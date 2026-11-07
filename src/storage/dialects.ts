@@ -1,0 +1,358 @@
+import { EventEmitter } from "node:events";
+import { mkdir } from "node:fs/promises";
+import { dirname } from "node:path";
+
+import SqliteDatabase from "better-sqlite3";
+import { MssqlDialect, MysqlDialect, PostgresDialect, SqliteDialect, type Dialect } from "kysely";
+import type * as Mysql2Module from "mysql2";
+import type * as PgModule from "pg";
+import type * as TarnModule from "tarn";
+import type * as TediousModule from "tedious";
+
+import { ConfigError } from "../config/load.js";
+import type { DatabaseStorage, ServerStorage, StorageKind } from "../config/schema.js";
+import { readEnv, type Env } from "../connectors/endpoint.js";
+import { clientTlsOptions, loadClientTls } from "../connectors/tls.js";
+
+type Pg = typeof PgModule;
+type Mysql2 = typeof Mysql2Module;
+type Tedious = typeof TediousModule;
+type Tarn = typeof TarnModule;
+
+/**
+ * The driver packages each database server needs. They are optional peer dependencies: a project
+ * installs the one for the database it uses, and SQLite's driver ships with Pathways.
+ *
+ * @example
+ * ```ts
+ * DRIVER_PACKAGES.sqlserver; // ["tedious", "tarn"]
+ * ```
+ */
+export const DRIVER_PACKAGES = {
+  postgres: ["pg"],
+  mysql: ["mysql2"],
+  sqlserver: ["tedious", "tarn"],
+} as const satisfies Record<Exclude<StorageKind, "sqlite">, readonly string[]>;
+
+/**
+ * One of the driver packages in {@link DRIVER_PACKAGES}.
+ *
+ * @example
+ * ```ts
+ * const name: DriverPackage = "mysql2";
+ * ```
+ */
+export type DriverPackage = (typeof DRIVER_PACKAGES)[keyof typeof DRIVER_PACKAGES][number];
+
+/**
+ * Imports a driver package. Pathways imports each from its own `node_modules`; tests pass their own,
+ * to stand in for a package that is not installed.
+ *
+ * @example
+ * ```ts
+ * const importDriver: DriverImport = (name) => import(name);
+ * ```
+ */
+export type DriverImport = (name: DriverPackage) => Promise<unknown>;
+
+const importDriver: DriverImport = (name) => {
+  switch (name) {
+    case "pg":
+      return import("pg");
+    case "mysql2":
+      return import("mysql2");
+    case "tedious":
+      return import("tedious");
+    case "tarn":
+      return import("tarn");
+  }
+};
+
+/**
+ * What {@link dialectFor} reads secrets with, and, for tests, how it imports drivers.
+ *
+ * @example
+ * ```ts
+ * const options: DialectOptions = { env: process.env };
+ * ```
+ */
+export interface DialectOptions {
+  /** Where the connection URL is read from. */
+  readonly env: Env;
+  /** Imports a driver package. Defaults to a plain `import()`. */
+  readonly importDriver?: DriverImport;
+}
+
+/** The URL schemes each database server's connection URL may use; the first is the one errors name. */
+const SCHEMES: Readonly<Record<ServerStorage["kind"], readonly string[]>> = {
+  postgres: ["postgres:", "postgresql:"],
+  mysql: ["mysql:", "mariadb:"],
+  sqlserver: ["sqlserver:", "mssql:"],
+};
+
+const DEFAULT_PORTS = { mysql: 3_306, sqlserver: 1_433 } as const;
+
+/**
+ * The Kysely dialect for `storage`, with its driver loaded and configured. It connects nothing yet:
+ * the first query opens the first connection.
+ *
+ * - SQLite: the database file's folder is created if needed, and the file is opened in WAL mode
+ *   with foreign keys enforced and `secure_delete` on.
+ * - A database server: its connection URL is read from the environment, its TLS files are read, and
+ *   its driver is imported.
+ *
+ * Errors name `pathways.yaml` and the key at fault, never a URL, a password or a path.
+ *
+ * @throws {ConfigError} when the URL's environment variable is unset or does not hold a URL Pathways
+ *   reads, a TLS file cannot be read, or the driver package is not installed.
+ * @example
+ * ```ts
+ * const dialect = await dialectFor(project.storage, { env: process.env });
+ * const db = new Kysely<Tables>({ dialect });
+ * ```
+ */
+export async function dialectFor(
+  storage: DatabaseStorage,
+  options: DialectOptions,
+): Promise<Dialect> {
+  if (storage.kind === "sqlite") return sqliteDialect(storage.file);
+  const where = `pathways.yaml: storage.${storage.kind}`;
+  const url = readUrl(storage, options.env, `${where}.url`);
+  const tls =
+    storage.tls === undefined
+      ? undefined
+      : definedOnly(clientTlsOptions(loadClientTls(storage.tls, `${where}.tls`)));
+  const load = options.importDriver ?? importDriver;
+  switch (storage.kind) {
+    case "postgres": {
+      const [pg] = await loadDrivers(storage.kind, load, where);
+      return postgresDialect(pg as Pg, storage, url, tls);
+    }
+    case "mysql": {
+      const [mysql2] = await loadDrivers(storage.kind, load, where);
+      return mysqlDialect(mysql2 as Mysql2, storage, url, tls);
+    }
+    case "sqlserver": {
+      const [tedious, tarn] = await loadDrivers(storage.kind, load, where);
+      return sqlServerDialect(tedious as Tedious, tarn as Tarn, storage, url, tls);
+    }
+  }
+}
+
+async function sqliteDialect(file: string): Promise<Dialect> {
+  if (file !== ":memory:") await mkdir(dirname(file), { recursive: true });
+  const sqlite = new SqliteDatabase(file);
+  sqlite.pragma("journal_mode = WAL");
+  sqlite.pragma("foreign_keys = ON");
+  // Freed space is overwritten with zeros, so a value rewritten in place (`pathways rekey`) or
+  // deleted leaves none of its old bytes in the file.
+  sqlite.pragma("secure_delete = ON");
+  return new SqliteDialect({ database: sqlite });
+}
+
+/** TLS options as the drivers take them: verified always, with a CA and client pair when set. */
+type TlsOptions = Readonly<Record<string, unknown>>;
+
+function postgresDialect(
+  pg: Pg,
+  storage: ServerStorage,
+  url: URL,
+  tls: TlsOptions | undefined,
+): Dialect {
+  const pool = new pg.Pool({
+    connectionString: url.href,
+    // Always set, so neither the URL nor PGSSLMODE decides: readUrl refuses a URL with TLS options.
+    ssl: tls ?? false,
+    max: storage.pool.max,
+    idleTimeoutMillis: storage.pool.idleTimeoutMs,
+    connectionTimeoutMillis: storage.connectTimeoutMs,
+  });
+  // An idle connection's error (the server restarted, say) would otherwise end the process. The
+  // pool drops that connection and the next query opens another; until then, the health endpoint
+  // reports storage it cannot reach.
+  pool.on("error", () => undefined);
+  return new PostgresDialect({ pool });
+}
+
+function mysqlDialect(
+  mysql2: Mysql2,
+  storage: ServerStorage,
+  url: URL,
+  tls: TlsOptions | undefined,
+): Dialect {
+  const pool = mysql2.createPool({
+    ...address(url, DEFAULT_PORTS.mysql),
+    ...(tls === undefined ? {} : { ssl: tls }),
+    connectionLimit: storage.pool.max,
+    maxIdle: storage.pool.max,
+    idleTimeout: storage.pool.idleTimeoutMs,
+    connectTimeout: storage.connectTimeoutMs,
+  });
+  return new MysqlDialect({ pool });
+}
+
+function sqlServerDialect(
+  tedious: Tedious,
+  tarn: Tarn,
+  storage: ServerStorage,
+  url: URL,
+  tls: TlsOptions | undefined,
+): Dialect {
+  const { host, port, user, password, database } = address(url, DEFAULT_PORTS.sqlserver);
+  const Connection = quietConnection(tedious);
+  return new MssqlDialect({
+    tarn: {
+      Pool: tarn.Pool,
+      options: {
+        min: 0,
+        max: storage.pool.max,
+        idleTimeoutMillis: storage.pool.idleTimeoutMs,
+        // Without this, a connection that fails is retried until the acquire times out, and the
+        // reason (a refused login, say) is lost.
+        propagateCreateError: true,
+      },
+    },
+    tedious: {
+      ISOLATION_LEVEL: tedious.ISOLATION_LEVEL,
+      Request: tedious.Request,
+      TYPES: tedious.TYPES,
+      connectionFactory: () =>
+        new Connection({
+          server: host,
+          authentication: { type: "default", options: { userName: user, password } },
+          options: {
+            port,
+            database,
+            // tedious verifies the server's certificate unless trustServerCertificate is set, and
+            // reads only the CA and the client pair from cryptoCredentialsDetails.
+            encrypt: tls !== undefined,
+            trustServerCertificate: false,
+            cryptoCredentialsDetails: { ...tls },
+            connectTimeout: storage.connectTimeoutMs,
+          },
+        }),
+    },
+  });
+}
+
+/**
+ * tedious's `Connection`, with each `error` event's text replaced by a fixed one that keeps only its
+ * code. Kysely's SQL Server driver writes every connection error to `console.error`, and tedious's
+ * own text names the server and the login.
+ */
+function quietConnection(tedious: Tedious): typeof tedious.Connection {
+  return class QuietConnection extends tedious.Connection {
+    override emit(event: string | symbol, ...args: unknown[]): boolean {
+      if (event !== "error") return EventEmitter.prototype.emit.call(this, event, ...args);
+      const code = (args[0] as { code?: unknown } | undefined)?.code;
+      const quiet = new Error("the SQL Server connection failed");
+      return super.emit("error", typeof code === "string" ? Object.assign(quiet, { code }) : quiet);
+    }
+  };
+}
+
+/**
+ * Reads and checks a database server's connection URL. Errors name the variable, never its value.
+ */
+function readUrl(storage: ServerStorage, env: Env, where: string): URL {
+  const name = storage.urlEnv;
+  const schemes = SCHEMES[storage.kind];
+  const url = URL.parse(readEnv(env, name, where));
+  if (url === null || !schemes.includes(url.protocol)) {
+    throw new ConfigError([
+      `${where}: the environment variable ${name} does not hold a ${String(schemes[0])}// URL`,
+    ]);
+  }
+  const options = [...url.searchParams.keys()];
+  if (storage.kind === "postgres") {
+    // pg reads the rest of a URL's options itself; TLS is the one setting pathways.yaml owns.
+    if (options.some((option) => option.toLowerCase().startsWith("ssl"))) {
+      throw new ConfigError([
+        `${where}: the URL in ${name} sets TLS options; set TLS in pathways.yaml instead, with tls or plaintext: true`,
+      ]);
+    }
+    return url;
+  }
+  // mysql2 would turn each option into a driver setting, some of which log every packet.
+  if (options.length > 0) {
+    throw new ConfigError([
+      `${where}: the URL in ${name} carries options after "?", which Pathways does not read; set TLS, the pool and timeouts in pathways.yaml`,
+    ]);
+  }
+  if (url.hostname === "") {
+    throw new ConfigError([`${where}: the URL in ${name} names no host`]);
+  }
+  if (!/^\/[^/]+$/.test(url.pathname)) {
+    throw new ConfigError([
+      `${where}: the URL in ${name} names no database; add it as the path, such as ${String(schemes[0])}//host/pathways`,
+    ]);
+  }
+  try {
+    address(url, 0);
+  } catch {
+    throw new ConfigError([`${where}: the URL in ${name} is not percent-encoded correctly`]);
+  }
+  return url;
+}
+
+/** A server's address and login, from a URL {@link readUrl} has checked. */
+function address(
+  url: URL,
+  defaultPort: number,
+): { host: string; port: number; user: string; password: string; database: string } {
+  return {
+    // An IPv6 address keeps its brackets in a URL, and loses them here.
+    host: url.hostname.replace(/^\[(.*)\]$/, "$1"),
+    port: url.port === "" ? defaultPort : Number(url.port),
+    user: decodeURIComponent(url.username),
+    password: decodeURIComponent(url.password),
+    database: decodeURIComponent(url.pathname.slice(1)),
+  };
+}
+
+/** Imports each driver package `kind` needs, or fails naming every one that is not installed. */
+async function loadDrivers(
+  kind: ServerStorage["kind"],
+  load: DriverImport,
+  where: string,
+): Promise<unknown[]> {
+  const names: readonly DriverPackage[] = DRIVER_PACKAGES[kind];
+  const missing: DriverPackage[] = [];
+  const modules = await Promise.all(
+    names.map(async (name) => {
+      try {
+        return interop(await load(name));
+      } catch (error) {
+        const code = (error as { code?: unknown } | undefined)?.code;
+        if (code !== "ERR_MODULE_NOT_FOUND" && code !== "MODULE_NOT_FOUND") throw error;
+        missing.push(name);
+        return undefined;
+      }
+    }),
+  );
+  if (missing.length > 0) {
+    const [one, two] = missing;
+    const what =
+      two === undefined
+        ? `the driver package ${String(one)} is not installed; add it`
+        : `the driver packages ${String(one)} and ${two} are not installed; add them`;
+    throw new ConfigError([
+      `${where}: ${what} to the project with npm install ${missing.join(" ")}`,
+    ]);
+  }
+  return modules;
+}
+
+/**
+ * A CommonJS package's exports, however it was imported: a native `import()` puts them on
+ * `default`, a bundler's CommonJS build may hand them over as they are.
+ */
+function interop(module: unknown): unknown {
+  const exported = (module as { default?: unknown }).default;
+  return typeof exported === "object" && exported !== null ? exported : module;
+}
+
+/** `options` without its undefined values, which some drivers read as set. */
+function definedOnly(options: Readonly<Record<string, unknown>>): TlsOptions {
+  return Object.fromEntries(Object.entries(options).filter(([, value]) => value !== undefined));
+}

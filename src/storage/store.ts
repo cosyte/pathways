@@ -1,9 +1,21 @@
-import { mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
-
-import SqliteDatabase from "better-sqlite3";
-import { Kysely, SqliteDialect, type Generated } from "kysely";
+import {
+  Kysely,
+  sql,
+  type ColumnDataType,
+  type ColumnDefinitionBuilder,
+  type ColumnType,
+  type CreateTableBuilder,
+  type Expression,
+  type Insertable,
+  type RawBuilder,
+  type SelectQueryBuilder,
+} from "kysely";
 import { Migrator, type Migration, type MigrationProvider } from "kysely/migration";
+
+import { ConfigError } from "../config/load.js";
+import type { DatabaseStorage, StorageKind } from "../config/schema.js";
+import type { Env } from "../connectors/endpoint.js";
+import { dialectFor, type DriverImport } from "./dialects.js";
 
 /**
  * Where a stored message stands.
@@ -25,8 +37,17 @@ export type MessageStatus = "received" | "transformed" | "filtered" | "failed";
  */
 export type DeliveryStatus = "pending" | "delivered" | "failed";
 
+/**
+ * A 64-bit integer column. pg and tedious return one as a string, so every read goes through
+ * `Number`; ids and epoch milliseconds stay far below 2^53.
+ */
+type Int64 = ColumnType<number | string, number, number>;
+
+/** A primary key the database numbers. */
+type Id = ColumnType<number | string, never, never>;
+
 interface MessagesTable {
-  id: Generated<number>;
+  id: Id;
   channel: string;
   received_at: string;
   body: Uint8Array;
@@ -36,19 +57,19 @@ interface MessagesTable {
   /** A hash of who sent the message and its control ID, for spotting a repeat. Since 0002. */
   dedup_key: string | null;
   /** The latest earlier message with the same `dedup_key`: set means a possible duplicate. Since 0002. */
-  duplicate_of: number | null;
+  duplicate_of: ColumnType<number | string | null, number | null, number | null>;
 }
 
 interface DeliveriesTable {
-  id: Generated<number>;
-  message_id: number;
+  id: Id;
+  message_id: Int64;
   channel: string;
   destination: number;
   seq: number;
   body: Uint8Array;
   status: DeliveryStatus;
   attempts: number;
-  next_attempt_at: number;
+  next_attempt_at: Int64;
   last_error: string | null;
   delivered_at: string | null;
 }
@@ -132,8 +153,9 @@ export interface PendingDelivery {
 }
 
 /**
- * What the engine needs from storage. {@link Store} implements it on SQLite; a storage adapter for
- * another database implements the same methods, and its module's `StoreFactory` returns it.
+ * What the engine needs from storage. {@link Store} implements it on SQLite, PostgreSQL, MySQL or
+ * MariaDB, and SQL Server; a storage adapter for anything else implements the same methods, and its
+ * module's `StoreFactory` returns it. A layer around a store (encryption at rest) wraps them.
  *
  * Every method is the engine's only path to that data, so an adapter keeps these promises: `receive`
  * is durable before it resolves; `completeTransform` writes all its deliveries and the message's new
@@ -255,107 +277,272 @@ export function isContentStore(store: MessageStore): store is MessageStore & Con
   );
 }
 
-const MIGRATIONS: Record<string, Migration> = {
-  "0001-messages-and-deliveries": {
-    async up(db: Kysely<unknown>): Promise<void> {
-      await db.schema
-        .createTable("messages")
-        .addColumn("id", "integer", (col) => col.primaryKey().autoIncrement())
-        .addColumn("channel", "text", (col) => col.notNull())
-        .addColumn("received_at", "text", (col) => col.notNull())
-        .addColumn("body", "blob", (col) => col.notNull())
-        .addColumn("status", "text", (col) => col.notNull())
-        .addColumn("error", "text")
-        .addColumn("updated_at", "text", (col) => col.notNull())
-        .execute();
-      await db.schema
-        .createIndex("messages_by_channel_status")
-        .on("messages")
-        .columns(["channel", "status", "id"])
-        .execute();
-      await db.schema
-        .createTable("deliveries")
-        .addColumn("id", "integer", (col) => col.primaryKey().autoIncrement())
-        .addColumn("message_id", "integer", (col) => col.notNull().references("messages.id"))
-        .addColumn("channel", "text", (col) => col.notNull())
-        .addColumn("destination", "integer", (col) => col.notNull())
-        .addColumn("seq", "integer", (col) => col.notNull())
-        .addColumn("body", "blob", (col) => col.notNull())
-        .addColumn("status", "text", (col) => col.notNull())
-        .addColumn("attempts", "integer", (col) => col.notNull())
-        .addColumn("next_attempt_at", "integer", (col) => col.notNull())
-        .addColumn("last_error", "text")
-        .addColumn("delivered_at", "text")
-        .execute();
-      await db.schema
-        .createIndex("deliveries_by_destination_status")
-        .on("deliveries")
-        .columns(["channel", "destination", "status", "id"])
-        .execute();
-    },
-  },
-  "0002-possible-duplicates": {
-    async up(db: Kysely<unknown>): Promise<void> {
-      // One column per statement: SQLite adds only one column per ALTER TABLE.
-      await db.schema.alterTable("messages").addColumn("dedup_key", "text").execute();
-      await db.schema.alterTable("messages").addColumn("duplicate_of", "integer").execute();
-      await db.schema
-        .createIndex("messages_by_channel_dedup_key")
-        .on("messages")
-        .columns(["channel", "dedup_key", "id"])
-        .execute();
-    },
-  },
-};
+/** A column type: one Kysely knows by name, or raw SQL. */
+type DataTypeExpression = ColumnDataType | Expression<unknown>;
 
-const provider: MigrationProvider = {
-  getMigrations: () => Promise.resolve(MIGRATIONS),
+/**
+ * The column types each database spells differently. SQLite's are the ones the first slice wrote,
+ * so a database it made still matches.
+ *
+ * - Keys and epoch milliseconds are 64-bit on the servers; SQLite's `integer` already is.
+ * - Names, statuses and duplicate keys are indexed, so MySQL and SQL Server need a bounded length.
+ * - Text compares by code point everywhere: MySQL's tables and SQL Server's text columns take a
+ *   binary collation, since their defaults ignore case and would let channel `ADT` read channel
+ *   `adt`, or let rekey take one error text for another.
+ * - Bodies take up to 4 GB on MySQL (`longblob`) and 2 GB on SQL Server; a plain MySQL `blob` holds
+ *   64 KB.
+ */
+
+interface ColumnTypes {
+  readonly key: DataTypeExpression;
+  readonly int64: DataTypeExpression;
+  readonly name: DataTypeExpression;
+  readonly status: DataTypeExpression;
+  readonly time: DataTypeExpression;
+  readonly body: DataTypeExpression;
+  readonly detail: DataTypeExpression;
+  /** Makes `key` a primary key the database numbers. */
+  readonly numbered: (col: ColumnDefinitionBuilder) => ColumnDefinitionBuilder;
+  /** Ends a `create table`: MySQL's engine and collation. */
+  readonly table: <T extends string, C extends string>(
+    table: CreateTableBuilder<T, C>,
+  ) => CreateTableBuilder<T, C>;
+}
+
+const SQL_SERVER_BINARY = sql.raw("collate Latin1_General_100_BIN2");
+
+const COLUMN_TYPES: Readonly<Record<StorageKind, ColumnTypes>> = {
+  sqlite: {
+    key: "integer",
+    int64: "integer",
+    name: "text",
+    status: "text",
+    time: "text",
+    body: "blob",
+    detail: "text",
+    numbered: (col) => col.primaryKey().autoIncrement(),
+    table: (table) => table,
+  },
+  postgres: {
+    key: "bigint",
+    int64: "bigint",
+    name: "text",
+    status: "text",
+    time: "text",
+    body: "bytea",
+    detail: "text",
+    numbered: (col) => col.primaryKey().generatedByDefaultAsIdentity(),
+    table: (table) => table,
+  },
+  mysql: {
+    key: "bigint",
+    int64: "bigint",
+    name: "varchar(255)",
+    status: "varchar(32)",
+    time: "varchar(32)",
+    body: sql`longblob`,
+    detail: sql`mediumtext`,
+    numbered: (col) => col.primaryKey().autoIncrement(),
+    table: (table) =>
+      table.modifyEnd(sql`engine = InnoDB default character set utf8mb4 collate utf8mb4_bin`),
+  },
+  sqlserver: {
+    key: "bigint",
+    int64: "bigint",
+    name: sql`nvarchar(255) ${SQL_SERVER_BINARY}`,
+    status: sql`nvarchar(32) ${SQL_SERVER_BINARY}`,
+    time: sql`nvarchar(32)`,
+    body: sql`varbinary(max)`,
+    detail: sql`nvarchar(max) ${SQL_SERVER_BINARY}`,
+    numbered: (col) => col.primaryKey().identity(),
+    table: (table) => table,
+  },
 };
 
 /**
- * Where Pathways keeps every message and every delivery, so a restart loses nothing.
+ * The schema's migrations, in the column types of `kind`. One portable set: each database runs the
+ * same steps under the same names, so the migration table reads the same everywhere.
+ */
+function migrations(kind: StorageKind): Record<string, Migration> {
+  const t = COLUMN_TYPES[kind];
+  return {
+    "0001-messages-and-deliveries": {
+      async up(db: Kysely<unknown>): Promise<void> {
+        await db.schema
+          .createTable("messages")
+          .addColumn("id", t.key, t.numbered)
+          .addColumn("channel", t.name, (col) => col.notNull())
+          .addColumn("received_at", t.time, (col) => col.notNull())
+          .addColumn("body", t.body, (col) => col.notNull())
+          .addColumn("status", t.status, (col) => col.notNull())
+          .addColumn("error", t.detail)
+          .addColumn("updated_at", t.time, (col) => col.notNull())
+          .$call(t.table)
+          .execute();
+        await db.schema
+          .createIndex("messages_by_channel_status")
+          .on("messages")
+          .columns(["channel", "status", "id"])
+          .execute();
+        await db.schema
+          .createTable("deliveries")
+          .addColumn("id", t.key, t.numbered)
+          .addColumn("message_id", t.int64, (col) => col.notNull().references("messages.id"))
+          .addColumn("channel", t.name, (col) => col.notNull())
+          .addColumn("destination", "integer", (col) => col.notNull())
+          .addColumn("seq", "integer", (col) => col.notNull())
+          .addColumn("body", t.body, (col) => col.notNull())
+          .addColumn("status", t.status, (col) => col.notNull())
+          .addColumn("attempts", "integer", (col) => col.notNull())
+          .addColumn("next_attempt_at", t.int64, (col) => col.notNull())
+          .addColumn("last_error", t.detail)
+          .addColumn("delivered_at", t.time)
+          .$call(t.table)
+          .execute();
+        await db.schema
+          .createIndex("deliveries_by_destination_status")
+          .on("deliveries")
+          .columns(["channel", "destination", "status", "id"])
+          .execute();
+      },
+    },
+    "0002-possible-duplicates": {
+      async up(db: Kysely<unknown>): Promise<void> {
+        // One column per statement: SQLite adds only one column per ALTER TABLE.
+        await db.schema.alterTable("messages").addColumn("dedup_key", t.name).execute();
+        await db.schema.alterTable("messages").addColumn("duplicate_of", t.int64).execute();
+        await db.schema
+          .createIndex("messages_by_channel_dedup_key")
+          .on("messages")
+          .columns(["channel", "dedup_key", "id"])
+          .execute();
+      },
+    },
+  };
+}
+
+/**
+ * What {@link Store.open} runs with. Every field is optional.
  *
- * SQLite for now, through Kysely; the other databases arrive behind the same methods.
+ * @example
+ * ```ts
+ * const store = await Store.open(project.storage, { env: process.env });
+ * ```
+ */
+export interface StoreOptions {
+  /** The clock for the times a store records. Tests pass their own. */
+  readonly now?: () => Date;
+  /** Where a database server's connection URL is read from. Defaults to `process.env`. */
+  readonly env?: Env;
+  /** Imports a driver package. Tests pass their own, to stand in for one that is not installed. */
+  readonly importDriver?: DriverImport;
+}
+
+/**
+ * Storage that could not be opened: `open` when the database could not be reached or opened (a
+ * refused connection, a login it refused, a file it could not create), `schema` when its schema
+ * could not be brought up to date. `code` is the driver's code, such as `ECONNREFUSED`, `28P01` or
+ * `ELOGIN`; the driver's own error, which can name the server, the login or the file, is kept as
+ * `cause` and never shown.
+ *
+ * @example
+ * ```ts
+ * try {
+ *   await Store.open(project.databaseFile);
+ * } catch (error) {
+ *   if (error instanceof StorageError) console.error(error.reason, error.code);
+ * }
+ * ```
+ */
+export class StorageError extends Error {
+  readonly reason: "open" | "schema";
+  readonly code: string | undefined;
+
+  /**
+   * @param reason What could not be done.
+   * @param cause The driver's error, kept and never shown.
+   */
+  constructor(reason: "open" | "schema", cause: unknown) {
+    super(
+      reason === "open"
+        ? "the database could not be opened"
+        : "the database schema could not be brought up to date",
+      { cause },
+    );
+    this.name = "StorageError";
+    this.reason = reason;
+    const code = (cause as { code?: unknown } | undefined)?.code;
+    this.code = typeof code === "string" ? code : undefined;
+  }
+}
+
+/**
+ * Where Pathways keeps every message and every delivery, so a restart loses nothing: SQLite,
+ * PostgreSQL, MySQL or MariaDB, or SQL Server, through Kysely.
+ *
+ * Every database runs the same queries but three. SQL Server writes `TOP` where the others write
+ * `LIMIT`, and each returns a new row's id its own way (`RETURNING`, `OUTPUT`, or MySQL's insert id).
+ * Nothing claims rows: one engine process owns a database, and reads the head of each queue in order.
  *
  * @example
  * ```ts
  * const store = await Store.open(".pathways/pathways.db");
- * const id = await store.receive("adt-to-lab", body);
+ * const { id } = await store.receive("adt-to-lab", body);
  * await store.close();
  * ```
  */
 export class Store implements MessageStore, ContentStore {
   private constructor(
     private readonly db: Kysely<Tables>,
+    private readonly kind: StorageKind,
     private readonly now: () => Date,
   ) {}
 
   /**
-   * Opens (creating if needed) the SQLite database at `file` and brings its schema up to date.
+   * Opens the database `storage` names (a path is a SQLite file), connects once to check it can,
+   * and brings its schema up to date. A SQLite file and its folder are created if needed.
    *
+   * @throws {ConfigError} when the connection URL's environment variable, a TLS file or the driver
+   *   package cannot be had.
+   * @throws {StorageError} when the database cannot be opened or its schema brought up to date.
    * @example
    * ```ts
-   * const store = await Store.open(".pathways/pathways.db");
+   * const store = await Store.open(project.storage, { env: process.env });
    * ```
    */
-  static async open(file: string, now: () => Date = () => new Date()): Promise<Store> {
-    if (file !== ":memory:") await mkdir(dirname(file), { recursive: true });
-    const sqlite = new SqliteDatabase(file);
-    sqlite.pragma("journal_mode = WAL");
-    sqlite.pragma("foreign_keys = ON");
-    // Freed space is overwritten with zeros, so a value rewritten in place (`pathways rekey`) or
-    // deleted leaves none of its old bytes in the file.
-    sqlite.pragma("secure_delete = ON");
-    const db = new Kysely<Tables>({ dialect: new SqliteDialect({ database: sqlite }) });
+  static async open(storage: string | DatabaseStorage, options: StoreOptions = {}): Promise<Store> {
+    const config: DatabaseStorage =
+      typeof storage === "string" ? { kind: "sqlite", file: storage } : storage;
+    const { importDriver } = options;
+    let db: Kysely<Tables>;
+    try {
+      const dialect = await dialectFor(config, {
+        env: options.env ?? process.env,
+        ...(importDriver === undefined ? {} : { importDriver }),
+      });
+      db = new Kysely<Tables>({ dialect });
+    } catch (error) {
+      if (error instanceof ConfigError) throw error;
+      throw new StorageError("open", error);
+    }
+    try {
+      await sql`select 1`.execute(db);
+    } catch (error) {
+      await db.destroy();
+      throw new StorageError("open", error);
+    }
+    const provider: MigrationProvider = {
+      getMigrations: () => Promise.resolve(migrations(config.kind)),
+    };
     const { error } = await new Migrator({ db, provider }).migrateToLatest();
     if (error !== undefined) {
       await db.destroy();
-      throw new Error("the database schema could not be brought up to date", { cause: error });
+      throw new StorageError("schema", error);
     }
-    return new Store(db, now);
+    return new Store(db, config.kind, options.now ?? (() => new Date()));
   }
 
-  /** Closes the database. */
+  /** Closes the database, and every pooled connection to it. */
   async close(): Promise<void> {
     await this.db.destroy();
   }
@@ -372,23 +559,17 @@ export class Store implements MessageStore, ContentStore {
   ): Promise<ReceivedMessage> {
     const at = this.now().toISOString();
     const { duplicateKey, failure } = options;
-    const insert = async (db: Kysely<Tables>, duplicateOf: number | undefined): Promise<number> => {
-      const row = await db
-        .insertInto("messages")
-        .values({
-          channel,
-          received_at: at,
-          body,
-          status: failure === undefined ? "received" : "failed",
-          error: failure ?? null,
-          updated_at: at,
-          dedup_key: duplicateKey ?? null,
-          duplicate_of: duplicateOf ?? null,
-        })
-        .returning("id")
-        .executeTakeFirstOrThrow();
-      return row.id;
-    };
+    const insert = (db: Kysely<Tables>, duplicateOf: number | undefined): Promise<number> =>
+      this.insertMessage(db, {
+        channel,
+        received_at: at,
+        body: blob(body),
+        status: failure === undefined ? "received" : "failed",
+        error: failure ?? null,
+        updated_at: at,
+        dedup_key: duplicateKey ?? null,
+        duplicate_of: duplicateOf ?? null,
+      });
     if (duplicateKey === undefined) {
       return { id: await insert(this.db, undefined), duplicateOf: undefined };
     }
@@ -399,9 +580,10 @@ export class Store implements MessageStore, ContentStore {
         .where("channel", "=", channel)
         .where("dedup_key", "=", duplicateKey)
         .orderBy("id", "desc")
-        .limit(1)
+        .$call((query) => this.first(query))
         .executeTakeFirst();
-      return { id: await insert(tx, earlier?.id), duplicateOf: earlier?.id };
+      const duplicateOf = earlier === undefined ? undefined : Number(earlier.id);
+      return { id: await insert(tx, duplicateOf), duplicateOf };
     });
   }
 
@@ -413,20 +595,27 @@ export class Store implements MessageStore, ContentStore {
       .where("id", "=", id)
       .executeTakeFirst();
     if (row === undefined) return undefined;
-    const { duplicate_of: duplicateOf, ...rest } = row;
-    return { ...rest, duplicateOf };
+    const { channel, status, error, duplicate_of: duplicateOf } = row;
+    return {
+      id: Number(row.id),
+      channel,
+      status,
+      error,
+      duplicateOf: duplicateOf === null ? null : Number(duplicateOf),
+    };
   }
 
   /** The oldest message of `channel` still waiting for its transform, if any. */
   async nextToTransform(channel: string): Promise<PendingMessage | undefined> {
-    return this.db
+    const row = await this.db
       .selectFrom("messages")
       .select(["id", "body"])
       .where("channel", "=", channel)
       .where("status", "=", "received")
       .orderBy("id")
-      .limit(1)
+      .$call((query) => this.first(query))
       .executeTakeFirst();
+    return row === undefined ? undefined : { id: Number(row.id), body: row.body };
   }
 
   /**
@@ -454,7 +643,7 @@ export class Store implements MessageStore, ContentStore {
               channel: message.channel,
               destination,
               seq,
-              body,
+              body: blob(body),
               status: "pending",
               attempts: 0,
               // Due at once, whatever the reader's clock: only a retry sets a time in the future.
@@ -497,16 +686,16 @@ export class Store implements MessageStore, ContentStore {
       .where("destination", "=", destination)
       .where("status", "=", "pending")
       .orderBy("id")
-      .limit(1)
+      .$call((query) => this.first(query))
       .executeTakeFirst();
     if (row === undefined) return undefined;
     return {
-      id: row.id,
-      messageId: row.message_id,
+      id: Number(row.id),
+      messageId: Number(row.message_id),
       seq: row.seq,
       body: row.body,
       attempts: row.attempts,
-      nextAttemptAt: row.next_attempt_at,
+      nextAttemptAt: Number(row.next_attempt_at),
     };
   }
 
@@ -546,7 +735,7 @@ export class Store implements MessageStore, ContentStore {
   async messageCounts(channel: string): Promise<Record<MessageStatus, number>> {
     const rows = await this.db
       .selectFrom("messages")
-      .select(["status", (eb) => eb.fn.countAll<number>().as("count")])
+      .select(["status", (eb) => eb.fn.countAll<number | string>().as("count")])
       .where("channel", "=", channel)
       .groupBy("status")
       .execute();
@@ -564,7 +753,7 @@ export class Store implements MessageStore, ContentStore {
   async deliveryCounts(channel: string): Promise<Record<DeliveryStatus, number>> {
     const rows = await this.db
       .selectFrom("deliveries")
-      .select(["status", (eb) => eb.fn.countAll<number>().as("count")])
+      .select(["status", (eb) => eb.fn.countAll<number | string>().as("count")])
       .where("channel", "=", channel)
       .groupBy("status")
       .execute();
@@ -582,41 +771,52 @@ export class Store implements MessageStore, ContentStore {
             .select(["id", "body", "error"])
             .where("id", ">", after)
             .orderBy("id")
-            .limit(limit)
+            .$call((query) => this.take(query, limit))
             .execute()
         : await this.db
             .selectFrom("deliveries")
             .select(["id", "body", "last_error as error"])
             .where("id", ">", after)
             .orderBy("id")
-            .limit(limit)
+            .$call((query) => this.take(query, limit))
             .execute();
-    return rows.map((row) => ({ table, ...row }));
+    return rows.map(({ id, body, error }) => ({ table, id: Number(id), body, error }));
   }
 
   /**
    * Replaces a row's body and error with `next`, only while the row still holds `current`'s body
-   * and error. Returns whether it did.
+   * and error, byte for byte. Returns whether it did.
+   *
+   * SQL Server's `=` ignores trailing zero bytes and trailing spaces, and MySQL's ignores trailing
+   * spaces in text, so on those two the lengths are compared as well.
+   *
+   * The old values are overwritten in place, but a database server keeps earlier row versions for
+   * a while: PostgreSQL until VACUUM, and even then in free space and its WAL; MySQL in its undo
+   * log and binary log; SQL Server in its transaction log and freed pages; and every server in its
+   * backups. Under encryption those versions are ciphertext under the older master key, so that key
+   * is what keeps them unreadable: retire it once the server no longer holds them, not as soon as
+   * rekey reports nothing left under it. SQLite, opened with `secure_delete`, zeroes them in its file.
    */
   async replaceContent(
     current: StoredContent,
     next: { readonly body: Uint8Array; readonly error: string | null },
   ): Promise<boolean> {
+    const body = blob(current.body);
     const result =
       current.table === "messages"
         ? await this.db
             .updateTable("messages")
-            .set({ body: next.body, error: next.error })
+            .set({ body: blob(next.body), error: next.error })
             .where("id", "=", current.id)
-            .where("body", "=", current.body)
-            .where("error", current.error === null ? "is" : "=", current.error)
+            .where(sql<boolean>`${this.same("body", body)}`)
+            .where(sql<boolean>`${this.same("error", current.error)}`)
             .executeTakeFirst()
         : await this.db
             .updateTable("deliveries")
-            .set({ body: next.body, last_error: next.error })
+            .set({ body: blob(next.body), last_error: next.error })
             .where("id", "=", current.id)
-            .where("body", "=", current.body)
-            .where("last_error", current.error === null ? "is" : "=", current.error)
+            .where(sql<boolean>`${this.same("body", body)}`)
+            .where(sql<boolean>`${this.same("last_error", current.error)}`)
             .executeTakeFirst();
     return result.numUpdatedRows > 0n;
   }
@@ -625,11 +825,64 @@ export class Store implements MessageStore, ContentStore {
   async retryingDeliveries(channel: string): Promise<number> {
     const row = await this.db
       .selectFrom("deliveries")
-      .select((eb) => eb.fn.countAll<number>().as("count"))
+      .select((eb) => eb.fn.countAll<number | string>().as("count"))
       .where("channel", "=", channel)
       .where("status", "=", "pending")
       .where("attempts", ">", 0)
       .executeTakeFirstOrThrow();
     return Number(row.count);
   }
+
+  /** Keeps a query's first row. */
+  private first<TB extends keyof Tables, O>(
+    query: SelectQueryBuilder<Tables, TB, O>,
+  ): SelectQueryBuilder<Tables, TB, O> {
+    return this.take(query, 1);
+  }
+
+  /** Keeps a query's first `count` rows: SQL Server writes `TOP`, the others `LIMIT`. */
+  private take<TB extends keyof Tables, O>(
+    query: SelectQueryBuilder<Tables, TB, O>,
+    count: number,
+  ): SelectQueryBuilder<Tables, TB, O> {
+    return this.kind === "sqlserver" ? query.top(count) : query.limit(count);
+  }
+
+  /**
+   * A condition that `column` holds exactly `value`, or is null when `value` is. On SQL Server and
+   * MySQL it also compares lengths, since their `=` pads the shorter value.
+   */
+  private same(column: string, value: Uint8Array | string | null): RawBuilder<boolean> {
+    const ref = sql.ref(column);
+    if (value === null) return sql<boolean>`${ref} is null`;
+    if (this.kind !== "sqlserver" && this.kind !== "mysql") return sql<boolean>`${ref} = ${value}`;
+    const length = sql.raw(this.kind === "sqlserver" ? "datalength" : "octet_length");
+    return sql<boolean>`(${ref} = ${value} and ${length}(${ref}) = ${length}(${value}))`;
+  }
+
+  /** Inserts a message and returns its id, which each database hands back its own way. */
+  private async insertMessage(
+    db: Kysely<Tables>,
+    values: Insertable<MessagesTable>,
+  ): Promise<number> {
+    const insert = db.insertInto("messages").values(values);
+    switch (this.kind) {
+      case "mysql":
+        // MySQL has no RETURNING; the driver reports the id it assigned.
+        return Number((await insert.executeTakeFirstOrThrow()).insertId);
+      case "sqlserver":
+        return Number((await insert.output("inserted.id").executeTakeFirstOrThrow()).id);
+      case "postgres":
+      case "sqlite":
+        return Number((await insert.returning("id").executeTakeFirstOrThrow()).id);
+    }
+  }
+}
+
+/**
+ * A body as every driver binds it. mysql2 and Kysely's SQL Server driver recognise a `Buffer` as
+ * binary, not a bare `Uint8Array`; the view shares the body's memory, so nothing is copied.
+ */
+function blob(body: Uint8Array): Buffer {
+  return Buffer.isBuffer(body) ? body : Buffer.from(body.buffer, body.byteOffset, body.byteLength);
 }

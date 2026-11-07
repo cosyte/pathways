@@ -3,6 +3,8 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import SqliteDatabase from "better-sqlite3";
+
 import { EXIT, run } from "../src/cli.js";
 import { generateKey } from "../src/encryption/keys.js";
 import { VERSION } from "../src/index.js";
@@ -148,8 +150,86 @@ describe("pathways start", () => {
     expect(result).toEqual({
       code: EXIT.failed,
       out: "",
-      err: "pathways: the database could not be opened.\n",
+      err: "pathways: the database could not be opened (EEXIST).\n",
     });
+  });
+
+  it("fails when the database's schema is from a version it does not know", async () => {
+    const root = await project({
+      "pathways.yaml": `${KEYS}storage:\n  sqlite: { file: ./future.db }\n`,
+    });
+    const future = new SqliteDatabase(join(root, "future.db"));
+    future.exec(`
+      CREATE TABLE kysely_migration (name varchar(255) not null primary key, timestamp varchar(255) not null);
+      INSERT INTO kysely_migration VALUES ('9999-from-a-later-version', '2026-11-07T00:00:00.000Z');
+    `);
+    future.close();
+    expect(await runCli(["start", "--once", "-C", root])).toEqual({
+      code: EXIT.failed,
+      out: "",
+      err: "pathways: the database schema could not be brought up to date.\n",
+    });
+  });
+
+  it("reports a storage failure that stops the engine by its code, never the driver's text", async () => {
+    const root = await project({
+      "pathways.yaml": `${KEYS}storage:\n  sqlite: { file: ./broken.db }\n`,
+    });
+    // Up to date by its migration record, but its deliveries table lacks a column: the pass fails
+    // when it queues the transform's output.
+    const broken = new SqliteDatabase(join(root, "broken.db"));
+    broken.exec(`
+      CREATE TABLE kysely_migration (name varchar(255) not null primary key, timestamp varchar(255) not null);
+      CREATE TABLE kysely_migration_lock (id varchar(255) not null primary key, is_locked integer default 0 not null);
+      INSERT INTO kysely_migration VALUES ('0001-messages-and-deliveries', '2026-11-07T00:00:00.000Z');
+      INSERT INTO kysely_migration VALUES ('0002-possible-duplicates', '2026-11-07T00:00:01.000Z');
+      CREATE TABLE messages (id integer primary key autoincrement, channel text not null,
+        received_at text not null, body blob not null, status text not null, error text,
+        updated_at text not null, dedup_key text, duplicate_of integer);
+      CREATE TABLE deliveries (id integer primary key autoincrement, message_id integer not null);
+    `);
+    broken.close();
+    await dropFile(join(root, "data/inbox/TESTPATIENT.hl7"), ADT_A01);
+    expect(await runCli(["start", "--once", "-C", root])).toEqual({
+      code: EXIT.failed,
+      out: "",
+      err: "pathways: the engine stopped on an error (SQLITE_ERROR).\n",
+    });
+  });
+
+  it("reports a database server's missing URL as configuration, naming the variable", async () => {
+    const root = await project({ "pathways.yaml": `${KEYS}storage:\n  postgres: { tls: {} }\n` });
+    expect(await runCli(["start", "--once", "-C", root], { env: {} })).toEqual({
+      code: EXIT.config,
+      out: "",
+      err:
+        "pathways: the configuration is invalid:\n" +
+        "  pathways.yaml: storage.postgres.url: the environment variable PATHWAYS_DATABASE_URL is not set\n",
+    });
+  });
+
+  it("warns of a plaintext database connection, and reports a refused one by its code alone", async () => {
+    const root = await project({
+      "pathways.yaml": `${KEYS}storage:\n  postgres: { plaintext: true, connectTimeout: 5s }\n`,
+    });
+    const url = "postgres://pathways:synthetic-pw-0000@127.0.0.1:1/pathways";
+    const { logger, events } = captureLogger();
+    let err = "";
+    const code = await run(["start", "--once", "-C", root], {
+      out: () => undefined,
+      err: (text) => {
+        err += text;
+      },
+      logger,
+      env: { PATHWAYS_DATABASE_URL: url },
+    });
+    expect({ code, err }).toEqual({
+      code: EXIT.failed,
+      err: "pathways: the database could not be opened (ECONNREFUSED).\n",
+    });
+    expect(events).toEqual([
+      expect.objectContaining({ event: "plaintext", endpoint: "storage", level: 40 }),
+    ]);
   });
 });
 

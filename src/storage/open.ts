@@ -51,10 +51,12 @@ export async function startingKeys(
 }
 
 /**
- * Opens the store `pathways.yaml` names as it is, with no encryption layer: SQLite by default, or a
- * custom store from a module whose default export is a `StoreFactory`. Only `pathways rekey`, which
+ * Opens the store `pathways.yaml` names as it is, with no encryption layer: SQLite by default, a
+ * database server, or a custom store from a module whose default export is a `StoreFactory`. Only `pathways rekey`, which
  * rewrites what a store holds, works on a store this way; everything else uses {@link openStore}.
  *
+ * @throws {ConfigError} when a database server's URL, TLS files or driver package cannot be had.
+ * @throws {StorageError} when the database cannot be opened or its schema brought up to date.
  * @throws {ExtensionLoadError} when a custom store's module, factory or result is wrong.
  * @example
  * ```ts
@@ -66,7 +68,7 @@ export async function openRawStore(
   context: OpenStoreContext,
 ): Promise<MessageStore> {
   const { storage } = project;
-  if (storage.kind === "sqlite") return Store.open(storage.file);
+  if (storage.kind !== "module") return Store.open(storage, { env: context.env });
   return customStore(
     storage,
     {

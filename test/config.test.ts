@@ -65,7 +65,7 @@ defaults:
       "channels/b/source-ignored.txt": "",
     });
     const project = await loadProject(root);
-    expect(project.databaseFile).toBe(join(root, "data/engine.db"));
+    expect(project.storage).toEqual({ kind: "sqlite", file: join(root, "data/engine.db") });
     const engine = { ...DEFAULT_SETTINGS, timeoutMs: 2_000, memoryMb: 128, pollIntervalMs: 250 };
     expect(project.settings).toEqual(engine);
     const [a, b] = project.channels;
@@ -664,7 +664,7 @@ describe("loadProject: extensions", () => {
         "source: { file: { dir: ./in }, options: { a: 1 } }\ndestinations:\n  - { module: ./d.ts, http: { url: https://lab.example.test } }\n",
     });
     expect(problems).toEqual([
-      "pathways.yaml: storage: name exactly one of: sqlite, module",
+      "pathways.yaml: storage: name exactly one of: sqlite, postgres, mysql, sqlserver, module",
       "pathways.yaml: hooks.0: a module path, { module: path, options }, or { webhook: { url } }",
       "pathways.yaml: hooks.1: name exactly one of: module, webhook",
       "pathways.yaml: hooks.2.webhook.url: https:// is required; set plaintext: true to send without TLS",
@@ -676,6 +676,98 @@ describe("loadProject: extensions", () => {
       'pathways.yaml: hooks.8: Unrecognized key: "colour"',
       "channels/a/channel.yaml: source.options: goes with module: it is what the module's factory is given",
       "channels/a/channel.yaml: destinations.0: name exactly one of: file, http, mllp, module",
+    ]);
+  });
+});
+
+describe("loadProject: storage", () => {
+  const withStorage = (storage: string): Record<string, string> => ({
+    "pathways.yaml": `storage:\n${storage}`,
+    "channels/a/channel.yaml": MINIMAL,
+  });
+
+  it("reads a database server with every default: the URL from PATHWAYS_DATABASE_URL", async () => {
+    const root = await makeProject(withStorage("  postgres: { tls: {} }\n"));
+    expect((await loadProject(root)).storage).toEqual({
+      kind: "postgres",
+      urlEnv: "PATHWAYS_DATABASE_URL",
+      tls: { ca: undefined, cert: undefined, key: undefined },
+      plaintext: false,
+      pool: { max: 10, idleTimeoutMs: 30_000 },
+      connectTimeoutMs: 10_000,
+    });
+  });
+
+  it("reads every setting, with TLS paths against the project root", async () => {
+    const root = await makeProject(
+      withStorage(`  mysql:
+    url: { env: LAB_DATABASE_URL }
+    tls: { ca: ./tls/db-ca.pem, cert: ./tls/client.crt, key: ./tls/client.key }
+    pool: { max: 4, idleTimeout: 1m }
+    connectTimeout: 5s
+`),
+    );
+    expect((await loadProject(root)).storage).toEqual({
+      kind: "mysql",
+      urlEnv: "LAB_DATABASE_URL",
+      tls: {
+        ca: join(root, "tls/db-ca.pem"),
+        cert: join(root, "tls/client.crt"),
+        key: join(root, "tls/client.key"),
+      },
+      plaintext: false,
+      pool: { max: 4, idleTimeoutMs: 60_000 },
+      connectTimeoutMs: 5_000,
+    });
+    const plaintext = await makeProject(withStorage("  sqlserver: { plaintext: true }\n"));
+    expect((await loadProject(plaintext)).storage).toMatchObject({
+      kind: "sqlserver",
+      tls: undefined,
+      plaintext: true,
+    });
+  });
+
+  it("keeps the connection URL out of the YAML", async () => {
+    const problems = await problemsOf(
+      withStorage('  postgres:\n    url: "postgres://u:synthetic-pw@db/pathways"\n    tls: {}\n'),
+    );
+    expect(problems).toEqual([
+      "pathways.yaml: storage.postgres.url: a connection URL carries a password, so it never goes in the YAML; read it with { env: NAME }",
+    ]);
+  });
+
+  it("requires TLS unless plaintext: true, refuses both, and names each problem by key", async () => {
+    expect(await problemsOf(withStorage("  postgres: {}\n"))).toEqual([
+      "pathways.yaml: storage.postgres.tls: required: set tls: {} to verify the server against Node's built-in roots, tls: { ca } to trust your own CA, or plaintext: true to connect without TLS",
+    ]);
+    expect(await problemsOf(withStorage("  mysql: { tls: {}, plaintext: true }\n"))).toEqual([
+      "pathways.yaml: storage.mysql.plaintext: cannot be set alongside tls; plaintext: true runs without TLS",
+    ]);
+    const problems = await problemsOf(
+      withStorage(
+        "  sqlserver:\n    plaintext: true\n    url: { env: 9BAD }\n    pool: { max: 0, idleTimeout: soon }\n    connectTimeout: -1\n    tls: { cert: ./c.crt }\n",
+      ),
+    );
+    const keys = problems.map((p) => p.replace(/^pathways\.yaml: /, "").split(":")[0]);
+    expect(keys).toEqual([
+      "storage.sqlserver.url.env",
+      "storage.sqlserver.tls.key",
+      "storage.sqlserver.pool.max",
+      "storage.sqlserver.pool.idleTimeout",
+      "storage.sqlserver.connectTimeout",
+      "storage.sqlserver.plaintext",
+    ]);
+  });
+
+  it("asks for exactly one database", async () => {
+    const one = "name exactly one of: sqlite, postgres, mysql, sqlserver, module";
+    expect(await problemsOf(withStorage("  {}\n"))).toEqual([`pathways.yaml: storage: ${one}`]);
+    expect(
+      await problemsOf(withStorage("  sqlite: { file: a.db }\n  postgres: { plaintext: true }\n")),
+    ).toEqual([`pathways.yaml: storage: ${one}`]);
+    expect(await problemsOf(withStorage("  oracle: {}\n"))).toEqual([
+      'pathways.yaml: storage: Unrecognized key: "oracle"',
+      `pathways.yaml: storage: ${one}`,
     ]);
   });
 });

@@ -1,7 +1,11 @@
 #!/usr/bin/env tsx
-// Throughput of one channel, end to end: files in, the transform in its worker, SQLite, files out,
+// Throughput of one channel, end to end: files in, the transform in its worker, storage, files out,
 // measured with encryption at rest on (the default) and off. Synthetic messages only.
-// Usage: pnpm bench [messages], default 2000.
+// Usage: pnpm bench [messages] [database], default 2000 through SQLite.
+//
+// database is sqlite (the default), postgres, mysql or sqlserver. A server is reached at the
+// administrator's URL in PATHWAYS_BENCH_DATABASE_URL, the same form as the test URLs in CLAUDE.md;
+// each run creates a database of its own there and drops it afterwards.
 //
 // It measures where the engine stands, so a change that slows it shows up; it is not a promise of
 // what a deployment will see, which depends on disks, message sizes and transforms.
@@ -13,12 +17,19 @@ import { performance } from "node:perf_hooks";
 import { pino } from "pino";
 
 import { loadProject } from "../src/config/load.js";
+import { STORAGE_KINDS, type StorageKind } from "../src/config/schema.js";
+import type { Env } from "../src/connectors/endpoint.js";
 import { EncryptedStore, UnencryptedStore } from "../src/encryption/encrypted-store.js";
 import { decodeKey, generateKey, LocalKeyProvider } from "../src/encryption/keys.js";
 import { Engine } from "../src/engine/engine.js";
 import { Store } from "../src/storage/store.js";
+import { closeAdmins, dropDatabases, freshDatabase, URL_ENV } from "../test/databases.js";
 
 const count = Number(process.argv[2] ?? 2000);
+const kind = (process.argv[3] ?? "sqlite") as StorageKind;
+if (!STORAGE_KINDS.includes(kind)) {
+  throw new Error(`database must be one of ${STORAGE_KINDS.join(", ")}`);
+}
 const message = (n: number): string =>
   [
     `MSH|^~\\&|SYNTH|TESTFAC|ADT|TESTFAC|20261107120000||ADT^A01^ADT_A01|MSG${String(n).padStart(8, "0")}|P|2.5.1`,
@@ -31,6 +42,15 @@ const message = (n: number): string =>
 async function measure(encrypted: boolean): Promise<number> {
   const root = await mkdtemp(join(tmpdir(), "pathways-bench-"));
   try {
+    let env: Env = {};
+    if (kind !== "sqlite") {
+      const database = { label: "bench", kind, urlEnv: "PATHWAYS_BENCH_DATABASE_URL" };
+      env = (await freshDatabase(database)).env;
+      await writeFile(
+        join(root, "pathways.yaml"),
+        `storage:\n  ${kind}:\n    url: { env: ${URL_ENV} }\n    plaintext: true\n`,
+      );
+    }
     await mkdir(join(root, "channels/adt"), { recursive: true });
     await writeFile(
       join(root, "channels/adt/channel.yaml"),
@@ -45,7 +65,10 @@ async function measure(encrypted: boolean): Promise<number> {
       await writeFile(join(root, "data/in", `${String(n).padStart(8, "0")}.hl7`), message(n));
 
     const project = await loadProject(root);
-    const raw = await Store.open(project.databaseFile);
+    const { storage } = project;
+    if (storage.kind === "module")
+      throw new Error("the bench runs on a database, not a custom store");
+    const raw = await Store.open(storage, { env });
     const keys = new LocalKeyProvider([["bench", decodeKey(generateKey()) as Buffer]], "bench");
     const store = encrypted ? new EncryptedStore(raw, keys) : new UnencryptedStore(raw);
     const engine = new Engine({ project, store, logger: pino({ level: "silent" }) });
@@ -61,14 +84,19 @@ async function measure(encrypted: boolean): Promise<number> {
     if (delivered !== count) throw new Error(`delivered ${delivered} of ${count}`);
     return seconds;
   } finally {
+    await dropDatabases();
     await rm(root, { recursive: true, force: true });
   }
 }
 
-for (const encrypted of [false, true]) {
-  const seconds = await measure(encrypted);
-  process.stdout.write(
-    `${count} messages, file to file through SQLite, encryption ${encrypted ? "on" : "off"}: ` +
-      `${seconds.toFixed(2)} s, ${Math.round(count / seconds)} messages/s (Node ${process.version})\n`,
-  );
+try {
+  for (const encrypted of [false, true]) {
+    const seconds = await measure(encrypted);
+    process.stdout.write(
+      `${count} messages, file to file through ${kind}, encryption ${encrypted ? "on" : "off"}: ` +
+        `${seconds.toFixed(2)} s, ${Math.round(count / seconds)} messages/s (Node ${process.version})\n`,
+    );
+  }
+} finally {
+  await closeAdmins();
 }
