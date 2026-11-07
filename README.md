@@ -26,8 +26,9 @@ are TypeScript functions, and both are tested like any other code.
 
 ## Status
 
-Today the repository holds the package setup and CI: the `pathways` command answers only `--help`
-and `--version`. Watch or star the repository to follow along.
+Today the repository holds the first working slice: a file source, a TypeScript transform in its own
+worker thread, SQLite storage, a file destination, and the `pathways start` and `pathways test`
+commands. Nothing is released yet. Watch or star the repository to follow along.
 
 ## License
 
