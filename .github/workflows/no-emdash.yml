@@ -1,0 +1,28 @@
+name: Em-dash gate
+
+# The brand rule, checked on every tracked file and, on a pull request, on its title, body and
+# commit messages.
+#
+# The shared gate runs on Node 22 and installs nothing. Its default command, `pnpm check:no-emdash`,
+# fails there before the script runs, because pnpm refuses a package whose engines.node starts at
+# 24. So we pass the script itself: it is plain Node with no dependencies.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, edited]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  no-emdash:
+    uses: cosyte/.github/.github/workflows/gate-no-emdash.yml@84ecccd771cbc9c1ece003a3f8ff61415360395b # workflows-2026-09-18-84ecccd771cb
+    with:
+      files-command: "node scripts/check-no-emdash.mjs"
+      messages-command: "node scripts/check-no-emdash.mjs --stdin"
+    permissions:
+      contents: read

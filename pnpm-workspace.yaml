@@ -1,0 +1,38 @@
+# INSTALL HARDENING, SHIPPED BY THE SCAFFOLD SO A NEW REPO IS NOT BORN IN DRIFT.
+#
+# drift-manifest.json's `installHardening` group requires both of these of every @cosyte/* package
+# repo, so a repo generated without them would report drift on the day it was created. They are here
+# rather than in .npmrc because pnpm's documented examples put them in this file, and .npmrc is not
+# among the routes pnpm names for configuring them explicitly.
+#
+# THIS REPOSITORY IS NOT A WORKSPACE, and the absence of a `packages:` key is deliberate: at pnpm 10
+# this file is the settings file, not only the workspace manifest, so a single-package repo uses it
+# for settings and declares no members.
+#
+# Both controls ship SWITCHED OFF at pnpm 10 (the cooldown defaults to 0 before v11, the trust
+# policy to `off`), so deleting either line does not fall back to a weaker setting: it turns the
+# control off. `pnpm --dir ../config run drift` grades this file and says which value it wanted.
+#
+# THEY ALSO NEED A pnpm THAT KNOWS THEM. `minimumReleaseAge` arrived in pnpm 10.16.0 and
+# `trustPolicy` in 10.21.0, and an older pnpm ignores both keys silently, which is a settings file
+# that decorates rather than defends. That is why this template's `packageManager` pins the same
+# 10.34.5 the toolchain root pins rather than the bare 10.0.0 it used to carry.
+
+# 1440 minutes = 24 hours. pnpm's own rationale: "Since malware is usually detected quickly,
+# delaying updates by 24 hours will most likely prevent you from installing a bad version"
+# (https://pnpm.io/supply-chain-security).
+minimumReleaseAge: 1440
+
+# Fail the install when a package's trust evidence is weaker than that of an earlier-published
+# version of the same package. Exemptions go in `trustPolicyExclude` below, one entry per line,
+# each with a "# reason: ..." comment above it saying why the hole is acceptable.
+trustPolicy: no-downgrade
+
+trustPolicyExclude:
+  # reason: measured 2026-11-07 on pnpm 10.34.5. A from-scratch resolution of this repository's
+  # dependency set reds with ERR_PNPM_TRUST_DOWNGRADE on chokidar@4.0.3, a transitive of tsup:
+  # earlier chokidar releases carry a provenance attestation and 4.0.3 carries none. config and hl7
+  # exempt the same version for the same measured reason, and pnpm's documentation uses it as its
+  # worked example (https://pnpm.io/settings/dependency-resolution). Pinned to the one version, so a
+  # later chokidar release is graded again.
+  - "chokidar@4.0.3"
