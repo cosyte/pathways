@@ -10,7 +10,8 @@ import { dialectFor } from "../src/storage/dialects.js";
  * One database the storage suites run on. SQLite always runs; each server runs when its URL is in
  * the environment. The URL is an administrator's (it creates and drops a database per test) and
  * names a database that exists: `postgres`, `mysql` or `master`. CI's `databases` job sets all four;
- * locally, start the servers with docker (see CLAUDE.md) and export the same variables.
+ * locally, start the servers with docker (see documentation/agent-notes.md#databases) and export
+ * the same variables.
  */
 export interface TestDatabase {
   /** The name a test reports: the storage kind, or `mariadb` for MariaDB on the `mysql` kind. */
