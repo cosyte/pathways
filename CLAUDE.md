@@ -4,6 +4,8 @@ Pathways, our code-first healthcare integration engine, published (once released
 `@cosyte/pathways` under MIT. Channels are YAML files, transforms are TypeScript, and a `pathways`
 command runs and tests them. This repository is public. It started from scratch on 2026-11-07.
 
+@AGENTS.md
+
 The first slice runs: a file source, a TypeScript transform in a worker thread per channel
 (`src/engine/`), storage through Kysely (`src/storage/`), a file destination, and
 `pathways start` and `pathways test`. A channel's `format` is `hl7v2`, `fhir`, `x12`, `ccda`,
