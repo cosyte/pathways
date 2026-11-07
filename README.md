@@ -32,8 +32,12 @@ Today the repository holds working slices; nothing is released yet:
   mutual TLS on every endpoint that listens.
 - HL7 v2, FHIR R4 JSON, X12, C-CDA, JSON and text, each parsed for a TypeScript transform that runs
   in its own worker thread.
-- SQLite storage, a health endpoint, a Docker image, and the `pathways init`, `pathways start` and
-  `pathways test` commands.
+- Storage on SQLite, PostgreSQL, MySQL or MariaDB, and SQL Server, with every stored message
+  encrypted at rest.
+- An audit log of every operator action, and the commands to inspect, replay and clear messages.
+- Your own connectors, hooks, storage and key providers, loaded from YAML.
+- A health endpoint, a Docker image, and the `pathways init`, `pathways start` and `pathways test`
+  commands.
 
 Watch or star the repository to follow along.
 
