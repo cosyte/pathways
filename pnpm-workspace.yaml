@@ -21,7 +21,11 @@
 # 1440 minutes = 24 hours. pnpm's own rationale: "Since malware is usually detected quickly,
 # delaying updates by 24 hours will most likely prevent you from installing a bad version"
 # (https://pnpm.io/supply-chain-security).
+# @cosyte is exempt by operator decision; every third-party package keeps the floor.
 minimumReleaseAge: 1440
+minimumReleaseAgeExclude:
+  # reason: first-party @cosyte package, exempt from the floor by operator decision
+  - "@cosyte/*"
 
 # Fail the install when a package's trust evidence is weaker than that of an earlier-published
 # version of the same package. Exemptions go in `trustPolicyExclude` below, one entry per line,

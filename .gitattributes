@@ -1,0 +1,3 @@
+# Line endings: text files are stored and checked out with LF. Files git reads as binary, such as
+# the starter's CR-terminated HL7 v2 messages under templates/starter/, are left byte for byte.
+* text=auto eol=lf

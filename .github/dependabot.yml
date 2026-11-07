@@ -1,9 +1,14 @@
 version: 2
 updates:
+  # A release becomes eligible a day after it is published (`cooldown`), the same 24 hours
+  # pnpm-workspace.yaml's minimumReleaseAge holds every install to, which keeps a release that is
+  # pulled within hours out of this repository. Security updates are not delayed.
   - package-ecosystem: npm
     directory: "/"
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 1
     open-pull-requests-limit: 5
     groups:
       dev-dependencies:
@@ -12,4 +17,6 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 1
     open-pull-requests-limit: 5
