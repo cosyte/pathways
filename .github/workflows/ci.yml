@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Nightly on main at 05:47 UTC. An odd minute: GitHub delays scheduled runs at the top of the hour.
+    - cron: "47 5 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # The shared pipeline: typecheck, lint, format, PHI scan, test, coverage, build, attw and the dual
+  # ESM/CJS smoke in `verify`, plus `prepublish` and `actionlint`.
+  #
+  # The Node matrix is stated here on purpose, and it is bound to `engines.node` in package.json:
+  # test/node-support.test.ts fails when they disagree. Each value is a required check
+  # (`ci / verify (24, ubuntu-latest)`, `ci / verify (26, ubuntu-latest)`), so change the ruleset
+  # first when adding a line, and never drop one before removing its context from the ruleset.
+  ci:
+    uses: cosyte/.github/.github/workflows/ci.yml@main
+    with:
+      run-phi-scan: true
+      node-versions: '["24", "26"]'
+      expect-unpublished-deps: ""

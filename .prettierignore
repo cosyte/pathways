@@ -1,0 +1,35 @@
+# What a WHOLE-TREE prettier glob must not rewrite.
+#
+# The emitted `format` / `format:check` scripts are one `**/*.{ext,...}` glob rather than a list of
+# path patterns, so a directory added to this template is read by the formatter without anyone
+# remembering to widen a list. This file is the other half of that, and exactly ONE line in it is
+# load-bearing today.
+#
+# MEASURED, on a copy of an emitted tree carrying a built `dist/`, a `coverage/`, an installed
+# `node_modules/`, a `.pnpm-store/` and a `pnpm-lock.yaml`: with this file absent the whole-tree
+# glob reaches `pnpm-lock.yaml` and nothing else it should not. Prettier's default `--ignore-path`
+# is `[.gitignore, .prettierignore]` and the emitted `.gitignore` already carries every generated
+# and installed directory below. A lockfile is the one tool-owned file that is COMMITTED, so it is
+# the one a `.gitignore` can never cover, and reformatting it churns it on every `pnpm install`.
+#
+# The rest is stated rather than relied on: it says out loud what must never be reformatted if the
+# emitted `.gitignore` is ever narrowed. `.git/` is documentary too - prettier hard-skips `.git`,
+# measured by planting files inside it. The set is `hl7`'s plus `.pnpm-store/`; the other parser
+# repos that carry one do NOT agree with each other, and most carry none, so this is a choice of
+# reference rather than a fleet convention.
+
+# Lockfiles: tool-owned, committed, rewritten by the package manager on every install.
+pnpm-lock.yaml
+package-lock.json
+yarn.lock
+
+# Generated artifacts (also in .gitignore)
+dist/
+coverage/
+
+# Dependencies (also in .gitignore; prettier additionally skips node_modules by default)
+node_modules/
+.pnpm-store/
+
+# Git / VCS internals
+.git/
