@@ -1,0 +1,12 @@
+# The build context is only what the Dockerfile copies. Everything else stays out, so a local
+# node_modules, dist, .env, database or message folder never reaches the image or the build cache.
+*
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!.npmrc
+!tsconfig.json
+!tsup.config.ts
+!src/
+!templates/
+!LICENSE

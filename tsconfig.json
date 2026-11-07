@@ -2,8 +2,11 @@
   "extends": "@cosyte/tsconfig/base.json",
   "compilerOptions": {
     "outDir": "./dist",
-    "noEmit": true
+    "noEmit": true,
+    "paths": {
+      "@cosyte/pathways": ["./src/index.ts"]
+    }
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "*.config.ts"],
+  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "templates/**/*.ts", "*.config.ts"],
   "exclude": ["node_modules", "dist", "coverage"]
 }
