@@ -26,9 +26,16 @@ are TypeScript functions, and both are tested like any other code.
 
 ## Status
 
-Today the repository holds the first working slice: a file source, a TypeScript transform in its own
-worker thread, SQLite storage, a file destination, and the `pathways start` and `pathways test`
-commands. Nothing is released yet. Watch or star the repository to follow along.
+Today the repository holds working slices; nothing is released yet:
+
+- Sources and destinations for MLLP, HTTP and files, over TLS by default, with a bearer token or
+  mutual TLS on every endpoint that listens.
+- HL7 v2, FHIR R4 JSON, X12, C-CDA, JSON and text, each parsed for a TypeScript transform that runs
+  in its own worker thread.
+- SQLite storage, a health endpoint, a Docker image, and the `pathways init`, `pathways start` and
+  `pathways test` commands.
+
+Watch or star the repository to follow along.
 
 ## License
 
