@@ -5,10 +5,24 @@ import SqliteDatabase from "better-sqlite3";
 import { Kysely, SqliteDialect, type Generated } from "kysely";
 import { Migrator, type Migration, type MigrationProvider } from "kysely/migration";
 
-/** Where a stored message stands. */
+/**
+ * Where a stored message stands.
+ *
+ * @example
+ * ```ts
+ * const done = (status: MessageStatus): boolean => status === "transformed" || status === "filtered";
+ * ```
+ */
 export type MessageStatus = "received" | "transformed" | "filtered" | "failed";
 
-/** Where one delivery of a message to one destination stands. */
+/**
+ * Where one delivery of a message to one destination stands.
+ *
+ * @example
+ * ```ts
+ * const open = (status: DeliveryStatus): boolean => status === "pending";
+ * ```
+ */
 export type DeliveryStatus = "pending" | "delivered" | "failed";
 
 interface MessagesTable {
@@ -44,7 +58,14 @@ interface Tables {
   deliveries: DeliveriesTable;
 }
 
-/** What the engine tells storage about an incoming message. Every field is optional. */
+/**
+ * What the engine tells storage about an incoming message. Every field is optional.
+ *
+ * @example
+ * ```ts
+ * await store.receive("adt", body, { duplicateKey: hashOfSenderAndControlId });
+ * ```
+ */
 export interface StoreReceiveOptions {
   /**
    * An opaque key for who sent the message and its control ID (the engine passes a hash). When an
@@ -56,7 +77,14 @@ export interface StoreReceiveOptions {
   readonly failure?: string | undefined;
 }
 
-/** An incoming message, stored. */
+/**
+ * An incoming message, stored.
+ *
+ * @example
+ * ```ts
+ * const { id, duplicateOf } = await store.receive("adt", body);
+ * ```
+ */
 export interface ReceivedMessage {
   readonly id: number;
   /** The latest earlier message of the channel with the same duplicate key, when there is one. */
@@ -72,13 +100,27 @@ export interface StoredMessage {
   readonly duplicateOf: number | null;
 }
 
-/** A stored message waiting for its transform. */
+/**
+ * A stored message waiting for its transform.
+ *
+ * @example
+ * ```ts
+ * const next: PendingMessage | undefined = await store.nextToTransform("adt");
+ * ```
+ */
 export interface PendingMessage {
   readonly id: number;
   readonly body: Uint8Array;
 }
 
-/** The oldest delivery still pending for one destination of one channel. */
+/**
+ * The oldest delivery still pending for one destination of one channel.
+ *
+ * @example
+ * ```ts
+ * const due = (delivery: PendingDelivery): boolean => delivery.nextAttemptAt <= Date.now();
+ * ```
+ */
 export interface PendingDelivery {
   readonly id: number;
   readonly messageId: number;
@@ -91,7 +133,23 @@ export interface PendingDelivery {
 
 /**
  * What the engine needs from storage. {@link Store} implements it on SQLite; a storage adapter for
- * another database implements the same methods.
+ * another database implements the same methods, and its module's `StoreFactory` returns it.
+ *
+ * Every method is the engine's only path to that data, so an adapter keeps these promises: `receive`
+ * is durable before it resolves; `completeTransform` writes all its deliveries and the message's new
+ * status, or none of them; `nextDelivery` returns the lowest pending id for that destination, so
+ * deliveries stay in order; and a new delivery is due at once (`nextAttemptAt` 0).
+ *
+ * @example
+ * ```ts
+ * class PoolStore implements MessageStore {
+ *   async receive(channel: string, body: Uint8Array, options?: StoreReceiveOptions) {
+ *     const id = await this.pool.insertMessage(channel, body, options?.failure);
+ *     return { id, duplicateOf: undefined };
+ *   }
+ *   // ...and the other methods, each against the same database.
+ * }
+ * ```
  */
 export interface MessageStore {
   /**
@@ -179,6 +237,22 @@ export interface ContentStore {
     current: StoredContent,
     next: { readonly body: Uint8Array; readonly error: string | null },
   ): Promise<boolean>;
+}
+
+/**
+ * Whether `store` also implements {@link ContentStore}, so `pathways rekey` can rewrite what it
+ * holds. {@link Store} does; a custom store may.
+ *
+ * @example
+ * ```ts
+ * if (!isContentStore(raw)) throw new Error("this store cannot be rekeyed");
+ * ```
+ */
+export function isContentStore(store: MessageStore): store is MessageStore & ContentStore {
+  const candidate = store as Partial<ContentStore>;
+  return (
+    typeof candidate.storedContent === "function" && typeof candidate.replaceContent === "function"
+  );
 }
 
 const MIGRATIONS: Record<string, Migration> = {

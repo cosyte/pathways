@@ -22,6 +22,14 @@ MLLP in and out (`src/connectors/mllp.ts`) runs on `@cosyte/mllp` with the same 
 a source sends is built in `src/connectors/ack.ts` with `@cosyte/hl7`'s `buildAck`, and an
 `AckBuilder` is the seam for a custom one.
 
+Extensions (`src/extensions/`) are a user's own TypeScript, named in the YAML: a custom source or
+destination (`module:`), an MLLP `ackBuilder`, lifecycle `hooks`, a `storage: { module }` and an
+`encryption: { provider }`. Each module's default export is checked by `src/extensions/load.ts`,
+which fails with an `ExtensionLoadError` naming the YAML file and key. The factory and event types
+are in `src/extensions/types.ts` and `events.ts`, and the package entry exports them. Hooks run in
+`HookSet` (`hooks.ts`): a queue and a time limit per hook, so a hook never holds up the engine.
+`src/storage/open.ts` is the one place a store and its keys are opened.
+
 The plan is in the umbrella's `plans/pathways.md`: the V1 scope, the stack, delivery and error
 handling, and the HITRUST-driven controls. `plans/hitrust.md` holds the control map. Read both
 before changing behaviour, and update them in the same change that moves the work.
@@ -87,6 +95,13 @@ receiver with the wrong picture of a patient. Keep message text out of logs, err
   `src/encryption/encrypted-store.ts`. A built-in store also implements `ContentStore`, so
   `pathways rekey` can reach it, and leaves no freed bytes behind (SQLite runs with
   `secure_delete`). `pathways start` refuses to run until `pathways.yaml` sets `encryption`.
+- Every store the engine runs on, built in or custom, comes out of `openStore` in
+  `src/storage/open.ts`, already wrapped; nothing else constructs `EncryptedStore` for the engine.
+- User modules load in the main thread with a plain `import()`, so Node's own type stripping reads
+  them; there is no loader dependency. Errors about them name the YAML file and key, and an error's
+  name, code and place (`source.ts:3:9`), never its text.
+- A lifecycle event carries ids, counts, error names, codes and times, never a body, plaintext or
+  encrypted. The engine never awaits a hook: `HookSet.emit` only queues.
 - `scripts/check-no-emdash.mjs` stays plain Node with no dependencies: the shared em-dash gate runs
   it with `node` on Node 22 without installing anything, since pnpm refuses this package below 24.
 - `prepare` sends simple-git-hooks' output to stderr (`1>&2`): on stdout it lands inside

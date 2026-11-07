@@ -310,7 +310,7 @@ describe("Engine", () => {
     });
     const [channel] = (await loadProject(root)).channels;
     const { logger } = captureLogger();
-    const built = connectorsFor(channel as ChannelConfig, { now: Date.now, logger, env: {} });
+    const built = await connectorsFor(channel as ChannelConfig, { now: Date.now, logger, env: {} });
     expect(built.source).toBeInstanceOf(FileSource);
     expect(built.destinations).toHaveLength(2);
   });

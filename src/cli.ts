@@ -1,3 +1,4 @@
+import { stderr } from "node:process";
 import { parseArgs } from "node:util";
 
 import { pino, type Logger } from "pino";
@@ -5,15 +6,16 @@ import { pino, type Logger } from "pino";
 import { ConfigError, loadProject } from "./config/load.js";
 import type { ProjectConfig } from "./config/schema.js";
 import type { Env } from "./connectors/endpoint.js";
-import { EncryptedStore, UnencryptedStore } from "./encryption/encrypted-store.js";
 import { EncryptionError } from "./encryption/envelope.js";
-import { keysToStart, readMasterKeys, type KeyProvider } from "./encryption/keys.js";
+import type { KeyProvider } from "./encryption/keys.js";
 import { rekey, rekeyComplete, type RekeyCounts } from "./encryption/rekey.js";
 import { TransformLoadError } from "./engine/channel-worker.js";
 import { Engine, errorCode } from "./engine/engine.js";
 import { healthEndpointFor, type HealthEndpoint } from "./engine/health.js";
+import { ExtensionLoadError } from "./extensions/load.js";
 import { InitError, initProject, STARTER_CHANNEL, STARTER_KEY_FILE } from "./starter/init.js";
-import { Store } from "./storage/store.js";
+import { openRawStore, openStore, startingKeys, type OpenStoreContext } from "./storage/open.js";
+import { isContentStore, type MessageStore } from "./storage/store.js";
 import { describeFailure, runChannelTests } from "./testing/run-tests.js";
 import { VERSION } from "./version.js";
 
@@ -34,8 +36,8 @@ export const EXIT = {
   /** The command did what was asked. */
   ok: 0,
   /**
-   * A test failed, the engine could not start or stopped on an error, init could not write, or
-   * rekey left a value that is not under the current key.
+   * A test failed, the engine or an extension module could not start or stopped on an error, init
+   * could not write, or rekey left a value that is not under the current key.
    */
   failed: 1,
   /** The arguments were not understood; nothing was done. */
@@ -71,13 +73,17 @@ Options:
   -h, --help           Show this help
   -v, --version        Print the version
 
-Exit codes: 0 done; 1 a test failed, the engine stopped on an error, init
-could not write the project, or rekey left a value not under the current
-key; 2 the command line was not understood; 3 the configuration is invalid.
+Exit codes: 0 done; 1 a test failed, the engine or an extension module could
+not start or stopped on an error, init could not write the project, or rekey
+left a value not under the current key; 2 the command line was not understood;
+3 the configuration is invalid.
 `;
 
 /** Redaction paths for the engine's logger, in case a field that can hold content is ever logged. */
 const REDACT = ["body", "*.body", "detail", "*.detail"];
+
+/** The logger of a command whose stdout is its report: JSON lines on stderr. */
+const STDERR_LOG = { redact: REDACT };
 
 /**
  * Runs the `pathways` command with the given arguments.
@@ -190,21 +196,17 @@ async function start(projectDir: string, once: boolean, io: CliIo): Promise<numb
   const project = await load(projectDir, io);
   if (project === undefined) return EXIT.config;
   const env = io.env ?? process.env;
-  // Master keys are read now, at startup, like every other secret: a missing one stops the start.
-  let keys: KeyProvider | undefined;
-  try {
-    keys = keysToStart(project.encryption, env);
-  } catch (error) {
-    /* v8 ignore next: keysToStart throws only ConfigError */
-    if (!(error instanceof ConfigError)) throw error;
-    reportConfigError(error, io);
-    return EXIT.config;
-  }
-
-  const raw = await openStore(project, io);
-  if (raw === undefined) return EXIT.failed;
-  const store = keys === undefined ? new UnencryptedStore(raw) : new EncryptedStore(raw, keys);
   const logger = io.logger ?? pino({ redact: REDACT });
+  // Master keys are read now, at startup, like every other secret: a missing one stops the start.
+  const keys = await keysOrExit(project, { env, logger }, io);
+  if (typeof keys === "number") return keys;
+  let store: MessageStore;
+  try {
+    store = await openStore(project, { env, logger, keys });
+  } catch (error) {
+    reportStoreError(error, io);
+    return EXIT.failed;
+  }
   if (keys === undefined) logger.warn({ event: "unencrypted-storage" });
   const engine = new Engine({ project, store, logger, env });
   let health: HealthEndpoint | undefined;
@@ -219,6 +221,10 @@ async function start(projectDir: string, once: boolean, io: CliIo): Promise<numb
     if (error instanceof ConfigError) {
       reportConfigError(error, io);
       return EXIT.config;
+    }
+    if (error instanceof ExtensionLoadError) {
+      io.err(`pathways: ${error.message}\n`);
+      return EXIT.failed;
     }
     if (!(error instanceof TransformLoadError)) throw error;
     const channel = project.channels.find((c) => c.name === error.channel);
@@ -255,18 +261,45 @@ async function start(projectDir: string, once: boolean, io: CliIo): Promise<numb
   return EXIT.ok;
 }
 
-async function openStore(project: ProjectConfig, io: CliIo): Promise<Store | undefined> {
+/**
+ * The key provider `pathways.yaml` names, read or loaded now (`undefined` for `encryption: none`), or,
+ * when it cannot be had, the exit code, having said why.
+ */
+async function keysOrExit(
+  project: ProjectConfig,
+  context: OpenStoreContext,
+  io: CliIo,
+): Promise<KeyProvider | undefined | number> {
   try {
-    return await Store.open(project.databaseFile);
-  } catch {
-    io.err("pathways: the database could not be opened.\n");
-    return undefined;
+    return await startingKeys(project, context);
+  } catch (error) {
+    if (error instanceof ExtensionLoadError) {
+      io.err(`pathways: ${error.message}\n`);
+      return EXIT.failed;
+    }
+    /* v8 ignore next: the rest throw only ConfigError */
+    if (!(error instanceof ConfigError)) throw error;
+    reportConfigError(error, io);
+    return EXIT.config;
   }
+}
+
+/** Says why the store could not be opened: a custom store's module by file and key, or fixed text. */
+function reportStoreError(error: unknown, io: CliIo): void {
+  io.err(
+    error instanceof ExtensionLoadError
+      ? `pathways: ${error.message}\n`
+      : "pathways: the database could not be opened.\n",
+  );
 }
 
 /** What `rekey` says when `pathways.yaml` names no keys. */
 const REKEY_NEEDS_KEYS =
-  "pathways.yaml: encryption: rekey needs encryption: { keys: [{ id, env: NAME } or { id, file: path }], current: id }";
+  "pathways.yaml: encryption: rekey needs encryption: { keys: [{ id, env: NAME } or { id, file: path }], current: id } or { provider: { module: path } }";
+
+/** What `rekey` says about a custom store that cannot list and replace what it holds. */
+const REKEY_NEEDS_CONTENT_STORE =
+  "pathways: pathways.yaml: storage.module: rekey needs a store that also implements ContentStore (storedContent and replaceContent).\n";
 
 async function rekeyStore(
   projectDir: string,
@@ -275,19 +308,29 @@ async function rekeyStore(
 ): Promise<number> {
   const project = await load(projectDir, io);
   if (project === undefined) return EXIT.config;
-  const { encryption } = project;
-  let keys: KeyProvider;
-  try {
-    if (encryption?.kind !== "keys") throw new ConfigError([REKEY_NEEDS_KEYS]);
-    keys = readMasterKeys(encryption, io.env ?? process.env);
-  } catch (error) {
-    /* v8 ignore next: both throw only ConfigError */
-    if (!(error instanceof ConfigError)) throw error;
-    reportConfigError(error, io);
+  if (project.encryption === undefined || project.encryption.kind === "none") {
+    reportConfigError(new ConfigError([REKEY_NEEDS_KEYS]), io);
     return EXIT.config;
   }
-  const store = await openStore(project, io);
-  if (store === undefined) return EXIT.failed;
+  // An extension's log lines go to stderr here, so stdout holds only the counts.
+  const context = { env: io.env ?? process.env, logger: io.logger ?? pino(STDERR_LOG, stderr) };
+  const keys = await keysOrExit(project, context, io);
+  if (typeof keys === "number") return keys;
+  /* v8 ignore next: every encryption but none has keys */
+  if (keys === undefined) return EXIT.config;
+  let store: MessageStore;
+  try {
+    // Rekey works on the store as it is, below encryption, to rewrite what it holds.
+    store = await openRawStore(project, context);
+  } catch (error) {
+    reportStoreError(error, io);
+    return EXIT.failed;
+  }
+  if (!isContentStore(store)) {
+    await store.close();
+    io.err(REKEY_NEEDS_CONTENT_STORE);
+    return EXIT.failed;
+  }
   let counts: RekeyCounts;
   try {
     counts = await rekey(store, keys, { encryptPlaintext });

@@ -8,6 +8,7 @@ import {
   channelSchema,
   DEFAULT_DATABASE_FILE,
   DEFAULT_HEALTH_TOKEN_ENV,
+  DEFAULT_HOOK_TIMEOUT_MS,
   DEFAULT_HOST,
   DEFAULT_HTTP_TIMEOUT_MS,
   DEFAULT_HTTP_TOKEN_ENV,
@@ -19,21 +20,24 @@ import {
   type ClientTlsFiles,
   type EncryptionConfig,
   type EndpointAuth,
-  type FileDestination,
   type HeaderValue,
-  type HttpDestination,
+  type HookConfig,
+  type HttpClientConfig,
   type ListenerConfig,
-  type MllpDestination,
+  type ModuleConnector,
   type OnStoreFailure,
   type ProjectConfig,
   type ServerTlsFiles,
   type Settings,
+  type StorageConfig,
 } from "./schema.js";
 
 type ChannelYaml = z.infer<typeof channelSchema>;
 type ProjectYaml = z.infer<typeof projectSchema>;
 type ListenerYaml = NonNullable<ProjectYaml["health"]>;
 type DestinationYaml = ChannelYaml["destinations"][number];
+type HookYaml = NonNullable<ChannelYaml["hooks"]>[number];
+type HttpClientYaml = NonNullable<DestinationYaml["http"]>;
 
 /**
  * A project that could not be loaded. `problems` name the file and the key at fault; they hold no
@@ -86,12 +90,32 @@ export async function loadProject(root: string): Promise<ProjectConfig> {
   }
 
   const settings: Settings = mergeSettings(DEFAULT_SETTINGS, project.defaults ?? {});
-  const databaseFile = resolve(projectRoot, project.storage?.sqlite.file ?? DEFAULT_DATABASE_FILE);
+  const databaseFile = resolve(projectRoot, project.storage?.sqlite?.file ?? DEFAULT_DATABASE_FILE);
+  const storageModule = project.storage?.module;
+  const storage: StorageConfig =
+    storageModule === undefined
+      ? { kind: "sqlite", file: databaseFile }
+      : {
+          kind: "module",
+          module: resolve(projectRoot, storageModule),
+          options: project.storage?.options ?? {},
+        };
+  const hooks = (project.hooks ?? []).map((hook) => resolveHook(hook, projectRoot));
+  const encryption = resolveEncryption(project.encryption, projectRoot);
+  problems.push(
+    ...(await missingModules(show(projectFile), show, [
+      [
+        "encryption.provider.module",
+        encryption?.kind === "provider" ? encryption.module : undefined,
+      ],
+      ["storage.module", storage.kind === "module" ? storage.module : undefined],
+      ...hookModules(hooks),
+    ])),
+  );
   const health =
     project.health === undefined
       ? undefined
       : resolveListener(project.health, projectRoot, DEFAULT_HEALTH_TOKEN_ENV);
-  const encryption = resolveEncryption(project.encryption, projectRoot);
 
   const channelsDir = join(projectRoot, "channels");
   const channels: ChannelConfig[] = [];
@@ -135,16 +159,36 @@ export async function loadProject(root: string): Promise<ProjectConfig> {
       continue;
     }
     const channelSettings = mergeSettings(settings, channel);
+    const source = resolveSource(channel.source, channelDir, channelSettings);
+    const destinations = channel.destinations.map((destination) =>
+      resolveDestination(destination, channelDir, channelSettings),
+    );
+    const channelHooks = (channel.hooks ?? []).map((hook) => resolveHook(hook, channelDir));
+    const absent = await missingModules(show(file), show, [
+      ["source.module", source.kind === "module" ? source.module : undefined],
+      ["source.mllp.ackBuilder", source.kind === "mllp" ? source.ackBuilder : undefined],
+      ...destinations.map(
+        (destination, index) =>
+          [
+            `destinations.${index}.module`,
+            destination.kind === "module" ? destination.module : undefined,
+          ] as const,
+      ),
+      ...hookModules(channelHooks),
+    ]);
+    if (absent.length > 0) {
+      problems.push(...absent);
+      continue;
+    }
     channels.push({
       name: folder,
       dir: channelDir,
       format: channel.format ?? "hl7v2",
-      source: resolveSource(channel.source, channelDir, channelSettings),
+      source,
       transform,
-      destinations: channel.destinations.map((destination) =>
-        resolveDestination(destination, channelDir, channelSettings),
-      ),
+      destinations,
       settings: channelSettings,
+      hooks: channelHooks,
     });
   }
 
@@ -154,7 +198,63 @@ export async function loadProject(root: string): Promise<ProjectConfig> {
     );
   }
   if (problems.length > 0) throw new ConfigError(problems);
-  return { root: projectRoot, databaseFile, settings, health, encryption, channels };
+  return {
+    root: projectRoot,
+    storage,
+    databaseFile,
+    settings,
+    hooks,
+    health,
+    encryption,
+    channels,
+  };
+}
+
+/** Each module a list of hooks names, by its key. */
+function hookModules(hooks: readonly HookConfig[]): (readonly [string, string | undefined])[] {
+  return hooks.map(
+    (hook, index) => [`hooks.${index}`, hook.kind === "module" ? hook.module : undefined] as const,
+  );
+}
+
+/** One problem for each module, named by its key, that does not exist. */
+async function missingModules(
+  file: string,
+  show: (file: string) => string,
+  modules: readonly (readonly [key: string, module: string | undefined])[],
+): Promise<string[]> {
+  const problems: string[] = [];
+  for (const [key, module] of modules) {
+    if (module !== undefined && !(await exists(module))) {
+      problems.push(`${file}: ${key}: ${show(module)} does not exist`);
+    }
+  }
+  return problems;
+}
+
+function resolveHook(hook: HookYaml, dir: string): HookConfig {
+  const settings = { events: hook.events, timeoutMs: hook.timeout ?? DEFAULT_HOOK_TIMEOUT_MS };
+  if (hook.webhook !== undefined) {
+    return { ...settings, kind: "webhook", webhook: resolveHttpClient(hook.webhook, dir) };
+  }
+  // The schema lets exactly one kind through, so a hook that is not a webhook is a module.
+  return {
+    ...settings,
+    kind: "module",
+    module: resolve(dir, hook.module as string),
+    options: hook.options ?? {},
+  };
+}
+
+function resolveModule(
+  block: {
+    readonly module?: string | undefined;
+    readonly options?: Record<string, unknown> | undefined;
+  },
+  dir: string,
+): ModuleConnector | undefined {
+  if (block.module === undefined) return undefined;
+  return { kind: "module", module: resolve(dir, block.module), options: block.options ?? {} };
 }
 
 /** The encryption settings, with each key file resolved against the project root. */
@@ -164,6 +264,10 @@ function resolveEncryption(
 ): EncryptionConfig | undefined {
   if (encryption === undefined) return undefined;
   if (encryption === "none") return { kind: "none" };
+  if ("provider" in encryption) {
+    const { module, options } = encryption.provider;
+    return { kind: "provider", module: resolve(root, module), options: options ?? {} };
+  }
   return {
     kind: "keys",
     keys: encryption.keys.map(({ id, env, file }) =>
@@ -180,6 +284,8 @@ function resolveSource(
   settings: Settings,
 ): ChannelConfig["source"] {
   const { http, mllp } = source;
+  const module = resolveModule(source, dir);
+  if (module !== undefined) return module;
   if (mllp !== undefined) {
     return {
       kind: "mllp",
@@ -188,6 +294,7 @@ function resolveSource(
       tls: mllp.tls === undefined ? undefined : resolveServerTls(mllp.tls, dir),
       plaintext: mllp.plaintext === true,
       onStoreFailure: mllp.onStoreFailure ?? settings.onStoreFailure,
+      ackBuilder: mllp.ackBuilder === undefined ? undefined : resolve(dir, mllp.ackBuilder),
     };
   }
   if (http !== undefined) {
@@ -211,8 +318,10 @@ function resolveDestination(
   destination: DestinationYaml,
   dir: string,
   settings: Settings,
-): FileDestination | HttpDestination | MllpDestination {
+): ChannelConfig["destinations"][number] {
   const { http, mllp } = destination;
+  const module = resolveModule(destination, dir);
+  if (module !== undefined) return module;
   if (mllp !== undefined) {
     return {
       kind: "mllp",
@@ -228,15 +337,22 @@ function resolveDestination(
     const file = destination.file as NonNullable<typeof destination.file>;
     return { kind: "file", dir: resolve(dir, file.dir) };
   }
+  return {
+    kind: "http",
+    ...resolveHttpClient(http, dir),
+    timeoutMs: http.timeout ?? DEFAULT_HTTP_TIMEOUT_MS,
+  };
+}
+
+/** An HTTP client endpoint, resolved: headers marked as written or from the environment. */
+function resolveHttpClient(http: Omit<HttpClientYaml, "timeout">, dir: string): HttpClientConfig {
   const headers: Record<string, HeaderValue> = {};
   for (const [name, value] of Object.entries(http.headers ?? {})) {
     headers[name] = typeof value === "string" ? { value } : { env: value.env };
   }
   return {
-    kind: "http",
     url: http.url,
     headers,
-    timeoutMs: http.timeout ?? DEFAULT_HTTP_TIMEOUT_MS,
     tls: http.tls === undefined ? undefined : resolveClientTls(http.tls, dir),
     plaintext: http.plaintext === true,
   };

@@ -399,8 +399,8 @@ describe("pathways.yaml encryption", () => {
   });
 
   it.each([
-    ["encryption: off\n", "encryption: either none, or { keys: "],
-    ["encryption: { current: a }\n", "encryption: either none, or { keys: "],
+    ["encryption: off\n", "encryption: either none, { keys: "],
+    ["encryption: { current: a }\n", "encryption: either none, { keys: "],
     ["encryption: { keys: [], current: a }\n", "encryption.keys: at least one key"],
     [
       "encryption: { keys: [{ id: a }], current: a }\n",

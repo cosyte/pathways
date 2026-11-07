@@ -197,11 +197,12 @@ export class LocalKeyProvider implements KeyProvider {
 
 /** What `start` says when `pathways.yaml` does not set `encryption`. */
 const ENCRYPTION_REQUIRED =
-  "pathways.yaml: encryption: required to start the engine: set encryption: { keys: [{ id, env: NAME } or { id, file: path }], current: id } to encrypt stored messages, or encryption: none to store them unencrypted";
+  "pathways.yaml: encryption: required to start the engine: set encryption: { keys: [{ id, env: NAME } or { id, file: path }], current: id } or { provider: { module: path } } to encrypt stored messages, or encryption: none to store them unencrypted";
 
 /**
  * The master keys `pathways start` encrypts with: read from each key's environment variable or file
- * now, at startup. Undefined for `encryption: none`.
+ * now, at startup. Undefined for `encryption: none`. A custom provider (`encryption: { provider }`)
+ * is loaded by `startingKeys` in `src/storage/open.ts` instead.
  *
  * @throws {ConfigError} when `pathways.yaml` does not set `encryption`, or a key cannot be read (see
  *   {@link readMasterKeys}).
@@ -212,7 +213,7 @@ const ENCRYPTION_REQUIRED =
  * ```
  */
 export function keysToStart(
-  encryption: EncryptionConfig | undefined,
+  encryption: Exclude<EncryptionConfig, { readonly kind: "provider" }> | undefined,
   env: Env,
 ): LocalKeyProvider | undefined {
   if (encryption === undefined) throw new ConfigError([ENCRYPTION_REQUIRED]);

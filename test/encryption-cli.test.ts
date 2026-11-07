@@ -81,7 +81,7 @@ describe("pathways start and encryption at rest", () => {
       out: "",
       err:
         "pathways: the configuration is invalid:\n" +
-        "  pathways.yaml: encryption: required to start the engine: set encryption: { keys: [{ id, env: NAME } or { id, file: path }], current: id } to encrypt stored messages, or encryption: none to store them unencrypted\n",
+        "  pathways.yaml: encryption: required to start the engine: set encryption: { keys: [{ id, env: NAME } or { id, file: path }], current: id } or { provider: { module: path } } to encrypt stored messages, or encryption: none to store them unencrypted\n",
     });
     expect(await readdir(root)).not.toContain(".pathways");
   });
@@ -271,7 +271,7 @@ describe("pathways rekey", () => {
 
   it("needs keys: not none, not unset, and every key readable", async () => {
     const needs =
-      "pathways: the configuration is invalid:\n  pathways.yaml: encryption: rekey needs encryption: { keys: [{ id, env: NAME } or { id, file: path }], current: id }\n";
+      "pathways: the configuration is invalid:\n  pathways.yaml: encryption: rekey needs encryption: { keys: [{ id, env: NAME } or { id, file: path }], current: id } or { provider: { module: path } }\n";
     for (const yaml of ["", "encryption: none\n"]) {
       expect(await runCli(["rekey", "-C", await project(yaml)])).toMatchObject({
         code: EXIT.config,

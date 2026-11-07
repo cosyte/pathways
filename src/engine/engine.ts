@@ -3,14 +3,13 @@ import { setTimeout as sleep } from "node:timers/promises";
 
 import type { Logger } from "pino";
 
-import { ConfigError } from "../config/load.js";
+import type { ChannelConfig, Format, ProjectConfig } from "../config/schema.js";
 import {
-  HEADER_VALUE,
-  type ChannelConfig,
-  type Format,
-  type ProjectConfig,
-} from "../config/schema.js";
-import { listenerSecurity, listenerWarnings, readEnv, type Env } from "../connectors/endpoint.js";
+  listenerSecurity,
+  listenerWarnings,
+  resolveHeaders,
+  type Env,
+} from "../connectors/endpoint.js";
 import { FileDestination, FileSource } from "../connectors/file.js";
 import { HttpDestination, HttpSource } from "../connectors/http.js";
 import { MllpDestination, MllpSource } from "../connectors/mllp.js";
@@ -21,6 +20,10 @@ import {
   type MessageSink,
   type SourceConnector,
 } from "../connectors/types.js";
+import { customDestination, customSource, loadAckBuilder } from "../extensions/build.js";
+import type { LifecycleEvent } from "../extensions/events.js";
+import { HookSet } from "../extensions/hooks.js";
+import type { ChannelContext } from "../extensions/types.js";
 import type { MessageStore, ReceivedMessage } from "../storage/store.js";
 import { ChannelWorker, type TransformOutcome } from "./channel-worker.js";
 import { channelStatus, type ChannelHealth, type HealthReport } from "./health.js";
@@ -109,20 +112,29 @@ export interface ConnectorContext {
 
 /**
  * Builds the connectors a channel's configuration names, reading TLS files and secrets from the
- * environment as it goes. Logs carry the channel, statuses and codes, never content.
+ * environment as it goes, and loading the modules it names: a custom source or destination, or an
+ * MLLP source's ACK builder. Logs carry the channel, statuses and codes, never content.
  *
  * @throws {ConfigError} when a TLS file, a token or a secret header cannot be had.
+ * @throws {ExtensionLoadError} when a module, its factory or what it returns is wrong.
  * @example
  * ```ts
- * const { source, destinations } = connectorsFor(channel, { now: Date.now, logger, env: process.env });
+ * const { source, destinations } = await connectorsFor(channel, { now: Date.now, logger, env: process.env });
  * ```
  */
-export function connectorsFor(
+export async function connectorsFor(
   channel: ChannelConfig,
   context: ConnectorContext,
-): ChannelConnectors {
+): Promise<ChannelConnectors> {
   const { now, logger, env } = context;
   const file = `channels/${channel.name}/channel.yaml`;
+  const extension = (fields: Readonly<Record<string, string | number>>): ChannelContext => ({
+    channel: channel.name,
+    format: channel.format,
+    dir: channel.dir,
+    env,
+    logger: logger.child({ channel: channel.name, ...fields }),
+  });
   const { source } = channel;
   let sourceConnector: SourceConnector;
   switch (source.kind) {
@@ -164,59 +176,80 @@ export function connectorsFor(
             ? undefined
             : loadServerTls(source.tls, `${file}: source.mllp.tls`),
         onStoreFailure: source.onStoreFailure,
+        ...(source.ackBuilder === undefined
+          ? {}
+          : {
+              ackBuilder: await loadAckBuilder(
+                source.ackBuilder,
+                `${file}: source.mllp.ackBuilder`,
+                channel.settings.timeoutMs,
+              ),
+            }),
         onEvent: ({ level, event, ...fields }) => {
           logger[level]({ event, channel: channel.name, ...fields });
         },
       });
       break;
+    case "module":
+      sourceConnector = await customSource(
+        source,
+        extension({ extension: "source" }),
+        `${file}: source.module`,
+      );
+      break;
   }
-  const destinations = channel.destinations.map((destination, index): DestinationConnector => {
+  const destinations: DestinationConnector[] = [];
+  for (const [index, destination] of channel.destinations.entries()) {
     switch (destination.kind) {
       case "file":
-        return new FileDestination({ dir: destination.dir, extension: EXTENSIONS[channel.format] });
+        destinations.push(
+          new FileDestination({ dir: destination.dir, extension: EXTENSIONS[channel.format] }),
+        );
+        break;
       case "http": {
         const where = `${file}: destinations.${index}.http`;
-        const headers: Record<string, string> = { "Content-Type": CONTENT_TYPES[channel.format] };
-        for (const [name, value] of Object.entries(destination.headers)) {
-          // A header the YAML sets replaces the default, whatever its case.
-          if (name.toLowerCase() === "content-type") delete headers["Content-Type"];
-          headers[name] =
-            "env" in value
-              ? readHeaderEnv(env, value.env, `${where}.headers.${name}`)
-              : value.value;
-        }
-        return new HttpDestination({
-          url: destination.url,
-          headers,
-          timeoutMs: destination.timeoutMs,
-          ...(destination.tls === undefined
-            ? {}
-            : { tls: loadClientTls(destination.tls, `${where}.tls`) }),
-        });
+        destinations.push(
+          new HttpDestination({
+            url: destination.url,
+            headers: resolveHeaders(
+              { "Content-Type": CONTENT_TYPES[channel.format] },
+              destination.headers,
+              env,
+              where,
+            ),
+            timeoutMs: destination.timeoutMs,
+            ...(destination.tls === undefined
+              ? {}
+              : { tls: loadClientTls(destination.tls, `${where}.tls`) }),
+          }),
+        );
+        break;
       }
       case "mllp":
-        return new MllpDestination({
-          host: destination.host,
-          port: destination.port,
-          tls:
-            destination.tls === undefined
-              ? undefined
-              : loadClientTls(destination.tls, `${file}: destinations.${index}.mllp.tls`),
-          ackTimeoutMs: destination.ackTimeoutMs,
-        });
+        destinations.push(
+          new MllpDestination({
+            host: destination.host,
+            port: destination.port,
+            tls:
+              destination.tls === undefined
+                ? undefined
+                : loadClientTls(destination.tls, `${file}: destinations.${index}.mllp.tls`),
+            ackTimeoutMs: destination.ackTimeoutMs,
+          }),
+        );
+        break;
+      case "module":
+        destinations.push(
+          await customDestination(
+            destination,
+            extension({ extension: "destination", destination: index }),
+            `${file}: destinations.${index}.module`,
+          ),
+        );
+        break;
     }
-  });
-  return { source: sourceConnector, destinations };
-}
-
-function readHeaderEnv(env: Env, name: string, where: string): string {
-  const value = readEnv(env, name, where);
-  if (!HEADER_VALUE.test(value)) {
-    throw new ConfigError([
-      `${where}: the environment variable ${name} holds characters a header cannot carry`,
-    ]);
   }
-  return value;
+  return { source: sourceConnector, destinations };
 }
 
 /** What the engine runs on. */
@@ -227,7 +260,7 @@ export interface EngineOptions {
   /** Epoch milliseconds now. Tests pass their own clock. */
   readonly now?: () => number;
   /** Builds a channel's connectors; by default, from its configuration. */
-  readonly connectors?: (channel: ChannelConfig) => ChannelConnectors;
+  readonly connectors?: (channel: ChannelConfig) => ChannelConnectors | Promise<ChannelConnectors>;
   /** Where tokens and secret headers are read from. Defaults to `process.env`. */
   readonly env?: Env;
 }
@@ -236,6 +269,8 @@ interface RunningChannel {
   readonly config: ChannelConfig;
   readonly worker: ChannelWorker;
   readonly connectors: ChannelConnectors;
+  /** The channel's own hooks. */
+  readonly hooks: HookSet;
   /** Set while the channel's source cannot listen: how often it has failed and when to try next. */
   down: { readonly attempts: number; readonly nextAt: number } | undefined;
 }
@@ -256,6 +291,9 @@ interface RunningChannel {
  * Logs carry ids, counts and error names only: never a message's content, and never a file name,
  * which can carry a patient's name.
  *
+ * Each step is also an event for the lifecycle hooks: the engine-wide ones in `pathways.yaml` and
+ * the channel's own. Hooks never hold the engine up: each has its own queue and time limit.
+ *
  * @example
  * ```ts
  * const engine = new Engine({ project, store, logger });
@@ -268,6 +306,8 @@ export class Engine {
   private readonly options: EngineOptions;
   private readonly now: () => number;
   private readonly channels: RunningChannel[] = [];
+  /** The engine-wide hooks, from `pathways.yaml`, once started. */
+  private hooks: HookSet | undefined;
 
   /** @param options The project, the store, the logger and, for tests, a clock and connectors. */
   constructor(options: EngineOptions) {
@@ -276,14 +316,22 @@ export class Engine {
   }
 
   /**
-   * Starts every channel. Rejects, having stopped any it started, if a transform will not load or a
-   * connector's TLS files or secrets cannot be had (a `ConfigError`). A source that cannot listen
-   * does not stop the start: it is logged, reported on the health endpoint, and tried again.
+   * Starts the hooks and every channel. Rejects, having stopped any it started, if a transform will
+   * not load, a connector's TLS files or secrets cannot be had (a `ConfigError`), or an extension
+   * module is wrong (an `ExtensionLoadError`). A source that cannot listen does not stop the start:
+   * it is logged, reported on the health endpoint, and tried again.
    */
   async start(): Promise<void> {
     const { project, logger } = this.options;
     const env = this.options.env ?? process.env;
     try {
+      this.hooks = await HookSet.open(project.hooks, {
+        file: "pathways.yaml",
+        channel: undefined,
+        dir: project.root,
+        env,
+        logger,
+      });
       for (const config of project.channels) {
         const worker = new ChannelWorker({
           channel: config.name,
@@ -292,10 +340,22 @@ export class Engine {
           timeoutMs: config.settings.timeoutMs,
           memoryMb: config.settings.memoryMb,
         });
-        const connectors =
-          this.options.connectors?.(config) ??
-          connectorsFor(config, { now: this.now, logger, env });
-        const channel: RunningChannel = { config, worker, connectors, down: undefined };
+        const hooks = await HookSet.open(config.hooks, {
+          file: `channels/${config.name}/channel.yaml`,
+          channel: config.name,
+          dir: config.dir,
+          env,
+          logger,
+        });
+        let connectors: ChannelConnectors;
+        try {
+          connectors = await (this.options.connectors?.(config) ??
+            connectorsFor(config, { now: this.now, logger, env }));
+        } catch (error) {
+          await hooks.stop();
+          throw error;
+        }
+        const channel: RunningChannel = { config, worker, connectors, hooks, down: undefined };
         this.channels.push(channel);
         this.warnInsecure(config);
         await worker.start();
@@ -313,7 +373,7 @@ export class Engine {
       if (channel.down !== undefined && channel.down.nextAt <= this.now()) {
         await this.startSource(channel);
       }
-      await channel.connectors.source.poll?.(this.sinkFor(channel.config));
+      await channel.connectors.source.poll?.(this.sinkFor(channel));
       await this.transformAll(channel);
       await this.deliverAll(channel);
     }
@@ -329,9 +389,14 @@ export class Engine {
     }
   }
 
-  /** Stops every source that listens, then every worker and every destination's connections. */
+  /**
+   * Stops every source that listens, then every worker and every destination's connections, then
+   * the hooks, once each has had its time limit to work through the events still queued.
+   */
   async stop(): Promise<void> {
     const channels = this.channels.splice(0);
+    const hooks = this.hooks;
+    this.hooks = undefined;
     await Promise.all(
       channels.map(async (channel) => {
         await channel.connectors.source.stop?.();
@@ -345,6 +410,7 @@ export class Engine {
         }),
       ]),
     );
+    await Promise.all([...channels.map((channel) => channel.hooks.stop()), hooks?.stop()]);
   }
 
   /**
@@ -396,7 +462,7 @@ export class Engine {
       logger.warn({ event: "plaintext", channel: config.name, endpoint: "source" });
     }
     for (const [index, destination] of config.destinations.entries()) {
-      if (destination.kind !== "file" && destination.plaintext) {
+      if ((destination.kind === "http" || destination.kind === "mllp") && destination.plaintext) {
         logger.warn({
           event: "plaintext",
           channel: config.name,
@@ -412,27 +478,60 @@ export class Engine {
     if (source.start === undefined) return;
     const { logger } = this.options;
     try {
-      await source.start(this.sinkFor(channel.config));
+      await source.start(this.sinkFor(channel));
     } catch (error) {
       const attempts = (channel.down?.attempts ?? 0) + 1;
       const wait = retryDelay(attempts);
+      const code = errorCode(error);
       channel.down = { attempts, nextAt: this.now() + wait };
       logger.error({
         event: "source-start-failed",
         channel: channel.config.name,
         attempt: attempts,
         retryInMs: wait,
-        code: errorCode(error),
+        code,
       });
+      this.emit(channel, () => ({
+        type: "source-down",
+        at: this.at(),
+        channel: channel.config.name,
+        attempt: attempts,
+        retryInMs: wait,
+        retryAt: this.at(wait),
+        name: errorName(error),
+        code,
+      }));
       return;
     }
     if (channel.down !== undefined) {
       channel.down = undefined;
       logger.info({ event: "source-started", channel: channel.config.name });
+      this.emit(channel, () => ({
+        type: "source-up",
+        at: this.at(),
+        channel: channel.config.name,
+      }));
     }
   }
 
-  private sinkFor(config: ChannelConfig): MessageSink {
+  /**
+   * Hands an event to the channel's hooks and the engine-wide ones. Never waits, never throws. The
+   * event is built only when some hook will be handed it.
+   */
+  private emit(channel: RunningChannel, event: () => LifecycleEvent): void {
+    if (channel.hooks.empty && (this.hooks?.empty ?? true)) return;
+    const built = event();
+    channel.hooks.emit(built);
+    this.hooks?.emit(built);
+  }
+
+  /** Now, or `inMs` from now, as an ISO 8601 time for an event. */
+  private at(inMs = 0): string {
+    return new Date(this.now() + inMs).toISOString();
+  }
+
+  private sinkFor(channel: RunningChannel): MessageSink {
+    const { config } = channel;
     const { store, logger } = this.options;
     return {
       receive: async (body, options = {}) => {
@@ -448,7 +547,15 @@ export class Engine {
             failure,
           });
         } catch (error) {
-          logger.error({ event: "receive-failed", channel: config.name, code: errorCode(error) });
+          const code = errorCode(error);
+          logger.error({ event: "receive-failed", channel: config.name, code });
+          this.emit(channel, () => ({
+            type: "receive-failed",
+            at: this.at(),
+            channel: config.name,
+            name: errorName(error),
+            code,
+          }));
           throw error;
         }
         logger.info({
@@ -458,6 +565,15 @@ export class Engine {
           bytes: body.byteLength,
           ...(failure === undefined ? {} : { failed: true }),
         });
+        this.emit(channel, () => ({
+          type: "received",
+          at: this.at(),
+          channel: config.name,
+          messageId: received.id,
+          bytes: body.byteLength,
+          failed: failure !== undefined,
+          duplicateOf: received.duplicateOf,
+        }));
         if (received.duplicateOf !== undefined) {
           logger.warn({
             event: "possible-duplicate",
@@ -471,7 +587,8 @@ export class Engine {
     };
   }
 
-  private async transformAll({ config, worker }: RunningChannel): Promise<void> {
+  private async transformAll(channel: RunningChannel): Promise<void> {
+    const { config, worker } = channel;
     const { store, logger } = this.options;
     for (;;) {
       const next = await store.nextToTransform(config.name);
@@ -479,11 +596,19 @@ export class Engine {
       const outcome: TransformOutcome = await worker.run(next.body);
       if (outcome.ok) {
         await store.completeTransform(next.id, outcome.outputs, config.destinations.length);
+        const outputs = outcome.outputs.length;
         logger.info({
-          event: outcome.outputs.length === 0 ? "filtered" : "transformed",
+          event: outputs === 0 ? "filtered" : "transformed",
           channel: config.name,
           message: next.id,
-          outputs: outcome.outputs.length,
+          outputs,
+        });
+        const messageId = next.id;
+        this.emit(channel, () => {
+          const base = { at: this.at(), channel: config.name, messageId };
+          return outputs === 0
+            ? { type: "filtered", ...base }
+            : { type: "transformed", ...base, outputs };
         });
       } else {
         await store.failTransform(next.id, storedFailure(outcome.failure));
@@ -497,16 +622,34 @@ export class Engine {
           code,
           where,
         });
+        this.emit(channel, () => ({
+          type: "transform-failed",
+          at: this.at(),
+          channel: config.name,
+          messageId: next.id,
+          kind,
+          name,
+          code,
+          where,
+        }));
       }
     }
   }
 
-  private async deliverAll({ config, connectors }: RunningChannel): Promise<void> {
+  private async deliverAll(channel: RunningChannel): Promise<void> {
+    const { config, connectors } = channel;
     const { store, logger } = this.options;
     for (const [index, destination] of connectors.destinations.entries()) {
       for (;;) {
         const delivery = await store.nextDelivery(config.name, index);
         if (delivery === undefined || delivery.nextAttemptAt > this.now()) break;
+        const about = {
+          channel: config.name,
+          messageId: delivery.messageId,
+          destination: index,
+          deliveryId: delivery.id,
+          attempt: delivery.attempts + 1,
+        };
         try {
           await destination.deliver({
             messageId: delivery.messageId,
@@ -523,6 +666,12 @@ export class Engine {
               delivery: delivery.id,
               reason: error.reason,
             });
+            this.emit(channel, () => ({
+              type: "delivery-rejected",
+              at: this.at(),
+              ...about,
+              reason: error.reason,
+            }));
             continue;
           }
           const attempts = delivery.attempts + 1;
@@ -543,6 +692,15 @@ export class Engine {
             retryInMs: wait,
             code,
           });
+          this.emit(channel, () => ({
+            type: "delivery-retry",
+            at: this.at(),
+            ...about,
+            retryInMs: wait,
+            retryAt: this.at(wait),
+            name: errorName(error),
+            code,
+          }));
           break;
         }
         await store.markDelivered(delivery.id);
@@ -552,6 +710,7 @@ export class Engine {
           destination: index,
           delivery: delivery.id,
         });
+        this.emit(channel, () => ({ type: "delivered", at: this.at(), ...about }));
       }
     }
   }
@@ -568,4 +727,9 @@ export class Engine {
 export function errorCode(error: unknown): string | undefined {
   const code = (error as { code?: unknown } | undefined)?.code;
   return typeof code === "string" ? code : undefined;
+}
+
+/** An error's name, or the type of what was thrown when it is not an error: never its text. */
+function errorName(error: unknown): string {
+  return error instanceof Error ? error.name : typeof error;
 }
