@@ -97,7 +97,7 @@
     "@types/better-sqlite3": "9.6.0",
     "@types/node": "^24.0.0",
     "@types/pg": "8.23.1",
-    "@vitest/coverage-v8": "4.1.4",
+    "@vitest/coverage-v8": "4.1.12",
     "eslint": "10.5.0",
     "mysql2": "3.24.6",
     "pg": "8.23.1",
@@ -109,10 +109,10 @@
     "tsx": "4.21.0",
     "typescript": "5.9.3",
     "vite": "7.3.7",
-    "vitest": "4.1.4"
+    "vitest": "4.1.12"
   },
   "dependencies": {
-    "@cosyte/ccda": "^0.1.0",
+    "@cosyte/ccda": "^0.1.1",
     "@cosyte/fhir": "^0.1.0",
     "@cosyte/hl7": "^0.1.0",
     "@cosyte/mllp": "^0.1.0",
@@ -146,8 +146,7 @@
   "pnpm": {
     "overrides": {
       "esbuild@>=0.27.3 <0.28.1": "0.28.1",
-      "js-yaml@>=4.0.0 <4.3.1": "4.3.1",
-      "js-yaml@>=3.0.0 <3.15.1": "3.15.1"
+      "minimatch@>=7.0.0 <11.0.1": "11.0.5"
     }
   }
 }
