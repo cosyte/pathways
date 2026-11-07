@@ -49,6 +49,10 @@ receiver with the wrong picture of a patient. Keep message text out of logs, err
 - CLI output and errors carry codes and fixed text, never what the caller typed or what a message
   holds.
 - Run `pnpm attw`, never the bare `attw` CLI, which exits 0 over a package with no types.
+- `scripts/check-no-emdash.mjs` stays plain Node with no dependencies: the shared em-dash gate runs
+  it with `node` on Node 22 without installing anything, since pnpm refuses this package below 24.
+- `prepare` sends simple-git-hooks' output to stderr (`1>&2`): on stdout it lands inside
+  `npm pack --json` and the attw gate refuses to read it.
 - `scripts/phi-scan.ts` is a thin caller of `@cosyte/script-utils/phi-scan`: 0 clean, 1 hits, 2
   anything it could not read. It is the starter floor (SSN and email shapes); add field-level
   detection for HL7 v2, FHIR, X12 and C-CDA when the first fixtures land.
