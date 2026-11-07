@@ -1,11 +1,18 @@
-import { chmod, copyFile, mkdir, readdir, readFile, utimes } from "node:fs/promises";
+import { chmod, copyFile, mkdir, readdir, readFile, stat, utimes } from "node:fs/promises";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
 import { EXIT, run } from "../src/cli.js";
+import { loadProject } from "../src/config/load.js";
+import { decodeKey } from "../src/encryption/keys.js";
 import { VERSION } from "../src/index.js";
-import { defaultTemplateDir, InitError, initProject } from "../src/starter/init.js";
+import {
+  defaultTemplateDir,
+  InitError,
+  initProject,
+  STARTER_KEY_FILE,
+} from "../src/starter/init.js";
 import { captureLogger, cleanUp, makeProject } from "./helpers.js";
 
 afterEach(cleanUp);
@@ -41,6 +48,7 @@ async function snapshot(dir: string): Promise<Record<string, string>> {
 
 const STARTER_FILES = [
   ".gitignore",
+  ".pathways/dev.key",
   "channels/adt-to-lab/channel.yaml",
   "channels/adt-to-lab/tests/a01.expected.hl7",
   "channels/adt-to-lab/tests/a01.hl7",
@@ -62,6 +70,8 @@ describe("pathways init", () => {
       out:
         "Wrote a starter project with one channel, adt-to-lab:\n" +
         STARTER_FILES.map((file) => `  ${file}\n`).join("") +
+        ".pathways/dev.key is a development key that encrypts stored messages on\n" +
+        "this machine; production keys come from a secret store (see pathways.yaml).\n" +
         'Next, in the project folder: "pathways test" runs the channel\'s tests, and\n' +
         '"pathways start" runs the channel.\n',
       err: "",
@@ -127,6 +137,36 @@ describe("pathways init", () => {
     expect(delivered.split("\r")[0]?.split("|")[4]).toBe("LAB");
     expect((await readdir(join(inbox, "processed"))).sort()).toEqual(["1-a01.hl7", "2-a08.hl7"]);
     expect(await readdir(join(target, ".pathways"))).toContain("pathways.db");
+
+    // Encrypted at rest from the first run: the database holds none of the messages' text.
+    for (const file of await readdir(join(target, ".pathways"))) {
+      const raw = (await readFile(join(target, ".pathways", file))).toString("latin1");
+      for (const plain of ["TESTPATIENT", "TEST000001", "ADT^A01", "MSG00001"]) {
+        expect(raw).not.toContain(plain);
+      }
+    }
+  });
+
+  it("generates a development key of the project's own, readable by its owner only, and configures it", async () => {
+    const [first, second] = [await makeProject({}), await makeProject({})];
+    await initProject(first);
+    await initProject(second);
+    const keyText = await readFile(join(first, STARTER_KEY_FILE), "utf8");
+    expect(keyText).toMatch(/^[A-Za-z0-9+/]{43}=\n$/);
+    expect(decodeKey(keyText)?.byteLength).toBe(32);
+    expect(await readFile(join(second, STARTER_KEY_FILE), "utf8")).not.toBe(keyText);
+    expect((await stat(join(first, STARTER_KEY_FILE))).mode & 0o777).toBe(0o600);
+    expect((await stat(join(first, ".pathways"))).mode & 0o077).toBe(0);
+
+    const project = await loadProject(first);
+    expect(project.encryption).toEqual({
+      kind: "keys",
+      keys: [{ id: "dev", file: join(first, STARTER_KEY_FILE) }],
+      current: "dev",
+    });
+    const yaml = await readFile(join(first, "pathways.yaml"), "utf8");
+    expect(yaml).toContain("Production keys come from a secret store");
+    expect(yaml).not.toContain(keyText.trim());
   });
 
   it("refuses a folder that is not empty, changes nothing, and does not repeat the path", async () => {

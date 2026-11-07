@@ -129,6 +129,58 @@ export interface MessageStore {
   close(): Promise<void>;
 }
 
+/**
+ * Which table a {@link StoredContent} row is from.
+ *
+ * @example
+ * ```ts
+ * const table: ContentTable = "deliveries";
+ * ```
+ */
+export type ContentTable = "messages" | "deliveries";
+
+/**
+ * One row's content, exactly as storage holds it: a message's body and error, or a delivery's body
+ * and last error. With encryption on, these are the encrypted values.
+ *
+ * @example
+ * ```ts
+ * const row: StoredContent = { table: "messages", id: 1, body, error: null };
+ * ```
+ */
+export interface StoredContent {
+  readonly table: ContentTable;
+  readonly id: number;
+  readonly body: Uint8Array;
+  readonly error: string | null;
+}
+
+/**
+ * What `pathways rekey` needs from storage beyond {@link MessageStore}: every stored body and error
+ * text as stored, and a way to replace them. The engine never uses it. {@link Store} implements it;
+ * a storage adapter that implements it can be rekeyed.
+ *
+ * @example
+ * ```ts
+ * for (const row of await store.storedContent("messages", 0, 100)) {
+ *   await store.replaceContent(row, { body: reencrypted(row.body), error: row.error });
+ * }
+ * ```
+ */
+export interface ContentStore {
+  /** Up to `limit` rows of `table` with an id above `after`, oldest first, as stored. */
+  storedContent(table: ContentTable, after: number, limit: number): Promise<StoredContent[]>;
+  /**
+   * Replaces a row's body and error with `next`, but only while the row still holds what `current`
+   * read, so a change made meanwhile (a retry's new error) is never overwritten. Returns whether it
+   * replaced them.
+   */
+  replaceContent(
+    current: StoredContent,
+    next: { readonly body: Uint8Array; readonly error: string | null },
+  ): Promise<boolean>;
+}
+
 const MIGRATIONS: Record<string, Migration> = {
   "0001-messages-and-deliveries": {
     async up(db: Kysely<unknown>): Promise<void> {
@@ -198,7 +250,7 @@ const provider: MigrationProvider = {
  * await store.close();
  * ```
  */
-export class Store implements MessageStore {
+export class Store implements MessageStore, ContentStore {
   private constructor(
     private readonly db: Kysely<Tables>,
     private readonly now: () => Date,
@@ -217,6 +269,9 @@ export class Store implements MessageStore {
     const sqlite = new SqliteDatabase(file);
     sqlite.pragma("journal_mode = WAL");
     sqlite.pragma("foreign_keys = ON");
+    // Freed space is overwritten with zeros, so a value rewritten in place (`pathways rekey`) or
+    // deleted leaves none of its old bytes in the file.
+    sqlite.pragma("secure_delete = ON");
     const db = new Kysely<Tables>({ dialect: new SqliteDialect({ database: sqlite }) });
     const { error } = await new Migrator({ db, provider }).migrateToLatest();
     if (error !== undefined) {
@@ -442,6 +497,54 @@ export class Store implements MessageStore {
     const counts: Record<DeliveryStatus, number> = { pending: 0, delivered: 0, failed: 0 };
     for (const row of rows) counts[row.status] = Number(row.count);
     return counts;
+  }
+
+  /** Up to `limit` rows of `table` with an id above `after`, oldest first, as stored. */
+  async storedContent(table: ContentTable, after: number, limit: number): Promise<StoredContent[]> {
+    const rows =
+      table === "messages"
+        ? await this.db
+            .selectFrom("messages")
+            .select(["id", "body", "error"])
+            .where("id", ">", after)
+            .orderBy("id")
+            .limit(limit)
+            .execute()
+        : await this.db
+            .selectFrom("deliveries")
+            .select(["id", "body", "last_error as error"])
+            .where("id", ">", after)
+            .orderBy("id")
+            .limit(limit)
+            .execute();
+    return rows.map((row) => ({ table, ...row }));
+  }
+
+  /**
+   * Replaces a row's body and error with `next`, only while the row still holds `current`'s body
+   * and error. Returns whether it did.
+   */
+  async replaceContent(
+    current: StoredContent,
+    next: { readonly body: Uint8Array; readonly error: string | null },
+  ): Promise<boolean> {
+    const result =
+      current.table === "messages"
+        ? await this.db
+            .updateTable("messages")
+            .set({ body: next.body, error: next.error })
+            .where("id", "=", current.id)
+            .where("body", "=", current.body)
+            .where("error", current.error === null ? "is" : "=", current.error)
+            .executeTakeFirst()
+        : await this.db
+            .updateTable("deliveries")
+            .set({ body: next.body, last_error: next.error })
+            .where("id", "=", current.id)
+            .where("body", "=", current.body)
+            .where("last_error", current.error === null ? "is" : "=", current.error)
+            .executeTakeFirst();
+    return result.numUpdatedRows > 0n;
   }
 
   /** How many of `channel`'s pending deliveries have failed at least once and wait for a retry. */

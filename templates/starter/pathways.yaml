@@ -1,10 +1,27 @@
-# Settings for the whole project. Every key is optional; the values below are the defaults.
+# Settings for the whole project. Every key but encryption is optional; the values below are the
+# defaults.
 
 storage:
   sqlite:
     # The message database, relative to this file. Stored messages can hold patient data, so
     # .gitignore keeps this folder out of git.
     file: .pathways/pathways.db
+
+# Every stored message, and every error stored with one, is encrypted with a data key of its own,
+# which the master key named by `current` wraps. `pathways start` needs this setting: a list of keys,
+# or `encryption: none` to store messages unencrypted.
+#
+# `pathways init` generated the key below for development on this machine: .gitignore keeps
+# .pathways/ out of git. Production keys come from a secret store, read when the engine starts from
+# an environment variable ({ id: ..., env: NAME }) or from a file the secret store mounts
+# ({ id: ..., file: path }). A key is 32 random bytes in base64 (`openssl rand -base64 32`); it never
+# goes in this file. To rotate, add a new key and make it current, run `pathways rekey`, then remove
+# the old key.
+encryption:
+  keys:
+    - id: dev
+      file: .pathways/dev.key
+  current: dev
 
 # Each channel's channel.yaml can override timeout and memory for that channel.
 defaults:

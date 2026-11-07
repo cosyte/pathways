@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { EXIT, run } from "../src/cli.js";
+import { generateKey } from "../src/encryption/keys.js";
 import { VERSION } from "../src/index.js";
 import {
   ADT_A01,
@@ -45,9 +46,13 @@ destinations:
   - file: { dir: ../../data/outbox }
 `;
 
+/** Encryption at rest under one key, read from `test.key` in the project, as `start` requires. */
+const KEYS = "encryption:\n  keys: [{ id: test, file: ./test.key }]\n  current: test\n";
+
 async function project(extra: Record<string, string> = {}): Promise<string> {
   return makeProject({
-    "pathways.yaml": "defaults:\n  pollInterval: 20ms\n",
+    "test.key": `${generateKey()}\n`,
+    "pathways.yaml": `${KEYS}defaults:\n  pollInterval: 20ms\n`,
     "channels/adt/channel.yaml": CHANNEL,
     "channels/adt/transform.ts": LAB_TRANSFORM,
     ...extra,
@@ -136,7 +141,7 @@ describe("pathways start", () => {
 
   it("fails when the database cannot be opened", async () => {
     const root = await project({
-      "pathways.yaml": "storage:\n  sqlite: { file: ./blocked/engine.db }\n",
+      "pathways.yaml": `${KEYS}storage:\n  sqlite: { file: ./blocked/engine.db }\n`,
     });
     await writeFile(join(root, "blocked"), "a file where a folder should be");
     const result = await runCli(["start", "--once", "-C", root]);
@@ -154,7 +159,7 @@ describe("pathways start with HTTP and health", () => {
   it("serves health while running, and stops it with the engine", async () => {
     const port = await freePort();
     const root = await project({
-      "pathways.yaml": `defaults:\n  pollInterval: 20ms\nhealth: { port: ${port}, plaintext: true }\n`,
+      "pathways.yaml": `${KEYS}defaults:\n  pollInterval: 20ms\nhealth: { port: ${port}, plaintext: true }\n`,
     });
     const stop = new AbortController();
     const running = runCli(["start", "-C", root], {
@@ -182,7 +187,7 @@ describe("pathways start with HTTP and health", () => {
     const holder = await receiver(status(200));
     try {
       const root = await project({
-        "pathways.yaml": `health: { port: ${holder.port}, plaintext: true, auth: none }\n`,
+        "pathways.yaml": `${KEYS}health: { port: ${holder.port}, plaintext: true, auth: none }\n`,
       });
       expect((await runCli(["start", "--once", "-C", root])).code).toBe(EXIT.ok);
     } finally {
@@ -194,7 +199,7 @@ describe("pathways start with HTTP and health", () => {
     const holder = await receiver(status(200));
     try {
       const root = await project({
-        "pathways.yaml": `health: { port: ${holder.port}, plaintext: true, auth: none }\n`,
+        "pathways.yaml": `${KEYS}health: { port: ${holder.port}, plaintext: true, auth: none }\n`,
       });
       expect(await runCli(["start", "-C", root])).toEqual({
         code: EXIT.failed,
@@ -209,7 +214,7 @@ describe("pathways start with HTTP and health", () => {
   it("refuses to start without a token it needs, as a configuration error", async () => {
     const port = await freePort();
     const root = await project({
-      "pathways.yaml": `health: { port: ${port}, plaintext: true }\n`,
+      "pathways.yaml": `${KEYS}health: { port: ${port}, plaintext: true }\n`,
     });
     expect(await runCli(["start", "-C", root], { env: {} })).toEqual({
       code: EXIT.config,
