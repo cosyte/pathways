@@ -1,0 +1,523 @@
+import { isIP } from "node:net";
+
+import { Hl7ParseError, interpretAck, parseHL7, type Hl7Message } from "@cosyte/hl7";
+import {
+  createClient,
+  createServer,
+  encodeFrame,
+  MllpConnectionError,
+  MllpFramingError,
+  MllpTimeoutError,
+  type Connection,
+  type MessageMeta,
+  type MllpClient,
+  type MllpServer,
+  type TlsOptions,
+} from "@cosyte/mllp";
+
+import type { OnStoreFailure } from "../config/schema.js";
+import { defaultAckBuilder, type AckBuilder, type AckRequest } from "./ack.js";
+import type { ClientTlsMaterial, ServerTlsMaterial } from "./tls.js";
+import {
+  DeliveryRejected,
+  type DestinationConnector,
+  type MessageSink,
+  type OutgoingMessage,
+  type SourceConnector,
+} from "./types.js";
+
+/**
+ * Something an MLLP source reports for the engine to log: an event name, a level, and fields that
+ * are ids, counts, codes and error names only. Never message content, error text or key material.
+ */
+export interface MllpEvent {
+  readonly level: "info" | "warn";
+  readonly event: string;
+  readonly [field: string]: string | number | boolean | null | undefined;
+}
+
+/** The header of an inbound message, read: usable when `problem` is `undefined`. */
+export interface HeaderReading {
+  /** The parsed MSH segment, or `undefined` when there is none that parses. */
+  readonly header: Hl7Message | undefined;
+  /**
+   * Why the header is not usable, as a stable code: a `@cosyte/hl7` parse code (such as
+   * `NO_MSH_SEGMENT`), `MULTIPLE_MESSAGES` or `NO_CONTROL_ID`. `undefined` when it is usable.
+   */
+  readonly problem: string | undefined;
+  /** MSH-10 as it arrived, when the header is usable. */
+  readonly controlId: string | undefined;
+  /** Who sent the message (MSH-3 and MSH-4) and its MSH-10, when the header is usable. */
+  readonly duplicateKey: string | undefined;
+}
+
+const CR = 0x0d;
+const LF = 0x0a;
+/** Segment ids that open a message or a batch. One after the first segment means a frame holds more than one message. */
+const OPENERS = ["MSH", "FHS", "BHS"].map((id) => Buffer.from(id, "latin1"));
+
+/**
+ * Reads the header of an HL7 v2 message: parses its first segment, which must be an MSH with an
+ * MSH-10 control ID, and checks that no later segment opens another message or a batch. It reads
+ * nothing past the header except the first three bytes of each segment.
+ *
+ * @example
+ * ```ts
+ * const reading = readHeader(payload);
+ * if (reading.problem === undefined) console.log(reading.header?.meta.type);
+ * ```
+ */
+export function readHeader(payload: Uint8Array): HeaderReading {
+  const bytes = Buffer.from(payload.buffer, payload.byteOffset, payload.byteLength);
+  let start = 0;
+  while (start < bytes.length && isBreak(bytes[start])) start += 1;
+  let end = start;
+  while (end < bytes.length && !isBreak(bytes[end])) end += 1;
+  const unusable = (header: Hl7Message | undefined, problem: string): HeaderReading => ({
+    header,
+    problem,
+    controlId: undefined,
+    duplicateKey: undefined,
+  });
+
+  let header: Hl7Message;
+  try {
+    header = parseHL7(bytes.subarray(start, end));
+  } catch (error) {
+    return unusable(undefined, error instanceof Hl7ParseError ? error.code : "UNREADABLE_HEADER");
+  }
+  for (let at = end; at < bytes.length; at += 1) {
+    if (isBreak(bytes[at]) && OPENERS.some((id) => id.equals(bytes.subarray(at + 1, at + 4)))) {
+      return unusable(header, "MULTIPLE_MESSAGES");
+    }
+  }
+  const msh = header.part("MSH");
+  const controlId = msh?.field(10)?.text ?? "";
+  if (controlId.trim() === "") return unusable(header, "NO_CONTROL_ID");
+  const sender = [3, 4].map((field) => msh?.field(field)?.text).join("|");
+  return { header, problem: undefined, controlId, duplicateKey: `${sender}\u0000${controlId}` };
+}
+
+function isBreak(byte: number | undefined): boolean {
+  return byte === CR || byte === LF;
+}
+
+/** Options for an {@link MllpSource}. */
+export interface MllpSourceOptions {
+  readonly host: string;
+  /** The port to listen on; 0 picks a free one, which {@link MllpSource.port} then reports. */
+  readonly port: number;
+  /**
+   * TLS, or undefined for plaintext MLLP. With a `ca`, every client must present a certificate it
+   * signed, and a client without one fails the handshake (mutual TLS).
+   */
+  readonly tls: ServerTlsMaterial | undefined;
+  /** What to do when a message cannot be stored. Defaults to `close`. */
+  readonly onStoreFailure?: OnStoreFailure;
+  /** Builds each ACK. Defaults to {@link defaultAckBuilder}. */
+  readonly ackBuilder?: AckBuilder;
+  /** Told what happens, for the engine to log: ids, codes and error names only. */
+  readonly onEvent?: (event: MllpEvent) => void;
+}
+
+interface ConnectionState {
+  /** The message being handled on this connection, so the next waits behind it. */
+  tail: Promise<void>;
+  /** Set once this source closes the connection: nothing queued behind is stored or answered. */
+  closed: boolean;
+}
+
+/**
+ * Listens for HL7 v2 messages over MLLP, over TLS when it is given TLS material. Each message is
+ * stored through the sink first, and only then acknowledged:
+ *
+ * - stored: `AA`;
+ * - not stored: by default no ACK, and the connection closes so the sender sends again; or `AE` or
+ *   `AR`, as `onStoreFailure` says;
+ * - no usable MSH header (none, no MSH-10, or more than one message in the frame): stored, marked
+ *   failed, and answered `AR`;
+ * - damaged in transit (the framing discarded bytes of it): stored, marked failed, and answered
+ *   `AE`, so the sender sends it again.
+ *
+ * Messages on one connection are handled one at a time, in order. A message whose sender (MSH-3 and
+ * MSH-4) and MSH-10 repeat an earlier one is passed on with a duplicate key, for the engine to flag.
+ *
+ * @example
+ * ```ts
+ * const source = new MllpSource({ host: "127.0.0.1", port: 2575, tls });
+ * await source.start(sink);
+ * await source.stop();
+ * ```
+ */
+export class MllpSource implements SourceConnector {
+  private readonly options: MllpSourceOptions;
+  private server: MllpServer | undefined;
+  private readonly states = new WeakMap<Connection, ConnectionState>();
+  private readonly pending = new Set<Promise<void>>();
+  private stopping = false;
+
+  /** @param options Where to listen, TLS, and how to answer. */
+  constructor(options: MllpSourceOptions) {
+    this.options = options;
+  }
+
+  /** The port the source listens on, or undefined when it is not listening. */
+  get port(): number | undefined {
+    return this.server?.getStats().port ?? undefined;
+  }
+
+  /** Starts listening, storing each message through `sink`. Rejects when the port cannot be had. */
+  async start(sink: MessageSink): Promise<void> {
+    const { tls: material, port, host } = this.options;
+    const server = createServer({
+      onMessage: (payload, meta, conn) => {
+        this.accept(sink, payload, meta, conn);
+      },
+      // The host is the operator's own setting, so binding every interface is theirs to choose.
+      allowWildcardBind: true,
+      ...(material === undefined
+        ? {}
+        : {
+            tls: {
+              cert: material.cert,
+              key: material.key,
+              ...(material.ca === undefined
+                ? {}
+                : { ca: material.ca, clientAuth: "MUST" as const }),
+            },
+          }),
+    });
+    server.on("error", (error: unknown) => {
+      this.report("warn", "mllp-source-error", describeError(error));
+    });
+    server.on("tlsClientError", (event: { readonly code: string | null }) => {
+      this.report("warn", "mllp-tls-refused", { code: event.code });
+    });
+    server.on("securityWarning", (warning: { readonly code: string }) => {
+      this.report("warn", "mllp-security-warning", { code: warning.code });
+    });
+    this.stopping = false;
+    await server.listen(port, host);
+    this.server = server;
+    this.report("info", "mllp-listening", { port: this.port, tls: material !== undefined });
+  }
+
+  /**
+   * Stops taking messages, lets those being stored finish and be answered, then closes every
+   * connection. A message that arrives meanwhile is neither stored nor answered, so its sender
+   * sends it again.
+   */
+  async stop(): Promise<void> {
+    this.stopping = true;
+    await Promise.all(this.pending);
+    const server = this.server;
+    this.server = undefined;
+    await server?.close({ drainTimeoutMs: 1_000 });
+  }
+
+  private accept(sink: MessageSink, payload: Buffer, meta: MessageMeta, conn: Connection): void {
+    if (this.stopping) return;
+    let state = this.states.get(conn);
+    if (state === undefined) {
+      state = { tail: Promise.resolve(), closed: false };
+      this.states.set(conn, state);
+    }
+    const current = state;
+    const task = current.tail.then(() => this.handle(sink, payload, meta, conn, current));
+    current.tail = task;
+    this.pending.add(task);
+    void task.then(() => this.pending.delete(task));
+  }
+
+  /** Stores one message and answers it. Never rejects: whatever goes wrong is reported. */
+  private async handle(
+    sink: MessageSink,
+    payload: Buffer,
+    meta: MessageMeta,
+    conn: Connection,
+    state: ConnectionState,
+  ): Promise<void> {
+    if (state.closed) return;
+    try {
+      const reading = readHeader(payload);
+      const damaged = meta.warnings.some((warning) => warning.code === "MLLP_TRAILING_BYTES");
+      const problem = damaged ? "MLLP_TRAILING_BYTES" : reading.problem;
+      const header = reading.header;
+
+      let messageId: number;
+      try {
+        messageId = await sink.receive(
+          payload,
+          problem === undefined
+            ? { duplicateKey: reading.duplicateKey }
+            : { failure: `inbound: ${problem}` },
+        );
+      } catch (error) {
+        const onStoreFailure = this.options.onStoreFailure ?? "close";
+        this.report("warn", "mllp-store-failed", { ...describeError(error), onStoreFailure });
+        if (onStoreFailure === "close") {
+          close(conn, state);
+          return;
+        }
+        const request: AckRequest = {
+          code: onStoreFailure,
+          reason: "store-failed",
+          problem,
+          header,
+          messageId: undefined,
+        };
+        await this.answer(conn, state, request);
+        return;
+      }
+
+      if (problem !== undefined) {
+        this.report("warn", "mllp-unreadable", { message: messageId, problem });
+      }
+      const request: AckRequest =
+        problem === undefined
+          ? { code: "AA", reason: "stored", problem, header, messageId }
+          : { code: damaged ? "AE" : "AR", reason: "unreadable", problem, header, messageId };
+      await this.answer(conn, state, request);
+    } catch (error) {
+      // Unreachable by design; if it happens, the sender gets no ACK and sends again.
+      this.report("warn", "mllp-source-failed", describeError(error));
+      close(conn, state);
+    }
+  }
+
+  private async answer(
+    conn: Connection,
+    state: ConnectionState,
+    request: AckRequest,
+  ): Promise<void> {
+    let ack: Uint8Array;
+    try {
+      ack = await (this.options.ackBuilder ?? defaultAckBuilder)(request);
+    } catch (error) {
+      this.report("warn", "mllp-ack-builder-failed", { name: describeError(error).name });
+      ack = defaultAckBuilder(request);
+    }
+    let frame: Buffer;
+    try {
+      frame = encodeFrame(Buffer.from(ack));
+    } catch (error) {
+      // The ACK holds a framing byte, so it cannot be sent; the sender times out and sends again.
+      this.report("warn", "mllp-ack-unsendable", describeError(error));
+      close(conn, state);
+      return;
+    }
+    conn.send(frame);
+  }
+
+  private report(
+    level: MllpEvent["level"],
+    event: string,
+    fields: Readonly<Record<string, string | number | boolean | null | undefined>>,
+  ): void {
+    this.options.onEvent?.({ ...fields, level, event });
+  }
+}
+
+function close(conn: Connection, state: ConnectionState): void {
+  state.closed = true;
+  conn.destroy();
+}
+
+/** How much longer than its ACK timeout a send may take in all, to cover a write that never flushes. */
+const SEND_GRACE_MS = 1_000;
+
+/** Options for an {@link MllpDestination}. */
+export interface MllpDestinationOptions {
+  readonly host: string;
+  readonly port: number;
+  /**
+   * TLS, or undefined for plaintext MLLP. The server's certificate is always verified, against `ca`
+   * when set and Node's built-in roots otherwise; `cert` and `key` present a client certificate.
+   */
+  readonly tls: ClientTlsMaterial | undefined;
+  /** How long to wait to connect, and then for each ACK, in milliseconds. */
+  readonly ackTimeoutMs: number;
+}
+
+/**
+ * An MLLP delivery that did not complete and is worth trying again: no connection, no ACK in time,
+ * an `AR` or `CR`, or an ACK that could not be read or did not match. `code` says which; it is
+ * stable and holds no message content.
+ *
+ * @example
+ * ```ts
+ * throw new MllpDeliveryError("ACK_TIMEOUT");
+ * ```
+ */
+export class MllpDeliveryError extends Error {
+  /** A stable code, such as `ACK_TIMEOUT`, `ACK_AR` or `ECONNREFUSED`. */
+  readonly code: string;
+
+  /** @param code A stable code. Never message content. */
+  constructor(code: string) {
+    super(`the MLLP delivery did not complete (${code})`);
+    this.name = "MllpDeliveryError";
+    this.code = code;
+  }
+}
+
+/**
+ * Sends each output over MLLP, over TLS when it is given TLS material, and waits for its ACK. It keeps
+ * one connection open and reuses it, opening a new one after any failure so a late ACK can never
+ * answer the wrong message. The ACK decides the outcome:
+ *
+ * - `AA` or `CA`: delivered;
+ * - `AE` or `CE`: a {@link DeliveryRejected}, so the engine marks the delivery failed and moves on;
+ * - `AR` or `CR`, no ACK in time, an ACK that cannot be read or answers another control ID, or a
+ *   connection that fails: an {@link MllpDeliveryError}, which the engine retries, holding later
+ *   deliveries behind it.
+ *
+ * An output that holds an MLLP framing byte can never be sent, so it is a `DeliveryRejected` too.
+ *
+ * @example
+ * ```ts
+ * const destination = new MllpDestination({ host: "lab.local", port: 2576, tls, ackTimeoutMs: 10_000 });
+ * await destination.deliver({ messageId: 1, seq: 0, body });
+ * await destination.stop();
+ * ```
+ */
+export class MllpDestination implements DestinationConnector {
+  private readonly options: MllpDestinationOptions;
+  private client: MllpClient | undefined;
+
+  /** @param options Where to send, TLS, and how long to wait. It connects at the first delivery. */
+  constructor(options: MllpDestinationOptions) {
+    this.options = options;
+  }
+
+  /** Sends one output and waits for its ACK. */
+  async deliver(message: OutgoingMessage): Promise<void> {
+    const { body } = message;
+    const payload = Buffer.from(body.buffer, body.byteOffset, body.byteLength);
+    const client = await this.connect();
+    let reply: Buffer;
+    try {
+      // The library times the ACK from when the write flushes. This deadline, a little later,
+      // also covers a write that never flushes because the receiver stopped reading.
+      reply = await client.send(payload, {
+        signal: AbortSignal.timeout(this.options.ackTimeoutMs + SEND_GRACE_MS),
+      });
+    } catch (error) {
+      this.reset();
+      if (error instanceof MllpFramingError && error.code.startsWith("MLLP_PAYLOAD_CONTAINS_")) {
+        throw new DeliveryRejected(error.code);
+      }
+      throw new MllpDeliveryError(failureCode(error, "ACK_TIMEOUT"));
+    }
+    this.settle(reply, readHeader(payload).controlId);
+  }
+
+  /** Closes the connection, if one is open. The engine stops only between deliveries. */
+  stop(): Promise<void> {
+    this.reset();
+    return Promise.resolve();
+  }
+
+  private async connect(): Promise<MllpClient> {
+    if (this.client?.state === "CONNECTED") return this.client;
+    this.reset();
+    const { host, port, tls, ackTimeoutMs } = this.options;
+    const client = createClient({
+      host,
+      port,
+      ackTimeoutMs,
+      pipeline: false,
+      ...(tls === undefined ? {} : { tls: clientTls(tls, host) }),
+    });
+    // A failure surfaces on the send it breaks; this keeps the client from reporting it twice.
+    client.on("error", () => undefined);
+    try {
+      await client.connect({ signal: AbortSignal.timeout(ackTimeoutMs) });
+    } catch (error) {
+      client.destroy();
+      throw new MllpDeliveryError(failureCode(error, "CONNECT_TIMEOUT"));
+    }
+    this.client = client;
+    return client;
+  }
+
+  private settle(reply: Buffer, controlId: string | undefined): void {
+    let code: string | undefined;
+    let answers: string | undefined;
+    try {
+      const ack = interpretAck(parseHL7(reply));
+      code = ack.code;
+      answers = ack.controlId;
+    } catch {
+      code = undefined;
+    }
+    if (controlId !== undefined && code !== undefined && answers !== controlId) {
+      this.reset();
+      throw new MllpDeliveryError("ACK_CONTROL_ID_MISMATCH");
+    }
+    switch (code) {
+      case "AA":
+      case "CA":
+        return;
+      case "AE":
+      case "CE":
+        throw new DeliveryRejected(code);
+      case "AR":
+      case "CR":
+        throw new MllpDeliveryError(`ACK_${code}`);
+      case undefined:
+      default:
+        this.reset();
+        throw new MllpDeliveryError("ACK_UNREADABLE");
+    }
+  }
+
+  private reset(): void {
+    this.client?.destroy();
+    this.client = undefined;
+  }
+}
+
+/**
+ * `@cosyte/mllp`'s client TLS options for `material`. Verification is always on: the library offers
+ * no way to turn it off but `allowUnverified`, which this never sets.
+ */
+function clientTls(material: ClientTlsMaterial, host: string): TlsOptions {
+  const { ca, cert, key } = material;
+  return {
+    ...(ca === undefined ? {} : { ca }),
+    ...(cert === undefined ? {} : { cert }),
+    ...(key === undefined ? {} : { key }),
+    // @cosyte/mllp sends the host as the TLS server name, which Node refuses for an IP address. An
+    // empty name sends none, and Node still checks the certificate against the host itself.
+    ...(isIP(host) === 0 ? {} : { servername: "" }),
+  };
+}
+
+/**
+ * A stable code for an MLLP failure: `timeout` when no answer came in time, otherwise the operating
+ * system's or the TLS layer's code (such as `ECONNREFUSED`), or `MLLP_CONNECTION` for a connection
+ * that ended without one. Never the error's text.
+ */
+function failureCode(error: unknown, timeout: string): string {
+  if (error instanceof MllpTimeoutError || error instanceof DOMException) return timeout;
+  const cause = error instanceof MllpConnectionError ? error.cause : error;
+  return codeOf(cause) ?? "MLLP_CONNECTION";
+}
+
+/** A string property of an error, such as its `code` or `name`; never its text. */
+function textOf(error: unknown, key: "code" | "name"): string | undefined {
+  const value = (error as Partial<Record<typeof key, unknown>> | undefined)?.[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+function codeOf(error: unknown): string | undefined {
+  return textOf(error, "code");
+}
+
+/** An error's name and code, for a log line. The server wraps a connection's error with its id. */
+function describeError(value: unknown): { name: string | undefined; code: string | undefined } {
+  const error = (value as { error?: unknown } | undefined)?.error ?? value;
+  const cause = (error as { cause?: unknown } | undefined)?.cause;
+  return { name: textOf(error, "name"), code: codeOf(error) ?? codeOf(cause) };
+}

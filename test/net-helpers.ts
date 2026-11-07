@@ -16,8 +16,8 @@ import { join } from "node:path";
 
 /**
  * Throwaway TLS material for one test file: a CA, a server certificate for localhost and
- * 127.0.0.1, a client certificate from the same CA, and a second CA with its own client
- * certificate that the first never trusts. Generated with the openssl CLI at test time and removed
+ * 127.0.0.1, one for another host name, a client certificate from the same CA, and a second CA with
+ * its own client certificate that the first never trusts. Generated with the openssl CLI at test time and removed
  * afterwards; no key is ever committed.
  */
 export interface Certificates {
@@ -27,6 +27,8 @@ export interface Certificates {
     readonly ca: string;
     readonly serverCert: string;
     readonly serverKey: string;
+    readonly elsewhereCert: string;
+    readonly elsewhereKey: string;
     readonly clientCert: string;
     readonly clientKey: string;
     readonly otherCa: string;
@@ -37,6 +39,9 @@ export interface Certificates {
   readonly ca: Buffer;
   readonly serverCert: Buffer;
   readonly serverKey: Buffer;
+  /** A server certificate from the CA for elsewhere.invalid: not localhost, not 127.0.0.1. */
+  readonly elsewhereCert: Buffer;
+  readonly elsewhereKey: Buffer;
   readonly clientCert: Buffer;
   readonly clientKey: Buffer;
   readonly otherCa: Buffer;
@@ -137,12 +142,19 @@ export function makeCertificates(): Certificates {
     "extendedKeyUsage = serverAuth",
     "subjectAltName = DNS:localhost,IP:127.0.0.1",
   ]);
+  makeLeaf(dir, "elsewhere", "ca", 5, [
+    ...leaf,
+    "extendedKeyUsage = serverAuth",
+    "subjectAltName = DNS:elsewhere.invalid",
+  ]);
   makeLeaf(dir, "client", "ca", 3, [...leaf, "extendedKeyUsage = clientAuth"]);
   makeLeaf(dir, "other-client", "other-ca", 4, [...leaf, "extendedKeyUsage = clientAuth"]);
   const files = {
     ca: join(dir, "ca.crt"),
     serverCert: join(dir, "server.crt"),
     serverKey: join(dir, "server.key"),
+    elsewhereCert: join(dir, "elsewhere.crt"),
+    elsewhereKey: join(dir, "elsewhere.key"),
     clientCert: join(dir, "client.crt"),
     clientKey: join(dir, "client.key"),
     otherCa: join(dir, "other-ca.crt"),
@@ -155,6 +167,8 @@ export function makeCertificates(): Certificates {
     ca: readFileSync(files.ca),
     serverCert: readFileSync(files.serverCert),
     serverKey: readFileSync(files.serverKey),
+    elsewhereCert: readFileSync(files.elsewhereCert),
+    elsewhereKey: readFileSync(files.elsewhereKey),
     clientCert: readFileSync(files.clientCert),
     clientKey: readFileSync(files.clientKey),
     otherCa: readFileSync(files.otherCa),

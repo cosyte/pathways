@@ -4,14 +4,33 @@
  * (storage, ordering, retries, transforms).
  */
 
+/** What a source can tell the engine about a message it hands over. Every field is optional. */
+export interface ReceiveOptions {
+  /**
+   * What identifies the message to its sender, such as the sender and its MSH-10 control ID. When
+   * an earlier message of the channel carried the same key, this one is stored and processed as
+   * usual, flagged as a possible duplicate: never dropped. The engine keeps a hash of the key,
+   * never the key itself.
+   */
+  readonly duplicateKey?: string | undefined;
+  /**
+   * Stores the message as failed, with this reason, instead of handing it to the transform: for a
+   * message the source received but could not accept, such as one with no usable header. A short
+   * code, never message content.
+   */
+  readonly failure?: string | undefined;
+}
+
 /** What a source hands each incoming message to. */
 export interface MessageSink {
   /**
    * Stores the message and resolves with its id once it is durable. Acknowledge the sender (move
    * the file, send the ACK) only after this resolves: that ordering is what keeps a crash from
    * losing a message. If it rejects, do not acknowledge; the sender should send again.
+   *
+   * `options` is optional, so a source that passes only `body` keeps working unchanged.
    */
-  receive(body: Uint8Array): Promise<number>;
+  receive(body: Uint8Array, options?: ReceiveOptions): Promise<number>;
 }
 
 /**

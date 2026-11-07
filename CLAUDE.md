@@ -15,6 +15,9 @@ is written against are in `src/transform.ts`. Sources and destinations are the p
 
 HTTP in and out (`src/connectors/http.ts`) and the health endpoint (`src/engine/health.ts`) share
 one listening server in `src/connectors/endpoint.ts` and the TLS loader in `src/connectors/tls.ts`.
+MLLP in and out (`src/connectors/mllp.ts`) runs on `@cosyte/mllp` with the same TLS loader; the ACK
+a source sends is built in `src/connectors/ack.ts` with `@cosyte/hl7`'s `buildAck`, and an
+`AckBuilder` is the seam for a custom one.
 
 The plan is in the umbrella's `plans/pathways.md`: the V1 scope, the stack, delivery and error
 handling, and the HITRUST-driven controls. `plans/hitrust.md` holds the control map. Read both
@@ -88,10 +91,15 @@ receiver with the wrong picture of a patient. Keep message text out of logs, err
 - A `json` body is refused rather than changed: a number `JSON.parse` would round fails with
   `INEXACT_JSON_NUMBER`, and FHIR, X12, C-CDA and JSON bodies that are not UTF-8 fail to parse.
 - Every network endpoint runs TLS unless its block says `plaintext: true`, which is refused
-  alongside `tls` and logged once at startup. A listening endpoint binds to 127.0.0.1 by default
-  and requires a bearer token (from an environment variable, never the YAML) unless `tls.ca`
-  makes it mutual TLS or the block says `auth: none`. Tokens are compared with
-  `bearerMatches` (SHA-256 digests through `timingSafeEqual`), never with `===`.
+  alongside `tls` and logged once at startup. A listening endpoint binds to 127.0.0.1 by default.
+  An HTTP one requires a bearer token (from an environment variable, never the YAML) unless
+  `tls.ca` makes it mutual TLS or the block says `auth: none`. Tokens are compared with
+  `bearerMatches` (SHA-256 digests through `timingSafeEqual`), never with `===`. MLLP has no
+  token: an MLLP source checks who sends through mutual TLS (`tls.ca`).
+- An MLLP source answers only after `sink.receive` resolves. A message it cannot store gets no
+  ACK and its connection closes, unless `onStoreFailure` says `AE` or `AR`; one with no usable
+  MSH header is stored as failed and answered `AR`; a repeated sender and MSH-10 is processed and
+  flagged (`duplicate_of`), never dropped. MLLP endpoints need `format: hl7v2`.
 - Secrets (tokens, credential headers, key files) are read when the engine starts, not when the
   configuration loads, so `pathways test` never needs them. A missing one is a `ConfigError` that
   names the file, the key and the variable, never the value.

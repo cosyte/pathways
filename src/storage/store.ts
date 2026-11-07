@@ -19,6 +19,10 @@ interface MessagesTable {
   status: MessageStatus;
   error: string | null;
   updated_at: string;
+  /** A hash of who sent the message and its control ID, for spotting a repeat. Since 0002. */
+  dedup_key: string | null;
+  /** The latest earlier message with the same `dedup_key`: set means a possible duplicate. Since 0002. */
+  duplicate_of: number | null;
 }
 
 interface DeliveriesTable {
@@ -38,6 +42,34 @@ interface DeliveriesTable {
 interface Tables {
   messages: MessagesTable;
   deliveries: DeliveriesTable;
+}
+
+/** What the engine tells storage about an incoming message. Every field is optional. */
+export interface StoreReceiveOptions {
+  /**
+   * An opaque key for who sent the message and its control ID (the engine passes a hash). When an
+   * earlier message of the channel has the same key, this one is stored flagged as a possible
+   * duplicate of it.
+   */
+  readonly duplicateKey?: string | undefined;
+  /** Stores the message as `failed`, with this reason, so it is kept but never transformed. */
+  readonly failure?: string | undefined;
+}
+
+/** An incoming message, stored. */
+export interface ReceivedMessage {
+  readonly id: number;
+  /** The latest earlier message of the channel with the same duplicate key, when there is one. */
+  readonly duplicateOf: number | undefined;
+}
+
+/** What storage holds about one message, without its body. */
+export interface StoredMessage {
+  readonly id: number;
+  readonly channel: string;
+  readonly status: MessageStatus;
+  readonly error: string | null;
+  readonly duplicateOf: number | null;
 }
 
 /** A stored message waiting for its transform. */
@@ -62,7 +94,16 @@ export interface PendingDelivery {
  * another database implements the same methods.
  */
 export interface MessageStore {
-  receive(channel: string, body: Uint8Array): Promise<number>;
+  /**
+   * Stores an incoming message, durably, before its source acknowledges it: as `received`, or as
+   * `failed` when `options.failure` is set. Flags it as a possible duplicate when an earlier
+   * message of the channel has the same `options.duplicateKey`.
+   */
+  receive(
+    channel: string,
+    body: Uint8Array,
+    options?: StoreReceiveOptions,
+  ): Promise<ReceivedMessage>;
   nextToTransform(channel: string): Promise<PendingMessage | undefined>;
   completeTransform(
     messageId: number,
@@ -127,6 +168,18 @@ const MIGRATIONS: Record<string, Migration> = {
         .execute();
     },
   },
+  "0002-possible-duplicates": {
+    async up(db: Kysely<unknown>): Promise<void> {
+      // One column per statement: SQLite adds only one column per ALTER TABLE.
+      await db.schema.alterTable("messages").addColumn("dedup_key", "text").execute();
+      await db.schema.alterTable("messages").addColumn("duplicate_of", "integer").execute();
+      await db.schema
+        .createIndex("messages_by_channel_dedup_key")
+        .on("messages")
+        .columns(["channel", "dedup_key", "id"])
+        .execute();
+    },
+  },
 };
 
 const provider: MigrationProvider = {
@@ -178,15 +231,61 @@ export class Store implements MessageStore {
     await this.db.destroy();
   }
 
-  /** Stores an incoming message as `received` and returns its id. */
-  async receive(channel: string, body: Uint8Array): Promise<number> {
+  /**
+   * Stores an incoming message as `received` (or `failed`, given `options.failure`) and returns its
+   * id, with the earlier message it may duplicate. With a duplicate key, the lookup and the insert
+   * are one transaction; without one, the insert alone.
+   */
+  async receive(
+    channel: string,
+    body: Uint8Array,
+    options: StoreReceiveOptions = {},
+  ): Promise<ReceivedMessage> {
     const at = this.now().toISOString();
+    const { duplicateKey, failure } = options;
+    const insert = async (db: Kysely<Tables>, duplicateOf: number | undefined): Promise<number> => {
+      const row = await db
+        .insertInto("messages")
+        .values({
+          channel,
+          received_at: at,
+          body,
+          status: failure === undefined ? "received" : "failed",
+          error: failure ?? null,
+          updated_at: at,
+          dedup_key: duplicateKey ?? null,
+          duplicate_of: duplicateOf ?? null,
+        })
+        .returning("id")
+        .executeTakeFirstOrThrow();
+      return row.id;
+    };
+    if (duplicateKey === undefined) {
+      return { id: await insert(this.db, undefined), duplicateOf: undefined };
+    }
+    return this.db.transaction().execute(async (tx) => {
+      const earlier = await tx
+        .selectFrom("messages")
+        .select("id")
+        .where("channel", "=", channel)
+        .where("dedup_key", "=", duplicateKey)
+        .orderBy("id", "desc")
+        .limit(1)
+        .executeTakeFirst();
+      return { id: await insert(tx, earlier?.id), duplicateOf: earlier?.id };
+    });
+  }
+
+  /** What is stored about one message, without its body, or `undefined` if there is none. */
+  async message(id: number): Promise<StoredMessage | undefined> {
     const row = await this.db
-      .insertInto("messages")
-      .values({ channel, received_at: at, body, status: "received", error: null, updated_at: at })
-      .returning("id")
-      .executeTakeFirstOrThrow();
-    return row.id;
+      .selectFrom("messages")
+      .select(["id", "channel", "status", "error", "duplicate_of"])
+      .where("id", "=", id)
+      .executeTakeFirst();
+    if (row === undefined) return undefined;
+    const { duplicate_of: duplicateOf, ...rest } = row;
+    return { ...rest, duplicateOf };
   }
 
   /** The oldest message of `channel` still waiting for its transform, if any. */

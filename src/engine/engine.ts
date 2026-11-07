@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 
 import type { Logger } from "pino";
@@ -12,14 +13,15 @@ import {
 import { listenerSecurity, listenerWarnings, readEnv, type Env } from "../connectors/endpoint.js";
 import { FileDestination, FileSource } from "../connectors/file.js";
 import { HttpDestination, HttpSource } from "../connectors/http.js";
-import { loadClientTls } from "../connectors/tls.js";
+import { MllpDestination, MllpSource } from "../connectors/mllp.js";
+import { loadClientTls, loadServerTls } from "../connectors/tls.js";
 import {
   DeliveryRejected,
   type DestinationConnector,
   type MessageSink,
   type SourceConnector,
 } from "../connectors/types.js";
-import type { MessageStore } from "../storage/store.js";
+import type { MessageStore, ReceivedMessage } from "../storage/store.js";
 import { ChannelWorker, type TransformOutcome } from "./channel-worker.js";
 import { channelStatus, type ChannelHealth, type HealthReport } from "./health.js";
 import type { FailureSummary } from "./worker-entry.js";
@@ -153,6 +155,20 @@ export function connectorsFor(
       });
       break;
     }
+    case "mllp":
+      sourceConnector = new MllpSource({
+        host: source.host,
+        port: source.port,
+        tls:
+          source.tls === undefined
+            ? undefined
+            : loadServerTls(source.tls, `${file}: source.mllp.tls`),
+        onStoreFailure: source.onStoreFailure,
+        onEvent: ({ level, event, ...fields }) => {
+          logger[level]({ event, channel: channel.name, ...fields });
+        },
+      });
+      break;
   }
   const destinations = channel.destinations.map((destination, index): DestinationConnector => {
     switch (destination.kind) {
@@ -178,6 +194,16 @@ export function connectorsFor(
             : { tls: loadClientTls(destination.tls, `${where}.tls`) }),
         });
       }
+      case "mllp":
+        return new MllpDestination({
+          host: destination.host,
+          port: destination.port,
+          tls:
+            destination.tls === undefined
+              ? undefined
+              : loadClientTls(destination.tls, `${file}: destinations.${index}.mllp.tls`),
+          ackTimeoutMs: destination.ackTimeoutMs,
+        });
     }
   });
   return { source: sourceConnector, destinations };
@@ -361,10 +387,13 @@ export class Engine {
   private warnInsecure(config: ChannelConfig): void {
     const { logger } = this.options;
     const { source } = config;
-    if (source.kind !== "file") {
+    if (source.kind === "http") {
       for (const warning of listenerWarnings(source)) {
         logger.warn({ event: warning, channel: config.name, endpoint: "source" });
       }
+    } else if (source.kind === "mllp" && source.plaintext) {
+      // MLLP carries no credentials of its own: mutual TLS (tls.ca) is how a source checks who sends.
+      logger.warn({ event: "plaintext", channel: config.name, endpoint: "source" });
     }
     for (const [index, destination] of config.destinations.entries()) {
       if (destination.kind !== "file" && destination.plaintext) {
@@ -406,10 +435,18 @@ export class Engine {
   private sinkFor(config: ChannelConfig): MessageSink {
     const { store, logger } = this.options;
     return {
-      receive: async (body) => {
-        let id: number;
+      receive: async (body, options = {}) => {
+        const { duplicateKey, failure } = options;
+        let received: ReceivedMessage;
         try {
-          id = await store.receive(config.name, body);
+          received = await store.receive(config.name, body, {
+            // Storage keeps a hash of the key, so a sender's identifiers are not stored twice.
+            duplicateKey:
+              duplicateKey === undefined
+                ? undefined
+                : createHash("sha256").update(duplicateKey).digest("hex"),
+            failure,
+          });
         } catch (error) {
           logger.error({ event: "receive-failed", channel: config.name, code: errorCode(error) });
           throw error;
@@ -417,10 +454,19 @@ export class Engine {
         logger.info({
           event: "received",
           channel: config.name,
-          message: id,
+          message: received.id,
           bytes: body.byteLength,
+          ...(failure === undefined ? {} : { failed: true }),
         });
-        return id;
+        if (received.duplicateOf !== undefined) {
+          logger.warn({
+            event: "possible-duplicate",
+            channel: config.name,
+            message: received.id,
+            duplicateOf: received.duplicateOf,
+          });
+        }
+        return received.id;
       },
     };
   }

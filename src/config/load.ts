@@ -22,7 +22,10 @@ import {
   type HeaderValue,
   type HttpDestination,
   type ListenerConfig,
+  type MllpDestination,
+  type OnStoreFailure,
   type ProjectConfig,
+  type ServerTlsFiles,
   type Settings,
 } from "./schema.js";
 
@@ -129,16 +132,17 @@ export async function loadProject(root: string): Promise<ProjectConfig> {
       problems.push(`${show(file)}: transform: ${show(transform)} does not exist`);
       continue;
     }
+    const channelSettings = mergeSettings(settings, channel);
     channels.push({
       name: folder,
       dir: channelDir,
       format: channel.format ?? "hl7v2",
-      source: resolveSource(channel.source, channelDir),
+      source: resolveSource(channel.source, channelDir, channelSettings),
       transform,
       destinations: channel.destinations.map((destination) =>
-        resolveDestination(destination, channelDir),
+        resolveDestination(destination, channelDir, channelSettings),
       ),
-      settings: mergeSettings(settings, channel),
+      settings: channelSettings,
     });
   }
 
@@ -151,8 +155,22 @@ export async function loadProject(root: string): Promise<ProjectConfig> {
   return { root: projectRoot, databaseFile, settings, health, channels };
 }
 
-function resolveSource(source: ChannelYaml["source"], dir: string): ChannelConfig["source"] {
-  const { http } = source;
+function resolveSource(
+  source: ChannelYaml["source"],
+  dir: string,
+  settings: Settings,
+): ChannelConfig["source"] {
+  const { http, mllp } = source;
+  if (mllp !== undefined) {
+    return {
+      kind: "mllp",
+      host: mllp.host ?? DEFAULT_HOST,
+      port: mllp.port,
+      tls: mllp.tls === undefined ? undefined : resolveServerTls(mllp.tls, dir),
+      plaintext: mllp.plaintext === true,
+      onStoreFailure: mllp.onStoreFailure ?? settings.onStoreFailure,
+    };
+  }
   if (http !== undefined) {
     return {
       kind: "http",
@@ -173,8 +191,19 @@ function resolveSource(source: ChannelYaml["source"], dir: string): ChannelConfi
 function resolveDestination(
   destination: DestinationYaml,
   dir: string,
-): FileDestination | HttpDestination {
-  const { http } = destination;
+  settings: Settings,
+): FileDestination | HttpDestination | MllpDestination {
+  const { http, mllp } = destination;
+  if (mllp !== undefined) {
+    return {
+      kind: "mllp",
+      host: mllp.host,
+      port: mllp.port,
+      tls: mllp.tls === undefined ? undefined : resolveClientTls(mllp.tls, dir),
+      plaintext: mllp.plaintext === true,
+      ackTimeoutMs: mllp.ackTimeout ?? settings.ackTimeoutMs,
+    };
+  }
   if (http === undefined) {
     // The schema lets exactly one kind through, so a destination that is not HTTP is a file one.
     const file = destination.file as NonNullable<typeof destination.file>;
@@ -212,16 +241,20 @@ function resolveListener(
   return {
     host: listener.host ?? DEFAULT_HOST,
     port: listener.port,
-    tls:
-      tls === undefined
-        ? undefined
-        : {
-            cert: resolve(dir, tls.cert),
-            key: resolve(dir, tls.key),
-            ca: tls.ca === undefined ? undefined : resolve(dir, tls.ca),
-          },
+    tls: tls === undefined ? undefined : resolveServerTls(tls, dir),
     plaintext: listener.plaintext === true,
     auth,
+  };
+}
+
+function resolveServerTls(
+  tls: { cert: string; key: string; ca?: string | undefined },
+  dir: string,
+): ServerTlsFiles {
+  return {
+    cert: resolve(dir, tls.cert),
+    key: resolve(dir, tls.key),
+    ca: tls.ca === undefined ? undefined : resolve(dir, tls.ca),
   };
 }
 
@@ -240,12 +273,16 @@ function mergeSettings(
     timeout?: number | undefined;
     memory?: number | undefined;
     pollInterval?: number | undefined;
+    onStoreFailure?: OnStoreFailure | undefined;
+    ackTimeout?: number | undefined;
   },
 ): Settings {
   return {
     timeoutMs: override.timeout ?? base.timeoutMs,
     memoryMb: override.memory ?? base.memoryMb,
     pollIntervalMs: override.pollInterval ?? base.pollIntervalMs,
+    onStoreFailure: override.onStoreFailure ?? base.onStoreFailure,
+    ackTimeoutMs: override.ackTimeout ?? base.ackTimeoutMs,
   };
 }
 
