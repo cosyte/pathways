@@ -21,53 +21,35 @@
  * pull request in `cosyte/config` and a version bump here.
  *
  * WHAT STAYS LOCAL is what genuinely differs: THE FIVE PER-REPO AXES below, and
- * the STANDARD-SPECIFIC FIELD DETECTION in `detect` at the bottom of this file.
+ * the STANDARD-SPECIFIC FIELD DETECTION, which `detect` at the bottom of this
+ * file hands to `scripts/phi-detect.ts`.
  * ===========================================================================
  *
  * ===========================================================================
- * ██  STARTER: READ BEFORE YOU RELY ON THIS  ████████████████████████████████
+ * WHAT IT DETECTS
  * ===========================================================================
  *
- *   As shipped, this scanner detects EXACTLY TWO cross-cutting PHI shapes that
- *   apply to ANY format, both of them from the shared floor:
+ *   Two layers, both run over every target the engine reads:
  *
- *       (1) a dashed Social Security Number
- *       (2) an email at a domain the allow-list does not declare
+ *     (1) the engine's cross-cutting FLOOR: a dashed Social Security Number,
+ *         and an email at a domain the allow-list does not declare;
+ *     (2) FIELD-LEVEL detection for the four formats Pathways parses, in
+ *         `scripts/phi-detect.ts`: the person names, dates of birth,
+ *         identifiers and phones of HL7 v2, FHIR, X12 and C-CDA, read from
+ *         whole messages AND from fixtures written inline in TypeScript.
  *
- *   That is a FLOOR, not a gate. It does NOT understand Pathways. It will NOT
- *   catch a patient name, a date of birth, an MRN / member id, an address, or a
- *   phone number sitting in a structured Pathways field: the PHI that a real
- *   Pathways message actually carries.
- *
- *   ⚠  A scanner that silently ships SSN/email-only detection is a FALSE-
- *      CONFIDENCE RISK: it reports green on fixtures stuffed with real names and
- *      DOBs. Before you trust `pnpm phi-scan` as a safety gate for Pathways,
- *      YOU MUST add structured, field-level detection for THIS standard's PHI
- *      in the clearly-fenced TODO section in `detect` below.
- *
- *   Worked examples of structured, format-aware detection live in the sibling
- *   parsers: read one before you start:
- *       ../hl7/scripts/phi-scan.ts     (segment -> field -> component aware)
- *       ../x12/scripts/phi-scan.ts     (ISA-delimited NM1 / DMG / PER aware)
- *       ../dicom/scripts/phi-scan.ts   (binary tag-aware)
- *       ../ccda/scripts/phi-scan.ts    (XML element aware)
- *       ../ncpdp/scripts/phi-scan.ts   (fixed-field aware)
+ *   `scripts/phi-detect.ts` lists exactly which fields each format is read
+ *   for, what counts as a hit, and what it does not catch (addresses among
+ *   them). A green `pnpm phi-scan` means none of THOSE fields holds a value the
+ *   allow-list does not declare synthetic; it is not a proof of no PHI.
  *
  *   The mechanism for declaring genuinely-synthetic identifiers is the
  *   allow-list (`scripts/phi-allow-list.txt`): a positive declaration that a
- *   fixture's identifiers are fake. Byte-strict formats cannot carry an inline
- *   `# synthetic: true` header, so the allow-list is the proven substitute. A
- *   whole-file bypass (`--allow-fixture <path>`) still exists and still needs a
- *   logged entry in `phi-scan-overrides.md`, but it is RECORDED AND REFUSED
- *   rather than honored: it cannot reach exit 0 in any mode.
- *
- *   🛑 A DETECTOR YOU ADD BELOW THAT DOES NOT CONSULT `allow` HAS NO REMEDY AT
- *   ALL, because the bypass is closed. A sibling shipped a phone detector and a
- *   dashed-SSN branch that consulted nothing, and its own reviewer caught the
- *   footer claiming the allow-list was the only remedy: it was not a remedy for
- *   those two at all. Check every PHI-bearing field against `allow` as you add
- *   it, or a developer meeting your detector has nowhere to go.
- * ===========================================================================
+ *   fixture's identifiers are fake, token by token. Every field detector
+ *   consults it. A whole-file bypass (`--allow-fixture <path>`) still exists
+ *   and still needs a logged entry in `phi-scan-overrides.md`, but it is
+ *   RECORDED AND REFUSED rather than honored: it cannot reach exit 0 in any
+ *   mode. Declare the tokens; do not withdraw the file.
  *
  * ===========================================================================
  * EXIT CONTRACT, DEFINED HERE AND NOT INHERITED. A scaffolded parser has no
@@ -94,6 +76,8 @@
  */
 
 import { exemptsMarkdown, runPhiScan, type DetectContext } from "@cosyte/script-utils/phi-scan";
+
+import { detectFields } from "./phi-detect.js";
 
 // ===========================================================================
 // ██  THE FIVE PER-REPO AXES  ███████████████████████████████████████████████
@@ -202,57 +186,17 @@ function isStagedReadable(relPath: string): boolean {
 
 /**
  * THE STANDARD-SPECIFIC FIELD DETECTION: the half the shared engine deliberately
- * does not own, because it differs per healthcare standard.
+ * does not own, because it differs per healthcare standard. It lives in
+ * `scripts/phi-detect.ts` so the suite can drive it in-process.
  *
  * The engine has already run the cross-cutting floor (SSN + email shapes) over
- * `ctx.text` and reported any hits against the correct locus. Everything below
- * is yours.
+ * `ctx.text`. Hits go through `ctx.hit`, which fills in the locus, and name a
+ * field and a rule, never the value.
  *
  * @param ctx The target's text and bytes, the parsed allow-list, and `hit`.
  */
 function detect(ctx: DetectContext): void {
-  // ── TODO: add Pathways-specific structured field-level PHI detection here ──
-  //
-  //   The floor ONLY catches SSN/email shapes. Before you rely on this scanner
-  //   as a real safety gate you MUST add structured, field-level detection for
-  //   Pathways's PHI (at minimum: person NAMES, DATE OF BIRTH, MRN / MEMBER ID,
-  //   ADDRESS, and PHONE) parsing `ctx.text` according to the Pathways wire
-  //   format and checking each PHI-bearing field against the allow-list
-  //   (`ctx.allow.names` / `.dobs` / `.ids`), raising a hit for anything not
-  //   positively declared synthetic.
-  //
-  //   Parse the format properly (delimiters / segments / elements / tags): do
-  //   NOT bolt on a blind text regex for names. Coded values (`CBC^Complete
-  //   Blood Count`, `Boston^MA`) produce false confidence. See the sibling
-  //   parsers named in the STARTER banner for worked, spec-aware examples:
-  //
-  //     const d = detectPathwaysDelimiters(ctx.text);       // if applicable
-  //     for (const record of splitPathways(ctx.text, d)) {
-  //       // check name / dob / id / address / phone fields against ctx.allow
-  //       // ctx.hit({ segment: "<field>", reason: "<why>" });
-  //     }
-  //
-  //   🛑 A HIT IS A POSITION AND A RULE, NEVER THE VALUE. `segment` is where in
-  //   the record it sits and `reason` is why it was raised; the engine reports
-  //   both beside the path and prints no token, because stderr is a CI log. The
-  //   `value` field is still accepted so an existing detector compiles, and it
-  //   is dropped rather than stored. Do not route around that with a value
-  //   interpolated into `segment` or `reason`.
-  //
-  //   🛑 CHECK `ctx.allow` IN EVERY DETECTOR YOU ADD. The `--allow-fixture`
-  //   bypass cannot reach a clean run, so a detector that consults nothing
-  //   leaves a developer with a hit they cannot answer and a gate they will
-  //   route around.
-  //
-  //   Until this section is implemented, treat a green `pnpm phi-scan` as
-  //   "no SSN/email shapes found", NOT as "no PHI".
-  //
-  //   Raise hits through `ctx.hit`, which fills in the locus. Never build a
-  //   path yourself: the index union scans bytes that may not be the ones on
-  //   disk, and a hit naming an undecorated path a developer then opens and
-  //   finds clean is its own defect.
-  // ───────────────────────────────────────────────────────────────────────────
-  void ctx;
+  detectFields(ctx);
 }
 
 process.exit(

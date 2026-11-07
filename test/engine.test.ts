@@ -15,6 +15,8 @@ import { TransformLoadError } from "../src/engine/channel-worker.js";
 import {
   Engine,
   connectorsFor,
+  CONTENT_TYPES,
+  EXTENSIONS,
   retryDelay,
   storedFailure,
   type ChannelConnectors,
@@ -26,8 +28,10 @@ import {
   captureLogger,
   cleanUp,
   dropFile,
+  FHIR_PATIENT,
   LAB_TRANSFORM,
   makeProject,
+  X12_270,
   type LogEvent,
 } from "./helpers.js";
 
@@ -248,6 +252,55 @@ describe("Engine", () => {
     stop.abort();
     await running;
     expect(await exists(data(root, "out-a", "1-1.hl7"))).toBe(true);
+  });
+
+  it("passes every format through a channel with no transform, under its own extension", async () => {
+    const formats = { hl7v2: ADT_A01, fhir: FHIR_PATIENT, x12: X12_270, json: '{"a": [1]}' };
+    const files: Record<string, string> = {};
+    for (const format of Object.keys(formats)) {
+      files[`channels/${format}/channel.yaml`] =
+        `format: ${format}\nsource:\n  file: { dir: ../../data/${format}-in, minAge: 0 }\n` +
+        `destinations:\n  - file: { dir: ../../data/${format}-out }\n`;
+    }
+    const root = await makeProject(files);
+    const project = await loadProject(root);
+    const store = await Store.open(project.databaseFile);
+    stores.push(store);
+    const engine = new Engine({ project, store, logger: captureLogger().logger });
+    engines.push(engine);
+    await engine.start();
+    for (const [format, body] of Object.entries(formats)) {
+      await dropFile(data(root, `${format}-in`, "message"), body);
+    }
+    await engine.tick();
+
+    const written = async (format: string): Promise<[string, string]> => {
+      const [name = ""] = await readdir(data(root, `${format}-out`));
+      return [
+        name.slice(name.indexOf(".")),
+        await readFile(data(root, `${format}-out`, name), "utf8"),
+      ];
+    };
+    expect(await written("hl7v2")).toEqual([".hl7", ADT_A01]);
+    expect(await written("fhir")).toEqual([".json", FHIR_PATIENT]);
+    expect(await written("x12")).toEqual([".x12", X12_270]);
+    expect(await written("json")).toEqual([".json", '{"a":[1]}']);
+    expect(EXTENSIONS).toEqual({
+      hl7v2: "hl7",
+      fhir: "json",
+      x12: "x12",
+      ccda: "xml",
+      json: "json",
+      text: "txt",
+    });
+    expect(CONTENT_TYPES).toEqual({
+      hl7v2: "application/hl7-v2",
+      fhir: "application/fhir+json",
+      x12: "application/edi-x12",
+      ccda: "application/xml",
+      json: "application/json",
+      text: "text/plain",
+    });
   });
 
   it("builds file connectors from a channel's configuration", async () => {

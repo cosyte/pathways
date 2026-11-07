@@ -29,12 +29,37 @@ export const RETRY_FIRST_MS = 1_000;
 /** No retry waits longer than this. */
 export const RETRY_MAX_MS = 300_000;
 
-/** The file extension a file destination writes for each format. */
-export const EXTENSIONS: Readonly<Record<Format, string>> = { hl7v2: "hl7", text: "txt" };
+/**
+ * The file extension a file destination writes for each format.
+ *
+ * @example
+ * ```ts
+ * EXTENSIONS.fhir; // "json"
+ * ```
+ */
+export const EXTENSIONS: Readonly<Record<Format, string>> = {
+  hl7v2: "hl7",
+  fhir: "json",
+  x12: "x12",
+  ccda: "xml",
+  json: "json",
+  text: "txt",
+};
 
-/** The `Content-Type` an HTTP destination sends for each format, unless its headers set one. */
+/**
+ * The `Content-Type` an HTTP destination sends for each format, unless its headers set one.
+ *
+ * @example
+ * ```ts
+ * CONTENT_TYPES.fhir; // "application/fhir+json"
+ * ```
+ */
 export const CONTENT_TYPES: Readonly<Record<Format, string>> = {
   hl7v2: "application/hl7-v2",
+  fhir: "application/fhir+json",
+  x12: "application/edi-x12",
+  ccda: "application/xml",
+  json: "application/json",
   text: "text/plain",
 };
 

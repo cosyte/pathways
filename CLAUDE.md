@@ -6,7 +6,9 @@ command runs and tests them. This repository is public. It started from scratch 
 
 The first slice runs: a file source, a TypeScript transform in a worker thread per channel
 (`src/engine/`), SQLite storage through Kysely (`src/storage/`), a file destination, and
-`pathways start` and `pathways test`. Sources and destinations are the public interfaces in
+`pathways start` and `pathways test`. A channel's `format` is `hl7v2`, `fhir`, `x12`, `ccda`,
+`json` or `text`; the worker parses each with its `@cosyte/*` library, and the types a transform
+is written against are in `src/transform.ts`. Sources and destinations are the public interfaces in
 `src/connectors/types.ts`, and the engine depends on `MessageStore`, not on SQLite.
 `pathways init` writes the starter project in `templates/starter/` (`src/starter/`), and the
 `Dockerfile` builds the image on distroless Node 24.
@@ -78,8 +80,13 @@ receiver with the wrong picture of a patient. Keep message text out of logs, err
 - `prepare` sends simple-git-hooks' output to stderr (`1>&2`): on stdout it lands inside
   `npm pack --json` and the attw gate refuses to read it.
 - `scripts/phi-scan.ts` is a thin caller of `@cosyte/script-utils/phi-scan`: 0 clean, 1 hits, 2
-  anything it could not read. It is the starter floor (SSN and email shapes); add field-level
-  detection for HL7 v2, FHIR, X12 and C-CDA when the first fixtures land.
+  anything it could not read. Its field-level detection for HL7 v2, FHIR, X12 and C-CDA is in
+  `scripts/phi-detect.ts`, and every detector consults `scripts/phi-allow-list.txt`: declare a
+  fixture's synthetic tokens there, never exclude the file.
+- The worker loads each `@cosyte/*` parser with `import()` on first use, never a static import,
+  so a channel's worker loads only its own format's library.
+- A `json` body is refused rather than changed: a number `JSON.parse` would round fails with
+  `INEXACT_JSON_NUMBER`, and FHIR, X12, C-CDA and JSON bodies that are not UTF-8 fail to parse.
 - Every network endpoint runs TLS unless its block says `plaintext: true`, which is refused
   alongside `tls` and logged once at startup. A listening endpoint binds to 127.0.0.1 by default
   and requires a bearer token (from an environment variable, never the YAML) unless `tls.ca`

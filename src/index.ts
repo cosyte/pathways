@@ -5,7 +5,19 @@
  * connector are written against. The engine itself runs through the `pathways` command.
  */
 export { VERSION } from "./version.js";
-export type { Transform, TransformOutput } from "./transform.js";
+export type { Format } from "./config/schema.js";
+export type {
+  CcdaDocument,
+  FhirResource,
+  Hl7Message,
+  JsonValue,
+  MessageFor,
+  MessageTypes,
+  Transform,
+  TransformFor,
+  TransformOutput,
+  X12Interchange,
+} from "./transform.js";
 export {
   DeliveryRejected,
   type DestinationConnector,

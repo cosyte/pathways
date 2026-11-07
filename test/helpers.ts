@@ -19,6 +19,68 @@ export const ADT_A08 = ADT_A01.replace("ADT^A01^ADT_A01", "ADT^A08^ADT_A01").rep
   "MSG00002",
 );
 
+/**
+ * A synthetic FHIR R4 Patient, compact and spec-clean, so it round-trips byte for byte. The tokens are
+ * the same declared synthetic ones the HL7 fixtures use (`scripts/phi-allow-list.txt`).
+ */
+export const FHIR_PATIENT = JSON.stringify({
+  resourceType: "Patient",
+  id: "test-0001",
+  identifier: [{ system: "urn:oid:2.16.840.1.113883.19.5", value: "TEST000001" }],
+  name: [{ family: "TESTPATIENT", given: ["ALPHA"] }],
+  gender: "unknown",
+  birthDate: "1970-01-01",
+});
+
+/** The fixed-width ISA header of every synthetic X12 interchange here: 106 bytes, `~` ending it. */
+const ISA =
+  "ISA*00*          *00*          *ZZ*SENDER         *ZZ*RECEIVER       *261107*1200*^*00501*000000001*0*T*:~";
+
+/** A synthetic X12 270 eligibility inquiry, written on one line as most X12 is. */
+export const X12_270 =
+  ISA +
+  [
+    "GS*HS*SENDER*RECEIVER*20261107*1200*1*X*005010X279A1",
+    "ST*270*0001*005010X279A1",
+    "BHT*0022*13*TEST0001*20261107*1200",
+    "HL*1**20*1",
+    "NM1*PR*2*TESTPAYER*****PI*TESTPAYER01",
+    "HL*2*1*21*1",
+    "NM1*1P*2*TESTFAC*****XX*1234567893",
+    "HL*3*2*22*0",
+    "NM1*IL*1*TESTPATIENT*ALPHA****MI*TEST000001",
+    "DMG*D8*19700101*U",
+    "EQ*30",
+    "SE*11*0001",
+    "GE*1*1",
+    "IEA*1*000000001",
+  ].join("~") +
+  "~";
+
+/** A synthetic C-CDA document: the header and a patient, with an empty body. */
+export const CCDA_DOCUMENT = `<?xml version="1.0" encoding="UTF-8"?>
+<ClinicalDocument xmlns="urn:hl7-org:v3">
+  <realmCode code="US"/>
+  <typeId root="2.16.840.1.113883.1.3" extension="POCD_HD000040"/>
+  <templateId root="2.16.840.1.113883.10.20.22.1.1" extension="2015-08-01"/>
+  <id root="2.16.840.1.113883.19.5" extension="TESTDOC0001"/>
+  <code code="34133-9" codeSystem="2.16.840.1.113883.6.1"/>
+  <title>Synthetic test document</title>
+  <effectiveTime value="20261107120000"/>
+  <confidentialityCode code="N" codeSystem="2.16.840.1.113883.5.25"/>
+  <recordTarget>
+    <patientRole>
+      <id root="2.16.840.1.113883.19.5" extension="TEST000001"/>
+      <patient>
+        <name><given>ALPHA</given><family>TESTPATIENT</family></name>
+        <administrativeGenderCode code="UN" codeSystem="2.16.840.1.113883.5.1"/>
+        <birthTime value="19700101"/>
+      </patient>
+    </patientRole>
+  </recordTarget>
+  <component><structuredBody/></component>
+</ClinicalDocument>`;
+
 /** A transform that routes A01s to the lab and filters everything else out. */
 export const LAB_TRANSFORM = `
 interface Msg { is(type: string): boolean; setField(path: string, value: string): void }
