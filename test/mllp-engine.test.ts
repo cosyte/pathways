@@ -274,6 +274,7 @@ destinations:
 
   it("are read when the engine starts: a missing one is a ConfigError by file and key, and start exits 3", async () => {
     const root = await makeProject({
+      "pathways.yaml": "encryption: none\n",
       "channels/adt/channel.yaml": MISSING,
       "channels/adt/transform.ts": LAB_TRANSFORM,
     });

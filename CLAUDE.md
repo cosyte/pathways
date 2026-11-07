@@ -10,6 +10,9 @@ The first slice runs: a file source, a TypeScript transform in a worker thread p
 `json` or `text`; the worker parses each with its `@cosyte/*` library, and the types a transform
 is written against are in `src/transform.ts`. Sources and destinations are the public interfaces in
 `src/connectors/types.ts`, and the engine depends on `MessageStore`, not on SQLite.
+Stored bodies and error texts are encrypted at rest by `src/encryption/`: `EncryptedStore` wraps any
+`MessageStore`, each value gets its own AES-256-GCM data key, a `KeyProvider` wraps that key under
+a master key, and `pathways rekey` moves stored values to the current key.
 `pathways init` writes the starter project in `templates/starter/` (`src/starter/`), and the
 `Dockerfile` builds the image on distroless Node 24.
 
@@ -46,8 +49,9 @@ directory), `ci / actionlint`, CodeQL, and the em-dash gate, which also reads th
 body and commit messages. Inside the umbrella, `.git` is a file, so set
 `SKIP_INSTALL_SIMPLE_GIT_HOOKS=1` before `pnpm attw` or the hook installer's error lands in its JSON.
 
-`pnpm bench [messages]` measures one channel's throughput, file to file through SQLite. It is not in
-CI; run it before and after a change that could move it, and put both numbers in the pull request.
+`pnpm bench [messages]` measures one channel's throughput, file to file through SQLite, with encryption
+at rest off and then on. It is not in CI; run it before and after a change that could move it, and put
+both numbers in the pull request.
 
 ## Hazard
 
@@ -78,6 +82,11 @@ receiver with the wrong picture of a patient. Keep message text out of logs, err
   stored, not printed), and never a source file name, which can carry a patient's name.
 - A message is stored before its source acknowledges it, and a new delivery is due at once
   (`next_attempt_at` 0); only a retry sets a time in the future.
+- Every body and error text reaches storage through `EncryptedStore`, or `UnencryptedStore` under
+  `encryption: none`. A new `MessageStore` method that carries either goes through the codec in
+  `src/encryption/encrypted-store.ts`. A built-in store also implements `ContentStore`, so
+  `pathways rekey` can reach it, and leaves no freed bytes behind (SQLite runs with
+  `secure_delete`). `pathways start` refuses to run until `pathways.yaml` sets `encryption`.
 - `scripts/check-no-emdash.mjs` stays plain Node with no dependencies: the shared em-dash gate runs
   it with `node` on Node 22 without installing anything, since pnpm refuses this package below 24.
 - `prepare` sends simple-git-hooks' output to stderr (`1>&2`): on stdout it lands inside
@@ -100,8 +109,8 @@ receiver with the wrong picture of a patient. Keep message text out of logs, err
   ACK and its connection closes, unless `onStoreFailure` says `AE` or `AR`; one with no usable
   MSH header is stored as failed and answered `AR`; a repeated sender and MSH-10 is processed and
   flagged (`duplicate_of`), never dropped. MLLP endpoints need `format: hl7v2`.
-- Secrets (tokens, credential headers, key files) are read when the engine starts, not when the
-  configuration loads, so `pathways test` never needs them. A missing one is a `ConfigError` that
+- Secrets (tokens, credential headers, key files, master keys) are read when the engine starts, not
+  when the configuration loads, so `pathways test` never needs them. A missing one is a `ConfigError` that
   names the file, the key and the variable, never the value.
 - The health body holds states and counts only. It answers 503 only when storage cannot be read or
   a source cannot listen.

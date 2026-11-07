@@ -258,8 +258,73 @@ function oneKind(kinds: readonly string[]) {
 const SOURCE_KINDS = ["file", "http", "mllp"] as const;
 const DESTINATION_KINDS = ["file", "http", "mllp"] as const;
 
+/**
+ * What a master key's id may hold: letters, digits, dots, hyphens and underscores, at most 64,
+ * starting with a letter or digit. Ids are stored beside every encrypted value and named in errors,
+ * so they are never secret.
+ *
+ * @example
+ * ```ts
+ * MASTER_KEY_ID.test("prod-2026-11"); // true
+ * ```
+ */
+export const MASTER_KEY_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+const keyId = z
+  .string()
+  .regex(
+    MASTER_KEY_ID,
+    "letters, digits, dots, hyphens and underscores, at most 64, starting with a letter or digit",
+  );
+
+/** One master key: its id, and where its value is read when the engine starts. Never the value. */
+const masterKey = z
+  .strictObject({
+    id: keyId,
+    env: fromEnv.shape.env.optional(),
+    file: path.optional(),
+  })
+  .superRefine((value, ctx) => {
+    if ((value.env === undefined) === (value.file === undefined)) {
+      ctx.addIssue({
+        code: "custom",
+        message: "name exactly one of: env, file; a key's value never goes in the YAML",
+      });
+    }
+  });
+
+/** `encryption: none`, or the master keys and which one encrypts new values. */
+const encryption = z.union(
+  [
+    z.literal("none"),
+    z
+      .strictObject({ keys: z.array(masterKey).min(1, "at least one key"), current: keyId })
+      .superRefine((value, ctx) => {
+        const seen = new Set<string>();
+        for (const [index, key] of value.keys.entries()) {
+          if (seen.has(key.id)) {
+            ctx.addIssue({
+              code: "custom",
+              path: ["keys", index, "id"],
+              message: "another key already has this id",
+            });
+          }
+          seen.add(key.id);
+        }
+        if (!seen.has(value.current)) {
+          ctx.addIssue({ code: "custom", path: ["current"], message: "names no key in keys" });
+        }
+      }),
+  ],
+  {
+    error:
+      "either none, or { keys: [{ id, env: NAME } or { id, file: path }], current: id } to encrypt stored messages",
+  },
+);
+
 /** `pathways.yaml` at the project root. Every key is optional. */
 export const projectSchema = z.strictObject({
+  encryption: encryption.optional(),
   storage: z
     .strictObject({
       sqlite: z.strictObject({ file: z.string().min(1) }),
@@ -473,6 +538,40 @@ export interface MllpDestination {
 /** The health endpoint, from `pathways.yaml`. */
 export type HealthConfig = ListenerConfig;
 
+/**
+ * A master key: its id, and where its value is read when the engine starts. A file path is
+ * resolved against the project root.
+ *
+ * @example
+ * ```ts
+ * const key: MasterKeySource = { id: "prod-2026-11", env: "PATHWAYS_KEY_2026_11" };
+ * ```
+ */
+export type MasterKeySource =
+  | { readonly id: string; readonly env: string }
+  | { readonly id: string; readonly file: string };
+
+/**
+ * How stored messages are encrypted at rest, from `pathways.yaml`: under master keys read from
+ * environment variables or files, with `current` wrapping each new value's data key, or `none`.
+ *
+ * @example
+ * ```ts
+ * const encryption: EncryptionConfig = {
+ *   kind: "keys",
+ *   keys: [{ id: "dev", file: "/project/.pathways/dev.key" }],
+ *   current: "dev",
+ * };
+ * ```
+ */
+export type EncryptionConfig =
+  | { readonly kind: "none" }
+  | {
+      readonly kind: "keys";
+      readonly keys: readonly MasterKeySource[];
+      readonly current: string;
+    };
+
 /** One channel, loaded, validated and resolved. */
 export interface ChannelConfig {
   readonly name: string;
@@ -493,5 +592,10 @@ export interface ProjectConfig {
   readonly settings: Settings;
   /** The health endpoint, or undefined when `pathways.yaml` does not configure one. */
   readonly health: HealthConfig | undefined;
+  /**
+   * How stored messages are encrypted, or undefined when `pathways.yaml` does not say. `pathways
+   * start` refuses to run without it; `pathways test` stores nothing and does not need it.
+   */
+  readonly encryption: EncryptionConfig | undefined;
   readonly channels: readonly ChannelConfig[];
 }

@@ -5,10 +5,14 @@ import { pino, type Logger } from "pino";
 import { ConfigError, loadProject } from "./config/load.js";
 import type { ProjectConfig } from "./config/schema.js";
 import type { Env } from "./connectors/endpoint.js";
+import { EncryptedStore, UnencryptedStore } from "./encryption/encrypted-store.js";
+import { EncryptionError } from "./encryption/envelope.js";
+import { keysToStart, readMasterKeys, type KeyProvider } from "./encryption/keys.js";
+import { rekey, rekeyComplete, type RekeyCounts } from "./encryption/rekey.js";
 import { TransformLoadError } from "./engine/channel-worker.js";
 import { Engine, errorCode } from "./engine/engine.js";
 import { healthEndpointFor, type HealthEndpoint } from "./engine/health.js";
-import { InitError, initProject, STARTER_CHANNEL } from "./starter/init.js";
+import { InitError, initProject, STARTER_CHANNEL, STARTER_KEY_FILE } from "./starter/init.js";
 import { Store } from "./storage/store.js";
 import { describeFailure, runChannelTests } from "./testing/run-tests.js";
 import { VERSION } from "./version.js";
@@ -21,7 +25,7 @@ export interface CliIo {
   readonly signal?: AbortSignal;
   /** The engine's logger. Defaults to JSON lines on stdout. */
   readonly logger?: Logger;
-  /** Where tokens and secret headers are read from. Defaults to `process.env`. */
+  /** Where tokens, secret headers and master keys are read from. Defaults to `process.env`. */
   readonly env?: Env;
 }
 
@@ -29,7 +33,10 @@ export interface CliIo {
 export const EXIT = {
   /** The command did what was asked. */
   ok: 0,
-  /** A test failed, the engine could not start or stopped on an error, or init could not write. */
+  /**
+   * A test failed, the engine could not start or stopped on an error, init could not write, or
+   * rekey left a value that is not under the current key.
+   */
   failed: 1,
   /** The arguments were not understood; nothing was done. */
   usage: 2,
@@ -46,21 +53,27 @@ Commands:
                    into dir (default: the project folder), which must be
                    empty or not exist yet
   start            Run every channel, and the health endpoint if pathways.yaml
-                   configures one, until stopped
+                   configures one, until stopped. Needs pathways.yaml's
+                   encryption: its keys, or none
   test [name...]   Run each channel's tests/ inputs through its transform and
                    compare the output with the saved .expected files
+  rekey            Re-encrypt every stored message under the current key of
+                   pathways.yaml's encryption, so older keys can be retired
 
 Options:
   -C, --project <dir>  The project folder (default: the current folder)
       --once           start: take in, transform and deliver what is
                        waiting, then exit
       --update         test: save the current outputs as the expected ones
+      --encrypt-plaintext
+                       rekey: also encrypt what was stored while encryption
+                       was none
   -h, --help           Show this help
   -v, --version        Print the version
 
-Exit codes: 0 done; 1 a test failed, the engine stopped on an error, or
-init could not write the project; 2 the command line was not understood;
-3 the configuration is invalid.
+Exit codes: 0 done; 1 a test failed, the engine stopped on an error, init
+could not write the project, or rekey left a value not under the current
+key; 2 the command line was not understood; 3 the configuration is invalid.
 `;
 
 /** Redaction paths for the engine's logger, in case a field that can hold content is ever logged. */
@@ -98,17 +111,21 @@ export async function run(argv: readonly string[], io: CliIo): Promise<number> {
   }
 
   const projectDir = values.project ?? process.cwd();
+  const encryptPlaintext = values["encrypt-plaintext"] === true;
   switch (command) {
     case "init":
       if (rest.length > 1 || (rest.length === 1 && values.project !== undefined)) return usage(io);
-      if (values.once === true || values.update === true) return usage(io);
+      if (values.once === true || values.update === true || encryptPlaintext) return usage(io);
       return init(rest[0] ?? projectDir, io);
     case "start":
-      if (rest.length > 0 || values.update === true) return usage(io);
+      if (rest.length > 0 || values.update === true || encryptPlaintext) return usage(io);
       return start(projectDir, values.once === true, io);
     case "test":
-      if (values.once === true) return usage(io);
+      if (values.once === true || encryptPlaintext) return usage(io);
       return test(projectDir, rest, values.update === true, io);
+    case "rekey":
+      if (rest.length > 0 || values.once === true || values.update === true) return usage(io);
+      return rekeyStore(projectDir, encryptPlaintext, io);
     default:
       io.err('pathways: unknown command. Run "pathways --help" for usage.\n');
       return EXIT.usage;
@@ -137,6 +154,8 @@ async function init(target: string, io: CliIo): Promise<number> {
   io.out(
     `Wrote a starter project with one channel, ${STARTER_CHANNEL}:\n` +
       files.map((file) => `  ${file}\n`).join("") +
+      `${STARTER_KEY_FILE} is a development key that encrypts stored messages on\n` +
+      "this machine; production keys come from a secret store (see pathways.yaml).\n" +
       'Next, in the project folder: "pathways test" runs the channel\'s tests, and\n' +
       '"pathways start" runs the channel.\n',
   );
@@ -170,16 +189,23 @@ function reportConfigError(error: ConfigError, io: CliIo): void {
 async function start(projectDir: string, once: boolean, io: CliIo): Promise<number> {
   const project = await load(projectDir, io);
   if (project === undefined) return EXIT.config;
-
-  let store: Store;
-  try {
-    store = await Store.open(project.databaseFile);
-  } catch {
-    io.err("pathways: the database could not be opened.\n");
-    return EXIT.failed;
-  }
-  const logger = io.logger ?? pino({ redact: REDACT });
   const env = io.env ?? process.env;
+  // Master keys are read now, at startup, like every other secret: a missing one stops the start.
+  let keys: KeyProvider | undefined;
+  try {
+    keys = keysToStart(project.encryption, env);
+  } catch (error) {
+    /* v8 ignore next: keysToStart throws only ConfigError */
+    if (!(error instanceof ConfigError)) throw error;
+    reportConfigError(error, io);
+    return EXIT.config;
+  }
+
+  const raw = await openStore(project, io);
+  if (raw === undefined) return EXIT.failed;
+  const store = keys === undefined ? new UnencryptedStore(raw) : new EncryptedStore(raw, keys);
+  const logger = io.logger ?? pino({ redact: REDACT });
+  if (keys === undefined) logger.warn({ event: "unencrypted-storage" });
   const engine = new Engine({ project, store, logger, env });
   let health: HealthEndpoint | undefined;
   try {
@@ -215,12 +241,81 @@ async function start(projectDir: string, once: boolean, io: CliIo): Promise<numb
   try {
     if (once) await engine.tick();
     else await engine.run(io.signal ?? new AbortController().signal);
+  } catch (error) {
+    // A stored value that cannot be decrypted stops the engine, as any storage failure does, and is
+    // never handed on garbled. Its message is fixed text and at most a key id.
+    if (!(error instanceof EncryptionError)) throw error;
+    io.err(`pathways: the engine stopped: ${error.message} (${error.code}).\n`);
+    return EXIT.failed;
   } finally {
     await health?.stop();
     await engine.stop();
     await store.close();
   }
   return EXIT.ok;
+}
+
+async function openStore(project: ProjectConfig, io: CliIo): Promise<Store | undefined> {
+  try {
+    return await Store.open(project.databaseFile);
+  } catch {
+    io.err("pathways: the database could not be opened.\n");
+    return undefined;
+  }
+}
+
+/** What `rekey` says when `pathways.yaml` names no keys. */
+const REKEY_NEEDS_KEYS =
+  "pathways.yaml: encryption: rekey needs encryption: { keys: [{ id, env: NAME } or { id, file: path }], current: id }";
+
+async function rekeyStore(
+  projectDir: string,
+  encryptPlaintext: boolean,
+  io: CliIo,
+): Promise<number> {
+  const project = await load(projectDir, io);
+  if (project === undefined) return EXIT.config;
+  const { encryption } = project;
+  let keys: KeyProvider;
+  try {
+    if (encryption?.kind !== "keys") throw new ConfigError([REKEY_NEEDS_KEYS]);
+    keys = readMasterKeys(encryption, io.env ?? process.env);
+  } catch (error) {
+    /* v8 ignore next: both throw only ConfigError */
+    if (!(error instanceof ConfigError)) throw error;
+    reportConfigError(error, io);
+    return EXIT.config;
+  }
+  const store = await openStore(project, io);
+  if (store === undefined) return EXIT.failed;
+  let counts: RekeyCounts;
+  try {
+    counts = await rekey(store, keys, { encryptPlaintext });
+  } finally {
+    await store.close();
+  }
+  io.out(
+    `re-encrypted under the current key: ${counts.reencrypted}\n` +
+      `already under the current key: ${counts.current}\n` +
+      `encrypted, stored while encryption was none: ${counts.encrypted}\n` +
+      `left unencrypted: ${counts.unencrypted}\n` +
+      `unreadable: ${counts.unreadable}\n` +
+      `changed while rekey ran: ${counts.changed}\n`,
+  );
+  if (counts.unencrypted > 0) {
+    io.err(
+      "pathways: some values were stored while encryption was none; run rekey --encrypt-plaintext to encrypt them.\n",
+    );
+  }
+  if (counts.unreadable > 0) {
+    io.err(
+      "pathways: some values could not be decrypted: they name a key that is not configured, or fail their integrity check. Keep every older key until rekey reports none.\n",
+    );
+  }
+  if (counts.changed > 0) {
+    io.err("pathways: some values changed while rekey ran; run it again.\n");
+  }
+  return rekeyComplete(counts) ? EXIT.ok : EXIT.failed;
 }
 
 async function test(
@@ -255,6 +350,7 @@ function parseCli(argv: readonly string[]) {
       project: { type: "string", short: "C" },
       once: { type: "boolean" },
       update: { type: "boolean" },
+      "encrypt-plaintext": { type: "boolean" },
     },
     allowPositionals: true,
     strict: true,

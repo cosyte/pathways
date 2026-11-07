@@ -17,6 +17,7 @@ import {
   projectSchema,
   type ChannelConfig,
   type ClientTlsFiles,
+  type EncryptionConfig,
   type EndpointAuth,
   type FileDestination,
   type HeaderValue,
@@ -90,6 +91,7 @@ export async function loadProject(root: string): Promise<ProjectConfig> {
     project.health === undefined
       ? undefined
       : resolveListener(project.health, projectRoot, DEFAULT_HEALTH_TOKEN_ENV);
+  const encryption = resolveEncryption(project.encryption, projectRoot);
 
   const channelsDir = join(projectRoot, "channels");
   const channels: ChannelConfig[] = [];
@@ -152,7 +154,24 @@ export async function loadProject(root: string): Promise<ProjectConfig> {
     );
   }
   if (problems.length > 0) throw new ConfigError(problems);
-  return { root: projectRoot, databaseFile, settings, health, channels };
+  return { root: projectRoot, databaseFile, settings, health, encryption, channels };
+}
+
+/** The encryption settings, with each key file resolved against the project root. */
+function resolveEncryption(
+  encryption: ProjectYaml["encryption"],
+  root: string,
+): EncryptionConfig | undefined {
+  if (encryption === undefined) return undefined;
+  if (encryption === "none") return { kind: "none" };
+  return {
+    kind: "keys",
+    keys: encryption.keys.map(({ id, env, file }) =>
+      // The schema lets exactly one of env and file through.
+      env === undefined ? { id, file: resolve(root, file as string) } : { id, env },
+    ),
+    current: encryption.current,
+  };
 }
 
 function resolveSource(

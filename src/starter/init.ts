@@ -2,10 +2,23 @@ import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { generateKey } from "../encryption/keys.js";
 import { VERSION } from "../version.js";
 
 /** The one channel the starter project holds. */
 export const STARTER_CHANNEL = "adt-to-lab";
+
+/**
+ * The starter's development master key, relative to the project root. `pathways init` generates it,
+ * the starter's `pathways.yaml` names it, and the starter's `.gitignore` keeps `.pathways/` out of
+ * git.
+ *
+ * @example
+ * ```ts
+ * join(projectRoot, STARTER_KEY_FILE); // "<project>/.pathways/dev.key"
+ * ```
+ */
+export const STARTER_KEY_FILE = ".pathways/dev.key";
 
 /**
  * Template files whose name in the package differs from the name they are written under. npm never
@@ -70,9 +83,11 @@ export interface InitOptions {
 
 /**
  * Writes the starter project into `target`: `pathways.yaml`, the `adt-to-lab` channel with its
- * transform and synthetic test messages, a `.gitignore` and a `package.json`. `target` must be an
- * empty folder or not exist yet; anything else is refused before a file is written. Returns the
- * files written, relative to `target`, with `/` separators.
+ * transform and synthetic test messages, a `.gitignore`, a `package.json`, and a freshly generated
+ * development master key at {@link STARTER_KEY_FILE} (readable by its owner only), so stored
+ * messages are encrypted from the first run. `target` must be an empty folder or not exist yet;
+ * anything else is refused before a file is written. Returns the files written, relative to
+ * `target`, with `/` separators.
  *
  * @example
  * ```ts
@@ -99,6 +114,11 @@ export async function initProject(target: string, options: InitOptions = {}): Pr
     await guard(writeFile(destination, contents, { flag: "wx" }));
     written.push(name);
   }
+  // A key of this project's own, never one shipped in the package: every project gets its own.
+  const keyFile = join(target, ...STARTER_KEY_FILE.split("/"));
+  await guard(mkdir(dirname(keyFile), { recursive: true, mode: 0o700 }));
+  await guard(writeFile(keyFile, `${generateKey()}\n`, { flag: "wx", mode: 0o600 }));
+  written.push(STARTER_KEY_FILE);
   return written.sort();
 }
 
