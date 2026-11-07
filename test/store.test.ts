@@ -73,6 +73,7 @@ for (const database of TEST_DATABASES) {
         transformed: 1,
         filtered: 0,
         failed: 0,
+        cleared: 0,
       });
 
       for (const destination of [0, 1]) {
@@ -85,7 +86,12 @@ for (const database of TEST_DATABASES) {
         await store.markDelivered(second?.id ?? -1);
         expect(await store.nextDelivery("a", destination)).toBeUndefined();
       }
-      expect(await store.deliveryCounts("a")).toEqual({ pending: 0, delivered: 4, failed: 0 });
+      expect(await store.deliveryCounts("a")).toEqual({
+        pending: 0,
+        delivered: 4,
+        failed: 0,
+        cleared: 0,
+      });
       await store.close();
     });
 
@@ -100,6 +106,7 @@ for (const database of TEST_DATABASES) {
         transformed: 0,
         filtered: 1,
         failed: 1,
+        cleared: 0,
       });
       expect(await store.nextDelivery("a", 0)).toBeUndefined();
       await store.close();
@@ -121,7 +128,12 @@ for (const database of TEST_DATABASES) {
       expect(await store.retryingDeliveries("a")).toBe(1);
       await store.failDelivery(first?.id ?? -1, "rejected: AE");
       expect((await store.nextDelivery("a", 0))?.seq).toBe(1);
-      expect(await store.deliveryCounts("a")).toEqual({ pending: 1, delivered: 0, failed: 1 });
+      expect(await store.deliveryCounts("a")).toEqual({
+        pending: 1,
+        delivered: 0,
+        failed: 1,
+        cleared: 0,
+      });
       expect(await store.retryingDeliveries("a")).toBe(0);
       await store.close();
     });
@@ -138,7 +150,12 @@ for (const database of TEST_DATABASES) {
     it("rolls the whole transform result back when part of it fails", async () => {
       const { store } = await openStore(database);
       await expect(store.completeTransform(999, [bytes("x")], 1)).rejects.toThrow();
-      expect(await store.deliveryCounts("a")).toEqual({ pending: 0, delivered: 0, failed: 0 });
+      expect(await store.deliveryCounts("a")).toEqual({
+        pending: 0,
+        delivered: 0,
+        failed: 0,
+        cleared: 0,
+      });
       await store.close();
     });
 
@@ -169,8 +186,14 @@ for (const database of TEST_DATABASES) {
         id,
         channel: "a",
         status: "failed",
+        state: "failed",
         error: "inbound: NO_MSH_SEGMENT",
+        receivedAt: "2026-11-07T12:00:00.000Z",
+        updatedAt: "2026-11-07T12:00:00.000Z",
+        size: 1,
         duplicateOf: null,
+        generation: 0,
+        deliveries: { pending: 0, retrying: 0, delivered: 0, failed: 0, cleared: 0 },
       });
       expect(await store.nextToTransform("a")).toBeUndefined();
       expect(await store.message(999)).toBeUndefined();
@@ -258,6 +281,24 @@ const FIRST_SLICE_SCHEMA = [
   `CREATE TABLE sqlite_sequence(name,seq)`,
 ];
 
+/**
+ * The schema today: the first slice's, with migration 0003's columns added to its two tables (SQLite
+ * appends them to the recorded statement), and the audit log and two indexes beside them.
+ */
+const CURRENT_SCHEMA = [
+  `CREATE INDEX "audit_log_by_message" on "audit_log" ("message_id", "id")`,
+  `CREATE INDEX "deliveries_by_destination_status" on "deliveries" ("channel", "destination", "status", "id")`,
+  `CREATE INDEX "deliveries_by_message" on "deliveries" ("message_id", "status")`,
+  `CREATE INDEX "messages_by_channel_dedup_key" on "messages" ("channel", "dedup_key", "id")`,
+  `CREATE INDEX "messages_by_channel_status" on "messages" ("channel", "status", "id")`,
+  `CREATE TABLE "audit_log" ("id" integer primary key autoincrement, "at" text not null, "actor" text not null, "action" text not null, "outcome" text not null, "channel" text, "message_id" integer, "detail" text)`,
+  `CREATE TABLE "deliveries" ("id" integer primary key autoincrement, "message_id" integer not null references "messages" ("id"), "channel" text not null, "destination" integer not null, "seq" integer not null, "body" blob not null, "status" text not null, "attempts" integer not null, "next_attempt_at" integer not null, "last_error" text, "delivered_at" text, "generation" integer default 0 not null)`,
+  `CREATE TABLE "kysely_migration" ("name" varchar(255) not null primary key, "timestamp" varchar(255) not null)`,
+  `CREATE TABLE "kysely_migration_lock" ("id" varchar(255) not null primary key, "is_locked" integer default 0 not null)`,
+  `CREATE TABLE "messages" ("id" integer primary key autoincrement, "channel" text not null, "received_at" text not null, "body" blob not null, "status" text not null, "error" text, "updated_at" text not null, "dedup_key" text, "duplicate_of" integer, "size" integer, "generation" integer default 0 not null)`,
+  `CREATE TABLE sqlite_sequence(name,seq)`,
+];
+
 function schemaOf(file: string): string[] {
   const db = new SqliteDatabase(file, { readonly: true });
   const rows = db
@@ -271,13 +312,22 @@ function schemaOf(file: string): string[] {
 }
 
 describe("Store on SQLite files the first slice made", () => {
-  it("makes a new database exactly as the first slice did, so old and new files are the same", async () => {
+  it("makes a new database as the first slice did, with 0003's additions, so old and new files are the same", async () => {
     const file = join(await makeProject({}), "new.db");
     await (await Store.open(file)).close();
-    expect(schemaOf(file)).toEqual(FIRST_SLICE_SCHEMA);
+    expect(schemaOf(file)).toEqual(CURRENT_SCHEMA);
+    // 0003 only adds: each of the first slice's statements is still there, as it was written.
+    for (const statement of FIRST_SLICE_SCHEMA) {
+      const table = /^CREATE TABLE "(messages|deliveries)"/.exec(statement);
+      const current =
+        table === null
+          ? statement
+          : CURRENT_SCHEMA.find((s) => s.startsWith(`CREATE TABLE "${String(table[1])}"`));
+      expect(current?.startsWith(statement.replace(/\)$/, ""))).toBe(true);
+    }
   });
 
-  it("opens a database made at migration 0002, keeping its messages, without migrating it again", async () => {
+  it("opens a database made at migration 0002, keeping its messages, and brings it to 0003 alone", async () => {
     const file = join(await makeProject({}), "at-0002.db");
     const old = new SqliteDatabase(file);
     const statements = FIRST_SLICE_SCHEMA.filter((s) => !s.includes("sqlite_sequence"));
@@ -307,11 +357,12 @@ describe("Store on SQLite files the first slice made", () => {
     await store.completeTransform(1, [bytes("out")], 1);
     expect((await store.nextDelivery("a", 0))?.messageId).toBe(1);
     await store.close();
-    expect(schemaOf(file)).toEqual(FIRST_SLICE_SCHEMA);
+    expect(schemaOf(file)).toEqual(CURRENT_SCHEMA);
     const db = new SqliteDatabase(file, { readonly: true });
     expect(db.prepare("select name from kysely_migration order by name").pluck().all()).toEqual([
       "0001-messages-and-deliveries",
       "0002-possible-duplicates",
+      "0003-operator-and-audit",
     ]);
     db.close();
   });

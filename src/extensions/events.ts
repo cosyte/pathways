@@ -22,6 +22,7 @@ export const LIFECYCLE_EVENTS = [
   "delivery-rejected",
   "source-down",
   "source-up",
+  "audit",
 ] as const;
 
 /**
@@ -35,7 +36,8 @@ export const LIFECYCLE_EVENTS = [
 export type LifecycleEventType = (typeof LIFECYCLE_EVENTS)[number];
 
 /**
- * What every lifecycle event carries: its type, when it happened and the channel it happened on.
+ * What every lifecycle event about a channel carries: its type, when it happened and the channel it
+ * happened on. An {@link AuditEvent} can concern no one channel, so it stands on its own.
  * Events carry ids, counts, error names, codes and times, never message content and never an
  * error's own text, so a hook can send them anywhere.
  *
@@ -258,11 +260,62 @@ export interface SourceUpEvent extends LifecycleEventBase {
 }
 
 /**
- * Any lifecycle event: switch on `type` to narrow it. Engine-wide hooks receive every channel's
- * events; a channel's own hooks receive that channel's.
+ * Every action the audit log records, as an {@link AuditEvent}'s `action`: `search` (messages
+ * listed), `view` (one message's details, without content), `content-view`, `replay`, `resend`,
+ * `clear`, `retention` (a run, with what it deleted) and `config` (a configuration change seen when
+ * the engine started). Kept equal to the audit log's own list by a test.
  *
- * The operator-commands slice adds audit entries to this union once its audit log lands; until then,
- * hooks see message, delivery and source events only.
+ * @example
+ * ```ts
+ * const sensitive = (action: AuditEventAction): boolean => action === "content-view";
+ * ```
+ */
+export type AuditEventAction =
+  | "search"
+  | "view"
+  | "content-view"
+  | "replay"
+  | "resend"
+  | "clear"
+  | "retention"
+  | "config";
+
+/**
+ * An entry of the audit log, once it is stored: who did what, to which message, and how it ended.
+ * The operator commands (and the engine's retention runs and configuration checks) write them;
+ * engine-wide hooks receive them, and channels' own hooks do not. Like every event it carries ids,
+ * counts, statuses, codes and hashes, never content, so a hook can forward the audit log to a file
+ * or a SIEM.
+ *
+ * @example
+ * ```ts
+ * if (event.type === "audit" && event.action === "content-view") {
+ *   siem.send({ at: event.at, user: event.actor, message: event.messageId });
+ * }
+ * ```
+ */
+export interface AuditEvent {
+  readonly type: "audit";
+  /** When it happened, as an ISO 8601 time in UTC. */
+  readonly at: string;
+  /** The channel acted on, or `undefined` for an entry about no one channel. */
+  readonly channel: string | undefined;
+  /** The entry's id in the audit log, which only grows. */
+  readonly entryId: number;
+  /** The operating system user who acted. */
+  readonly actor: string;
+  readonly action: AuditEventAction;
+  /** `ok`; `refused`, with `detail.reason` saying why; or `not-found`. */
+  readonly outcome: "ok" | "refused" | "not-found";
+  /** The message acted on, when there is one. */
+  readonly messageId: number | undefined;
+  /** Counts, statuses, codes and hashes, such as `{ status: "transformed", queued: 2 }`. */
+  readonly detail: Readonly<Record<string, string | number | boolean>>;
+}
+
+/**
+ * Any lifecycle event: switch on `type` to narrow it. Engine-wide hooks receive every channel's
+ * events and the audit log's; a channel's own hooks receive that channel's events.
  *
  * @example
  * ```ts
@@ -288,4 +341,5 @@ export type LifecycleEvent =
   | DeliveryRetryEvent
   | DeliveryRejectedEvent
   | SourceDownEvent
-  | SourceUpEvent;
+  | SourceUpEvent
+  | AuditEvent;

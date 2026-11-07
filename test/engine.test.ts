@@ -111,8 +111,14 @@ describe("Engine", () => {
       transformed: 1,
       filtered: 1,
       failed: 0,
+      cleared: 0,
     });
-    expect(await store.deliveryCounts("adt")).toEqual({ pending: 0, delivered: 2, failed: 0 });
+    expect(await store.deliveryCounts("adt")).toEqual({
+      pending: 0,
+      delivered: 2,
+      failed: 0,
+      cleared: 0,
+    });
 
     // Logs carry ids and counts, never content or file names.
     const log = lines.join("");
@@ -132,6 +138,7 @@ describe("Engine", () => {
       transformed: 1,
       filtered: 0,
       failed: 1,
+      cleared: 0,
     });
     const failed = events.find((e) => e.event === "transform-failed");
     expect(failed).toMatchObject({
@@ -150,7 +157,12 @@ describe("Engine", () => {
     await engine.tick();
 
     expect(await readdir(data(root, "out-b"))).toEqual(["1-1.hl7", "2-1.hl7"]);
-    expect(await store.deliveryCounts("adt")).toEqual({ pending: 2, delivered: 2, failed: 0 });
+    expect(await store.deliveryCounts("adt")).toEqual({
+      pending: 2,
+      delivered: 2,
+      failed: 0,
+      cleared: 0,
+    });
     expect(events.filter((e) => e.event === "delivery-retry")).toEqual([
       expect.objectContaining({ destination: 0, attempt: 1, retryInMs: 1_000 }),
     ]);
@@ -172,7 +184,12 @@ describe("Engine", () => {
     clock.now += 2_000;
     await engine.tick();
     expect(await readdir(data(root, "out-a"))).toEqual(["1-1.hl7", "2-1.hl7"]);
-    expect(await store.deliveryCounts("adt")).toEqual({ pending: 0, delivered: 4, failed: 0 });
+    expect(await store.deliveryCounts("adt")).toEqual({
+      pending: 0,
+      delivered: 4,
+      failed: 0,
+      cleared: 0,
+    });
     const delivered = events
       .filter((e) => e.event === "delivered" && e.destination === 0)
       .map((e) => e.delivery);
@@ -194,7 +211,12 @@ describe("Engine", () => {
     await dropFile(data(root, "inbox", "1.hl7"), ADT_A01);
     await dropFile(data(root, "inbox", "2.hl7"), ADT_A01);
     await engine.tick();
-    expect(await store.deliveryCounts("adt")).toEqual({ pending: 0, delivered: 3, failed: 1 });
+    expect(await store.deliveryCounts("adt")).toEqual({
+      pending: 0,
+      delivered: 3,
+      failed: 1,
+      cleared: 0,
+    });
     expect(events.find((e) => e.event === "delivery-rejected")).toMatchObject({
       reason: "AE",
       destination: 0,
@@ -219,7 +241,12 @@ describe("Engine", () => {
     }));
     expect(await sink?.receive(new TextEncoder().encode(ADT_A01))).toBe(1);
     await engine.tick();
-    expect(await store.deliveryCounts("adt")).toEqual({ pending: 0, delivered: 2, failed: 0 });
+    expect(await store.deliveryCounts("adt")).toEqual({
+      pending: 0,
+      delivered: 2,
+      failed: 0,
+      cleared: 0,
+    });
     await engine.stop();
     expect(stopped).toBe(true);
   });

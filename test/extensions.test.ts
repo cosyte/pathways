@@ -264,7 +264,12 @@ describe("custom connectors", () => {
 
     expect(bench.outbox["out"]).toEqual(["SYNTHETIC ONE", "SYNTHETIC TWO"]);
     expect(await readdir(join(root, "channels/text/out"))).toEqual(["1-1.txt", "2-1.txt"]);
-    expect(await store.deliveryCounts("text")).toEqual({ pending: 0, delivered: 4, failed: 0 });
+    expect(await store.deliveryCounts("text")).toEqual({
+      pending: 0,
+      delivered: 4,
+      failed: 0,
+      cleared: 0,
+    });
     // The factory got its options as written, and the channel's context.
     expect(bench.notes["source"]).toEqual([
       {
@@ -328,7 +333,12 @@ describe("custom connectors", () => {
     expect(events).toContainEqual(
       expect.objectContaining({ event: "delivery-rejected", reason: "NOPE" }),
     );
-    expect(await store.deliveryCounts("text")).toEqual({ pending: 0, delivered: 1, failed: 1 });
+    expect(await store.deliveryCounts("text")).toEqual({
+      pending: 0,
+      delivered: 1,
+      failed: 1,
+      cleared: 0,
+    });
   });
 
   it("refuses to start on a bad module, by file and key", async () => {
@@ -483,14 +493,14 @@ destinations:
     });
     // The store the module built, below the layer openStore wraps it in.
     const memory = opened.at(-1);
-    expect(memory?.messages).toEqual([]);
+    expect(memory?.messageRows).toEqual([]);
 
     await dropFile(join(root, "channels/adt/in/a01.hl7"), ADT_A01);
     await dropFile(join(root, "channels/adt/in/a08.hl7"), ADT_A08);
     await engine.tick();
 
-    expect(memory?.messages.map((m) => m.status)).toEqual(["transformed", "filtered"]);
-    expect(memory?.deliveries.map((d) => d.status)).toEqual(["delivered"]);
+    expect(memory?.messageRows.map((m) => m.status)).toEqual(["transformed", "filtered"]);
+    expect(memory?.deliveryRows.map((d) => d.status)).toEqual(["delivered"]);
     expect(await readFile(join(root, "channels/adt/out/1-1.hl7"), "utf8")).toBe(
       ADT_A01.replace("|LAB|", "|LAB2|"),
     );
@@ -542,7 +552,7 @@ destinations:
           "export default () => ({ receive: async () => ({ id: 1 }), close: async () => undefined });\n",
       }),
     ).toBe(
-      "pathways.yaml: storage.module: the factory did not return a message store: nextToTransform, completeTransform, failTransform, nextDelivery, markDelivered, scheduleRetry, failDelivery, messageCounts, deliveryCounts, retryingDeliveries must be methods",
+      "pathways.yaml: storage.module: the factory did not return a message store: nextToTransform, completeTransform, failTransform, nextDelivery, markDelivered, scheduleRetry, failDelivery, messageCounts, deliveryCounts, retryingDeliveries, channels, message, messageBody, deliveries, outputs, listMessages, listRetrying, requeue, clear, expire, appendAudit, auditEntries must be methods",
     );
   });
 

@@ -183,10 +183,15 @@ describe("pathways start", () => {
       CREATE TABLE kysely_migration_lock (id varchar(255) not null primary key, is_locked integer default 0 not null);
       INSERT INTO kysely_migration VALUES ('0001-messages-and-deliveries', '2026-11-07T00:00:00.000Z');
       INSERT INTO kysely_migration VALUES ('0002-possible-duplicates', '2026-11-07T00:00:01.000Z');
+      INSERT INTO kysely_migration VALUES ('0003-operator-and-audit', '2026-11-07T00:00:02.000Z');
       CREATE TABLE messages (id integer primary key autoincrement, channel text not null,
         received_at text not null, body blob not null, status text not null, error text,
-        updated_at text not null, dedup_key text, duplicate_of integer);
+        updated_at text not null, dedup_key text, duplicate_of integer, size integer,
+        generation integer default 0 not null);
       CREATE TABLE deliveries (id integer primary key autoincrement, message_id integer not null);
+      CREATE TABLE audit_log (id integer primary key autoincrement, at text not null,
+        actor text not null, action text not null, outcome text not null, channel text,
+        message_id integer, detail text);
     `);
     broken.close();
     await dropFile(join(root, "data/inbox/TESTPATIENT.hl7"), ADT_A01);

@@ -29,23 +29,36 @@ export const FORMATS = ["hl7v2", "fhir", "x12", "ccda", "json", "text"] as const
  */
 export type Format = (typeof FORMATS)[number];
 
-const DURATION = /^(\d+)(ms|s|m|h)$/;
-const UNIT_MS = { ms: 1, s: 1_000, m: 60_000, h: 3_600_000 } as const;
+const DURATION = /^(\d+)(ms|s|m|h|d)$/;
+const UNIT_MS = { ms: 1, s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 } as const;
 const SIZE = /^(\d+)MB$/;
 const BYTES = /^([1-9]\d*)(B|KB|MB)$/;
 const UNIT_BYTES = { B: 1, KB: 1_024, MB: 1_048_576 } as const;
 
-/** A duration in milliseconds, written as a number of milliseconds or as `500ms`, `5s`, `2m`, `1h`. */
+/**
+ * A duration written as `500ms`, `5s`, `2m`, `1h` or `30d`, in milliseconds, or `undefined` when the
+ * text is not one.
+ *
+ * @example
+ * ```ts
+ * parseDuration("30d"); // 2592000000
+ * parseDuration("soon"); // undefined
+ * ```
+ */
+export function parseDuration(text: string): number | undefined {
+  const match = DURATION.exec(text);
+  if (match === null) return undefined;
+  const [, amount, unit] = match;
+  return Number(amount) * UNIT_MS[unit as keyof typeof UNIT_MS];
+}
+
+/** A duration in milliseconds, written as a number of milliseconds or as `500ms`, `5s`, `2m`, `1h`, `30d`. */
 const duration = z
   .union([
     z.number().int().nonnegative(),
-    z.string().regex(DURATION, 'a duration such as "500ms", "5s", "2m" or "1h"'),
+    z.string().regex(DURATION, 'a duration such as "500ms", "5s", "2m", "1h" or "30d"'),
   ])
-  .transform((value) => {
-    if (typeof value === "number") return value;
-    const [, amount, unit] = DURATION.exec(value) ?? [];
-    return Number(amount) * UNIT_MS[unit as keyof typeof UNIT_MS];
-  });
+  .transform((value) => (typeof value === "number" ? value : (parseDuration(value) ?? 0)));
 
 /** A size in megabytes, written as a number of megabytes or as `256MB`. */
 const megabytes = z
@@ -79,6 +92,8 @@ const settingsShape = {
   pollInterval: duration.optional(),
   onStoreFailure: onStoreFailure.optional(),
   ackTimeout: duration.optional(),
+  retention: duration.optional(),
+  retentionInterval: duration.optional(),
 };
 
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -522,12 +537,13 @@ export const channelSchema = z
       )
       .min(1, "at least one destination"),
     hooks,
-    // A channel overrides the transform limits and the MLLP defaults; how often the engine polls is
-    // engine-wide.
+    // A channel overrides the transform limits, the MLLP defaults and retention; how often the
+    // engine polls, and how often it runs retention, are engine-wide.
     timeout: settingsShape.timeout,
     memory: settingsShape.memory,
     onStoreFailure: settingsShape.onStoreFailure,
     ackTimeout: settingsShape.ackTimeout,
+    retention: settingsShape.retention,
   })
   .superRefine((channel, ctx) => {
     // MLLP frames HL7 v2 and its ACKs are HL7 v2 messages, so an MLLP endpoint needs that format.
@@ -555,6 +571,14 @@ export interface Settings {
   readonly onStoreFailure: OnStoreFailure;
   /** How long an MLLP destination waits to connect, and then for each ACK. A destination can override it. */
   readonly ackTimeoutMs: number;
+  /**
+   * How long a delivered, filtered or cleared message is kept after its last activity, in
+   * milliseconds, before retention deletes it with its deliveries. Failed messages are kept until
+   * they are replayed or cleared.
+   */
+  readonly retentionMs: number;
+  /** How often `pathways start` runs retention, in milliseconds. Engine-wide. */
+  readonly retentionIntervalMs: number;
 }
 
 /** The defaults when neither `pathways.yaml` nor a channel sets a value. */
@@ -564,6 +588,8 @@ export const DEFAULT_SETTINGS: Settings = {
   pollIntervalMs: 1_000,
   onStoreFailure: "close",
   ackTimeoutMs: 10_000,
+  retentionMs: 30 * 86_400_000,
+  retentionIntervalMs: 3_600_000,
 };
 
 /** How long a file must sit unchanged in a file source before it is read, by default. */

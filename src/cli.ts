@@ -12,12 +12,35 @@ import { rekey, rekeyComplete, type RekeyCounts } from "./encryption/rekey.js";
 import { TransformLoadError } from "./engine/channel-worker.js";
 import { Engine, errorCode } from "./engine/engine.js";
 import { healthEndpointFor, type HealthEndpoint } from "./engine/health.js";
+import { EXIT } from "./exit.js";
+import { HookSet } from "./extensions/hooks.js";
 import { ExtensionLoadError } from "./extensions/load.js";
+import { AuditLog, auditEvent, type AuditListener } from "./operator/audit.js";
+import {
+  auditCommand,
+  clearCommand,
+  DEFAULT_LIMIT,
+  isChannelName,
+  listCommand,
+  parseAction,
+  parseId,
+  parseLimit,
+  parseState,
+  parseTime,
+  replayCommand,
+  retentionCommand,
+  showCommand,
+  statusCommand,
+  type OperatorContext,
+} from "./operator/commands.js";
+import { recordConfigChanges } from "./operator/config-audit.js";
 import { InitError, initProject, STARTER_CHANNEL, STARTER_KEY_FILE } from "./starter/init.js";
 import { openRawStore, openStore, startingKeys, type OpenStoreContext } from "./storage/open.js";
 import { isContentStore, StorageError, type MessageStore } from "./storage/store.js";
 import { describeFailure, runChannelTests } from "./testing/run-tests.js";
 import { VERSION } from "./version.js";
+
+export { EXIT } from "./exit.js";
 
 /** Where the CLI writes, and what it runs with. The process entry passes the real ones. */
 export interface CliIo {
@@ -29,54 +52,87 @@ export interface CliIo {
   readonly logger?: Logger;
   /** Where tokens, secret headers and master keys are read from. Defaults to `process.env`. */
   readonly env?: Env;
-}
-
-/** The exit codes `pathways` returns. Scripts branch on these, so they are stable. */
-export const EXIT = {
-  /** The command did what was asked. */
-  ok: 0,
   /**
-   * A test failed, the engine or an extension module could not start or stopped on an error, init
-   * could not write, or rekey left a value that is not under the current key.
+   * Told of every audit entry a command writes, once it is stored: replays, resends, clears,
+   * searches and views, retention runs and configuration changes. The engine-wide lifecycle hooks
+   * in `pathways.yaml` receive the same entries as `audit` events.
    */
-  failed: 1,
-  /** The arguments were not understood; nothing was done. */
-  usage: 2,
-  /** The project's configuration is invalid; nothing was done. */
-  config: 3,
-} as const;
+  readonly onAudit?: AuditListener;
+}
 
 const HELP = `Usage: pathways <command> [options]
 
 Pathways is a code-first healthcare integration engine. It is early.
 
 Commands:
-  init [dir]       Write a starter project, with one channel and its tests,
-                   into dir (default: the project folder), which must be
-                   empty or not exist yet
-  start            Run every channel, and the health endpoint if pathways.yaml
-                   configures one, until stopped. Needs pathways.yaml's
-                   encryption: its keys, or none
-  test [name...]   Run each channel's tests/ inputs through its transform and
-                   compare the output with the saved .expected files
-  rekey            Re-encrypt every stored message under the current key of
-                   pathways.yaml's encryption, so older keys can be retired
+  init [dir]          Write a starter project, with one channel and its tests,
+                      into dir (default: the project folder), which must be
+                      empty or not exist yet
+  start               Run every channel, and the health endpoint if
+                      pathways.yaml configures one, until stopped. Needs
+                      pathways.yaml's encryption: its keys, or none. Retention
+                      runs at start and then every retentionInterval
+  test [name...]      Run each channel's tests/ inputs through its transform
+                      and compare the output with the saved .expected files
+  status [name...]    Each channel's counts, retrying deliveries and failed
+                      messages, read from the database
+  messages            List stored messages, newest first: ids, states, times,
+                      sizes and duplicate flags, never content
+  messages show <id>  One message and its deliveries; its content only with
+                      --content
+  replay <id...>      Run each message through its channel's transform again
+                      and queue fresh deliveries behind those waiting
+  clear <id...>       Mark failed messages cleared, so they leave the failed
+                      count and retention can delete them
+  retention           Delete delivered, filtered and cleared messages past
+                      their channel's retention period (default 30d)
+  audit               Read the audit log, newest first
+  rekey               Re-encrypt every stored message under the current key
+                      of pathways.yaml's encryption, so older keys can be
+                      retired
+
+The commands that read or change stored messages open the database as start
+does, so they need the same encryption keys.
 
 Options:
-  -C, --project <dir>  The project folder (default: the current folder)
-      --once           start: take in, transform and deliver what is
-                       waiting, then exit
-      --update         test: save the current outputs as the expected ones
+  -C, --project <dir>   The project folder (default: the current folder)
+      --once            start: take in, transform and deliver what is
+                        waiting, then exit
+      --update          test: save the current outputs as the expected ones
+      --json            status, messages, replay, clear, retention, audit:
+                        print one JSON document instead of text
+      --channel <name>  messages, audit: only this channel
+      --status <state>  messages: only this state: received, queued, retrying,
+                        delivered, filtered, failed or cleared
+      --since <time>    messages, audit: from this time: 2026-11-07,
+                        2026-11-07T12:00:00Z (UTC unless a zone is given), or
+                        a duration ago, such as 24h or 7d
+      --until <time>    messages, audit: before this time
+      --limit <n>       messages, audit: at most n rows (default ${DEFAULT_LIMIT}, at most 1000)
+      --before <id>     messages, audit: the next page, as the last one says
+      --content         messages show: print the content, which is PHI. The
+                        view is written to the audit log first
+      --resend          replay: send the stored outputs again, untransformed
+      --dry-run         retention: say what would be deleted, delete nothing
+      --action <name>   audit: only this action: search, view, content-view,
+                        replay, resend, clear, retention or config
+      --message <id>    audit: only entries about this message
       --encrypt-plaintext
-                       rekey: also encrypt what was stored while encryption
-                       was none
-  -h, --help           Show this help
-  -v, --version        Print the version
+                        rekey: also encrypt what was stored while encryption
+                        was none
+  -h, --help            Show this help
+  -v, --version         Print the version
 
-Exit codes: 0 done; 1 a test failed, the engine or an extension module could
-not start or stopped on an error, init could not write the project, or rekey
-left a value not under the current key; 2 the command line was not understood;
-3 the configuration is invalid.
+Every replay, resend, clear, search, view and content view is written to the
+audit log with the operating system user, as are retention runs and the
+configuration changes pathways start sees. The hooks in pathways.yaml receive
+each entry as an audit event.
+
+Exit codes: 0 done; 1 a test failed, the engine, a command or an extension
+module could not start or stopped on an error, init could not write the
+project, rekey left a value not under the current key, or a replay, resend or
+clear was refused or the message failed again; 2 the command line was not
+understood; 3 the configuration is invalid; 4 a message named does not exist.
 `;
 
 /** Redaction paths for the engine's logger, in case a field that can hold content is ever logged. */
@@ -84,6 +140,23 @@ const REDACT = ["body", "*.body", "detail", "*.detail"];
 
 /** The logger of a command whose stdout is its report: JSON lines on stderr. */
 const STDERR_LOG = { redact: REDACT };
+
+type Values = ReturnType<typeof parseCli>["values"];
+type OptionName = Exclude<keyof Values, "help" | "version" | "project">;
+
+/** The options each command takes, beyond --project, --help and --version. */
+const OPTIONS: Readonly<Record<string, readonly OptionName[]>> = {
+  init: [],
+  start: ["once"],
+  test: ["update"],
+  status: ["json"],
+  messages: ["json", "channel", "status", "since", "until", "limit", "before", "content"],
+  replay: ["json", "resend"],
+  clear: ["json"],
+  retention: ["json", "dry-run"],
+  audit: ["json", "action", "message", "channel", "since", "until", "limit", "before"],
+  rekey: ["encrypt-plaintext"],
+};
 
 /**
  * Runs the `pathways` command with the given arguments.
@@ -116,25 +189,31 @@ export async function run(argv: readonly string[], io: CliIo): Promise<number> {
     return EXIT.ok;
   }
 
+  const allowed = OPTIONS[command];
+  if (allowed === undefined) {
+    io.err('pathways: unknown command. Run "pathways --help" for usage.\n');
+    return EXIT.usage;
+  }
+  const given = (Object.keys(values) as (keyof Values)[]).filter(
+    (name) => name !== "help" && name !== "version" && name !== "project",
+  );
+  if (given.some((name) => !(allowed as readonly string[]).includes(name))) return usage(io);
+
   const projectDir = values.project ?? process.cwd();
-  const encryptPlaintext = values["encrypt-plaintext"] === true;
   switch (command) {
     case "init":
       if (rest.length > 1 || (rest.length === 1 && values.project !== undefined)) return usage(io);
-      if (values.once === true || values.update === true || encryptPlaintext) return usage(io);
       return init(rest[0] ?? projectDir, io);
     case "start":
-      if (rest.length > 0 || values.update === true || encryptPlaintext) return usage(io);
+      if (rest.length > 0) return usage(io);
       return start(projectDir, values.once === true, io);
     case "test":
-      if (values.once === true || encryptPlaintext) return usage(io);
       return test(projectDir, rest, values.update === true, io);
     case "rekey":
-      if (rest.length > 0 || values.once === true || values.update === true) return usage(io);
-      return rekeyStore(projectDir, encryptPlaintext, io);
+      if (rest.length > 0) return usage(io);
+      return rekeyStore(projectDir, values["encrypt-plaintext"] === true, io);
     default:
-      io.err('pathways: unknown command. Run "pathways --help" for usage.\n');
-      return EXIT.usage;
+      return operator(command, rest, values, projectDir, io);
   }
 }
 
@@ -142,6 +221,11 @@ function usage(io: CliIo): number {
   io.err(
     'pathways: that option does not apply to this command. Run "pathways --help" for usage.\n',
   );
+  return EXIT.usage;
+}
+
+function invalid(io: CliIo, what: string): number {
+  io.err(`pathways: ${what} Run "pathways --help" for usage.\n`);
   return EXIT.usage;
 }
 
@@ -190,84 +274,6 @@ function reportConfigError(error: ConfigError, io: CliIo): void {
   io.err(
     `pathways: the configuration is invalid:\n${error.problems.map((p) => `  ${p}\n`).join("")}`,
   );
-}
-
-async function start(projectDir: string, once: boolean, io: CliIo): Promise<number> {
-  const project = await load(projectDir, io);
-  if (project === undefined) return EXIT.config;
-  const env = io.env ?? process.env;
-  const logger = io.logger ?? pino({ redact: REDACT });
-  // Master keys are read now, at startup, like every other secret: a missing one stops the start.
-  const keys = await keysOrExit(project, { env, logger }, io);
-  if (typeof keys === "number") return keys;
-  const { storage } = project;
-  if (storage.kind !== "sqlite" && storage.kind !== "module" && storage.plaintext) {
-    logger.warn({ event: "plaintext", endpoint: "storage" });
-  }
-  let store: MessageStore;
-  try {
-    store = await openStore(project, { env, logger, keys });
-  } catch (error) {
-    return reportStoreError(error, io);
-  }
-  if (keys === undefined) logger.warn({ event: "unencrypted-storage" });
-  const engine = new Engine({ project, store, logger, env });
-  let health: HealthEndpoint | undefined;
-  try {
-    // A single pass does not serve health: it would hold the port a running engine needs.
-    if (project.health !== undefined && !once) {
-      health = healthEndpointFor(project.health, () => engine.health(), env, logger);
-    }
-    await engine.start();
-  } catch (error) {
-    await store.close();
-    if (error instanceof ConfigError) {
-      reportConfigError(error, io);
-      return EXIT.config;
-    }
-    if (error instanceof ExtensionLoadError) {
-      io.err(`pathways: ${error.message}\n`);
-      return EXIT.failed;
-    }
-    if (!(error instanceof TransformLoadError)) throw error;
-    const channel = project.channels.find((c) => c.name === error.channel);
-    /* v8 ignore next: the engine names only channels it was given */
-    const detail =
-      channel === undefined ? error.failure.name : describeFailure(error.failure, channel);
-    io.err(`pathways: channel ${error.channel}: ${detail}\n`);
-    return EXIT.failed;
-  }
-
-  try {
-    await health?.start();
-  } catch (error) {
-    await engine.stop();
-    await store.close();
-    io.err(`pathways: the health endpoint could not listen (${String(errorCode(error))}).\n`);
-    return EXIT.failed;
-  }
-
-  try {
-    if (once) await engine.tick();
-    else await engine.run(io.signal ?? new AbortController().signal);
-  } catch (error) {
-    // A stored value that cannot be decrypted stops the engine, as any storage failure does, and is
-    // never handed on garbled. Its message is fixed text and at most a key id.
-    if (error instanceof EncryptionError) {
-      io.err(`pathways: the engine stopped: ${error.message} (${error.code}).\n`);
-      return EXIT.failed;
-    }
-    // Anything else (a database server that went away, say) is reported by its code alone: a
-    // driver's own text can name the server, the login or a stored value.
-    const code = errorCode(error);
-    io.err(`pathways: the engine stopped on an error${code === undefined ? "" : ` (${code})`}.\n`);
-    return EXIT.failed;
-  } finally {
-    await health?.stop();
-    await engine.stop();
-    await store.close();
-  }
-  return EXIT.ok;
 }
 
 /**
@@ -321,6 +327,119 @@ const STORAGE_REFUSALS: Readonly<Record<StorageError["reason"], string>> = {
   open: "the database could not be opened",
   schema: "the database schema could not be brought up to date",
 };
+
+/**
+ * Opens the project's store as every command that reads or writes messages does, through
+ * `src/storage/open.ts`: the store `pathways.yaml` names, wrapped in encryption at rest under its
+ * keys (read now, like every other secret), or in the plaintext store for `encryption: none`.
+ * Returns the exit code when it cannot, having said why.
+ */
+async function openWrapped(
+  project: ProjectConfig,
+  context: OpenStoreContext,
+  io: CliIo,
+): Promise<{ readonly store: MessageStore; readonly encrypted: boolean } | number> {
+  const keys = await keysOrExit(project, context, io);
+  if (typeof keys === "number") return keys;
+  const { storage } = project;
+  if (storage.kind !== "sqlite" && storage.kind !== "module" && storage.plaintext) {
+    context.logger.warn({ event: "plaintext", endpoint: "storage" });
+  }
+  try {
+    return { store: await openStore(project, { ...context, keys }), encrypted: keys !== undefined };
+  } catch (error) {
+    return reportStoreError(error, io);
+  }
+}
+
+/** The audit log a command writes to, with `io.onAudit` subscribed. */
+function auditFor(store: MessageStore, io: CliIo, onListenerError: (error: unknown) => void) {
+  const audit = new AuditLog(store, { onListenerError });
+  if (io.onAudit !== undefined) audit.subscribe(io.onAudit);
+  return audit;
+}
+
+async function start(projectDir: string, once: boolean, io: CliIo): Promise<number> {
+  const project = await load(projectDir, io);
+  if (project === undefined) return EXIT.config;
+  const env = io.env ?? process.env;
+  const logger = io.logger ?? pino({ redact: REDACT });
+  // Master keys are read now, at startup, like every other secret: a missing one stops the start.
+  const opened = await openWrapped(project, { env, logger }, io);
+  if (typeof opened === "number") return opened;
+  const { store } = opened;
+  if (!opened.encrypted) logger.warn({ event: "unencrypted-storage" });
+  const audit = auditFor(store, io, (error) => {
+    logger.warn({ event: "audit-listener-failed", code: errorCode(error) });
+  });
+  const engine = new Engine({ project, store, logger, env, audit });
+  let health: HealthEndpoint | undefined;
+  try {
+    // A single pass does not serve health: it would hold the port a running engine needs.
+    if (project.health !== undefined && !once) {
+      health = healthEndpointFor(project.health, () => engine.health(), env, logger);
+    }
+    await engine.start();
+  } catch (error) {
+    await store.close();
+    if (error instanceof ConfigError) {
+      reportConfigError(error, io);
+      return EXIT.config;
+    }
+    if (error instanceof ExtensionLoadError) {
+      io.err(`pathways: ${error.message}\n`);
+      return EXIT.failed;
+    }
+    if (!(error instanceof TransformLoadError)) throw error;
+    const channel = project.channels.find((c) => c.name === error.channel);
+    /* v8 ignore next: the engine names only channels it was given */
+    const detail =
+      channel === undefined ? error.failure.name : describeFailure(error.failure, channel);
+    io.err(`pathways: channel ${error.channel}: ${detail}\n`);
+    return EXIT.failed;
+  }
+
+  try {
+    // After the engine has started, so its hooks receive these entries too.
+    await recordConfigChanges(project, store, audit);
+  } catch {
+    await engine.stop();
+    await store.close();
+    io.err("pathways: the audit log could not be written.\n");
+    return EXIT.failed;
+  }
+
+  try {
+    await health?.start();
+  } catch (error) {
+    await engine.stop();
+    await store.close();
+    io.err(`pathways: the health endpoint could not listen (${String(errorCode(error))}).\n`);
+    return EXIT.failed;
+  }
+
+  try {
+    if (once) await engine.tick();
+    else await engine.run(io.signal ?? new AbortController().signal);
+  } catch (error) {
+    // A stored value that cannot be decrypted stops the engine, as any storage failure does, and is
+    // never handed on garbled. Its message is fixed text and at most a key id.
+    if (error instanceof EncryptionError) {
+      io.err(`pathways: the engine stopped: ${error.message} (${error.code}).\n`);
+      return EXIT.failed;
+    }
+    // Anything else (a database server that went away, say) is reported by its code alone: a
+    // driver's own text can name the server, the login or a stored value.
+    const code = errorCode(error);
+    io.err(`pathways: the engine stopped on an error${code === undefined ? "" : ` (${code})`}.\n`);
+    return EXIT.failed;
+  } finally {
+    await health?.stop();
+    await engine.stop();
+    await store.close();
+  }
+  return EXIT.ok;
+}
 
 /** What `rekey` says when `pathways.yaml` names no keys. */
 const REKEY_NEEDS_KEYS =
@@ -412,6 +531,198 @@ async function test(
   return summary.failed > 0 ? EXIT.failed : EXIT.ok;
 }
 
+/** A command that reads or acts on stored messages, parsed: what to run once the store is open. */
+type OperatorRun = (context: OperatorContext) => Promise<number>;
+
+/**
+ * The operator commands: status, messages, replay, clear, retention and audit. Parses and checks
+ * the arguments first, so a mistake changes nothing and opens nothing; then loads the project,
+ * opens its store and runs.
+ */
+async function operator(
+  command: string,
+  rest: readonly string[],
+  values: Values,
+  projectDir: string,
+  io: CliIo,
+): Promise<number> {
+  const parsed = parseOperator(command, rest, values, io);
+  if (typeof parsed === "number") return parsed;
+
+  const project = await load(projectDir, io);
+  if (project === undefined) return EXIT.config;
+  // Extensions log to stderr, so stdout holds only the report.
+  const context = { env: io.env ?? process.env, logger: io.logger ?? pino(STDERR_LOG, stderr) };
+  const wrapped = await openWrapped(project, context, io);
+  if (typeof wrapped === "number") return wrapped;
+  const { store } = wrapped;
+  const audit = auditFor(store, io, (error) => {
+    io.err(`pathways: an audit listener failed (${errorCode(error) ?? "no code"}).\n`);
+  });
+  // The engine-wide hooks receive each audit entry this command writes, as `pathways start`'s do.
+  // status and audit write none, so they load no hooks.
+  let hooks: HookSet | undefined;
+  if (command !== "status" && command !== "audit") {
+    const opened = await hooksOrExit(project, context, io);
+    if (typeof opened === "number") {
+      await store.close();
+      return opened;
+    }
+    hooks = opened;
+    audit.subscribe((entry) => {
+      opened.emit(auditEvent(entry));
+    });
+  }
+  try {
+    return await parsed({
+      project,
+      store,
+      audit,
+      json: values.json === true,
+      out: io.out,
+      err: io.err,
+      now: Date.now,
+    });
+  } catch (error) {
+    // A stored value that cannot be decrypted: never shown garbled. Fixed text and at most a key id.
+    if (error instanceof EncryptionError) {
+      io.err(`pathways: the command stopped: ${error.message} (${error.code}).\n`);
+      return EXIT.failed;
+    }
+    // The database refused a read or a write (it can be busy for longer than the wait, or full).
+    const code = errorCode(error) ?? (error instanceof Error ? error.name : "error");
+    io.err(`pathways: the command could not finish (${code}).\n`);
+    return EXIT.failed;
+  } finally {
+    // Each hook gets up to its time limit to send what is queued; the command waits no longer.
+    await hooks?.stop();
+    await store.close();
+  }
+}
+
+/** The engine-wide hooks of `pathways.yaml`, started, or the exit code, having said why not. */
+async function hooksOrExit(
+  project: ProjectConfig,
+  context: OpenStoreContext,
+  io: CliIo,
+): Promise<HookSet | number> {
+  try {
+    return await HookSet.open(project.hooks, {
+      file: "pathways.yaml",
+      channel: undefined,
+      dir: project.root,
+      ...context,
+    });
+  } catch (error) {
+    if (error instanceof ExtensionLoadError) {
+      io.err(`pathways: ${error.message}\n`);
+      return EXIT.failed;
+    }
+    /* v8 ignore next: HookSet.open throws only ExtensionLoadError and ConfigError */
+    if (!(error instanceof ConfigError)) throw error;
+    reportConfigError(error, io);
+    return EXIT.config;
+  }
+}
+
+function parseOperator(
+  command: string,
+  rest: readonly string[],
+  values: Values,
+  io: CliIo,
+): OperatorRun | number {
+  switch (command) {
+    case "status":
+      return (context) => statusCommand(context, rest);
+    case "messages": {
+      if (rest[0] === "show") {
+        const listing = ["channel", "status", "since", "until", "limit", "before"] as const;
+        if (rest.length !== 2 || listing.some((name) => values[name] !== undefined)) {
+          return usage(io);
+        }
+        const id = parseId(rest[1] ?? "");
+        if (id === undefined) return invalid(io, "a message id is a positive whole number.");
+        return (context) => showCommand(context, id, values.content === true);
+      }
+      if (rest.length > 0 || values.content !== undefined) return usage(io);
+      const filters = parseListing(values, io);
+      if (typeof filters === "number") return filters;
+      const state = values.status === undefined ? undefined : parseState(values.status);
+      if (values.status !== undefined && state === undefined) {
+        return invalid(io, "--status takes a message state.");
+      }
+      return (context) => listCommand(context, { ...filters, state });
+    }
+    case "replay":
+    case "clear": {
+      if (rest.length === 0) return invalid(io, `${command} needs at least one message id.`);
+      const ids = rest.map(parseId);
+      if (ids.some((id) => id === undefined)) {
+        return invalid(io, "a message id is a positive whole number.");
+      }
+      const unique = [...new Set(ids as number[])];
+      return command === "replay"
+        ? (context) => replayCommand(context, unique, values.resend === true)
+        : (context) => clearCommand(context, unique);
+    }
+    case "retention":
+      if (rest.length > 0) return usage(io);
+      return (context) => retentionCommand(context, values["dry-run"] === true);
+    default: {
+      // audit: OPTIONS lists exactly these commands.
+      if (rest.length > 0) return usage(io);
+      const filters = parseListing(values, io);
+      if (typeof filters === "number") return filters;
+      const action = values.action === undefined ? undefined : parseAction(values.action);
+      if (values.action !== undefined && action === undefined) {
+        return invalid(io, "--action takes an audit action.");
+      }
+      const messageId = values.message === undefined ? undefined : parseId(values.message);
+      if (values.message !== undefined && messageId === undefined) {
+        return invalid(io, "a message id is a positive whole number.");
+      }
+      return (context) => auditCommand(context, { ...filters, action, messageId });
+    }
+  }
+}
+
+/** The filters `messages` and `audit` share, parsed, or the exit code of a usage error. */
+function parseListing(
+  values: Values,
+  io: CliIo,
+):
+  | {
+      channel: string | undefined;
+      since: string | undefined;
+      until: string | undefined;
+      before: number | undefined;
+      limit: number;
+    }
+  | number {
+  const now = Date.now();
+  if (values.channel !== undefined && !isChannelName(values.channel)) {
+    return invalid(io, "--channel takes a channel name.");
+  }
+  const since = values.since === undefined ? undefined : parseTime(values.since, now);
+  const until = values.until === undefined ? undefined : parseTime(values.until, now);
+  if (
+    (values.since !== undefined && since === undefined) ||
+    (values.until !== undefined && until === undefined)
+  ) {
+    return invalid(
+      io,
+      "--since and --until take a date, a date and time, or a duration such as 24h or 7d.",
+    );
+  }
+  const before = values.before === undefined ? undefined : parseId(values.before);
+  if (values.before !== undefined && before === undefined) {
+    return invalid(io, "--before takes an id from the last page.");
+  }
+  const limit = values.limit === undefined ? DEFAULT_LIMIT : parseLimit(values.limit);
+  if (limit === undefined) return invalid(io, "--limit takes a whole number from 1 to 1000.");
+  return { channel: values.channel, since, until, before, limit };
+}
+
 function parseCli(argv: readonly string[]) {
   return parseArgs({
     args: [...argv],
@@ -421,6 +732,18 @@ function parseCli(argv: readonly string[]) {
       project: { type: "string", short: "C" },
       once: { type: "boolean" },
       update: { type: "boolean" },
+      json: { type: "boolean" },
+      channel: { type: "string" },
+      status: { type: "string" },
+      since: { type: "string" },
+      until: { type: "string" },
+      limit: { type: "string" },
+      before: { type: "string" },
+      content: { type: "boolean" },
+      resend: { type: "boolean" },
+      "dry-run": { type: "boolean" },
+      action: { type: "string" },
+      message: { type: "string" },
       "encrypt-plaintext": { type: "boolean" },
     },
     allowPositionals: true,

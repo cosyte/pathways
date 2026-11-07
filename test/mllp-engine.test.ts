@@ -113,7 +113,12 @@ describe("an MLLP channel", () => {
     await engine.tick();
 
     expect(receiver.received).toEqual([ADT_A01.replace("|LAB|", "|LAB2|")]);
-    expect(await store.deliveryCounts("adt")).toEqual({ pending: 0, delivered: 1, failed: 0 });
+    expect(await store.deliveryCounts("adt")).toEqual({
+      pending: 0,
+      delivered: 1,
+      failed: 0,
+      cleared: 0,
+    });
     expect(await store.messageCounts("adt")).toMatchObject({ transformed: 1, filtered: 1 });
     // Plaintext runs only because the channel says so, and it is said once per endpoint.
     expect(events.filter((e) => e.event === "plaintext")).toEqual([
@@ -165,10 +170,11 @@ describe("an MLLP channel", () => {
     await engine.tick();
 
     expect(msaOf(replies[0] ?? "")).toEqual(["AR", ""]);
-    expect(await store.message(1)).toEqual({
+    expect(await store.message(1)).toMatchObject({
       id: 1,
       channel: "adt",
       status: "failed",
+      state: "failed",
       error: "inbound: NO_MSH_SEGMENT",
       duplicateOf: null,
     });
@@ -223,7 +229,12 @@ describe("an MLLP channel", () => {
     await exchange(port, [ADT_A01, ADT_A01.replace("MSG00001", "MSG00003")], { replies: 2 });
     await engine.tick();
 
-    expect(await store.deliveryCounts("adt")).toEqual({ pending: 1, delivered: 0, failed: 1 });
+    expect(await store.deliveryCounts("adt")).toEqual({
+      pending: 1,
+      delivered: 0,
+      failed: 1,
+      cleared: 0,
+    });
     expect(events).toContainEqual(
       expect.objectContaining({ event: "delivery-rejected", reason: "AE", destination: 0 }),
     );
@@ -412,6 +423,18 @@ function bind(store: Store): MessageStore {
     messageCounts: store.messageCounts.bind(store),
     deliveryCounts: store.deliveryCounts.bind(store),
     retryingDeliveries: store.retryingDeliveries.bind(store),
+    channels: store.channels.bind(store),
+    message: store.message.bind(store),
+    messageBody: store.messageBody.bind(store),
+    deliveries: store.deliveries.bind(store),
+    outputs: store.outputs.bind(store),
+    listMessages: store.listMessages.bind(store),
+    listRetrying: store.listRetrying.bind(store),
+    requeue: store.requeue.bind(store),
+    clear: store.clear.bind(store),
+    expire: store.expire.bind(store),
+    appendAudit: store.appendAudit.bind(store),
+    auditEntries: store.auditEntries.bind(store),
     close: store.close.bind(store),
   };
 }

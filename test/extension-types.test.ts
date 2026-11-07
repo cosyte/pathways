@@ -3,9 +3,15 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
 
 import type { FailureKind } from "../src/engine/worker-entry.js";
+import { auditEvent } from "../src/operator/audit.js";
+import type { AUDIT_ACTIONS } from "../src/storage/store.js";
 import {
   DeliveryRejected,
   LIFECYCLE_EVENTS,
+  type AuditAction,
+  type AuditEntry,
+  type AuditEvent,
+  type AuditEventAction,
   type ChannelContext,
   type DestinationFactory,
   type HookContext,
@@ -112,6 +118,37 @@ describe("the extension types", () => {
     expectTypeOf<LifecycleEventType>().toEqualTypeOf<LifecycleEvent["type"]>();
     expectTypeOf<TransformFailureKind>().toEqualTypeOf<FailureKind>();
     expect(new Set(LIFECYCLE_EVENTS).size).toBe(LIFECYCLE_EVENTS.length);
+  });
+
+  it("keep the audit event's actions in step with the audit log's, and carry an entry whole", () => {
+    expectTypeOf<AuditEventAction>().toEqualTypeOf<AuditAction>();
+    expectTypeOf<(typeof AUDIT_ACTIONS)[number]>().toEqualTypeOf<AuditEventAction>();
+    expectTypeOf<AuditEvent["outcome"]>().toEqualTypeOf<AuditEntry["outcome"]>();
+    const entry: AuditEntry = {
+      id: 7,
+      at: "2026-11-07T12:00:00.000Z",
+      actor: "synthetic-operator",
+      action: "retention",
+      outcome: "ok",
+      channel: null,
+      messageId: null,
+      detail: { messages: 3 },
+    };
+    expect(auditEvent(entry)).toEqual({
+      type: "audit",
+      at: "2026-11-07T12:00:00.000Z",
+      channel: undefined,
+      entryId: 7,
+      actor: "synthetic-operator",
+      action: "retention",
+      outcome: "ok",
+      messageId: undefined,
+      detail: { messages: 3 },
+    });
+    expect(auditEvent({ ...entry, action: "replay", channel: "adt", messageId: 4 })).toMatchObject({
+      channel: "adt",
+      messageId: 4,
+    });
   });
 });
 

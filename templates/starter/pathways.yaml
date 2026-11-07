@@ -30,7 +30,7 @@ encryption:
       file: .pathways/dev.key
   current: dev
 
-# Each channel's channel.yaml can override timeout and memory for that channel.
+# Each channel's channel.yaml can override timeout, memory and retention for that channel.
 defaults:
   # How long one message's transform may run before it is stopped and the message is marked
   # failed.
@@ -39,3 +39,7 @@ defaults:
   memory: 256MB
   # How often `pathways start` looks for new files.
   pollInterval: 1s
+  # How long a delivered, filtered or cleared message is kept after its last activity before it
+  # is deleted. Failed messages are kept until they are replayed or cleared. "pathways retention
+  # --dry-run" says what would go.
+  retention: 30d
