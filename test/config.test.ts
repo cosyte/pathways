@@ -63,12 +63,13 @@ defaults:
     });
     const project = await loadProject(root);
     expect(project.databaseFile).toBe(join(root, "data/engine.db"));
-    expect(project.settings).toEqual({ timeoutMs: 2_000, memoryMb: 128, pollIntervalMs: 250 });
+    const engine = { ...DEFAULT_SETTINGS, timeoutMs: 2_000, memoryMb: 128, pollIntervalMs: 250 };
+    expect(project.settings).toEqual(engine);
     const [a, b] = project.channels;
-    expect(a?.settings).toEqual({ timeoutMs: 2_000, memoryMb: 128, pollIntervalMs: 250 });
+    expect(a?.settings).toEqual(engine);
     expect(b?.format).toBe("text");
     expect(b?.transform).toBe(join(root, "channels/b/t.ts"));
-    expect(b?.settings).toEqual({ timeoutMs: 120_000, memoryMb: 64, pollIntervalMs: 250 });
+    expect(b?.settings).toEqual({ ...engine, timeoutMs: 120_000, memoryMb: 64 });
   });
 
   it("reads hours, numbers of milliseconds, and a source's minimum age", async () => {
@@ -372,8 +373,163 @@ destinations:
 `,
     });
     expect(problems).toEqual([
-      "channels/a/channel.yaml: source: name exactly one of: file, http",
-      "channels/a/channel.yaml: destinations.0: name exactly one of: file, http",
+      "channels/a/channel.yaml: source: name exactly one of: file, http, mllp",
+      "channels/a/channel.yaml: destinations.0: name exactly one of: file, http, mllp",
+    ]);
+  });
+
+  it("loads MLLP endpoints: the default host, TLS paths against the channel folder, and settings cascaded", async () => {
+    const root = await makeProject({
+      "pathways.yaml": "defaults:\n  onStoreFailure: AE\n  ackTimeout: 3s\n",
+      "channels/a/channel.yaml": `
+source:
+  mllp:
+    port: 2575
+    tls: { cert: ./certs/server.pem, key: ./certs/server.key, ca: ./certs/ca.pem }
+destinations:
+  - mllp: { host: lab.invalid, port: 2576, tls: {} }
+  - mllp:
+      host: lab.invalid
+      port: 2577
+      tls: { ca: ./certs/ca.pem, cert: ./certs/client.pem, key: ./certs/client.key }
+      ackTimeout: 500ms
+`,
+      "channels/b/channel.yaml": `
+source:
+  mllp: { port: 2585, host: 0.0.0.0, plaintext: true, onStoreFailure: close }
+destinations:
+  - mllp: { host: lab.invalid, port: 2586, plaintext: true }
+onStoreFailure: AR
+ackTimeout: 1m
+`,
+      "channels/c/channel.yaml": `
+source:
+  mllp: { port: 2595, plaintext: true }
+destinations:
+  - file: { dir: out }
+onStoreFailure: AR
+`,
+    });
+    const project = await loadProject(root);
+    expect(project.settings).toMatchObject({ onStoreFailure: "AE", ackTimeoutMs: 3_000 });
+    const [a, b, c] = project.channels;
+    // TLS files are only resolved here; they are read when the engine starts.
+    const certs = join(root, "channels/a/certs");
+    expect(a?.source).toEqual({
+      kind: "mllp",
+      host: "127.0.0.1",
+      port: 2575,
+      tls: {
+        cert: join(certs, "server.pem"),
+        key: join(certs, "server.key"),
+        ca: join(certs, "ca.pem"),
+      },
+      plaintext: false,
+      onStoreFailure: "AE",
+    });
+    expect(a?.destinations).toEqual([
+      {
+        kind: "mllp",
+        host: "lab.invalid",
+        port: 2576,
+        tls: { ca: undefined, cert: undefined, key: undefined },
+        plaintext: false,
+        ackTimeoutMs: 3_000,
+      },
+      {
+        kind: "mllp",
+        host: "lab.invalid",
+        port: 2577,
+        tls: {
+          ca: join(certs, "ca.pem"),
+          cert: join(certs, "client.pem"),
+          key: join(certs, "client.key"),
+        },
+        plaintext: false,
+        ackTimeoutMs: 500,
+      },
+    ]);
+    // The channel overrides the engine, and the source overrides the channel.
+    expect(b?.settings).toMatchObject({ onStoreFailure: "AR", ackTimeoutMs: 60_000 });
+    expect(b?.source).toEqual({
+      kind: "mllp",
+      host: "0.0.0.0",
+      port: 2585,
+      tls: undefined,
+      plaintext: true,
+      onStoreFailure: "close",
+    });
+    expect(b?.destinations[0]).toMatchObject({
+      tls: undefined,
+      plaintext: true,
+      ackTimeoutMs: 60_000,
+    });
+    expect(c?.source).toMatchObject({ onStoreFailure: "AR" });
+  });
+
+  it("refuses an MLLP endpoint without TLS unless it says plaintext: true, and refuses both", async () => {
+    const problems = await problemsOf({
+      "channels/a/channel.yaml":
+        "source:\n  mllp: { port: 2575 }\ndestinations:\n  - mllp: { host: h, port: 1 }\n",
+      "channels/b/channel.yaml":
+        "source:\n  mllp: { port: 2575, plaintext: false }\ndestinations:\n  - mllp: { host: h, port: 1, plaintext: true, tls: {} }\n",
+      "channels/c/channel.yaml":
+        "source:\n  mllp: { port: 2575, plaintext: true, tls: { cert: c, key: k } }\ndestinations:\n  - file: { dir: out }\n",
+    });
+    expect(problems).toEqual([
+      "channels/a/channel.yaml: source.mllp.tls: required: set tls: { cert, key }, or plaintext: true to run without TLS",
+      "channels/a/channel.yaml: destinations.0.mllp.tls: required: set tls: {} to verify the server against Node's built-in roots, tls: { ca } to trust your own CA, or plaintext: true to run without TLS",
+      "channels/b/channel.yaml: source.mllp.tls: required: set tls: { cert, key }, or plaintext: true to run without TLS",
+      "channels/b/channel.yaml: destinations.0.mllp.plaintext: cannot be set alongside tls; plaintext: true runs without TLS",
+      "channels/c/channel.yaml: source.mllp.plaintext: cannot be set alongside tls; plaintext: true runs without TLS",
+    ]);
+  });
+
+  it("refuses an MLLP endpoint on a channel whose format is not hl7v2", async () => {
+    const problems = await problemsOf({
+      "channels/a/channel.yaml": `
+format: fhir
+source:
+  mllp: { port: 2575, plaintext: true }
+destinations:
+  - file: { dir: out }
+  - mllp: { host: h, port: 1, plaintext: true }
+`,
+      "channels/b/channel.yaml": `
+format: text
+source:
+  file: { dir: in }
+destinations:
+  - mllp: { host: h, port: 1, plaintext: true }
+`,
+    });
+    const why = "MLLP carries HL7 v2 only, and this channel's format is";
+    expect(problems).toEqual([
+      `channels/a/channel.yaml: source.mllp: ${why} fhir; set format: hl7v2, or use another connector`,
+      `channels/a/channel.yaml: destinations.1.mllp: ${why} fhir; set format: hl7v2, or use another connector`,
+      `channels/b/channel.yaml: destinations.0.mllp: ${why} text; set format: hl7v2, or use another connector`,
+    ]);
+  });
+
+  it("names each MLLP problem by file and key", async () => {
+    const problems = await problemsOf({
+      "pathways.yaml": "defaults:\n  onStoreFailure: drop\n",
+      "channels/a/channel.yaml": `
+source:
+  mllp: { port: 70000, plaintext: true, onStoreFailure: retry }
+destinations:
+  - mllp: { host: h, port: 0, plaintext: true, ackTimeout: soon }
+  - mllp: { host: h, port: 1, tls: { cert: ./c.pem } }
+`,
+    });
+    const keys = problems.map((p) => p.replace(/^[^:]+: /, "").split(":")[0]);
+    expect(keys).toEqual([
+      "defaults.onStoreFailure",
+      "source.mllp.port",
+      "source.mllp.onStoreFailure",
+      "destinations.0.mllp.port",
+      "destinations.0.mllp.ackTimeout",
+      "destinations.1.mllp.tls.key",
     ]);
   });
 });

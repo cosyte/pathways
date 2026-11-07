@@ -22,6 +22,9 @@ importers:
       '@cosyte/hl7':
         specifier: ^0.1.0
         version: 0.1.0
+      '@cosyte/mllp':
+        specifier: ^0.1.0
+        version: 0.1.0(@cosyte/hl7@0.1.0)
       '@cosyte/x12':
         specifier: ^0.1.1
         version: 0.1.1
@@ -220,6 +223,15 @@ packages:
   '@cosyte/hl7@0.1.0':
     resolution: {integrity: sha512-vscdMcPWyB+VsXzmRzzFNsYWtiNotl5wm+kO2OTvGFw2T94BmHPXfFpswSbyiqBH4DlKBIrgi4PJIzOU78v6pw==}
     engines: {node: '>=22.0.0'}
+
+  '@cosyte/mllp@0.1.0':
+    resolution: {integrity: sha512-z6R33Rht2i2HClwTlii980VS31aRFEbM0lJ+zT5zS8oM1Pb6GAS1Vqtc2fHmf7f15BUr8keqY1aqJnpcnHXvyQ==}
+    engines: {node: '>=22.0.0'}
+    peerDependencies:
+      '@cosyte/hl7': '>=0.0.0'
+    peerDependenciesMeta:
+      '@cosyte/hl7':
+        optional: true
 
   '@cosyte/prettier-config@0.0.2':
     resolution: {integrity: sha512-nmplXQKNq5DZ+Su/tCUF6m9UJ9MOArhw5NG0X9yqi6B5zvxmVXtKMAX1N2bKkqpKhZqyQOR9ALGYVpTx022R/g==}
@@ -2151,6 +2163,10 @@ snapshots:
   '@cosyte/fhir@0.1.0': {}
 
   '@cosyte/hl7@0.1.0': {}
+
+  '@cosyte/mllp@0.1.0(@cosyte/hl7@0.1.0)':
+    optionalDependencies:
+      '@cosyte/hl7': 0.1.0
 
   '@cosyte/prettier-config@0.0.2': {}
 

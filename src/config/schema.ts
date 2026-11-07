@@ -59,11 +59,24 @@ const bytes = z
     return Number(amount) * UNIT_BYTES[unit as keyof typeof UNIT_BYTES];
   });
 
+/**
+ * What an MLLP source does when a message cannot be stored: `close` sends no ACK and closes the
+ * connection, so the sender sends again; `AE` and `AR` answer with that negative ACK instead.
+ */
+export const ON_STORE_FAILURE = ["close", "AE", "AR"] as const;
+
+/** One of {@link ON_STORE_FAILURE}. */
+export type OnStoreFailure = (typeof ON_STORE_FAILURE)[number];
+
+const onStoreFailure = z.enum(ON_STORE_FAILURE);
+
 /** Settings an engine sets as defaults and a channel can override. */
 const settingsShape = {
   timeout: duration.optional(),
   memory: megabytes.optional(),
   pollInterval: duration.optional(),
+  onStoreFailure: onStoreFailure.optional(),
+  ackTimeout: duration.optional(),
 };
 
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -206,6 +219,32 @@ const httpDestination = z
     }
   });
 
+const mllpSource = z
+  .strictObject({
+    port,
+    host: host.optional(),
+    tls: serverTls.optional(),
+    plaintext: z.boolean().optional(),
+    onStoreFailure: onStoreFailure.optional(),
+  })
+  .superRefine((value, ctx) => tlsOrPlaintext(value, ctx, LISTENER_TLS_REQUIRED));
+
+const mllpDestination = z
+  .strictObject({
+    host,
+    port,
+    tls: clientTls.optional(),
+    plaintext: z.boolean().optional(),
+    ackTimeout: duration.optional(),
+  })
+  .superRefine((value, ctx) =>
+    tlsOrPlaintext(
+      value,
+      ctx,
+      "required: set tls: {} to verify the server against Node's built-in roots, tls: { ca } to trust your own CA, or plaintext: true to run without TLS",
+    ),
+  );
+
 /** Exactly one key of a block that names one kind of connector. */
 function oneKind(kinds: readonly string[]) {
   return (value: Record<string, unknown>, ctx: z.RefinementCtx): void => {
@@ -216,8 +255,8 @@ function oneKind(kinds: readonly string[]) {
   };
 }
 
-const SOURCE_KINDS = ["file", "http"] as const;
-const DESTINATION_KINDS = ["file", "http"] as const;
+const SOURCE_KINDS = ["file", "http", "mllp"] as const;
+const DESTINATION_KINDS = ["file", "http", "mllp"] as const;
 
 /** `pathways.yaml` at the project root. Every key is optional. */
 export const projectSchema = z.strictObject({
@@ -234,41 +273,60 @@ export const projectSchema = z.strictObject({
 });
 
 /** `channels/<name>/channel.yaml`. */
-export const channelSchema = z.strictObject({
-  name: z
-    .string()
-    .regex(
-      /^[a-z0-9][a-z0-9-]*$/,
-      "lowercase letters, digits and hyphens, starting with a letter or digit",
-    )
-    .optional(),
-  format: z.enum(FORMATS).optional(),
-  source: z
-    .strictObject({
-      file: z
-        .strictObject({
-          dir: z.string().min(1),
-          minAge: duration.optional(),
-        })
-        .optional(),
-      http: httpSource.optional(),
-    })
-    .superRefine(oneKind(SOURCE_KINDS)),
-  transform: z.string().min(1).optional(),
-  destinations: z
-    .array(
-      z
-        .strictObject({
-          file: z.strictObject({ dir: z.string().min(1) }).optional(),
-          http: httpDestination.optional(),
-        })
-        .superRefine(oneKind(DESTINATION_KINDS)),
-    )
-    .min(1, "at least one destination"),
-  // A channel overrides the transform limits; how often the engine polls is engine-wide.
-  timeout: settingsShape.timeout,
-  memory: settingsShape.memory,
-});
+export const channelSchema = z
+  .strictObject({
+    name: z
+      .string()
+      .regex(
+        /^[a-z0-9][a-z0-9-]*$/,
+        "lowercase letters, digits and hyphens, starting with a letter or digit",
+      )
+      .optional(),
+    format: z.enum(FORMATS).optional(),
+    source: z
+      .strictObject({
+        file: z
+          .strictObject({
+            dir: z.string().min(1),
+            minAge: duration.optional(),
+          })
+          .optional(),
+        http: httpSource.optional(),
+        mllp: mllpSource.optional(),
+      })
+      .superRefine(oneKind(SOURCE_KINDS)),
+    transform: z.string().min(1).optional(),
+    destinations: z
+      .array(
+        z
+          .strictObject({
+            file: z.strictObject({ dir: z.string().min(1) }).optional(),
+            http: httpDestination.optional(),
+            mllp: mllpDestination.optional(),
+          })
+          .superRefine(oneKind(DESTINATION_KINDS)),
+      )
+      .min(1, "at least one destination"),
+    // A channel overrides the transform limits and the MLLP defaults; how often the engine polls is
+    // engine-wide.
+    timeout: settingsShape.timeout,
+    memory: settingsShape.memory,
+    onStoreFailure: settingsShape.onStoreFailure,
+    ackTimeout: settingsShape.ackTimeout,
+  })
+  .superRefine((channel, ctx) => {
+    // MLLP frames HL7 v2 and its ACKs are HL7 v2 messages, so an MLLP endpoint needs that format.
+    if ((channel.format ?? "hl7v2") === "hl7v2") return;
+    const message = `MLLP carries HL7 v2 only, and this channel's format is ${String(channel.format)}; set format: hl7v2, or use another connector`;
+    if (channel.source.mllp !== undefined) {
+      ctx.addIssue({ code: "custom", path: ["source", "mllp"], message });
+    }
+    for (const [index, destination] of channel.destinations.entries()) {
+      if (destination.mllp !== undefined) {
+        ctx.addIssue({ code: "custom", path: ["destinations", index, "mllp"], message });
+      }
+    }
+  });
 
 /** The settings in force for one channel, after the engine defaults and the channel's own. */
 export interface Settings {
@@ -278,6 +336,10 @@ export interface Settings {
   readonly memoryMb: number;
   /** How often `pathways start` looks for new work, in milliseconds. Engine-wide. */
   readonly pollIntervalMs: number;
+  /** What an MLLP source does when a message cannot be stored. A source can override it. */
+  readonly onStoreFailure: OnStoreFailure;
+  /** How long an MLLP destination waits to connect, and then for each ACK. A destination can override it. */
+  readonly ackTimeoutMs: number;
 }
 
 /** The defaults when neither `pathways.yaml` nor a channel sets a value. */
@@ -285,6 +347,8 @@ export const DEFAULT_SETTINGS: Settings = {
   timeoutMs: 5_000,
   memoryMb: 256,
   pollIntervalMs: 1_000,
+  onStoreFailure: "close",
+  ackTimeoutMs: 10_000,
 };
 
 /** How long a file must sit unchanged in a file source before it is read, by default. */
@@ -380,6 +444,32 @@ export interface HttpDestination {
   readonly plaintext: boolean;
 }
 
+/**
+ * An MLLP source: each framed message on a connection is one message, stored and then acknowledged.
+ * `tls` is undefined exactly when `plaintext`.
+ */
+export interface MllpSource {
+  readonly kind: "mllp";
+  readonly host: string;
+  readonly port: number;
+  readonly tls: ServerTlsFiles | undefined;
+  readonly plaintext: boolean;
+  readonly onStoreFailure: OnStoreFailure;
+}
+
+/**
+ * An MLLP destination: each output is sent framed and waits for its ACK. `tls` is undefined exactly
+ * when `plaintext`.
+ */
+export interface MllpDestination {
+  readonly kind: "mllp";
+  readonly host: string;
+  readonly port: number;
+  readonly tls: ClientTlsFiles | undefined;
+  readonly plaintext: boolean;
+  readonly ackTimeoutMs: number;
+}
+
 /** The health endpoint, from `pathways.yaml`. */
 export type HealthConfig = ListenerConfig;
 
@@ -389,10 +479,10 @@ export interface ChannelConfig {
   /** The channel's folder. Relative paths in its `channel.yaml` resolve against it. */
   readonly dir: string;
   readonly format: Format;
-  readonly source: FileSource | HttpSource;
+  readonly source: FileSource | HttpSource | MllpSource;
   /** The transform module, or `undefined` to pass each message through unchanged. */
   readonly transform: string | undefined;
-  readonly destinations: readonly (FileDestination | HttpDestination)[];
+  readonly destinations: readonly (FileDestination | HttpDestination | MllpDestination)[];
   readonly settings: Settings;
 }
 

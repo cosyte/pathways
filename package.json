@@ -110,6 +110,7 @@
     "@cosyte/ccda": "^0.1.0",
     "@cosyte/fhir": "^0.1.0",
     "@cosyte/hl7": "^0.1.0",
+    "@cosyte/mllp": "^0.1.0",
     "@cosyte/x12": "^0.1.1",
     "better-sqlite3": "^13.0.3",
     "kysely": "^0.29.8",
