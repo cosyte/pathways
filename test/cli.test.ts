@@ -13,12 +13,13 @@ import {
   LAB_TRANSFORM,
   makeProject,
 } from "./helpers.js";
+import { freePort, receiver, send, status } from "./net-helpers.js";
 
 afterEach(cleanUp);
 
 async function runCli(
   argv: readonly string[],
-  extra: { signal?: AbortSignal } = {},
+  extra: { signal?: AbortSignal; env?: Record<string, string> } = {},
 ): Promise<{ code: number; out: string; err: string }> {
   let out = "";
   let err = "";
@@ -143,6 +144,85 @@ describe("pathways start", () => {
       code: EXIT.failed,
       out: "",
       err: "pathways: the database could not be opened.\n",
+    });
+  });
+});
+
+describe("pathways start with HTTP and health", () => {
+  const HEALTH_TOKEN = "synthetic-health-token-0123456789";
+
+  it("serves health while running, and stops it with the engine", async () => {
+    const port = await freePort();
+    const root = await project({
+      "pathways.yaml": `defaults:\n  pollInterval: 20ms\nhealth: { port: ${port}, plaintext: true }\n`,
+    });
+    const stop = new AbortController();
+    const running = runCli(["start", "-C", root], {
+      signal: stop.signal,
+      env: { PATHWAYS_HEALTH_TOKEN: HEALTH_TOKEN },
+    });
+    const auth = { Authorization: `Bearer ${HEALTH_TOKEN}` };
+    let answer = await send(port, { method: "GET", headers: auth }).catch(() => undefined);
+    for (let i = 0; i < 100 && answer === undefined; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      answer = await send(port, { method: "GET", headers: auth }).catch(() => undefined);
+    }
+    expect(answer?.status).toBe(200);
+    expect(JSON.parse(answer?.body ?? "{}")).toMatchObject({
+      status: "ok",
+      channels: { adt: { status: "ok", source: "up" } },
+    });
+    expect((await send(port, { method: "GET" })).status).toBe(401);
+    stop.abort();
+    expect((await running).code).toBe(EXIT.ok);
+    await expect(send(port, { method: "GET", headers: auth })).rejects.toThrow();
+  });
+
+  it("does not serve health for a single pass", async () => {
+    const holder = await receiver(status(200));
+    try {
+      const root = await project({
+        "pathways.yaml": `health: { port: ${holder.port}, plaintext: true, auth: none }\n`,
+      });
+      expect((await runCli(["start", "--once", "-C", root])).code).toBe(EXIT.ok);
+    } finally {
+      await holder.close();
+    }
+  });
+
+  it("fails when the health endpoint cannot listen, naming only the code", async () => {
+    const holder = await receiver(status(200));
+    try {
+      const root = await project({
+        "pathways.yaml": `health: { port: ${holder.port}, plaintext: true, auth: none }\n`,
+      });
+      expect(await runCli(["start", "-C", root])).toEqual({
+        code: EXIT.failed,
+        out: "",
+        err: "pathways: the health endpoint could not listen (EADDRINUSE).\n",
+      });
+    } finally {
+      await holder.close();
+    }
+  });
+
+  it("refuses to start without a token it needs, as a configuration error", async () => {
+    const port = await freePort();
+    const root = await project({
+      "pathways.yaml": `health: { port: ${port}, plaintext: true }\n`,
+    });
+    expect(await runCli(["start", "-C", root], { env: {} })).toEqual({
+      code: EXIT.config,
+      out: "",
+      err: "pathways: the configuration is invalid:\n  pathways.yaml: health.auth: the environment variable PATHWAYS_HEALTH_TOKEN is not set\n",
+    });
+    const channelRoot = await project({
+      "channels/adt/channel.yaml": `source:\n  http: { port: ${port}, plaintext: true }\ndestinations:\n  - file: { dir: out }\n`,
+    });
+    expect(await runCli(["start", "--once", "-C", channelRoot], { env: {} })).toEqual({
+      code: EXIT.config,
+      out: "",
+      err: "pathways: the configuration is invalid:\n  channels/adt/channel.yaml: source.http.auth: the environment variable PATHWAYS_HTTP_TOKEN is not set\n",
     });
   });
 });

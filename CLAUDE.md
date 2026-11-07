@@ -11,6 +11,9 @@ The first slice runs: a file source, a TypeScript transform in a worker thread p
 `pathways init` writes the starter project in `templates/starter/` (`src/starter/`), and the
 `Dockerfile` builds the image on distroless Node 24.
 
+HTTP in and out (`src/connectors/http.ts`) and the health endpoint (`src/engine/health.ts`) share
+one listening server in `src/connectors/endpoint.ts` and the TLS loader in `src/connectors/tls.ts`.
+
 The plan is in the umbrella's `plans/pathways.md`: the V1 scope, the stack, delivery and error
 handling, and the HITRUST-driven controls. `plans/hitrust.md` holds the control map. Read both
 before changing behaviour, and update them in the same change that moves the work.
@@ -77,6 +80,16 @@ receiver with the wrong picture of a patient. Keep message text out of logs, err
 - `scripts/phi-scan.ts` is a thin caller of `@cosyte/script-utils/phi-scan`: 0 clean, 1 hits, 2
   anything it could not read. It is the starter floor (SSN and email shapes); add field-level
   detection for HL7 v2, FHIR, X12 and C-CDA when the first fixtures land.
+- Every network endpoint runs TLS unless its block says `plaintext: true`, which is refused
+  alongside `tls` and logged once at startup. A listening endpoint binds to 127.0.0.1 by default
+  and requires a bearer token (from an environment variable, never the YAML) unless `tls.ca`
+  makes it mutual TLS or the block says `auth: none`. Tokens are compared with
+  `bearerMatches` (SHA-256 digests through `timingSafeEqual`), never with `===`.
+- Secrets (tokens, credential headers, key files) are read when the engine starts, not when the
+  configuration loads, so `pathways test` never needs them. A missing one is a `ConfigError` that
+  names the file, the key and the variable, never the value.
+- The health body holds states and counts only. It answers 503 only when storage cannot be read or
+  a source cannot listen.
 - We never call Pathways HIPAA or HITRUST compliant or certified. It is built to the controls an
   assessment looks for; compliance belongs to the organization that runs it.
 - `templates/starter/` ships in the tarball (`files` in package.json). Its `gitignore` is written as

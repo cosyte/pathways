@@ -181,10 +181,10 @@ describe("Engine", () => {
         message.messageId === 1 ? Promise.reject(new DeliveryRejected("AE")) : Promise.resolve(),
     };
     const { root, engine, store, events } = await setUp(LAB_TRANSFORM, (channel) => ({
-      source: new FileSource({ dir: channel.source.dir, minAgeMs: 0 }),
+      source: new FileSource({ dir: join(channel.dir, "../../data/inbox"), minAgeMs: 0 }),
       destinations: [
         rejecting,
-        new FileDestination({ dir: channel.destinations[1]?.dir ?? "", extension: "hl7" }),
+        new FileDestination({ dir: join(channel.dir, "../../data/out-b"), extension: "hl7" }),
       ],
     }));
     await dropFile(data(root, "inbox", "1.hl7"), ADT_A01);
@@ -256,7 +256,8 @@ describe("Engine", () => {
       "channels/adt/transform.ts": LAB_TRANSFORM,
     });
     const [channel] = (await loadProject(root)).channels;
-    const built = connectorsFor(channel as ChannelConfig, Date.now, () => undefined);
+    const { logger } = captureLogger();
+    const built = connectorsFor(channel as ChannelConfig, { now: Date.now, logger, env: {} });
     expect(built.source).toBeInstanceOf(FileSource);
     expect(built.destinations).toHaveLength(2);
   });

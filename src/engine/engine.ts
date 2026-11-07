@@ -2,15 +2,26 @@ import { setTimeout as sleep } from "node:timers/promises";
 
 import type { Logger } from "pino";
 
-import type { ChannelConfig, Format, ProjectConfig } from "../config/schema.js";
+import { ConfigError } from "../config/load.js";
+import {
+  HEADER_VALUE,
+  type ChannelConfig,
+  type Format,
+  type ProjectConfig,
+} from "../config/schema.js";
+import { listenerSecurity, listenerWarnings, readEnv, type Env } from "../connectors/endpoint.js";
 import { FileDestination, FileSource } from "../connectors/file.js";
+import { HttpDestination, HttpSource } from "../connectors/http.js";
+import { loadClientTls } from "../connectors/tls.js";
 import {
   DeliveryRejected,
   type DestinationConnector,
+  type MessageSink,
   type SourceConnector,
 } from "../connectors/types.js";
 import type { MessageStore } from "../storage/store.js";
 import { ChannelWorker, type TransformOutcome } from "./channel-worker.js";
+import { channelStatus, type ChannelHealth, type HealthReport } from "./health.js";
 import type { FailureSummary } from "./worker-entry.js";
 
 /** The first retry waits this long; each later one waits twice as long as the one before. */
@@ -20,6 +31,12 @@ export const RETRY_MAX_MS = 300_000;
 
 /** The file extension a file destination writes for each format. */
 export const EXTENSIONS: Readonly<Record<Format, string>> = { hl7v2: "hl7", text: "txt" };
+
+/** The `Content-Type` an HTTP destination sends for each format, unless its headers set one. */
+export const CONTENT_TYPES: Readonly<Record<Format, string>> = {
+  hl7v2: "application/hl7-v2",
+  text: "text/plain",
+};
 
 /**
  * How long to wait before attempt number `attempts + 1`, after `attempts` failures.
@@ -54,31 +71,101 @@ export interface ChannelConnectors {
   readonly destinations: readonly DestinationConnector[];
 }
 
+/** What {@link connectorsFor} builds connectors with. */
+export interface ConnectorContext {
+  /** Epoch milliseconds now. */
+  readonly now: () => number;
+  readonly logger: Logger;
+  /** Where tokens and secret headers are read from. */
+  readonly env: Env;
+}
+
 /**
- * Builds the connectors a channel's configuration names.
+ * Builds the connectors a channel's configuration names, reading TLS files and secrets from the
+ * environment as it goes. Logs carry the channel, statuses and codes, never content.
  *
+ * @throws {ConfigError} when a TLS file, a token or a secret header cannot be had.
  * @example
  * ```ts
- * const { source, destinations } = connectorsFor(channel, Date.now, () => undefined);
+ * const { source, destinations } = connectorsFor(channel, { now: Date.now, logger, env: process.env });
  * ```
  */
 export function connectorsFor(
   channel: ChannelConfig,
-  now: () => number,
-  onReadError: (error: unknown) => void,
+  context: ConnectorContext,
 ): ChannelConnectors {
-  return {
-    source: new FileSource({
-      dir: channel.source.dir,
-      minAgeMs: channel.source.minAgeMs,
-      now,
-      onReadError,
-    }),
-    destinations: channel.destinations.map(
-      (destination) =>
-        new FileDestination({ dir: destination.dir, extension: EXTENSIONS[channel.format] }),
-    ),
-  };
+  const { now, logger, env } = context;
+  const file = `channels/${channel.name}/channel.yaml`;
+  const { source } = channel;
+  let sourceConnector: SourceConnector;
+  switch (source.kind) {
+    case "file":
+      sourceConnector = new FileSource({
+        dir: source.dir,
+        minAgeMs: source.minAgeMs,
+        now,
+        onReadError: (error) => {
+          logger.warn({
+            event: "source-read-failed",
+            channel: channel.name,
+            code: errorCode(error),
+          });
+        },
+      });
+      break;
+    case "http": {
+      const { tls, token } = listenerSecurity(source, env, `${file}: source.http`);
+      sourceConnector = new HttpSource({
+        host: source.host,
+        port: source.port,
+        path: source.path,
+        maxBytes: source.maxBytes,
+        tls,
+        token,
+        onRefused: (status) => {
+          logger.warn({ event: "http-refused", channel: channel.name, status });
+        },
+      });
+      break;
+    }
+  }
+  const destinations = channel.destinations.map((destination, index): DestinationConnector => {
+    switch (destination.kind) {
+      case "file":
+        return new FileDestination({ dir: destination.dir, extension: EXTENSIONS[channel.format] });
+      case "http": {
+        const where = `${file}: destinations.${index}.http`;
+        const headers: Record<string, string> = { "Content-Type": CONTENT_TYPES[channel.format] };
+        for (const [name, value] of Object.entries(destination.headers)) {
+          // A header the YAML sets replaces the default, whatever its case.
+          if (name.toLowerCase() === "content-type") delete headers["Content-Type"];
+          headers[name] =
+            "env" in value
+              ? readHeaderEnv(env, value.env, `${where}.headers.${name}`)
+              : value.value;
+        }
+        return new HttpDestination({
+          url: destination.url,
+          headers,
+          timeoutMs: destination.timeoutMs,
+          ...(destination.tls === undefined
+            ? {}
+            : { tls: loadClientTls(destination.tls, `${where}.tls`) }),
+        });
+      }
+    }
+  });
+  return { source: sourceConnector, destinations };
+}
+
+function readHeaderEnv(env: Env, name: string, where: string): string {
+  const value = readEnv(env, name, where);
+  if (!HEADER_VALUE.test(value)) {
+    throw new ConfigError([
+      `${where}: the environment variable ${name} holds characters a header cannot carry`,
+    ]);
+  }
+  return value;
 }
 
 /** What the engine runs on. */
@@ -90,12 +177,16 @@ export interface EngineOptions {
   readonly now?: () => number;
   /** Builds a channel's connectors; by default, from its configuration. */
   readonly connectors?: (channel: ChannelConfig) => ChannelConnectors;
+  /** Where tokens and secret headers are read from. Defaults to `process.env`. */
+  readonly env?: Env;
 }
 
 interface RunningChannel {
   readonly config: ChannelConfig;
   readonly worker: ChannelWorker;
   readonly connectors: ChannelConnectors;
+  /** Set while the channel's source cannot listen: how often it has failed and when to try next. */
+  down: { readonly attempts: number; readonly nextAt: number } | undefined;
 }
 
 /**
@@ -108,6 +199,8 @@ interface RunningChannel {
  *   it with growing waits, and later deliveries wait behind it; other destinations carry on. A
  *   delivery the receiver rejects for good is marked failed and the destination moves on.
  * - A message whose transform fails is marked failed, and the channel moves on to the next.
+ * - A source that cannot listen (its port is taken) is tried again with the same growing waits,
+ *   while the rest of the engine runs and the health endpoint answers 503.
  *
  * Logs carry ids, counts and error names only: never a message's content, and never a file name,
  * which can carry a patient's name.
@@ -131,9 +224,14 @@ export class Engine {
     this.now = options.now ?? Date.now;
   }
 
-  /** Starts every channel. Rejects, having stopped any it started, if a transform will not load. */
+  /**
+   * Starts every channel. Rejects, having stopped any it started, if a transform will not load or a
+   * connector's TLS files or secrets cannot be had (a `ConfigError`). A source that cannot listen
+   * does not stop the start: it is logged, reported on the health endpoint, and tried again.
+   */
   async start(): Promise<void> {
     const { project, logger } = this.options;
+    const env = this.options.env ?? process.env;
     try {
       for (const config of project.channels) {
         const worker = new ChannelWorker({
@@ -143,19 +241,14 @@ export class Engine {
           timeoutMs: config.settings.timeoutMs,
           memoryMb: config.settings.memoryMb,
         });
-        const onReadError = (error: unknown): void => {
-          logger.warn({
-            event: "source-read-failed",
-            channel: config.name,
-            code: errorCode(error),
-          });
-        };
         const connectors =
-          this.options.connectors?.(config) ?? connectorsFor(config, this.now, onReadError);
-        const channel = { config, worker, connectors };
+          this.options.connectors?.(config) ??
+          connectorsFor(config, { now: this.now, logger, env });
+        const channel: RunningChannel = { config, worker, connectors, down: undefined };
         this.channels.push(channel);
+        this.warnInsecure(config);
         await worker.start();
-        await connectors.source.start?.(this.sinkFor(config));
+        await this.startSource(channel);
       }
     } catch (error) {
       await this.stop();
@@ -166,6 +259,9 @@ export class Engine {
   /** One pass over every channel: take in, transform, deliver. */
   async tick(): Promise<void> {
     for (const channel of this.channels) {
+      if (channel.down !== undefined && channel.down.nextAt <= this.now()) {
+        await this.startSource(channel);
+      }
       await channel.connectors.source.poll?.(this.sinkFor(channel.config));
       await this.transformAll(channel);
       await this.deliverAll(channel);
@@ -182,7 +278,7 @@ export class Engine {
     }
   }
 
-  /** Stops every source that listens, then every worker. */
+  /** Stops every source that listens, then every worker and every destination's connections. */
   async stop(): Promise<void> {
     const channels = this.channels.splice(0);
     await Promise.all(
@@ -190,14 +286,109 @@ export class Engine {
         await channel.connectors.source.stop?.();
       }),
     );
-    await Promise.all(channels.map((channel) => channel.worker.stop()));
+    await Promise.all(
+      channels.flatMap((channel) => [
+        channel.worker.stop(),
+        ...channel.connectors.destinations.map(async (destination) => {
+          await destination.stop?.();
+        }),
+      ]),
+    );
   }
 
-  private sinkFor(config: ChannelConfig): { receive(body: Uint8Array): Promise<number> } {
+  /**
+   * Each channel's status and counts, for the health endpoint. Its `status` is `unavailable` only
+   * when storage cannot be read or a source cannot listen. Holds counts and states, never content.
+   */
+  async health(): Promise<HealthReport> {
+    const { project, store } = this.options;
+    const down = new Set(
+      this.channels.filter((channel) => channel.down !== undefined).map((c) => c.config.name),
+    );
+    const source = (name: string): "up" | "down" => (down.has(name) ? "down" : "up");
+    const channels: Record<string, ChannelHealth> = {};
+    let storage: HealthReport["storage"] = "ok";
+    try {
+      for (const { name } of project.channels) {
+        const [messages, counts, retrying] = await Promise.all([
+          store.messageCounts(name),
+          store.deliveryCounts(name),
+          store.retryingDeliveries(name),
+        ]);
+        const deliveries = { ...counts, retrying };
+        channels[name] = {
+          status: channelStatus(messages, deliveries),
+          source: source(name),
+          messages,
+          deliveries,
+        };
+      }
+    } catch {
+      storage = "unreachable";
+      for (const { name } of project.channels) {
+        channels[name] = { status: "unknown", source: source(name) };
+      }
+    }
+    const broken = storage !== "ok" || down.size > 0;
+    return { status: broken ? "unavailable" : "ok", storage, channels };
+  }
+
+  private warnInsecure(config: ChannelConfig): void {
+    const { logger } = this.options;
+    const { source } = config;
+    if (source.kind !== "file") {
+      for (const warning of listenerWarnings(source)) {
+        logger.warn({ event: warning, channel: config.name, endpoint: "source" });
+      }
+    }
+    for (const [index, destination] of config.destinations.entries()) {
+      if (destination.kind !== "file" && destination.plaintext) {
+        logger.warn({
+          event: "plaintext",
+          channel: config.name,
+          endpoint: "destination",
+          destination: index,
+        });
+      }
+    }
+  }
+
+  private async startSource(channel: RunningChannel): Promise<void> {
+    const { source } = channel.connectors;
+    if (source.start === undefined) return;
+    const { logger } = this.options;
+    try {
+      await source.start(this.sinkFor(channel.config));
+    } catch (error) {
+      const attempts = (channel.down?.attempts ?? 0) + 1;
+      const wait = retryDelay(attempts);
+      channel.down = { attempts, nextAt: this.now() + wait };
+      logger.error({
+        event: "source-start-failed",
+        channel: channel.config.name,
+        attempt: attempts,
+        retryInMs: wait,
+        code: errorCode(error),
+      });
+      return;
+    }
+    if (channel.down !== undefined) {
+      channel.down = undefined;
+      logger.info({ event: "source-started", channel: channel.config.name });
+    }
+  }
+
+  private sinkFor(config: ChannelConfig): MessageSink {
     const { store, logger } = this.options;
     return {
       receive: async (body) => {
-        const id = await store.receive(config.name, body);
+        let id: number;
+        try {
+          id = await store.receive(config.name, body);
+        } catch (error) {
+          logger.error({ event: "receive-failed", channel: config.name, code: errorCode(error) });
+          throw error;
+        }
         logger.info({
           event: "received",
           channel: config.name,
@@ -295,7 +486,15 @@ export class Engine {
   }
 }
 
-function errorCode(error: unknown): string | undefined {
+/**
+ * An error's `code`, when it has a string one: the only part of an error that is safe to log.
+ *
+ * @example
+ * ```ts
+ * errorCode(Object.assign(new Error("..."), { code: "EADDRINUSE" })); // "EADDRINUSE"
+ * ```
+ */
+export function errorCode(error: unknown): string | undefined {
   const code = (error as { code?: unknown } | undefined)?.code;
   return typeof code === "string" ? code : undefined;
 }

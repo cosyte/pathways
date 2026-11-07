@@ -79,6 +79,12 @@ export interface MessageStore {
     error: string,
   ): Promise<void>;
   failDelivery(deliveryId: number, error: string): Promise<void>;
+  /** How many messages of a channel stand at each status. The health endpoint reports these. */
+  messageCounts(channel: string): Promise<Record<MessageStatus, number>>;
+  /** How many deliveries of a channel stand at each status. */
+  deliveryCounts(channel: string): Promise<Record<DeliveryStatus, number>>;
+  /** How many of a channel's pending deliveries have failed at least once and wait for a retry. */
+  retryingDeliveries(channel: string): Promise<number>;
   close(): Promise<void>;
 }
 
@@ -337,5 +343,17 @@ export class Store implements MessageStore {
     const counts: Record<DeliveryStatus, number> = { pending: 0, delivered: 0, failed: 0 };
     for (const row of rows) counts[row.status] = Number(row.count);
     return counts;
+  }
+
+  /** How many of `channel`'s pending deliveries have failed at least once and wait for a retry. */
+  async retryingDeliveries(channel: string): Promise<number> {
+    const row = await this.db
+      .selectFrom("deliveries")
+      .select((eb) => eb.fn.countAll<number>().as("count"))
+      .where("channel", "=", channel)
+      .where("status", "=", "pending")
+      .where("attempts", ">", 0)
+      .executeTakeFirstOrThrow();
+    return Number(row.count);
   }
 }
