@@ -100,7 +100,7 @@ describe("a custom store under encryption at rest", () => {
 
     // The custom store was wrapped like SQLite: what it holds is ciphertext.
     const memory = opened.at(-1);
-    const stored = [...(memory?.messages ?? []), ...(memory?.deliveries ?? [])].map((row) =>
+    const stored = [...(memory?.messageRows ?? []), ...(memory?.deliveryRows ?? [])].map((row) =>
       Buffer.from(row.body).toString("latin1"),
     );
     expect(stored).toHaveLength(2);
@@ -110,12 +110,19 @@ describe("a custom store under encryption at rest", () => {
     }
     expect(ran.events.some((e) => e.event === "unencrypted-storage")).toBe(false);
 
-    // The hook saw every step, by ids and counts only: no body, encrypted or decrypted.
+    // The hook saw every step, by ids and counts only: no body, encrypted or decrypted. First come
+    // the audit log's entries for the configuration this first start saw.
     const events = bench.events["all"] ?? [];
     expect(events.map((e) => (e as { type: string }).type)).toEqual([
+      "audit",
+      "audit",
       "received",
       "transformed",
       "delivered",
+    ]);
+    expect(events.slice(0, 2)).toEqual([
+      expect.objectContaining({ action: "config", channel: undefined }),
+      expect.objectContaining({ action: "config", channel: "adt" }),
     ]);
     const json = JSON.stringify(events);
     for (const body of [ADT_A01, PLAIN, ...stored]) {

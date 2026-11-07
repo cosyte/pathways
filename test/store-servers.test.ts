@@ -170,8 +170,14 @@ for (const database of SERVER_DATABASES) {
           transformed: 1,
           filtered: 1,
           failed: 0,
+          cleared: 0,
         });
-        expect(await store.deliveryCounts("adt")).toEqual({ pending: 0, delivered: 1, failed: 0 });
+        expect(await store.deliveryCounts("adt")).toEqual({
+          pending: 0,
+          delivered: 1,
+          failed: 0,
+          cleared: 0,
+        });
       } finally {
         await store.close();
       }

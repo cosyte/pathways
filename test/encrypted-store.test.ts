@@ -124,7 +124,12 @@ for (const database of TEST_DATABASES) {
           expect(text(delivery?.body ?? new Uint8Array())).toBe("out-1");
         }
         expect(await store.messageCounts("adt")).toMatchObject({ received: 1, transformed: 1 });
-        expect(await store.deliveryCounts("adt")).toEqual({ pending: 4, delivered: 0, failed: 0 });
+        expect(await store.deliveryCounts("adt")).toEqual({
+          pending: 4,
+          delivered: 0,
+          failed: 0,
+          cleared: 0,
+        });
         expect(await store.retryingDeliveries("adt")).toBe(0);
 
         // Two copies of one body are two different ciphertexts.
@@ -164,7 +169,12 @@ for (const database of TEST_DATABASES) {
           ].sort(),
         );
         expect(await store.retryingDeliveries("adt")).toBe(1);
-        expect(await store.deliveryCounts("adt")).toEqual({ pending: 2, delivered: 1, failed: 1 });
+        expect(await store.deliveryCounts("adt")).toEqual({
+          pending: 2,
+          delivered: 1,
+          failed: 1,
+          cleared: 0,
+        });
       });
 
       it("refuses a body that was changed underneath, with a typed error and never the bytes", async () => {
@@ -476,8 +486,14 @@ export default (msg: string): string => {
       transformed: 1,
       filtered: 0,
       failed: 1,
+      cleared: 0,
     });
-    expect(await wrapped.deliveryCounts("adt")).toEqual({ pending: 0, delivered: 1, failed: 1 });
+    expect(await wrapped.deliveryCounts("adt")).toEqual({
+      pending: 0,
+      delivered: 1,
+      failed: 1,
+      cleared: 0,
+    });
     expect(lines.join("")).not.toContain("TESTPATIENT");
     await store.close();
 

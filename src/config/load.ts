@@ -438,6 +438,8 @@ function mergeSettings(
     pollInterval?: number | undefined;
     onStoreFailure?: OnStoreFailure | undefined;
     ackTimeout?: number | undefined;
+    retention?: number | undefined;
+    retentionInterval?: number | undefined;
   },
 ): Settings {
   return {
@@ -446,6 +448,8 @@ function mergeSettings(
     pollIntervalMs: override.pollInterval ?? base.pollIntervalMs,
     onStoreFailure: override.onStoreFailure ?? base.onStoreFailure,
     ackTimeoutMs: override.ackTimeout ?? base.ackTimeoutMs,
+    retentionMs: override.retention ?? base.retentionMs,
+    retentionIntervalMs: override.retentionInterval ?? base.retentionIntervalMs,
   };
 }
 

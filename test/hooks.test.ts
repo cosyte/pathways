@@ -238,7 +238,12 @@ describe("lifecycle hooks in the engine", () => {
     await engine.tick();
     // Every delivery was done while the hanging hook still had both its calls ahead of it.
     expect(bench.outbox["out"]).toEqual(["synthetic one", "synthetic two"]);
-    expect(await store.deliveryCounts("text")).toEqual({ pending: 0, delivered: 2, failed: 0 });
+    expect(await store.deliveryCounts("text")).toEqual({
+      pending: 0,
+      delivered: 2,
+      failed: 0,
+      cleared: 0,
+    });
     expect(events.filter((e) => e.event === "hook-timeout")).toEqual([]);
     await eventually(() => events.filter((e) => e.event === "hook-timeout").length === 2);
     await engine.stop();

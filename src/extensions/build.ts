@@ -25,6 +25,18 @@ const STORE_METHODS = Object.keys({
   messageCounts: true,
   deliveryCounts: true,
   retryingDeliveries: true,
+  channels: true,
+  message: true,
+  messageBody: true,
+  deliveries: true,
+  outputs: true,
+  listMessages: true,
+  listRetrying: true,
+  requeue: true,
+  clear: true,
+  expire: true,
+  appendAudit: true,
+  auditEntries: true,
   close: true,
 } satisfies Record<keyof MessageStore, true>);
 

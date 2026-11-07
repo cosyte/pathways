@@ -6,9 +6,14 @@ import {
   type ColumnType,
   type CreateTableBuilder,
   type Expression,
+  type ExpressionBuilder,
+  type Generated,
   type Insertable,
   type RawBuilder,
+  type Selectable,
   type SelectQueryBuilder,
+  type SqlBool,
+  type Transaction,
 } from "kysely";
 import { Migrator, type Migration, type MigrationProvider } from "kysely/migration";
 
@@ -18,24 +23,73 @@ import type { Env } from "../connectors/endpoint.js";
 import { dialectFor, type DriverImport } from "./dialects.js";
 
 /**
- * Where a stored message stands.
+ * Where a stored message stands. `cleared`: it failed, and an operator cleared it with
+ * `pathways clear`.
  *
  * @example
  * ```ts
  * const done = (status: MessageStatus): boolean => status === "transformed" || status === "filtered";
  * ```
  */
-export type MessageStatus = "received" | "transformed" | "filtered" | "failed";
+export type MessageStatus = "received" | "transformed" | "filtered" | "failed" | "cleared";
 
 /**
- * Where one delivery of a message to one destination stands.
+ * Where one delivery of a message to one destination stands. `cleared`: it failed for good, and an
+ * operator cleared it, or replayed its message.
  *
  * @example
  * ```ts
  * const open = (status: DeliveryStatus): boolean => status === "pending";
  * ```
  */
-export type DeliveryStatus = "pending" | "delivered" | "failed";
+export type DeliveryStatus = "pending" | "delivered" | "failed" | "cleared";
+
+/**
+ * Every state a message can be in, as an operator sees it. {@link messageState} says how each is
+ * worked out.
+ *
+ * @example
+ * ```ts
+ * MESSAGE_STATES.includes("retrying"); // true
+ * ```
+ */
+export const MESSAGE_STATES = [
+  "received",
+  "queued",
+  "retrying",
+  "delivered",
+  "filtered",
+  "failed",
+  "cleared",
+] as const;
+
+/**
+ * A message's state as an operator sees it: its status, and for a transformed one, its deliveries.
+ *
+ * @example
+ * ```ts
+ * const waiting: readonly MessageState[] = ["received", "queued", "retrying"];
+ * ```
+ */
+export type MessageState = (typeof MESSAGE_STATES)[number];
+
+/**
+ * How many of one message's deliveries stand at each status. `retrying` counts the pending ones
+ * that have failed at least once, so it is part of `pending`.
+ *
+ * @example
+ * ```ts
+ * const open = (tally: DeliveryTally): number => tally.pending + tally.failed;
+ * ```
+ */
+export type DeliveryTally = Readonly<Record<DeliveryStatus | "retrying", number>>;
+
+/**
+ * Retention marks the messages it is about to delete with this status, inside the transaction that
+ * deletes them, so a concurrent change takes them out of the batch. It is never committed.
+ */
+const EXPIRING = "expiring";
+type StoredStatus = MessageStatus | typeof EXPIRING;
 
 /**
  * A 64-bit integer column. pg and tedious return one as a string, so every read goes through
@@ -51,13 +105,17 @@ interface MessagesTable {
   channel: string;
   received_at: string;
   body: Uint8Array;
-  status: MessageStatus;
+  status: StoredStatus;
   error: string | null;
   updated_at: string;
   /** A hash of who sent the message and its control ID, for spotting a repeat. Since 0002. */
   dedup_key: string | null;
   /** The latest earlier message with the same `dedup_key`: set means a possible duplicate. Since 0002. */
   duplicate_of: ColumnType<number | string | null, number | null, number | null>;
+  /** The body's size in bytes, as received. Since 0003; null for messages stored before it. */
+  size: ColumnType<number | string | null, number | null, number | null>;
+  /** How often the message was replayed or resent: its current deliveries carry this. Since 0003. */
+  generation: Generated<number>;
 }
 
 interface DeliveriesTable {
@@ -72,11 +130,27 @@ interface DeliveriesTable {
   next_attempt_at: Int64;
   last_error: string | null;
   delivered_at: string | null;
+  /** The message's generation this delivery was queued for. Since 0003. */
+  generation: Generated<number>;
+}
+
+/** The audit log. Rows are only ever inserted: nothing here updates or deletes one. Since 0003. */
+interface AuditLogTable {
+  id: Id;
+  at: string;
+  actor: string;
+  action: AuditAction;
+  outcome: AuditOutcome;
+  channel: string | null;
+  message_id: ColumnType<number | string | null, number | null, never>;
+  /** JSON: counts, statuses, codes and hashes. Never content. */
+  detail: string | null;
 }
 
 interface Tables {
   messages: MessagesTable;
   deliveries: DeliveriesTable;
+  audit_log: AuditLogTable;
 }
 
 /**
@@ -96,6 +170,11 @@ export interface StoreReceiveOptions {
   readonly duplicateKey?: string | undefined;
   /** Stores the message as `failed`, with this reason, so it is kept but never transformed. */
   readonly failure?: string | undefined;
+  /**
+   * The body's size in bytes as it arrived; defaults to `body.byteLength`. A storage layer that
+   * changes the body on its way in, such as encryption, passes the original size along.
+   */
+  readonly size?: number | undefined;
 }
 
 /**
@@ -112,13 +191,88 @@ export interface ReceivedMessage {
   readonly duplicateOf: number | undefined;
 }
 
-/** What storage holds about one message, without its body. */
-export interface StoredMessage {
+/**
+ * What storage holds about one message, without its body or its error: safe to list.
+ *
+ * @example
+ * ```ts
+ * const { items } = await store.listMessages({ state: "failed", limit: 20 });
+ * const ids = items.map((message: MessageSummary) => message.id);
+ * ```
+ */
+export interface MessageSummary {
   readonly id: number;
   readonly channel: string;
   readonly status: MessageStatus;
-  readonly error: string | null;
+  /** The status and the current deliveries, as an operator sees them. */
+  readonly state: MessageState;
+  readonly receivedAt: string;
+  /** When the message last changed: transformed, failed, replayed or cleared. */
+  readonly updatedAt: string;
+  /** The body's size in bytes, or null for a message stored before sizes were kept. */
+  readonly size: number | null;
+  /** The latest earlier message with the same sender and control ID, when there is one. */
   readonly duplicateOf: number | null;
+  /** 0 until the message is first replayed or resent; one more each time. */
+  readonly generation: number;
+  /** The deliveries of the current generation, by status. */
+  readonly deliveries: DeliveryTally;
+}
+
+/**
+ * What storage holds about one message, without its body.
+ *
+ * @example
+ * ```ts
+ * const message: StoredMessage | undefined = await store.message(12);
+ * ```
+ */
+export interface StoredMessage extends MessageSummary {
+  /**
+   * Why the message failed, as stored. The part after the second `": "` is the error's own text,
+   * which can quote the message: never print it.
+   */
+  readonly error: string | null;
+}
+
+/**
+ * One delivery of a message, without its body.
+ *
+ * @example
+ * ```ts
+ * const waiting = (await store.deliveries(12)).filter((d: StoredDelivery) => d.status === "pending");
+ * ```
+ */
+export interface StoredDelivery {
+  readonly id: number;
+  readonly destination: number;
+  /** Which output of the transform this is, from 0. */
+  readonly seq: number;
+  readonly generation: number;
+  readonly status: DeliveryStatus;
+  readonly attempts: number;
+  /** Epoch milliseconds before which it is not tried again; 0 when due at once. */
+  readonly nextAttemptAt: number;
+  readonly deliveredAt: string | null;
+  /** The last failure, as stored: a stage and a code, such as `delivery: ECONNREFUSED`. */
+  readonly error: string | null;
+}
+
+/**
+ * A pending delivery that has failed at least once and waits to be tried again.
+ *
+ * @example
+ * ```ts
+ * const late = (d: RetryingDelivery): boolean => d.nextAttemptAt > Date.now() + 60_000;
+ * ```
+ */
+export interface RetryingDelivery {
+  readonly id: number;
+  readonly messageId: number;
+  readonly destination: number;
+  readonly attempts: number;
+  /** Epoch milliseconds of the next try. */
+  readonly nextAttemptAt: number;
 }
 
 /**
@@ -153,14 +307,267 @@ export interface PendingDelivery {
 }
 
 /**
- * What the engine needs from storage. {@link Store} implements it on SQLite, PostgreSQL, MySQL or
- * MariaDB, and SQL Server; a storage adapter for anything else implements the same methods, and its
- * module's `StoreFactory` returns it. A layer around a store (encryption at rest) wraps them.
+ * Which messages {@link MessageStore.listMessages} returns: newest first, every filter optional.
+ *
+ * @example
+ * ```ts
+ * const query: MessageQuery = { channel: "adt", state: "failed", since: "2026-11-01T00:00:00.000Z", limit: 50 };
+ * ```
+ */
+export interface MessageQuery {
+  readonly channel?: string | undefined;
+  readonly state?: MessageState | undefined;
+  /** Received at or after this time (ISO 8601, UTC). */
+  readonly since?: string | undefined;
+  /** Received before this time (ISO 8601, UTC). */
+  readonly until?: string | undefined;
+  /** Only ids below this one: the `next` of the page before. */
+  readonly before?: number | undefined;
+  readonly limit: number;
+}
+
+/**
+ * One page of results, newest first. `next` is the `before` that fetches the page after it.
+ *
+ * @example
+ * ```ts
+ * const first: Page<MessageSummary> = await store.listMessages({ limit: 50 });
+ * const second = await store.listMessages({ limit: 50, before: first.next });
+ * ```
+ */
+export interface Page<T> {
+  readonly items: readonly T[];
+  readonly next: number | undefined;
+}
+
+/**
+ * What a replay or a resend asks storage to record. Storage checks the message still stands where
+ * the caller found it, and changes nothing otherwise.
+ *
+ * @example
+ * ```ts
+ * const request: RequeueRequest = { mode: "resend", expected: "transformed", outputs, destinations: 2 };
+ * ```
+ */
+export interface RequeueRequest {
+  /** `replay` ran the transform again; `resend` queues the stored outputs again. */
+  readonly mode: "replay" | "resend";
+  /** The status the caller read before transforming. */
+  readonly expected: MessageStatus;
+  /**
+   * The outputs to queue, in order, for each of `destinations`. None, without a `failure`, means the
+   * transform filtered the message out.
+   */
+  readonly outputs: readonly Uint8Array[];
+  /** What the replayed transform failed with, as stored; the message is marked failed. */
+  readonly failure?: string | undefined;
+  /** How many destinations the channel has now. */
+  readonly destinations: number;
+}
+
+/**
+ * Why storage did not record a replay or a clear.
+ *
+ * @example
+ * ```ts
+ * const retryable = (reason: RefusalReason): boolean => reason === "changed" || reason === "pending";
+ * ```
+ */
+export type RefusalReason = "not-found" | "changed" | "pending" | "not-failed";
+
+/**
+ * What a replay or a resend did, with the audit entry written in the same transaction.
+ *
+ * @example
+ * ```ts
+ * const result: RequeueResult = await store.requeue(12, request, "noah");
+ * if (!result.done) console.log(result.reason);
+ * ```
+ */
+export type RequeueResult =
+  | {
+      readonly done: true;
+      readonly status: MessageStatus;
+      /** Deliveries queued, at the back of each destination's queue. */
+      readonly queued: number;
+      /** Earlier deliveries that had failed for good, now cleared. */
+      readonly superseded: number;
+      readonly generation: number;
+      readonly entry: AuditEntry;
+    }
+  | {
+      readonly done: false;
+      readonly reason: Extract<RefusalReason, "not-found" | "changed" | "pending">;
+      readonly entry: AuditEntry;
+    };
+
+/**
+ * What a clear did, with the audit entry written in the same transaction.
+ *
+ * @example
+ * ```ts
+ * const result: ClearResult = await store.clear(12, "noah");
+ * if (result.done) console.log(result.messages, result.deliveries);
+ * ```
+ */
+export type ClearResult =
+  | {
+      readonly done: true;
+      /** 1 when the message itself had failed, else 0. */
+      readonly messages: number;
+      /** Its deliveries that had failed for good. */
+      readonly deliveries: number;
+      readonly entry: AuditEntry;
+    }
+  | {
+      readonly done: false;
+      readonly reason: Extract<RefusalReason, "not-found" | "not-failed">;
+      readonly entry: AuditEntry;
+    };
+
+/**
+ * What retention deleted, or would delete, from one channel.
+ *
+ * @example
+ * ```ts
+ * const { messages, deliveries }: ExpireResult = await store.expire("adt", cutoff, true);
+ * ```
+ */
+export interface ExpireResult {
+  readonly messages: number;
+  readonly deliveries: number;
+}
+
+/**
+ * Every action the audit log records:
+ *
+ * - `search`: messages listed; `view`: one message's details shown, without content;
+ * - `content-view`: a message's content shown;
+ * - `replay`, `resend`, `clear`: what the commands of the same names did;
+ * - `retention`: a retention run and what it deleted;
+ * - `config`: a change to the configuration, seen when the engine started.
+ *
+ * @example
+ * ```ts
+ * AUDIT_ACTIONS.includes("content-view"); // true
+ * ```
+ */
+export const AUDIT_ACTIONS = [
+  "search",
+  "view",
+  "content-view",
+  "replay",
+  "resend",
+  "clear",
+  "retention",
+  "config",
+] as const;
+
+/**
+ * One of {@link AUDIT_ACTIONS}.
+ *
+ * @example
+ * ```ts
+ * const action: AuditAction = "content-view";
+ * ```
+ */
+export type AuditAction = (typeof AUDIT_ACTIONS)[number];
+
+/**
+ * How an audited action ended: done, refused (its `detail.reason` says why), or no such message.
+ *
+ * @example
+ * ```ts
+ * const failed = (outcome: AuditOutcome): boolean => outcome !== "ok";
+ * ```
+ */
+export type AuditOutcome = "ok" | "refused" | "not-found";
+
+/**
+ * An audit entry's particulars: counts, statuses, codes and hashes. Never content.
+ *
+ * @example
+ * ```ts
+ * const detail: AuditDetail = { status: "transformed", queued: 2 };
+ * ```
+ */
+export type AuditDetail = Readonly<Record<string, string | number | boolean>>;
+
+/**
+ * An audit entry to append. The store adds the time and the actor.
+ *
+ * @example
+ * ```ts
+ * await store.appendAudit("noah", [{ action: "content-view", channel: "adt", messageId: 12 }]);
+ * ```
+ */
+export interface AuditInput {
+  readonly action: AuditAction;
+  /** Defaults to `ok`. */
+  readonly outcome?: AuditOutcome | undefined;
+  readonly channel?: string | undefined;
+  readonly messageId?: number | undefined;
+  readonly detail?: AuditDetail | undefined;
+}
+
+/**
+ * One entry of the audit log, as stored.
+ *
+ * @example
+ * ```ts
+ * const line = (entry: AuditEntry): string => `${entry.at} ${entry.actor} ${entry.action}`;
+ * ```
+ */
+export interface AuditEntry {
+  readonly id: number;
+  /** When, in ISO 8601 UTC. */
+  readonly at: string;
+  /** The operating system user who acted. */
+  readonly actor: string;
+  readonly action: AuditAction;
+  readonly outcome: AuditOutcome;
+  readonly channel: string | null;
+  readonly messageId: number | null;
+  readonly detail: AuditDetail;
+}
+
+/**
+ * Which audit entries {@link MessageStore.auditEntries} returns: newest first, filters optional.
+ *
+ * @example
+ * ```ts
+ * const views = await store.auditEntries({ action: "content-view", since: "2026-11-01", limit: 100 });
+ * ```
+ */
+export interface AuditQuery {
+  readonly action?: AuditAction | undefined;
+  readonly channel?: string | undefined;
+  readonly messageId?: number | undefined;
+  /** At or after this time (ISO 8601, UTC). */
+  readonly since?: string | undefined;
+  /** Before this time (ISO 8601, UTC). */
+  readonly until?: string | undefined;
+  /** Only ids below this one: the `next` of the page before. */
+  readonly before?: number | undefined;
+  readonly limit: number;
+}
+
+/**
+ * What the engine and the operator commands need from storage. {@link Store} implements it on
+ * SQLite, PostgreSQL, MySQL or MariaDB, and SQL Server; a storage adapter for anything else
+ * implements the same methods, and its module's `StoreFactory` returns it. A layer around a store
+ * (encryption at rest) wraps them: every method that takes or returns a body or an error's text is
+ * here, so a wrapping layer sees them all.
  *
  * Every method is the engine's only path to that data, so an adapter keeps these promises: `receive`
  * is durable before it resolves; `completeTransform` writes all its deliveries and the message's new
  * status, or none of them; `nextDelivery` returns the lowest pending id for that destination, so
- * deliveries stay in order; and a new delivery is due at once (`nextAttemptAt` 0).
+ * deliveries stay in order; and a new delivery is due at once (`nextAttemptAt` 0). For the operator
+ * commands: `requeue` and `clear` change nothing unless the message still stands where the caller
+ * found it, and write their audit entry in the same transaction as their change; `expire` deletes
+ * only done messages, with their deliveries, and never an audit entry.
+ *
+ * The audit log has two methods, append and read, and no way to change or remove an entry.
  *
  * @example
  * ```ts
@@ -206,6 +613,42 @@ export interface MessageStore {
   deliveryCounts(channel: string): Promise<Record<DeliveryStatus, number>>;
   /** How many of a channel's pending deliveries have failed at least once and wait for a retry. */
   retryingDeliveries(channel: string): Promise<number>;
+
+  /** Every channel with a stored message, by name. */
+  channels(): Promise<string[]>;
+  /** One message, without its body, or `undefined` if there is none. Its `error` is raw: see there. */
+  message(id: number): Promise<StoredMessage | undefined>;
+  /** One message's body as it arrived, or `undefined` if there is none. */
+  messageBody(id: number): Promise<Uint8Array | undefined>;
+  /** A message's deliveries, every generation, oldest first, without bodies. */
+  deliveries(messageId: number): Promise<StoredDelivery[]>;
+  /** The outputs of a message's current generation, in order; none when it has none. */
+  outputs(messageId: number): Promise<Uint8Array[]>;
+  /** A page of messages, newest first, without bodies or errors. */
+  listMessages(query: MessageQuery): Promise<Page<MessageSummary>>;
+  /** A channel's retrying deliveries, oldest first, at most `limit`. */
+  listRetrying(channel: string, limit: number): Promise<RetryingDelivery[]>;
+  /**
+   * Records a replay or a resend: the message's new status, a new generation, and fresh deliveries
+   * at the back of each destination's queue. Refuses, changing nothing, when the message has moved
+   * since the caller read it or has deliveries still pending. The audit entry is written in the
+   * same transaction, whichever way it goes.
+   */
+  requeue(messageId: number, request: RequeueRequest, actor: string): Promise<RequeueResult>;
+  /**
+   * Marks a failed message, and its deliveries that failed for good, `cleared`. Refuses when there
+   * is nothing failed. The audit entry is written in the same transaction.
+   */
+  clear(messageId: number, actor: string): Promise<ClearResult>;
+  /**
+   * Deletes a channel's messages that are done (delivered, filtered or cleared) and whose last
+   * activity is before `cutoff` (ISO 8601), with their deliveries. With `dryRun`, counts them only.
+   */
+  expire(channel: string, cutoff: string, dryRun: boolean): Promise<ExpireResult>;
+  /** Appends entries to the audit log, stamped with the time and `actor`. */
+  appendAudit(actor: string, entries: readonly AuditInput[]): Promise<AuditEntry[]>;
+  /** A page of the audit log, newest first. */
+  auditEntries(query: AuditQuery): Promise<Page<AuditEntry>>;
   close(): Promise<void>;
 }
 
@@ -418,7 +861,192 @@ function migrations(kind: StorageKind): Record<string, Migration> {
           .execute();
       },
     },
+    "0003-operator-and-audit": {
+      async up(db: Kysely<unknown>): Promise<void> {
+        // Sizes are kept from now on; a message stored before has none, rather than a guess.
+        await db.schema.alterTable("messages").addColumn("size", t.int64).execute();
+        await db.schema
+          .alterTable("messages")
+          .addColumn("generation", "integer", (col) => col.notNull().defaultTo(0))
+          .execute();
+        await db.schema
+          .alterTable("deliveries")
+          .addColumn("generation", "integer", (col) => col.notNull().defaultTo(0))
+          .execute();
+        // A message's deliveries, for its state, a replay's checks and retention.
+        await db.schema
+          .createIndex("deliveries_by_message")
+          .on("deliveries")
+          .columns(["message_id", "status"])
+          .execute();
+        // Append-only: nothing in Pathways updates or deletes a row of it.
+        await db.schema
+          .createTable("audit_log")
+          .addColumn("id", t.key, t.numbered)
+          .addColumn("at", t.time, (col) => col.notNull())
+          .addColumn("actor", t.name, (col) => col.notNull())
+          .addColumn("action", t.status, (col) => col.notNull())
+          .addColumn("outcome", t.status, (col) => col.notNull())
+          .addColumn("channel", t.name)
+          .addColumn("message_id", t.int64)
+          .addColumn("detail", t.detail)
+          .$call(t.table)
+          .execute();
+        await db.schema
+          .createIndex("audit_log_by_message")
+          .on("audit_log")
+          .columns(["message_id", "id"])
+          .execute();
+      },
+    },
   };
+}
+
+/** How many messages retention deletes in one transaction, so the engine is never held up long. */
+const EXPIRE_BATCH = 500;
+
+/**
+ * A message's state from its status and its current deliveries: a transformed message is `failed`
+ * if a delivery failed for good, else `retrying` if one waits to be tried again, else `queued` if
+ * one waits its first try, else `cleared` if an operator cleared one, else `delivered`. Any other
+ * status is its own state.
+ *
+ * @example
+ * ```ts
+ * messageState("transformed", { pending: 1, retrying: 1, delivered: 0, failed: 0, cleared: 0 }); // "retrying"
+ * ```
+ */
+export function messageState(status: MessageStatus, deliveries: DeliveryTally): MessageState {
+  if (status !== "transformed") return status;
+  if (deliveries.failed > 0) return "failed";
+  if (deliveries.retrying > 0) return "retrying";
+  if (deliveries.pending > 0) return "queued";
+  if (deliveries.cleared > 0) return "cleared";
+  return "delivered";
+}
+
+type MessagesBuilder = ExpressionBuilder<Tables, "messages">;
+
+/** Whether the message has a delivery of its current generation at one of `statuses`. */
+function hasCurrent(
+  eb: MessagesBuilder,
+  statuses: readonly DeliveryStatus[],
+  retried?: boolean,
+): Expression<SqlBool> {
+  let query = eb
+    .selectFrom("deliveries")
+    .select("deliveries.id")
+    .whereRef("deliveries.message_id", "=", "messages.id")
+    .whereRef("deliveries.generation", "=", "messages.generation")
+    .where("deliveries.status", "in", statuses);
+  if (retried === true) query = query.where("deliveries.attempts", ">", 0);
+  return eb.exists(query);
+}
+
+/** {@link messageState}, as a condition. The two must agree; the tests hold them to it. */
+function stateIs(eb: MessagesBuilder, state: MessageState): Expression<SqlBool> {
+  if (state === "received" || state === "filtered") return eb("messages.status", "=", state);
+  const transformed = eb("messages.status", "=", "transformed");
+  const failed = hasCurrent(eb, ["failed"]);
+  const retrying = hasCurrent(eb, ["pending"], true);
+  const pending = hasCurrent(eb, ["pending"]);
+  const cleared = hasCurrent(eb, ["cleared"]);
+  switch (state) {
+    case "failed":
+      return eb.or([eb("messages.status", "=", "failed"), eb.and([transformed, failed])]);
+    case "retrying":
+      return eb.and([transformed, eb.not(failed), retrying]);
+    case "queued":
+      return eb.and([transformed, eb.not(failed), eb.not(retrying), pending]);
+    case "cleared":
+      return eb.or([
+        eb("messages.status", "=", "cleared"),
+        eb.and([transformed, eb.not(failed), eb.not(pending), cleared]),
+      ]);
+    case "delivered":
+      return eb.and([transformed, eb.not(failed), eb.not(pending), eb.not(cleared)]);
+  }
+}
+
+/**
+ * Whether retention may delete the message: done (filtered, cleared, or transformed with every
+ * delivery delivered or cleared) and nothing about it happened since `cutoff`.
+ */
+function expirable(eb: MessagesBuilder, cutoff: string): Expression<SqlBool> {
+  return eb.and([
+    eb("messages.updated_at", "<", cutoff),
+    eb.or([
+      eb("messages.status", "in", ["filtered", "cleared"]),
+      eb.and([
+        eb("messages.status", "=", "transformed"),
+        eb.not(
+          eb.exists(
+            eb
+              .selectFrom("deliveries")
+              .select("deliveries.id")
+              .whereRef("deliveries.message_id", "=", "messages.id")
+              .where((d) =>
+                d.or([
+                  d("deliveries.status", "in", ["pending", "failed"]),
+                  d("deliveries.delivered_at", ">=", cutoff),
+                ]),
+              ),
+          ),
+        ),
+      ]),
+    ]),
+  ]);
+}
+
+/** A status read back. Retention's `expiring` is never committed, so it is never read. */
+function readStatus(status: StoredStatus): MessageStatus {
+  /* v8 ignore start: retention's transaction deletes every row it marks before it commits */
+  if (status === EXPIRING) {
+    throw new Error("a message retention was deleting was read");
+  }
+  /* v8 ignore stop */
+  return status;
+}
+
+function emptyTally(): Record<DeliveryStatus | "retrying", number> {
+  return { pending: 0, retrying: 0, delivered: 0, failed: 0, cleared: 0 };
+}
+
+/** Thrown inside a transaction to roll it back and say why. */
+class Refusal extends Error {
+  constructor(readonly reason: RefusalReason) {
+    super(reason);
+    this.name = "Refusal";
+  }
+}
+
+type MessageRow = Pick<
+  Selectable<MessagesTable>,
+  | "id"
+  | "channel"
+  | "status"
+  | "received_at"
+  | "updated_at"
+  | "size"
+  | "duplicate_of"
+  | "generation"
+>;
+
+/** The columns a message's summary is read from. */
+const SUMMARY_COLUMNS = [
+  "id",
+  "channel",
+  "status",
+  "received_at",
+  "updated_at",
+  "size",
+  "duplicate_of",
+  "generation",
+] as const;
+
+/** A nullable 64-bit column, read as a number. */
+function int64OrNull(value: number | string | null): number | null {
+  return value === null ? null : Number(value);
 }
 
 /**
@@ -477,12 +1105,15 @@ export class StorageError extends Error {
 }
 
 /**
- * Where Pathways keeps every message and every delivery, so a restart loses nothing: SQLite,
- * PostgreSQL, MySQL or MariaDB, or SQL Server, through Kysely.
+ * Where Pathways keeps every message and every delivery, so a restart loses nothing, and the audit
+ * log of what operators did with them: SQLite, PostgreSQL, MySQL or MariaDB, or SQL Server, through
+ * Kysely.
  *
  * Every database runs the same queries but three. SQL Server writes `TOP` where the others write
  * `LIMIT`, and each returns a new row's id its own way (`RETURNING`, `OUTPUT`, or MySQL's insert id).
  * Nothing claims rows: one engine process owns a database, and reads the head of each queue in order.
+ * The operator commands write beside it (a replay, a clear, retention), each change in one
+ * transaction that writes first and re-checks what it read, so it never undoes the engine's work.
  *
  * @example
  * ```ts
@@ -549,8 +1180,12 @@ export class Store implements MessageStore, ContentStore {
 
   /**
    * Stores an incoming message as `received` (or `failed`, given `options.failure`) and returns its
-   * id, with the earlier message it may duplicate. With a duplicate key, the lookup and the insert
-   * are one transaction; without one, the insert alone.
+   * id, with the earlier message it may duplicate. With a duplicate key, the insert, the lookup and
+   * the flag are one transaction; without one, the insert alone.
+   *
+   * Every transaction here writes before it reads. On SQLite, a transaction that reads first cannot
+   * write once another process (an operator command beside the engine) has written meanwhile, and
+   * fails at once rather than waiting its turn.
    */
   async receive(
     channel: string,
@@ -558,8 +1193,8 @@ export class Store implements MessageStore, ContentStore {
     options: StoreReceiveOptions = {},
   ): Promise<ReceivedMessage> {
     const at = this.now().toISOString();
-    const { duplicateKey, failure } = options;
-    const insert = (db: Kysely<Tables>, duplicateOf: number | undefined): Promise<number> =>
+    const { duplicateKey, failure, size } = options;
+    const insert = (db: Kysely<Tables>): Promise<number> =>
       this.insertMessage(db, {
         channel,
         received_at: at,
@@ -568,22 +1203,32 @@ export class Store implements MessageStore, ContentStore {
         error: failure ?? null,
         updated_at: at,
         dedup_key: duplicateKey ?? null,
-        duplicate_of: duplicateOf ?? null,
+        duplicate_of: null,
+        size: size ?? body.byteLength,
       });
     if (duplicateKey === undefined) {
-      return { id: await insert(this.db, undefined), duplicateOf: undefined };
+      return { id: await insert(this.db), duplicateOf: undefined };
     }
     return this.db.transaction().execute(async (tx) => {
+      const id = await insert(tx);
       const earlier = await tx
         .selectFrom("messages")
         .select("id")
         .where("channel", "=", channel)
         .where("dedup_key", "=", duplicateKey)
+        .where("id", "<", id)
         .orderBy("id", "desc")
         .$call((query) => this.first(query))
         .executeTakeFirst();
       const duplicateOf = earlier === undefined ? undefined : Number(earlier.id);
-      return { id: await insert(tx, duplicateOf), duplicateOf };
+      if (duplicateOf !== undefined) {
+        await tx
+          .updateTable("messages")
+          .set({ duplicate_of: duplicateOf })
+          .where("id", "=", id)
+          .execute();
+      }
+      return { id, duplicateOf };
     });
   }
 
@@ -591,18 +1236,121 @@ export class Store implements MessageStore, ContentStore {
   async message(id: number): Promise<StoredMessage | undefined> {
     const row = await this.db
       .selectFrom("messages")
-      .select(["id", "channel", "status", "error", "duplicate_of"])
+      .select([...SUMMARY_COLUMNS, "error"])
       .where("id", "=", id)
       .executeTakeFirst();
     if (row === undefined) return undefined;
-    const { channel, status, error, duplicate_of: duplicateOf } = row;
-    return {
+    const [summary] = await this.summarize([row]);
+    /* v8 ignore next: summarize returns one summary per row */
+    if (summary === undefined) return undefined;
+    return { ...summary, error: row.error };
+  }
+
+  /** The body of one message as it arrived, or `undefined` if there is none. */
+  async messageBody(id: number): Promise<Uint8Array | undefined> {
+    const row = await this.db
+      .selectFrom("messages")
+      .select("body")
+      .where("id", "=", id)
+      .executeTakeFirst();
+    return row?.body;
+  }
+
+  /** Every delivery of a message, oldest first, without bodies. */
+  async deliveries(messageId: number): Promise<StoredDelivery[]> {
+    const rows = await this.db
+      .selectFrom("deliveries")
+      .select([
+        "id",
+        "destination",
+        "seq",
+        "generation",
+        "status",
+        "attempts",
+        "next_attempt_at",
+        "delivered_at",
+        "last_error",
+      ])
+      .where("message_id", "=", messageId)
+      .orderBy("id")
+      .execute();
+    return rows.map((row) => ({
       id: Number(row.id),
-      channel,
-      status,
-      error,
-      duplicateOf: duplicateOf === null ? null : Number(duplicateOf),
-    };
+      destination: row.destination,
+      seq: row.seq,
+      generation: row.generation,
+      status: row.status,
+      attempts: row.attempts,
+      nextAttemptAt: Number(row.next_attempt_at),
+      deliveredAt: row.delivered_at,
+      error: row.last_error,
+    }));
+  }
+
+  /**
+   * The outputs of a message's current generation, in order. Each destination was queued the same
+   * outputs, so they are read from the first destination's deliveries.
+   */
+  async outputs(messageId: number): Promise<Uint8Array[]> {
+    const rows = await this.db
+      .selectFrom("deliveries")
+      .innerJoin("messages", "messages.id", "deliveries.message_id")
+      .select(["deliveries.destination", "deliveries.body"])
+      .where("deliveries.message_id", "=", messageId)
+      .whereRef("deliveries.generation", "=", "messages.generation")
+      .orderBy("deliveries.destination")
+      .orderBy("deliveries.seq")
+      .execute();
+    const first = rows[0]?.destination;
+    return rows.filter((row) => row.destination === first).map((row) => row.body);
+  }
+
+  /** Every channel with a stored message, by name. */
+  async channels(): Promise<string[]> {
+    const rows = await this.db
+      .selectFrom("messages")
+      .select("channel")
+      .distinct()
+      .orderBy("channel")
+      .execute();
+    return rows.map((row) => row.channel);
+  }
+
+  /** A page of messages, newest first, without bodies or errors. */
+  async listMessages(query: MessageQuery): Promise<Page<MessageSummary>> {
+    const { channel, state, since, until, before, limit } = query;
+    let select = this.db.selectFrom("messages").select(SUMMARY_COLUMNS);
+    if (channel !== undefined) select = select.where("channel", "=", channel);
+    if (state !== undefined) select = select.where((eb) => stateIs(eb, state));
+    if (since !== undefined) select = select.where("received_at", ">=", since);
+    if (until !== undefined) select = select.where("received_at", "<", until);
+    if (before !== undefined) select = select.where("id", "<", before);
+    const rows = await select
+      .orderBy("id", "desc")
+      .$call((q) => this.take(q, limit + 1))
+      .execute();
+    const items = await this.summarize(rows.slice(0, limit));
+    return { items, next: rows.length > limit ? items.at(-1)?.id : undefined };
+  }
+
+  /** A channel's retrying deliveries, oldest first, at most `limit`. */
+  async listRetrying(channel: string, limit: number): Promise<RetryingDelivery[]> {
+    const rows = await this.db
+      .selectFrom("deliveries")
+      .select(["id", "message_id", "destination", "attempts", "next_attempt_at"])
+      .where("channel", "=", channel)
+      .where("status", "=", "pending")
+      .where("attempts", ">", 0)
+      .orderBy("id")
+      .$call((q) => this.take(q, limit))
+      .execute();
+    return rows.map((row) => ({
+      id: Number(row.id),
+      messageId: Number(row.message_id),
+      destination: row.destination,
+      attempts: row.attempts,
+      nextAttemptAt: Number(row.next_attempt_at),
+    }));
   }
 
   /** The oldest message of `channel` still waiting for its transform, if any. */
@@ -629,31 +1377,7 @@ export class Store implements MessageStore, ContentStore {
   ): Promise<void> {
     const at = this.now();
     await this.db.transaction().execute(async (tx) => {
-      const message = await tx
-        .selectFrom("messages")
-        .select("channel")
-        .where("id", "=", messageId)
-        .executeTakeFirstOrThrow();
-      for (let destination = 0; destination < destinations; destination += 1) {
-        for (const [seq, body] of outputs.entries()) {
-          await tx
-            .insertInto("deliveries")
-            .values({
-              message_id: messageId,
-              channel: message.channel,
-              destination,
-              seq,
-              body: blob(body),
-              status: "pending",
-              attempts: 0,
-              // Due at once, whatever the reader's clock: only a retry sets a time in the future.
-              next_attempt_at: 0,
-              last_error: null,
-              delivered_at: null,
-            })
-            .execute();
-        }
-      }
+      // The update first: see receive() for why every transaction here writes before it reads.
       await tx
         .updateTable("messages")
         .set({
@@ -662,6 +1386,12 @@ export class Store implements MessageStore, ContentStore {
         })
         .where("id", "=", messageId)
         .execute();
+      const message = await tx
+        .selectFrom("messages")
+        .select(["channel", "generation"])
+        .where("id", "=", messageId)
+        .executeTakeFirstOrThrow();
+      await this.queue(tx, messageId, message, outputs, destinations);
     });
   }
 
@@ -744,8 +1474,9 @@ export class Store implements MessageStore, ContentStore {
       transformed: 0,
       filtered: 0,
       failed: 0,
+      cleared: 0,
     };
-    for (const row of rows) counts[row.status] = Number(row.count);
+    for (const row of rows) counts[readStatus(row.status)] = Number(row.count);
     return counts;
   }
 
@@ -757,7 +1488,12 @@ export class Store implements MessageStore, ContentStore {
       .where("channel", "=", channel)
       .groupBy("status")
       .execute();
-    const counts: Record<DeliveryStatus, number> = { pending: 0, delivered: 0, failed: 0 };
+    const counts: Record<DeliveryStatus, number> = {
+      pending: 0,
+      delivered: 0,
+      failed: 0,
+      cleared: 0,
+    };
     for (const row of rows) counts[row.status] = Number(row.count);
     return counts;
   }
@@ -831,6 +1567,392 @@ export class Store implements MessageStore, ContentStore {
       .where("attempts", ">", 0)
       .executeTakeFirstOrThrow();
     return Number(row.count);
+  }
+
+  /**
+   * Records a replay or a resend. The guarded update of the message comes first, so on SQLite the
+   * transaction holds the write lock before it reads anything, and on a server it holds the
+   * message's row: nothing the engine writes can come between the checks and the inserts. The new
+   * deliveries take new ids, which puts them at the back of each destination's queue.
+   */
+  async requeue(messageId: number, request: RequeueRequest, actor: string): Promise<RequeueResult> {
+    const at = this.now().toISOString();
+    const { mode, expected, outputs, failure, destinations } = request;
+    let status: MessageStatus = "transformed";
+    if (failure !== undefined) status = "failed";
+    else if (outputs.length === 0) status = "filtered";
+    try {
+      return await this.db.transaction().execute(async (tx) => {
+        const moved = await tx
+          .updateTable("messages")
+          .set((eb) => ({
+            status,
+            error: failure ?? null,
+            updated_at: at,
+            generation: eb("generation", "+", 1),
+          }))
+          .where("id", "=", messageId)
+          .where("status", "=", expected)
+          .executeTakeFirst();
+        const message = await tx
+          .selectFrom("messages")
+          .select(["channel", "generation"])
+          .where("id", "=", messageId)
+          .executeTakeFirst();
+        if (message === undefined) throw new Refusal("not-found");
+        if (moved.numUpdatedRows === 0n) throw new Refusal("changed");
+        const pending = await tx
+          .selectFrom("deliveries")
+          .select("id")
+          .where("message_id", "=", messageId)
+          .where("status", "=", "pending")
+          .$call((q) => this.first(q))
+          .executeTakeFirst();
+        if (pending !== undefined) throw new Refusal("pending");
+        const superseded = await tx
+          .updateTable("deliveries")
+          .set({ status: "cleared" })
+          .where("message_id", "=", messageId)
+          .where("status", "=", "failed")
+          .executeTakeFirst();
+        const queued =
+          failure === undefined
+            ? await this.queue(tx, messageId, message, outputs, destinations)
+            : 0;
+        const done = {
+          status,
+          queued,
+          superseded: Number(superseded.numUpdatedRows),
+          generation: message.generation,
+        };
+        const [entry] = await this.insertAudit(tx, actor, at, [
+          { action: mode, channel: message.channel, messageId, detail: done },
+        ]);
+        /* v8 ignore next: insertAudit returns one entry per input */
+        if (entry === undefined) throw new Error("the audit entry was not written");
+        return { done: true, ...done, entry };
+      });
+    } catch (error) {
+      if (!(error instanceof Refusal)) throw error;
+      const reason = error.reason as Extract<RefusalReason, "not-found" | "changed" | "pending">;
+      const entry = await this.refusal(actor, mode, messageId, reason);
+      return { done: false, reason, entry };
+    }
+  }
+
+  /** Clears a failed message and its failed deliveries; the audit entry is in the same transaction. */
+  async clear(messageId: number, actor: string): Promise<ClearResult> {
+    const at = this.now().toISOString();
+    try {
+      return await this.db.transaction().execute(async (tx) => {
+        // Writes first, so on SQLite the transaction holds the write lock before it reads.
+        const messages = await tx
+          .updateTable("messages")
+          .set({ status: "cleared", updated_at: at })
+          .where("id", "=", messageId)
+          .where("status", "=", "failed")
+          .executeTakeFirst();
+        const deliveries = await tx
+          .updateTable("deliveries")
+          .set({ status: "cleared" })
+          .where("message_id", "=", messageId)
+          .where("status", "=", "failed")
+          .executeTakeFirst();
+        const message = await tx
+          .selectFrom("messages")
+          .select("channel")
+          .where("id", "=", messageId)
+          .executeTakeFirst();
+        if (message === undefined) throw new Refusal("not-found");
+        const done = {
+          messages: Number(messages.numUpdatedRows),
+          deliveries: Number(deliveries.numUpdatedRows),
+        };
+        if (done.messages + done.deliveries === 0) throw new Refusal("not-failed");
+        // Clearing is activity: retention counts its period from now.
+        await tx
+          .updateTable("messages")
+          .set({ updated_at: at })
+          .where("id", "=", messageId)
+          .execute();
+        const [entry] = await this.insertAudit(tx, actor, at, [
+          { action: "clear", channel: message.channel, messageId, detail: done },
+        ]);
+        /* v8 ignore next: insertAudit returns one entry per input */
+        if (entry === undefined) throw new Error("the audit entry was not written");
+        return { done: true, ...done, entry };
+      });
+    } catch (error) {
+      if (!(error instanceof Refusal)) throw error;
+      const reason = error.reason as Extract<RefusalReason, "not-found" | "not-failed">;
+      const entry = await this.refusal(actor, "clear", messageId, reason);
+      return { done: false, reason, entry };
+    }
+  }
+
+  /**
+   * Deletes a channel's done messages whose last activity is before `cutoff`, with their
+   * deliveries, a batch at a time. Each batch is one transaction that first marks the messages it
+   * will delete, re-checking that each is still done and still old, so a message replayed or given
+   * a new delivery meanwhile is left alone. Every statement runs on every database: the batch is a
+   * list of ids, since MySQL takes no `LIMIT` in a subquery and no subquery on the table it deletes
+   * from.
+   */
+  async expire(channel: string, cutoff: string, dryRun: boolean): Promise<ExpireResult> {
+    if (dryRun) {
+      const messages = await this.db
+        .selectFrom("messages")
+        .select((eb) => eb.fn.countAll<number | string>().as("count"))
+        .where("channel", "=", channel)
+        .where((eb) => expirable(eb, cutoff))
+        .executeTakeFirstOrThrow();
+      const deliveries = await this.db
+        .selectFrom("deliveries")
+        .select((eb) => eb.fn.countAll<number | string>().as("count"))
+        .where("message_id", "in", (eb) =>
+          eb
+            .selectFrom("messages")
+            .select("messages.id")
+            .where("messages.channel", "=", channel)
+            .where((m) => expirable(m, cutoff)),
+        )
+        .executeTakeFirstOrThrow();
+      return { messages: Number(messages.count), deliveries: Number(deliveries.count) };
+    }
+
+    let messages = 0;
+    let deliveries = 0;
+    for (;;) {
+      const ids = (
+        await this.db
+          .selectFrom("messages")
+          .select("id")
+          .where("channel", "=", channel)
+          .where((eb) => expirable(eb, cutoff))
+          .orderBy("id")
+          .$call((q) => this.take(q, EXPIRE_BATCH))
+          .execute()
+      ).map((row) => Number(row.id));
+      if (ids.length === 0) break;
+      const removed = await this.db.transaction().execute(async (tx) => {
+        await tx
+          .updateTable("messages")
+          .set({ status: EXPIRING })
+          .where("id", "in", ids)
+          .where((eb) => expirable(eb, cutoff))
+          .execute();
+        const gone = await tx
+          .deleteFrom("deliveries")
+          .where("message_id", "in", (eb) =>
+            eb
+              .selectFrom("messages")
+              .select("messages.id")
+              .where("messages.id", "in", ids)
+              .where("messages.status", "=", EXPIRING),
+          )
+          .executeTakeFirst();
+        const deleted = await tx
+          .deleteFrom("messages")
+          .where("id", "in", ids)
+          .where("status", "=", EXPIRING)
+          .executeTakeFirst();
+        return {
+          messages: Number(deleted.numDeletedRows),
+          deliveries: Number(gone.numDeletedRows),
+        };
+      });
+      messages += removed.messages;
+      deliveries += removed.deliveries;
+      // A short batch was the last; an empty one means the rest changed under us.
+      if (ids.length < EXPIRE_BATCH || removed.messages === 0) break;
+    }
+    return { messages, deliveries };
+  }
+
+  /** Appends entries to the audit log, in one transaction, stamped with the time and `actor`. */
+  async appendAudit(actor: string, entries: readonly AuditInput[]): Promise<AuditEntry[]> {
+    const at = this.now().toISOString();
+    return this.db.transaction().execute((tx) => this.insertAudit(tx, actor, at, entries));
+  }
+
+  /** A page of the audit log, newest first. */
+  async auditEntries(query: AuditQuery): Promise<Page<AuditEntry>> {
+    const { action, channel, messageId, since, until, before, limit } = query;
+    let select = this.db.selectFrom("audit_log").selectAll();
+    if (action !== undefined) select = select.where("action", "=", action);
+    if (channel !== undefined) select = select.where("channel", "=", channel);
+    if (messageId !== undefined) select = select.where("message_id", "=", messageId);
+    if (since !== undefined) select = select.where("at", ">=", since);
+    if (until !== undefined) select = select.where("at", "<", until);
+    if (before !== undefined) select = select.where("id", "<", before);
+    const rows = await select
+      .orderBy("id", "desc")
+      .$call((q) => this.take(q, limit + 1))
+      .execute();
+    const items = rows.slice(0, limit).map(
+      (row): AuditEntry => ({
+        id: Number(row.id),
+        at: row.at,
+        actor: row.actor,
+        action: row.action,
+        outcome: row.outcome,
+        channel: row.channel,
+        messageId: int64OrNull(row.message_id),
+        detail: row.detail === null ? {} : (JSON.parse(row.detail) as AuditDetail),
+      }),
+    );
+    return { items, next: rows.length > limit ? items.at(-1)?.id : undefined };
+  }
+
+  /** Inserts one pending delivery per output per destination, in order; returns how many. */
+  private async queue(
+    tx: Transaction<Tables>,
+    messageId: number,
+    message: { readonly channel: string; readonly generation: number },
+    outputs: readonly Uint8Array[],
+    destinations: number,
+  ): Promise<number> {
+    let queued = 0;
+    for (let destination = 0; destination < destinations; destination += 1) {
+      for (const [seq, body] of outputs.entries()) {
+        await tx
+          .insertInto("deliveries")
+          .values({
+            message_id: messageId,
+            channel: message.channel,
+            destination,
+            seq,
+            body: blob(body),
+            status: "pending",
+            attempts: 0,
+            // Due at once, whatever the reader's clock: only a retry sets a time in the future.
+            next_attempt_at: 0,
+            last_error: null,
+            delivered_at: null,
+            generation: message.generation,
+          })
+          .execute();
+        queued += 1;
+      }
+    }
+    return queued;
+  }
+
+  /** Records a refused replay, resend or clear, naming the message's channel when it exists. */
+  private async refusal(
+    actor: string,
+    action: AuditAction,
+    messageId: number,
+    reason: RefusalReason,
+  ): Promise<AuditEntry> {
+    const row = await this.db
+      .selectFrom("messages")
+      .select("channel")
+      .where("id", "=", messageId)
+      .executeTakeFirst();
+    const [entry] = await this.appendAudit(actor, [
+      {
+        action,
+        outcome: reason === "not-found" ? "not-found" : "refused",
+        channel: row?.channel,
+        messageId,
+        detail: reason === "not-found" ? {} : { reason },
+      },
+    ]);
+    /* v8 ignore next: appendAudit returns one entry per input */
+    if (entry === undefined) throw new Error("the audit entry was not written");
+    return entry;
+  }
+
+  private async insertAudit(
+    db: Kysely<Tables>,
+    actor: string,
+    at: string,
+    entries: readonly AuditInput[],
+  ): Promise<AuditEntry[]> {
+    const written: AuditEntry[] = [];
+    for (const input of entries) {
+      const detail = input.detail ?? {};
+      const entry = {
+        at,
+        actor,
+        action: input.action,
+        outcome: input.outcome ?? "ok",
+        channel: input.channel ?? null,
+        message_id: input.messageId ?? null,
+        detail: Object.keys(detail).length === 0 ? null : JSON.stringify(detail),
+      };
+      written.push({
+        id: await this.insertAuditRow(db, entry),
+        at,
+        actor,
+        action: entry.action,
+        outcome: entry.outcome,
+        channel: entry.channel,
+        messageId: entry.message_id,
+        detail,
+      });
+    }
+    return written;
+  }
+
+  /** Inserts an audit row and returns its id, which each database hands back its own way. */
+  private async insertAuditRow(
+    db: Kysely<Tables>,
+    values: Insertable<AuditLogTable>,
+  ): Promise<number> {
+    const insert = db.insertInto("audit_log").values(values);
+    switch (this.kind) {
+      case "mysql":
+        return Number((await insert.executeTakeFirstOrThrow()).insertId);
+      case "sqlserver":
+        return Number((await insert.output("inserted.id").executeTakeFirstOrThrow()).id);
+      case "postgres":
+      case "sqlite":
+        return Number((await insert.returning("id").executeTakeFirstOrThrow()).id);
+    }
+  }
+
+  /** Adds each message's state and its current deliveries' tally. */
+  private async summarize(rows: readonly MessageRow[]): Promise<MessageSummary[]> {
+    const tallies = new Map<number, Record<DeliveryStatus | "retrying", number>>();
+    if (rows.length > 0) {
+      const generation = new Map(rows.map((row) => [Number(row.id), row.generation]));
+      const deliveries = await this.db
+        .selectFrom("deliveries")
+        .select(["message_id", "generation", "status", "attempts"])
+        .where(
+          "message_id",
+          "in",
+          rows.map((row) => Number(row.id)),
+        )
+        .execute();
+      for (const delivery of deliveries) {
+        const messageId = Number(delivery.message_id);
+        if (delivery.generation !== generation.get(messageId)) continue;
+        const tally = tallies.get(messageId) ?? emptyTally();
+        tally[delivery.status] += 1;
+        if (delivery.status === "pending" && delivery.attempts > 0) tally.retrying += 1;
+        tallies.set(messageId, tally);
+      }
+    }
+    return rows.map((row) => {
+      const id = Number(row.id);
+      const status = readStatus(row.status);
+      const deliveries = tallies.get(id) ?? emptyTally();
+      return {
+        id,
+        channel: row.channel,
+        status,
+        state: messageState(status, deliveries),
+        receivedAt: row.received_at,
+        updatedAt: row.updated_at,
+        size: int64OrNull(row.size),
+        duplicateOf: int64OrNull(row.duplicate_of),
+        generation: row.generation,
+        deliveries,
+      };
+    });
   }
 
   /** Keeps a query's first row. */

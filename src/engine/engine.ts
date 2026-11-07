@@ -24,6 +24,8 @@ import { customDestination, customSource, loadAckBuilder } from "../extensions/b
 import type { LifecycleEvent } from "../extensions/events.js";
 import { HookSet } from "../extensions/hooks.js";
 import type { ChannelContext } from "../extensions/types.js";
+import { AuditLog, auditEvent } from "../operator/audit.js";
+import { recordRetention, runRetention, type RetentionReport } from "../operator/retention.js";
 import type { MessageStore, ReceivedMessage } from "../storage/store.js";
 import { ChannelWorker, type TransformOutcome } from "./channel-worker.js";
 import { channelStatus, type ChannelHealth, type HealthReport } from "./health.js";
@@ -263,6 +265,11 @@ export interface EngineOptions {
   readonly connectors?: (channel: ChannelConfig) => ChannelConnectors | Promise<ChannelConnectors>;
   /** Where tokens and secret headers are read from. Defaults to `process.env`. */
   readonly env?: Env;
+  /**
+   * The audit log the engine records retention runs in. Defaults to one over `store`, naming the
+   * operating system user; pass one to share it, and its listeners, with other callers.
+   */
+  readonly audit?: AuditLog;
 }
 
 interface RunningChannel {
@@ -287,6 +294,8 @@ interface RunningChannel {
  * - A message whose transform fails is marked failed, and the channel moves on to the next.
  * - A source that cannot listen (its port is taken) is tried again with the same growing waits,
  *   while the rest of the engine runs and the health endpoint answers 503.
+ * - While it runs, retention deletes done messages past their channel's retention period, at
+ *   start and then every `retentionInterval`, and records each run in the audit log.
  *
  * Logs carry ids, counts and error names only: never a message's content, and never a file name,
  * which can carry a patient's name.
@@ -303,6 +312,11 @@ interface RunningChannel {
  * ```
  */
 export class Engine {
+  /**
+   * The audit log the engine records in. Each entry, once stored, goes to the engine-wide hooks as
+   * an `audit` event; subscribe to it to see them directly.
+   */
+  readonly audit: AuditLog;
   private readonly options: EngineOptions;
   private readonly now: () => number;
   private readonly channels: RunningChannel[] = [];
@@ -313,6 +327,18 @@ export class Engine {
   constructor(options: EngineOptions) {
     this.options = options;
     this.now = options.now ?? Date.now;
+    this.audit =
+      options.audit ??
+      new AuditLog(options.store, {
+        onListenerError: (error) => {
+          options.logger.warn({ event: "audit-listener-failed", code: errorCode(error) });
+        },
+      });
+    // Every entry, the engine's own and those of whoever shares this log, goes to the engine-wide
+    // hooks once they have started. Emitting only queues, so it never holds the engine up.
+    this.audit.subscribe((entry) => {
+      this.hooks?.emit(auditEvent(entry));
+    });
   }
 
   /**
@@ -379,13 +405,41 @@ export class Engine {
     }
   }
 
-  /** Runs passes until `signal` aborts, waiting the poll interval between them. */
+  /**
+   * Runs passes until `signal` aborts, waiting the poll interval between them. Retention runs after
+   * the first pass and then once every `retentionInterval`.
+   */
   async run(signal: AbortSignal): Promise<void> {
+    const { pollIntervalMs, retentionIntervalMs } = this.options.project.settings;
+    let retentionAt = this.now();
     while (!signal.aborted) {
       await this.tick();
-      await sleep(this.options.project.settings.pollIntervalMs, undefined, { signal }).catch(
-        () => undefined,
-      );
+      if (this.now() >= retentionAt) {
+        await this.retention();
+        retentionAt = this.now() + retentionIntervalMs;
+      }
+      await sleep(pollIntervalMs, undefined, { signal }).catch(() => undefined);
+    }
+  }
+
+  /**
+   * Runs retention once, records the run in the audit log, and logs the counts. A failure is logged
+   * by its code and does not stop the engine; the next run tries again.
+   */
+  async retention(): Promise<RetentionReport | undefined> {
+    const { store, project, logger } = this.options;
+    try {
+      const report = await runRetention(store, project, { now: this.now(), dryRun: false });
+      await recordRetention(this.audit, report);
+      logger.info({
+        event: "retention",
+        messages: report.messages,
+        deliveries: report.deliveries,
+      });
+      return report;
+    } catch (error) {
+      logger.error({ event: "retention-failed", code: errorCode(error) });
+      return undefined;
     }
   }
 
@@ -545,6 +599,7 @@ export class Engine {
                 ? undefined
                 : createHash("sha256").update(duplicateKey).digest("hex"),
             failure,
+            size: body.byteLength,
           });
         } catch (error) {
           const code = errorCode(error);

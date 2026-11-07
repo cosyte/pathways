@@ -119,7 +119,12 @@ describe("an HTTP channel in the engine", () => {
     expect(request?.body.toString("utf8")).toBe(ADT_A01.replace("|LAB|", "|LAB2|"));
     expect(request?.headers.authorization).toBe(LAB_AUTH);
     expect(request?.headers["content-type"]).toBe("application/hl7-v2");
-    expect(await store.deliveryCounts("adt")).toEqual({ pending: 0, delivered: 1, failed: 0 });
+    expect(await store.deliveryCounts("adt")).toEqual({
+      pending: 0,
+      delivered: 1,
+      failed: 0,
+      cleared: 0,
+    });
 
     expect(events.map((e) => e.event)).toEqual(["received", "transformed", "delivered"]);
     const log = lines.join("");
@@ -165,6 +170,7 @@ describe("an HTTP channel in the engine", () => {
       pending: 0,
       delivered: 0,
       failed: 1,
+      cleared: 0,
     });
   });
 
@@ -296,8 +302,8 @@ describe("health", () => {
         adt: {
           status: "ok",
           source: "up",
-          messages: { received: 0, transformed: 1, filtered: 0, failed: 0 },
-          deliveries: { pending: 0, delivered: 1, failed: 0, retrying: 0 },
+          messages: { received: 0, transformed: 1, filtered: 0, failed: 0, cleared: 0 },
+          deliveries: { pending: 0, delivered: 1, failed: 0, cleared: 0, retrying: 0 },
         },
       },
     });

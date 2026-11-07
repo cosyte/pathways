@@ -14,13 +14,22 @@ Storage is SQLite (better-sqlite3, bundled), PostgreSQL (pg), MySQL or MariaDB (
 (tedious and tarn), chosen by `pathways.yaml`'s `storage` block. The server drivers are optional peer
 dependencies, imported only when configured (`src/storage/dialects.ts`); a missing one is a
 configuration error naming the package. One `Store` runs the same queries on all four, with the
-column types per database inside the two migrations, and SQLite's exactly as the first slice wrote
-them. A server's connection URL, which carries its password, comes only from an environment variable.
+column types per database inside the migrations, and SQLite's first two exactly as the first slice
+wrote them. A server's connection URL, which carries its password, comes only from an environment variable.
 Stored bodies and error texts are encrypted at rest by `src/encryption/`: `EncryptedStore` wraps any
 `MessageStore`, each value gets its own AES-256-GCM data key, a `KeyProvider` wraps that key under
 a master key, and `pathways rekey` moves stored values to the current key.
 `pathways init` writes the starter project in `templates/starter/` (`src/starter/`), and the
 `Dockerfile` builds the image on distroless Node 24.
+
+The operator commands live in `src/operator/`: `status`, `messages` (and `messages show`),
+`replay` (and `--resend`), `clear`, `retention` and `audit`. They open the store through
+`src/storage/open.ts`, wrapped, as `start` does. The audit log is the `audit_log` table, from
+migration 0003, behind `MessageStore.appendAudit` and `auditEntries`; `AuditLog` (`src/operator/audit.ts`)
+appends through the store and tells its listeners. The engine forwards every entry to its
+engine-wide `HookSet` as an `audit` event, and each command that writes to the log opens the same
+hooks and does the same, stopping them on exit within each hook's time limit. `CliIo.onAudit` sees
+the entries too. Retention (`src/operator/retention.ts`) runs in `pathways start` and on its own.
 
 HTTP in and out (`src/connectors/http.ts`) and the health endpoint (`src/engine/health.ts`) share
 one listening server in `src/connectors/endpoint.ts` and the TLS loader in `src/connectors/tls.ts`.
@@ -160,7 +169,11 @@ receiver with the wrong picture of a patient. Keep message text out of logs, err
   are 64-bit, and a new migration keeps SQLite's existing files valid. A query is written per
   database only where SQL differs: `TOP` against `LIMIT`, how an insert returns its id, and the
   length check that makes SQL Server's and MySQL's `=` exact. Nothing claims rows: one engine process
-  owns a database and reads the head of each queue in order.
+  owns a database and reads the head of each queue in order. The operator commands write beside it,
+  each change in one transaction whose first statement is a guarded write (on a status or an id,
+  never on text or bytes), so it holds the row, or SQLite's lock, before it reads. MySQL takes no
+  `LIMIT` in a subquery and no subquery on the table a statement deletes from, so retention works
+  on a list of ids.
 - A database server's connection runs TLS like any other endpoint (`tls`, or `plaintext: true`), and
   its URL comes from `{ env: NAME }` (`PATHWAYS_DATABASE_URL` by default), never the YAML. TLS is set
   only in `pathways.yaml`: a URL with TLS options is refused, and a MySQL or SQL Server URL with any
@@ -173,6 +186,16 @@ receiver with the wrong picture of a patient. Keep message text out of logs, err
   no longer holds them, not as soon as rekey reports nothing under it.
 - The health body holds states and counts only. It answers 503 only when storage cannot be read or
   a source cannot listen.
+- The audit log is append-only: nothing updates, deletes, alters or drops `audit_log`, and
+  `test/store-operator.test.ts` fails if any source file does. Retention never touches it. An entry
+  holds ids, counts, statuses, codes and hashes, never content.
+- Every store transaction writes before it reads. On SQLite, a transaction that reads first cannot
+  write once another process (an operator command beside the engine) has committed, and fails with
+  `SQLITE_BUSY_SNAPSHOT` instead of waiting its turn.
+- A `MessageStore` method that takes or returns a body or an error text passes through
+  `CodecStore` in `src/encryption/encrypted-store.ts`, so encryption at rest covers it. Operator
+  output cuts a stored error to its stage, name, code and location (`safeError`), and prints content
+  only for `messages show --content`, after the view is in the audit log.
 - We never call Pathways HIPAA or HITRUST compliant or certified. It is built to the controls an
   assessment looks for; compliance belongs to the organization that runs it.
 - `templates/starter/` ships in the tarball (`files` in package.json). Its `gitignore` is written as

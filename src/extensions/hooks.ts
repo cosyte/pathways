@@ -131,8 +131,9 @@ class HookRunner {
  * and never throws: each hook has its own queue, time limit and failure handling.
  *
  * This is the seam for any other source of events: whatever holds a `HookSet` (the engine holds the
- * engine-wide one) can `emit` to it. The operator-commands slice's audit entries go through here as
- * events once it lands.
+ * engine-wide one) can `emit` to it. The audit log's entries go through here as `audit` events: the
+ * engine forwards its own, and each operator command that writes to the log opens the engine-wide
+ * hooks and forwards its entries the same way.
  *
  * @example
  * ```ts
