@@ -6,6 +6,7 @@ import { ConfigError, loadProject } from "./config/load.js";
 import type { ProjectConfig } from "./config/schema.js";
 import { TransformLoadError } from "./engine/channel-worker.js";
 import { Engine } from "./engine/engine.js";
+import { InitError, initProject, STARTER_CHANNEL } from "./starter/init.js";
 import { Store } from "./storage/store.js";
 import { describeFailure, runChannelTests } from "./testing/run-tests.js";
 import { VERSION } from "./version.js";
@@ -24,7 +25,7 @@ export interface CliIo {
 export const EXIT = {
   /** The command did what was asked. */
   ok: 0,
-  /** A test failed, or the engine could not start or stopped on an error. */
+  /** A test failed, the engine could not start or stopped on an error, or init could not write. */
   failed: 1,
   /** The arguments were not understood; nothing was done. */
   usage: 2,
@@ -37,6 +38,9 @@ const HELP = `Usage: pathways <command> [options]
 Pathways is a code-first healthcare integration engine. It is early.
 
 Commands:
+  init [dir]       Write a starter project, with one channel and its tests,
+                   into dir (default: the project folder), which must be
+                   empty or not exist yet
   start            Run every channel until stopped
   test [name...]   Run each channel's tests/ inputs through its transform and
                    compare the output with the saved .expected files
@@ -49,8 +53,9 @@ Options:
   -h, --help           Show this help
   -v, --version        Print the version
 
-Exit codes: 0 done; 1 a test failed or the engine stopped on an error;
-2 the command line was not understood; 3 the configuration is invalid.
+Exit codes: 0 done; 1 a test failed, the engine stopped on an error, or
+init could not write the project; 2 the command line was not understood;
+3 the configuration is invalid.
 `;
 
 /** Redaction paths for the engine's logger, in case a field that can hold content is ever logged. */
@@ -89,6 +94,10 @@ export async function run(argv: readonly string[], io: CliIo): Promise<number> {
 
   const projectDir = values.project ?? process.cwd();
   switch (command) {
+    case "init":
+      if (rest.length > 1 || (rest.length === 1 && values.project !== undefined)) return usage(io);
+      if (values.once === true || values.update === true) return usage(io);
+      return init(rest[0] ?? projectDir, io);
     case "start":
       if (rest.length > 0 || values.update === true) return usage(io);
       return start(projectDir, values.once === true, io);
@@ -107,6 +116,35 @@ function usage(io: CliIo): number {
   );
   return EXIT.usage;
 }
+
+async function init(target: string, io: CliIo): Promise<number> {
+  let files: string[];
+  try {
+    files = await initProject(target);
+  } catch (error) {
+    /* v8 ignore next: initProject rejects only with InitError */
+    if (!(error instanceof InitError)) throw error;
+    io.err(
+      `pathways: ${INIT_REFUSALS[error.reason]}${error.code === undefined ? "" : ` (${error.code})`}\n`,
+    );
+    return EXIT.failed;
+  }
+  io.out(
+    `Wrote a starter project with one channel, ${STARTER_CHANNEL}:\n` +
+      files.map((file) => `  ${file}\n`).join("") +
+      'Next, in the project folder: "pathways test" runs the channel\'s tests, and\n' +
+      '"pathways start" runs the channel.\n',
+  );
+  return EXIT.ok;
+}
+
+/** What `pathways init` says when it stops. None names the folder: the caller typed it. */
+const INIT_REFUSALS: Readonly<Record<InitError["reason"], string>> = {
+  "not-empty":
+    "init writes only into an empty folder or a new one, and this one is not empty. Nothing was changed.",
+  "not-a-folder": "init needs a folder, and that path is a file. Nothing was changed.",
+  io: "the starter project could not be written",
+};
 
 async function load(projectDir: string, io: CliIo): Promise<ProjectConfig | undefined> {
   try {

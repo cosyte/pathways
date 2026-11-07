@@ -8,6 +8,7 @@ interface PackageJson {
   readonly version: string;
   readonly engines: { readonly node: string };
   readonly bin: Record<string, string>;
+  readonly files: readonly string[];
 }
 
 const pkg = JSON.parse(readFileSync("package.json", "utf8")) as PackageJson;
@@ -20,6 +21,12 @@ describe("package facts that must agree", () => {
 
   it("ships the pathways command from the built bin", () => {
     expect(pkg.bin).toEqual({ pathways: "./dist/bin/pathways.mjs" });
+  });
+
+  // `pathways init` reads templates/starter/ from two folders above dist/bin/pathways.mjs, so the
+  // templates ship in the tarball beside dist.
+  it("ships the starter project's templates", () => {
+    expect(pkg.files).toContain("templates");
   });
 
   // engines.node and the CI matrix describe the same promise: the lowest Node line CI tests is the

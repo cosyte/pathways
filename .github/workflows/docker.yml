@@ -1,0 +1,120 @@
+name: Docker
+
+# Builds the image from the Dockerfile and runs it against a starter project written by
+# `pathways init` inside the image: `--version`, `pathways test`, `pathways start --once`, the
+# default command as the nonroot user stopped by `docker stop`, and the debug target's shell.
+#
+# It pushes and publishes nothing: where the image is published is not decided yet.
+#
+# NOT A REQUIRED CHECK. The ruleset `ci-required-checks` does not name `image`, so a red run here
+# blocks no merge. It is its own workflow, outside ci.yml's shared `ci` job, so it can never change
+# the contexts that ruleset does require.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      IMAGE: pathways:ci
+      DEBUG_IMAGE: pathways:ci-debug
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Built locally and loaded into the runner's Docker only. No registry login, no push.
+      - name: Build the image
+        run: docker build --tag "$IMAGE" .
+      - name: Build the debug target
+        run: docker build --target debug --tag "$DEBUG_IMAGE" .
+
+      - name: The image has no shell
+        run: |
+          for shell in /bin/sh /busybox/sh; do
+            if docker run --rm --entrypoint "$shell" "$IMAGE" -c true 2>/dev/null; then
+              echo "::error::the image has a shell at $shell"
+              exit 1
+            fi
+          done
+
+      - name: pathways --version prints the package's version
+        run: |
+          expected="$(jq -r .version package.json)"
+          actual="$(docker run --rm "$IMAGE" --version)"
+          echo "pathways --version: $actual"
+          test "$actual" = "$expected"
+
+      # Run as the runner's own user, so the files it writes are the runner's to change.
+      - name: pathways init writes a starter project into an empty folder
+        run: |
+          project="$RUNNER_TEMP/project"
+          mkdir "$project"
+          docker run --rm --user "$(id -u):$(id -g)" --volume "$project:/project" "$IMAGE" init /project
+          test -f "$project/pathways.yaml"
+          test -f "$project/channels/adt-to-lab/channel.yaml"
+
+      # As the image's nonroot user, from a read-only mount: test reads the project and writes nothing.
+      - name: pathways test passes on the starter project
+        run: docker run --rm --volume "$RUNNER_TEMP/project:/project:ro" "$IMAGE" test
+
+      - name: pathways start --once delivers the A01 to the lab and filters the A08
+        run: |
+          project="$RUNNER_TEMP/project"
+          inbox="$project/data/adt-to-lab/in"
+          outbox="$project/data/adt-to-lab/out"
+          mkdir -p "$inbox"
+          cp "$project/channels/adt-to-lab/tests/a01.hl7" "$project/channels/adt-to-lab/tests/a08.hl7" "$inbox/"
+          # The starter's file source reads a file once it has sat unchanged for a second.
+          touch -d '1 minute ago' "$inbox/a01.hl7" "$inbox/a08.hl7"
+          docker run --rm --user "$(id -u):$(id -g)" --volume "$project:/project" "$IMAGE" start --once
+          delivered="$(find "$outbox" -type f -printf '%P\n' | sort)"
+          echo "delivered: $delivered"
+          test "$delivered" = "1-1.hl7"
+          cmp "$outbox/1-1.hl7" "$project/channels/adt-to-lab/tests/a01.expected.hl7"
+          test -f "$project/.pathways/pathways.db"
+
+      # The way most people will run it: the default command (`start -C /project`) as uid 65532,
+      # stopped with SIGTERM by `docker stop`, which must end it cleanly with exit code 0.
+      - name: The default command runs as nonroot and stops cleanly on docker stop
+        run: |
+          project="$RUNNER_TEMP/project"
+          inbox="$project/data/adt-to-lab/in"
+          cp "$project/channels/adt-to-lab/tests/a01.hl7" "$inbox/next.hl7"
+          touch -d '1 minute ago' "$inbox/next.hl7"
+          sudo chown -R 65532:65532 "$project"
+          docker run --detach --name pathways-ci --volume "$project:/project" "$IMAGE"
+          for _ in $(seq 1 30); do
+            if [ -f "$project/data/adt-to-lab/out/3-1.hl7" ]; then break; fi
+            sleep 1
+          done
+          docker stop pathways-ci
+          code="$(docker inspect --format '{{.State.ExitCode}}' pathways-ci)"
+          # The engine logs ids, counts and events, never message content.
+          docker logs pathways-ci
+          docker rm pathways-ci
+          echo "exit code after docker stop: $code"
+          test "$code" = 0
+          cmp "$project/data/adt-to-lab/out/3-1.hl7" "$project/channels/adt-to-lab/tests/a01.expected.hl7"
+
+      - name: The debug target has a shell and the same command
+        run: |
+          docker run --rm --entrypoint /busybox/sh "$DEBUG_IMAGE" -c 'echo the debug shell runs'
+          test "$(docker run --rm "$DEBUG_IMAGE" --version)" = "$(jq -r .version package.json)"
+
+      - name: Image sizes
+        run: |
+          docker image ls --format '{{.Repository}}:{{.Tag}} {{.Size}}' pathways | tee -a "$GITHUB_STEP_SUMMARY"

@@ -8,6 +8,8 @@ The first slice runs: a file source, a TypeScript transform in a worker thread p
 (`src/engine/`), SQLite storage through Kysely (`src/storage/`), a file destination, and
 `pathways start` and `pathways test`. Sources and destinations are the public interfaces in
 `src/connectors/types.ts`, and the engine depends on `MessageStore`, not on SQLite.
+`pathways init` writes the starter project in `templates/starter/` (`src/starter/`), and the
+`Dockerfile` builds the image on distroless Node 24.
 
 The plan is in the umbrella's `plans/pathways.md`: the V1 scope, the stack, delivery and error
 handling, and the HITRUST-driven controls. `plans/hitrust.md` holds the control map. Read both
@@ -77,5 +79,14 @@ receiver with the wrong picture of a patient. Keep message text out of logs, err
   detection for HL7 v2, FHIR, X12 and C-CDA when the first fixtures land.
 - We never call Pathways HIPAA or HITRUST compliant or certified. It is built to the controls an
   assessment looks for; compliance belongs to the organization that runs it.
+- `templates/starter/` ships in the tarball (`files` in package.json). Its `gitignore` is written as
+  `.gitignore`, because npm never packs a file by that name, and `{{pathwaysVersion}}` in its
+  package.json becomes this package's version. Its messages are synthetic, its `.expected` files
+  are what `pathways test --update` writes, and `test/init.test.ts` runs `init`, `test` and
+  `start --once` on it. It holds no README: that is public copy, which waits for the operator.
+- The `Dockerfile` pins every base image by its index digest, with the tag in a comment, and the
+  builder's pnpm comes from `packageManager`. `.github/workflows/docker.yml` builds the image and
+  runs it against a starter project; it is not a required check, and it pushes nothing until the
+  operator decides where the image is published.
 - There is no release workflow yet. Publishing to npm gets its own pull request, with trusted
   publishing, when V1 is close.

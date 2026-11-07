@@ -1,0 +1,26 @@
+# One channel: read HL7 v2 files from a folder, keep only admissions (ADT^A01), address them to
+# the lab and write them to another folder. Paths are relative to this file.
+
+# The name must match the channel's folder.
+name: adt-to-lab
+
+# hl7v2 messages reach the transform parsed by @cosyte/hl7. `text` passes them as a string.
+format: hl7v2
+
+# Each file dropped into this folder is one message. Once it is stored, the file moves into a
+# processed/ folder inside it, so it is never read twice.
+source:
+  file:
+    dir: ../../data/adt-to-lab/in
+    # How long a file must sit unchanged before it is read, so a file still being written is
+    # left for the next pass.
+    minAge: 1s
+
+# Filters and edits each message. `pathways test` runs it on every input in tests/ and compares
+# the output with the matching .expected file.
+transform: ./transform.ts
+
+# Each message the transform returns is written to this folder as a file of its own.
+destinations:
+  - file:
+      dir: ../../data/adt-to-lab/out

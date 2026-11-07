@@ -1,0 +1,17 @@
+# Settings for the whole project. Every key is optional; the values below are the defaults.
+
+storage:
+  sqlite:
+    # The message database, relative to this file. Stored messages can hold patient data, so
+    # .gitignore keeps this folder out of git.
+    file: .pathways/pathways.db
+
+# Each channel's channel.yaml can override timeout and memory for that channel.
+defaults:
+  # How long one message's transform may run before it is stopped and the message is marked
+  # failed.
+  timeout: 5s
+  # The memory cap of each channel's transform worker.
+  memory: 256MB
+  # How often `pathways start` looks for new files.
+  pollInterval: 1s
