@@ -10,7 +10,7 @@ import {
 import { createServer as createHttpsServer } from "node:https";
 
 import { ConfigError } from "../config/load.js";
-import type { ListenerConfig } from "../config/schema.js";
+import { HEADER_VALUE, type HeaderValue, type ListenerConfig } from "../config/schema.js";
 import { loadServerTls, serverTlsOptions, type ServerTlsMaterial } from "./tls.js";
 
 /** The environment Pathways reads secrets from: `process.env`, or a stand-in in tests. */
@@ -38,6 +38,47 @@ export function readEnv(env: Env, name: string, where: string): string {
   const value = env[name];
   if (value === undefined || value === "") {
     throw new ConfigError([`${where}: the environment variable ${name} is not set`]);
+  }
+  return value;
+}
+
+/**
+ * The headers an HTTP client sends: `defaults` first, then each configured header, read from the
+ * environment when it says `{ env: NAME }`. A configured header replaces a default of the same name,
+ * whatever its case. `where` names the file and key, such as
+ * `channels/adt/channel.yaml: destinations.0.http`. Errors name the header and the variable, never a
+ * value.
+ *
+ * @throws {ConfigError} when a variable is not set, or holds characters a header cannot carry.
+ * @example
+ * ```ts
+ * const headers = resolveHeaders({ "Content-Type": "application/json" }, config.headers, process.env, where);
+ * ```
+ */
+export function resolveHeaders(
+  defaults: Readonly<Record<string, string>>,
+  configured: Readonly<Record<string, HeaderValue>>,
+  env: Env,
+  where: string,
+): Record<string, string> {
+  const headers: Record<string, string> = { ...defaults };
+  for (const [name, value] of Object.entries(configured)) {
+    const lower = name.toLowerCase();
+    for (const existing of Object.keys(headers)) {
+      if (existing.toLowerCase() === lower) delete headers[existing];
+    }
+    headers[name] =
+      "env" in value ? readHeaderEnv(env, value.env, `${where}.headers.${name}`) : value.value;
+  }
+  return headers;
+}
+
+function readHeaderEnv(env: Env, name: string, where: string): string {
+  const value = readEnv(env, name, where);
+  if (!HEADER_VALUE.test(value)) {
+    throw new ConfigError([
+      `${where}: the environment variable ${name} holds characters a header cannot carry`,
+    ]);
   }
   return value;
 }

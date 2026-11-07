@@ -32,6 +32,8 @@ describe("loadProject", () => {
     const project = await loadProject(root);
     expect(project.root).toBe(root);
     expect(project.databaseFile).toBe(join(root, ".pathways/pathways.db"));
+    expect(project.storage).toEqual({ kind: "sqlite", file: join(root, ".pathways/pathways.db") });
+    expect(project.hooks).toEqual([]);
     expect(project.settings).toEqual(DEFAULT_SETTINGS);
     expect(project.channels).toEqual([
       {
@@ -42,6 +44,7 @@ describe("loadProject", () => {
         transform: undefined,
         destinations: [{ kind: "file", dir: join(root, "channels/adt/outbox") }],
         settings: DEFAULT_SETTINGS,
+        hooks: [],
       },
     ]);
   });
@@ -373,8 +376,8 @@ destinations:
 `,
     });
     expect(problems).toEqual([
-      "channels/a/channel.yaml: source: name exactly one of: file, http, mllp",
-      "channels/a/channel.yaml: destinations.0: name exactly one of: file, http, mllp",
+      "channels/a/channel.yaml: source: name exactly one of: file, http, mllp, module",
+      "channels/a/channel.yaml: destinations.0: name exactly one of: file, http, mllp, module",
     ]);
   });
 
@@ -530,6 +533,149 @@ destinations:
       "destinations.0.mllp.port",
       "destinations.0.mllp.ackTimeout",
       "destinations.1.mllp.tls.key",
+    ]);
+  });
+});
+
+describe("loadProject: extensions", () => {
+  it("resolves custom modules, an ACK builder, hooks and a storage module against their files", async () => {
+    const root = await makeProject({
+      "pathways.yaml": [
+        "storage:",
+        "  module: ./stores/memory.ts",
+        "  options: { size: 3 }",
+        "hooks:",
+        "  - ./hooks/pager.ts",
+        "  - module: ./hooks/siem.ts",
+        "    options: { facility: local4 }",
+        "    events: [delivery-rejected, transform-failed]",
+        "    timeout: 2s",
+        "  - webhook:",
+        "      url: https://ops.example.test/pathways",
+        "      headers: { Authorization: { env: OPS_TOKEN }, X-Team: integration }",
+        "      tls: { ca: ./ca.pem }",
+        "",
+      ].join("\n"),
+      "stores/memory.ts": "",
+      "hooks/pager.ts": "",
+      "hooks/siem.ts": "",
+      "channels/a/channel.yaml": [
+        "source:",
+        "  module: ./source.ts",
+        "  options: { queue: synthetic, depth: 2 }",
+        "destinations:",
+        "  - module: ./destination.ts",
+        "  - file: { dir: ./out }",
+        "hooks: [../../hooks/pager.ts]",
+        "",
+      ].join("\n"),
+      "channels/a/source.ts": "",
+      "channels/a/destination.ts": "",
+      "channels/b/channel.yaml":
+        "source:\n  mllp: { port: 2575, plaintext: true, ackBuilder: ./ack.ts }\ndestinations:\n  - file: { dir: ./out }\n",
+      "channels/b/ack.ts": "",
+    });
+    const project = await loadProject(root);
+    expect(project.storage).toEqual({
+      kind: "module",
+      module: join(root, "stores/memory.ts"),
+      options: { size: 3 },
+    });
+    expect(project.hooks).toEqual([
+      {
+        kind: "module",
+        module: join(root, "hooks/pager.ts"),
+        options: {},
+        events: undefined,
+        timeoutMs: 5_000,
+      },
+      {
+        kind: "module",
+        module: join(root, "hooks/siem.ts"),
+        options: { facility: "local4" },
+        events: ["delivery-rejected", "transform-failed"],
+        timeoutMs: 2_000,
+      },
+      {
+        kind: "webhook",
+        webhook: {
+          url: "https://ops.example.test/pathways",
+          headers: { Authorization: { env: "OPS_TOKEN" }, "X-Team": { value: "integration" } },
+          tls: { ca: join(root, "ca.pem"), cert: undefined, key: undefined },
+          plaintext: false,
+        },
+        events: undefined,
+        timeoutMs: 5_000,
+      },
+    ]);
+    const [a, b] = project.channels;
+    expect(a?.source).toEqual({
+      kind: "module",
+      module: join(root, "channels/a/source.ts"),
+      options: { queue: "synthetic", depth: 2 },
+    });
+    expect(a?.destinations[0]).toEqual({
+      kind: "module",
+      module: join(root, "channels/a/destination.ts"),
+      options: {},
+    });
+    expect(a?.hooks).toEqual([
+      expect.objectContaining({ kind: "module", module: join(root, "hooks/pager.ts") }),
+    ]);
+    expect(b?.source).toMatchObject({ kind: "mllp", ackBuilder: join(root, "channels/b/ack.ts") });
+  });
+
+  it("names a module that does not exist, by file and key", async () => {
+    expect(
+      await problemsOf({
+        "pathways.yaml": "storage: { module: ./nowhere/store.ts }\nhooks: [./nowhere/hook.ts]\n",
+        "channels/a/channel.yaml":
+          "source: { module: ./nowhere/source.ts }\ndestinations:\n  - module: ./nowhere/destination.ts\nhooks: [{ module: ./nowhere/hook.ts }]\n",
+        "channels/b/channel.yaml":
+          "source:\n  mllp: { port: 2575, plaintext: true, ackBuilder: ./nowhere/ack.ts }\ndestinations:\n  - file: { dir: ./out }\n",
+      }),
+    ).toEqual([
+      "pathways.yaml: storage.module: nowhere/store.ts does not exist",
+      "pathways.yaml: hooks.0: nowhere/hook.ts does not exist",
+      "channels/a/channel.yaml: source.module: channels/a/nowhere/source.ts does not exist",
+      "channels/a/channel.yaml: destinations.0.module: channels/a/nowhere/destination.ts does not exist",
+      "channels/a/channel.yaml: hooks.0: channels/a/nowhere/hook.ts does not exist",
+      "channels/b/channel.yaml: source.mllp.ackBuilder: channels/b/nowhere/ack.ts does not exist",
+    ]);
+  });
+
+  it("names each problem in a module, hook or storage block", async () => {
+    const problems = await problemsOf({
+      "pathways.yaml": [
+        "storage: { sqlite: { file: ./p.db }, module: ./store.ts }",
+        "hooks:",
+        "  - 42",
+        "  - { module: ./hook.ts, webhook: { url: https://ops.example.test } }",
+        "  - { webhook: { url: http://ops.example.test } }",
+        "  - { webhook: { url: https://ops.example.test, headers: { Authorization: Bearer-in-yaml } } }",
+        "  - { module: ./hook.ts, events: [delivered, exploded] }",
+        "  - { module: ./hook.ts, events: [] }",
+        "  - { module: ./hook.ts, timeout: 0 }",
+        "  - { options: { a: 1 }, webhook: { url: https://ops.example.test } }",
+        "  - { module: ./hook.ts, colour: red }",
+        "",
+      ].join("\n"),
+      "channels/a/channel.yaml":
+        "source: { file: { dir: ./in }, options: { a: 1 } }\ndestinations:\n  - { module: ./d.ts, http: { url: https://lab.example.test } }\n",
+    });
+    expect(problems).toEqual([
+      "pathways.yaml: storage: name exactly one of: sqlite, module",
+      "pathways.yaml: hooks.0: a module path, { module: path, options }, or { webhook: { url } }",
+      "pathways.yaml: hooks.1: name exactly one of: module, webhook",
+      "pathways.yaml: hooks.2.webhook.url: https:// is required; set plaintext: true to send without TLS",
+      "pathways.yaml: hooks.3.webhook.headers.Authorization: a credential never goes in the YAML; read it with { env: NAME }",
+      expect.stringMatching(/^pathways\.yaml: hooks\.4\.events\.1: /) as unknown,
+      "pathways.yaml: hooks.5.events: at least one event",
+      'pathways.yaml: hooks.6.timeout: a duration above zero, such as "5s"',
+      "pathways.yaml: hooks.7.options: goes with module: it is what the module's factory is given",
+      'pathways.yaml: hooks.8: Unrecognized key: "colour"',
+      "channels/a/channel.yaml: source.options: goes with module: it is what the module's factory is given",
+      "channels/a/channel.yaml: destinations.0: name exactly one of: file, http, mllp, module",
     ]);
   });
 });

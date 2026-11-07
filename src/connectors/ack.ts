@@ -3,17 +3,36 @@ import { buildAck, parseHL7, type AckErrorDetail, type Hl7Message } from "@cosyt
 // The ACK an MLLP source sends, and the seam for building a different one. Kept apart from the MLLP
 // connectors so the package entry point, which exports it, does not load the transport.
 
-/** The ACK codes an MLLP source answers with. */
+/**
+ * The ACK codes an MLLP source answers with.
+ *
+ * @example
+ * ```ts
+ * const positive = (code: SourceAckCode): boolean => code === "AA";
+ * ```
+ */
 export type SourceAckCode = "AA" | "AE" | "AR";
 
 /**
  * Why an MLLP source answers as it does: `stored` (the message is durable), `store-failed` (it
  * could not be stored, and `onStoreFailure` asked for an ACK), or `unreadable` (it was stored,
  * marked failed, because it has no usable header or arrived damaged).
+ *
+ * @example
+ * ```ts
+ * if (request.reason === "unreadable") console.warn(request.problem);
+ * ```
  */
 export type AckReason = "stored" | "store-failed" | "unreadable";
 
-/** What an {@link AckBuilder} is asked to acknowledge. */
+/**
+ * What an {@link AckBuilder} is asked to acknowledge.
+ *
+ * @example
+ * ```ts
+ * const controlId = (request: AckRequest): string => request.header?.get("MSH.10") ?? "";
+ * ```
+ */
 export interface AckRequest {
   /** The code Pathways decided on. */
   readonly code: SourceAckCode;
@@ -36,8 +55,23 @@ export interface AckRequest {
 /**
  * Builds the ACK an MLLP source sends, as the bytes of an HL7 v2 message (the source adds the MLLP
  * framing). The default is {@link defaultAckBuilder}; a custom one is the seam for a source whose
- * receiver wants a different ACK. If it throws, the source logs the error's name and sends the
- * default ACK instead.
+ * sender wants a different ACK, named in the channel's YAML as
+ * `source: { mllp: { ..., ackBuilder: ./ack.ts } }` and exported as the module's default. If it
+ * throws, or runs past the channel's transform time limit, the source logs the error's name and
+ * sends the default ACK instead. It runs in the engine's own thread, once per message.
+ *
+ * @example
+ * ```ts
+ * // channels/adt/ack.ts: the default ACK, with MSH-3 set to what this sender expects.
+ * import { defaultAckBuilder, type AckBuilder } from "@cosyte/pathways";
+ * import { parseHL7 } from "@cosyte/hl7";
+ *
+ * export default ((request) => {
+ *   const ack = parseHL7(Buffer.from(defaultAckBuilder(request)));
+ *   ack.setField("MSH.3", "PATHWAYS");
+ *   return Buffer.from(ack.toString());
+ * }) satisfies AckBuilder;
+ * ```
  */
 export type AckBuilder = (request: AckRequest) => Uint8Array | Promise<Uint8Array>;
 

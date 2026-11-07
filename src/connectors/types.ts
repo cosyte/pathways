@@ -4,7 +4,15 @@
  * (storage, ordering, retries, transforms).
  */
 
-/** What a source can tell the engine about a message it hands over. Every field is optional. */
+/**
+ * What a source can tell the engine about a message it hands over. Every field is optional.
+ *
+ * @example
+ * ```ts
+ * await sink.receive(body, { duplicateKey: `${sender}|${controlId}` });
+ * await sink.receive(body, { failure: "inbound: NO_MSH_SEGMENT" });
+ * ```
+ */
 export interface ReceiveOptions {
   /**
    * What identifies the message to its sender, such as the sender and its MSH-10 control ID. When
@@ -21,7 +29,15 @@ export interface ReceiveOptions {
   readonly failure?: string | undefined;
 }
 
-/** What a source hands each incoming message to. */
+/**
+ * What a source hands each incoming message to.
+ *
+ * @example
+ * ```ts
+ * const id = await sink.receive(body); // durable once this resolves
+ * await acknowledge(id);
+ * ```
+ */
 export interface MessageSink {
   /**
    * Stores the message and resolves with its id once it is durable. Acknowledge the sender (move
@@ -35,7 +51,17 @@ export interface MessageSink {
 
 /**
  * Brings messages in. A source that polls (a folder, an inbox) implements `poll`, which the engine
- * calls on every pass. A source that listens (MLLP, HTTP) implements `start` and `stop`.
+ * calls on every pass. A source that listens (MLLP, HTTP) implements `start` and `stop`. A custom
+ * source's module builds one with a `SourceFactory`.
+ *
+ * @example
+ * ```ts
+ * const source: SourceConnector = {
+ *   async poll(sink) {
+ *     for (const body of await takeWaiting()) await sink.receive(body);
+ *   },
+ * };
+ * ```
  */
 export interface SourceConnector {
   poll?(sink: MessageSink): Promise<void>;
@@ -43,7 +69,14 @@ export interface SourceConnector {
   stop?(): Promise<void>;
 }
 
-/** One output of one message, on its way to one destination. */
+/**
+ * One output of one message, on its way to one destination.
+ *
+ * @example
+ * ```ts
+ * const name = (message: OutgoingMessage): string => `${message.messageId}-${message.seq}.hl7`;
+ * ```
+ */
 export interface OutgoingMessage {
   /** The id of the stored message this came from. */
   readonly messageId: number;
@@ -56,7 +89,17 @@ export interface OutgoingMessage {
  * Sends messages out. Throw to fail an attempt: by default the engine retries it with growing waits
  * and holds this destination's later messages behind it. Throw a {@link DeliveryRejected} when
  * sending the same message again cannot succeed (the receiver rejected its content), and the engine
- * marks it failed and moves on.
+ * marks it failed and moves on. A custom destination's module builds one with a
+ * `DestinationFactory`.
+ *
+ * @example
+ * ```ts
+ * const destination: DestinationConnector = {
+ *   async deliver(message) {
+ *     await upload(`${message.messageId}-${message.seq}`, message.body);
+ *   },
+ * };
+ * ```
  */
 export interface DestinationConnector {
   deliver(message: OutgoingMessage): Promise<void>;
@@ -64,8 +107,15 @@ export interface DestinationConnector {
   stop?(): Promise<void>;
 }
 
+/** Marks a {@link DeliveryRejected}, shared by every copy of Pathways loaded in one process. */
+const REJECTED = Symbol.for("@cosyte/pathways/DeliveryRejected");
+
 /**
  * A delivery the receiver rejected for good: retrying the same message will not help.
+ *
+ * `instanceof DeliveryRejected` holds for one made by any copy of Pathways in the process: the
+ * `pathways` command bundles its own copy of this class, and a custom destination imports another
+ * from the package entry, so the check goes by a shared mark rather than by class identity.
  *
  * @example
  * ```ts
@@ -81,5 +131,16 @@ export class DeliveryRejected extends Error {
     super(`the destination rejected the message (${reason})`);
     this.name = "DeliveryRejected";
     this.reason = reason;
+    Object.defineProperty(this, REJECTED, { value: true });
+  }
+
+  /** Whether `value` is a DeliveryRejected from any copy of Pathways; a subclass checks as usual. */
+  static override [Symbol.hasInstance](value: unknown): boolean {
+    if (this !== DeliveryRejected) return Function.prototype[Symbol.hasInstance].call(this, value);
+    return (
+      typeof value === "object" &&
+      value !== null &&
+      (value as { readonly [REJECTED]?: unknown })[REJECTED] === true
+    );
   }
 }

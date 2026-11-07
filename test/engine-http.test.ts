@@ -259,7 +259,7 @@ describe("an HTTP channel in the engine", () => {
     });
     const [channel] = (await loadProject(root)).channels;
     const { logger } = captureLogger();
-    const built = connectorsFor(channel as ChannelConfig, { now: Date.now, logger, env: {} });
+    const built = await connectorsFor(channel as ChannelConfig, { now: Date.now, logger, env: {} });
     expect(built.source).toBeInstanceOf(HttpSource);
     expect(built.destinations[0]).toBeInstanceOf(HttpDestination);
     await built.destinations[0]?.stop?.();

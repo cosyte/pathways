@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { LIFECYCLE_EVENTS, type LifecycleEventType } from "../extensions/events.js";
+
 /**
  * The message formats a channel can declare.
  *
@@ -160,64 +162,83 @@ const httpSource = z
   })
   .superRefine((value, ctx) => tlsOrPlaintext(value, ctx, LISTENER_TLS_REQUIRED));
 
+/** What an HTTP client endpoint (an HTTP destination, a webhook hook) is configured with. */
+const httpClientShape = {
+  url: z.string().refine((value) => {
+    const url = URL.parse(value);
+    return url !== null && (url.protocol === "https:" || url.protocol === "http:");
+  }, "an https:// URL"),
+  headers: z.record(z.string(), z.union([z.string(), fromEnv])).optional(),
+  tls: clientTls.optional(),
+  plaintext: z.boolean().optional(),
+};
+
+/**
+ * HTTPS unless `plaintext: true` with an `http://` url, no credentials in the url, and every header
+ * that carries a credential read from the environment.
+ */
+function httpClientChecks(
+  value: {
+    readonly url: string;
+    readonly headers?: Readonly<Record<string, string | { readonly env: string }>> | undefined;
+    readonly tls?: unknown;
+    readonly plaintext?: boolean | undefined;
+  },
+  ctx: z.RefinementCtx,
+): void {
+  const url = URL.parse(value.url);
+  /* v8 ignore next: the url refinement above has already passed */
+  if (url === null) return;
+  if (url.username !== "" || url.password !== "") {
+    ctx.addIssue({
+      code: "custom",
+      path: ["url"],
+      message: "credentials do not belong in the url; send them in headers, from { env: NAME }",
+    });
+  }
+  if (value.tls !== undefined && value.plaintext === true) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["plaintext"],
+      message: "cannot be set alongside tls; plaintext: true runs without TLS",
+    });
+  } else if (url.protocol === "http:" && value.plaintext !== true) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["url"],
+      message: "https:// is required; set plaintext: true to send without TLS",
+    });
+  } else if (url.protocol === "https:" && value.plaintext === true) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["plaintext"],
+      message: "applies only to an http:// url",
+    });
+  }
+  for (const [name, header] of Object.entries(value.headers ?? {})) {
+    const at = ["headers", name];
+    if (!HEADER_NAME.test(name)) {
+      ctx.addIssue({ code: "custom", path: at, message: "not a valid header name" });
+    } else if (MANAGED_HEADERS.has(name.toLowerCase())) {
+      ctx.addIssue({ code: "custom", path: at, message: "Pathways sets this header itself" });
+    } else if (typeof header === "string" && SECRET_HEADER.test(name)) {
+      ctx.addIssue({
+        code: "custom",
+        path: at,
+        message: "a credential never goes in the YAML; read it with { env: NAME }",
+      });
+    } else if (typeof header === "string" && !HEADER_VALUE.test(header)) {
+      ctx.addIssue({ code: "custom", path: at, message: "not a valid header value" });
+    }
+  }
+}
+
 const httpDestination = z
-  .strictObject({
-    url: z.string().refine((value) => {
-      const url = URL.parse(value);
-      return url !== null && (url.protocol === "https:" || url.protocol === "http:");
-    }, "an https:// URL"),
-    headers: z.record(z.string(), z.union([z.string(), fromEnv])).optional(),
-    timeout: duration.optional(),
-    tls: clientTls.optional(),
-    plaintext: z.boolean().optional(),
-  })
-  .superRefine((value, ctx) => {
-    const url = URL.parse(value.url);
-    /* v8 ignore next: the url refinement above has already passed */
-    if (url === null) return;
-    if (url.username !== "" || url.password !== "") {
-      ctx.addIssue({
-        code: "custom",
-        path: ["url"],
-        message: "credentials do not belong in the url; send them in headers, from { env: NAME }",
-      });
-    }
-    if (value.tls !== undefined && value.plaintext === true) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["plaintext"],
-        message: "cannot be set alongside tls; plaintext: true runs without TLS",
-      });
-    } else if (url.protocol === "http:" && value.plaintext !== true) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["url"],
-        message: "https:// is required; set plaintext: true to send without TLS",
-      });
-    } else if (url.protocol === "https:" && value.plaintext === true) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["plaintext"],
-        message: "applies only to an http:// url",
-      });
-    }
-    for (const [name, header] of Object.entries(value.headers ?? {})) {
-      const at = ["headers", name];
-      if (!HEADER_NAME.test(name)) {
-        ctx.addIssue({ code: "custom", path: at, message: "not a valid header name" });
-      } else if (MANAGED_HEADERS.has(name.toLowerCase())) {
-        ctx.addIssue({ code: "custom", path: at, message: "Pathways sets this header itself" });
-      } else if (typeof header === "string" && SECRET_HEADER.test(name)) {
-        ctx.addIssue({
-          code: "custom",
-          path: at,
-          message: "a credential never goes in the YAML; read it with { env: NAME }",
-        });
-      } else if (typeof header === "string" && !HEADER_VALUE.test(header)) {
-        ctx.addIssue({ code: "custom", path: at, message: "not a valid header value" });
-      }
-    }
-  });
+  .strictObject({ ...httpClientShape, timeout: duration.optional() })
+  .superRefine(httpClientChecks);
+
+/** The built-in webhook hook: an HTTP client endpoint whose time limit is its hook entry's. */
+const webhook = z.strictObject(httpClientShape).superRefine(httpClientChecks);
 
 const mllpSource = z
   .strictObject({
@@ -226,6 +247,7 @@ const mllpSource = z
     tls: serverTls.optional(),
     plaintext: z.boolean().optional(),
     onStoreFailure: onStoreFailure.optional(),
+    ackBuilder: path.optional(),
   })
   .superRefine((value, ctx) => tlsOrPlaintext(value, ctx, LISTENER_TLS_REQUIRED));
 
@@ -255,8 +277,54 @@ function oneKind(kinds: readonly string[]) {
   };
 }
 
-const SOURCE_KINDS = ["file", "http", "mllp"] as const;
-const DESTINATION_KINDS = ["file", "http", "mllp"] as const;
+/** `options:` belongs to `module:`, the only kind of block that hands its options to user code. */
+function optionsWithModule(
+  value: { readonly module?: string | undefined; readonly options?: unknown },
+  ctx: z.RefinementCtx,
+): void {
+  if (value.options !== undefined && value.module === undefined) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["options"],
+      message: "goes with module: it is what the module's factory is given",
+    });
+  }
+}
+
+/** A custom module's options: any YAML mapping, handed to the module's factory as it is. */
+const moduleOptions = z.record(z.string(), z.unknown());
+
+const SOURCE_KINDS = ["file", "http", "mllp", "module"] as const;
+const DESTINATION_KINDS = ["file", "http", "mllp", "module"] as const;
+const HOOK_KINDS = ["module", "webhook"] as const;
+const STORAGE_KINDS = ["sqlite", "module"] as const;
+
+/** A hook's time limit: a duration above zero. */
+const hookTimeout = duration.refine((value) => value > 0, 'a duration above zero, such as "5s"');
+
+/** One hook in a `hooks:` list, written out. */
+const hookObject = z
+  .strictObject({
+    module: path.optional(),
+    options: moduleOptions.optional(),
+    webhook: webhook.optional(),
+    events: z.array(z.enum(LIFECYCLE_EVENTS)).min(1, "at least one event").optional(),
+    timeout: hookTimeout.optional(),
+  })
+  .superRefine(oneKind(HOOK_KINDS))
+  .superRefine(optionsWithModule);
+
+/**
+ * One hook in a `hooks:` list: a module path on its own, `{ module, options }`, or
+ * `{ webhook: { url, headers } }`, each with optional `events` and `timeout`.
+ */
+const hookEntry = z
+  .union([path.transform((module) => ({ module })), z.record(z.string(), z.unknown())], {
+    error: "a module path, { module: path, options }, or { webhook: { url } }",
+  })
+  .pipe(hookObject);
+
+const hooks = z.array(hookEntry).optional();
 
 /**
  * What a master key's id may hold: letters, digits, dots, hyphens and underscores, at most 64,
@@ -315,10 +383,15 @@ const encryption = z.union(
           ctx.addIssue({ code: "custom", path: ["current"], message: "names no key in keys" });
         }
       }),
+    // A user's KeyProvider: a module whose default export builds it, such as one over a cloud key
+    // service. It holds its own master keys and says which one is current.
+    z.strictObject({
+      provider: z.strictObject({ module: path, options: moduleOptions.optional() }),
+    }),
   ],
   {
     error:
-      "either none, or { keys: [{ id, env: NAME } or { id, file: path }], current: id } to encrypt stored messages",
+      "either none, { keys: [{ id, env: NAME } or { id, file: path }], current: id }, or { provider: { module: path, options } } to encrypt stored messages",
   },
 );
 
@@ -327,9 +400,14 @@ export const projectSchema = z.strictObject({
   encryption: encryption.optional(),
   storage: z
     .strictObject({
-      sqlite: z.strictObject({ file: z.string().min(1) }),
+      sqlite: z.strictObject({ file: z.string().min(1) }).optional(),
+      module: path.optional(),
+      options: moduleOptions.optional(),
     })
+    .superRefine(oneKind(STORAGE_KINDS))
+    .superRefine(optionsWithModule)
     .optional(),
+  hooks,
   defaults: z.strictObject(settingsShape).optional(),
   health: z
     .strictObject(listenerShape)
@@ -358,8 +436,11 @@ export const channelSchema = z
           .optional(),
         http: httpSource.optional(),
         mllp: mllpSource.optional(),
+        module: path.optional(),
+        options: moduleOptions.optional(),
       })
-      .superRefine(oneKind(SOURCE_KINDS)),
+      .superRefine(oneKind(SOURCE_KINDS))
+      .superRefine(optionsWithModule),
     transform: z.string().min(1).optional(),
     destinations: z
       .array(
@@ -368,10 +449,14 @@ export const channelSchema = z
             file: z.strictObject({ dir: z.string().min(1) }).optional(),
             http: httpDestination.optional(),
             mllp: mllpDestination.optional(),
+            module: path.optional(),
+            options: moduleOptions.optional(),
           })
-          .superRefine(oneKind(DESTINATION_KINDS)),
+          .superRefine(oneKind(DESTINATION_KINDS))
+          .superRefine(optionsWithModule),
       )
       .min(1, "at least one destination"),
+    hooks,
     // A channel overrides the transform limits and the MLLP defaults; how often the engine polls is
     // engine-wide.
     timeout: settingsShape.timeout,
@@ -437,6 +522,41 @@ export const DEFAULT_HTTP_TOKEN_ENV = "PATHWAYS_HTTP_TOKEN";
 /** The environment variable the health endpoint reads its bearer token from when `auth` is not set. */
 export const DEFAULT_HEALTH_TOKEN_ENV = "PATHWAYS_HEALTH_TOKEN";
 
+/**
+ * How long one call to a hook may run by default, in milliseconds.
+ *
+ * @example
+ * ```ts
+ * DEFAULT_HOOK_TIMEOUT_MS; // 5000
+ * ```
+ */
+export const DEFAULT_HOOK_TIMEOUT_MS = 5_000;
+
+/**
+ * A custom module's `options:`, as parsed from the YAML.
+ *
+ * @example
+ * ```ts
+ * const options: ModuleOptions = { queue: "adt" };
+ * ```
+ */
+export type ModuleOptions = Readonly<Record<string, unknown>>;
+
+/**
+ * A custom source or destination: a module, resolved to an absolute path, whose default export
+ * builds the connector from `options`.
+ *
+ * @example
+ * ```ts
+ * const source: ModuleConnector = { kind: "module", module: "/project/channels/adt/source.ts", options: {} };
+ * ```
+ */
+export interface ModuleConnector {
+  readonly kind: "module";
+  readonly module: string;
+  readonly options: ModuleOptions;
+}
+
 /** A file source, with its folder resolved to an absolute path. */
 export interface FileSource {
   readonly kind: "file";
@@ -498,15 +618,31 @@ export interface HttpSource extends ListenerConfig {
 /** A header an HTTP destination sends: written in the YAML, or read from an environment variable. */
 export type HeaderValue = { readonly value: string } | { readonly env: string };
 
-/** An HTTP destination: each output is POSTed to `url`. */
-export interface HttpDestination {
-  readonly kind: "http";
+/**
+ * Where an HTTP client (an HTTP destination, a webhook hook) POSTs, and how.
+ *
+ * @example
+ * ```ts
+ * const ops: HttpClientConfig = {
+ *   url: "https://ops.example.test/pathways",
+ *   headers: { Authorization: { env: "OPS_TOKEN" } },
+ *   tls: undefined,
+ *   plaintext: false,
+ * };
+ * ```
+ */
+export interface HttpClientConfig {
   readonly url: string;
   readonly headers: Readonly<Record<string, HeaderValue>>;
-  readonly timeoutMs: number;
   /** Undefined for `https://` with Node's built-in roots and no client certificate, or plaintext. */
   readonly tls: ClientTlsFiles | undefined;
   readonly plaintext: boolean;
+}
+
+/** An HTTP destination: each output is POSTed to `url`. */
+export interface HttpDestination extends HttpClientConfig {
+  readonly kind: "http";
+  readonly timeoutMs: number;
 }
 
 /**
@@ -520,6 +656,8 @@ export interface MllpSource {
   readonly tls: ServerTlsFiles | undefined;
   readonly plaintext: boolean;
   readonly onStoreFailure: OnStoreFailure;
+  /** A module whose default export builds each ACK, or `undefined` for the default ACK. */
+  readonly ackBuilder: string | undefined;
 }
 
 /**
@@ -553,7 +691,8 @@ export type MasterKeySource =
 
 /**
  * How stored messages are encrypted at rest, from `pathways.yaml`: under master keys read from
- * environment variables or files, with `current` wrapping each new value's data key, or `none`.
+ * environment variables or files, with `current` wrapping each new value's data key; under a custom
+ * `KeyProvider` a module builds (`provider`), which holds its own keys; or `none`.
  *
  * @example
  * ```ts
@@ -570,7 +709,51 @@ export type EncryptionConfig =
       readonly kind: "keys";
       readonly keys: readonly MasterKeySource[];
       readonly current: string;
-    };
+    }
+  | { readonly kind: "provider"; readonly module: string; readonly options: ModuleOptions };
+
+/** What every hook entry sets beside its kind. */
+interface HookSettings {
+  /** The events the hook receives, or `undefined` for every event. */
+  readonly events: readonly LifecycleEventType[] | undefined;
+  /** How long one call to the hook may run, in milliseconds. */
+  readonly timeoutMs: number;
+}
+
+/**
+ * One lifecycle hook: a module whose default export builds the hook from `options`, or the
+ * built-in webhook.
+ *
+ * @example
+ * ```ts
+ * const pager: HookConfig = {
+ *   kind: "module",
+ *   module: "/project/hooks/pager.ts",
+ *   options: {},
+ *   events: ["delivery-rejected"],
+ *   timeoutMs: 5_000,
+ * };
+ * ```
+ */
+export type HookConfig =
+  | (HookSettings & {
+      readonly kind: "module";
+      readonly module: string;
+      readonly options: ModuleOptions;
+    })
+  | (HookSettings & { readonly kind: "webhook"; readonly webhook: HttpClientConfig });
+
+/**
+ * Where messages are stored: SQLite, or a module whose default export builds a store.
+ *
+ * @example
+ * ```ts
+ * const storage: StorageConfig = { kind: "sqlite", file: "/project/.pathways/pathways.db" };
+ * ```
+ */
+export type StorageConfig =
+  | { readonly kind: "sqlite"; readonly file: string }
+  | { readonly kind: "module"; readonly module: string; readonly options: ModuleOptions };
 
 /** One channel, loaded, validated and resolved. */
 export interface ChannelConfig {
@@ -578,18 +761,30 @@ export interface ChannelConfig {
   /** The channel's folder. Relative paths in its `channel.yaml` resolve against it. */
   readonly dir: string;
   readonly format: Format;
-  readonly source: FileSource | HttpSource | MllpSource;
+  readonly source: FileSource | HttpSource | MllpSource | ModuleConnector;
   /** The transform module, or `undefined` to pass each message through unchanged. */
   readonly transform: string | undefined;
-  readonly destinations: readonly (FileDestination | HttpDestination | MllpDestination)[];
+  readonly destinations: readonly (
+    | FileDestination
+    | HttpDestination
+    | MllpDestination
+    | ModuleConnector
+  )[];
   readonly settings: Settings;
+  /** The channel's own hooks, which receive its events beside the engine-wide ones. */
+  readonly hooks: readonly HookConfig[];
 }
 
 /** A whole project: the engine settings and every channel under `channels/`. */
 export interface ProjectConfig {
   readonly root: string;
+  /** Where messages are stored. */
+  readonly storage: StorageConfig;
+  /** The SQLite file: where `storage.sqlite.file` points, or the default. Unused by a custom store. */
   readonly databaseFile: string;
   readonly settings: Settings;
+  /** The engine-wide hooks, which receive every channel's events. */
+  readonly hooks: readonly HookConfig[];
   /** The health endpoint, or undefined when `pathways.yaml` does not configure one. */
   readonly health: HealthConfig | undefined;
   /**
