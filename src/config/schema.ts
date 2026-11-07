@@ -267,6 +267,45 @@ const mllpDestination = z
     ),
   );
 
+/**
+ * A database server's connection URL, read from an environment variable at startup. It carries the
+ * password, so it never goes in the YAML.
+ */
+const urlFromEnv = z.strictObject(
+  {
+    env: z.string().regex(ENV_NAME, "an environment variable name, such as PATHWAYS_DATABASE_URL"),
+  },
+  {
+    error: (issue) =>
+      issue.code === "invalid_type"
+        ? "a connection URL carries a password, so it never goes in the YAML; read it with { env: NAME }"
+        : undefined,
+  },
+);
+
+/** A database server's connection pool. */
+const storagePool = z.strictObject({
+  max: z.number().int().min(1).max(1_000).optional(),
+  idleTimeout: duration.optional(),
+});
+
+/** A database server: PostgreSQL, MySQL or MariaDB, or SQL Server. */
+const serverStorage = z
+  .strictObject({
+    url: urlFromEnv.optional(),
+    tls: clientTls.optional(),
+    plaintext: z.boolean().optional(),
+    pool: storagePool.optional(),
+    connectTimeout: duration.optional(),
+  })
+  .superRefine((value, ctx) =>
+    tlsOrPlaintext(
+      value,
+      ctx,
+      "required: set tls: {} to verify the server against Node's built-in roots, tls: { ca } to trust your own CA, or plaintext: true to connect without TLS",
+    ),
+  );
+
 /** Exactly one key of a block that names one kind of connector. */
 function oneKind(kinds: readonly string[]) {
   return (value: Record<string, unknown>, ctx: z.RefinementCtx): void => {
@@ -297,7 +336,30 @@ const moduleOptions = z.record(z.string(), z.unknown());
 const SOURCE_KINDS = ["file", "http", "mllp", "module"] as const;
 const DESTINATION_KINDS = ["file", "http", "mllp", "module"] as const;
 const HOOK_KINDS = ["module", "webhook"] as const;
-const STORAGE_KINDS = ["sqlite", "module"] as const;
+
+/**
+ * The databases Pathways stores messages in: SQLite (the default, bundled), PostgreSQL, MySQL or
+ * MariaDB (`mysql`), and SQL Server. Each server's driver is an optional peer dependency.
+ *
+ * @example
+ * ```ts
+ * STORAGE_KINDS.includes("postgres"); // true
+ * ```
+ */
+export const STORAGE_KINDS = ["sqlite", "postgres", "mysql", "sqlserver"] as const;
+
+/**
+ * One of {@link STORAGE_KINDS}.
+ *
+ * @example
+ * ```ts
+ * const kind: StorageKind = "sqlserver";
+ * ```
+ */
+export type StorageKind = (typeof STORAGE_KINDS)[number];
+
+/** What a `storage:` block names: one of the databases, or a custom store's module. */
+const STORAGE_BLOCK_KINDS = [...STORAGE_KINDS, "module"] as const;
 
 /** A hook's time limit: a duration above zero. */
 const hookTimeout = duration.refine((value) => value > 0, 'a duration above zero, such as "5s"');
@@ -401,10 +463,13 @@ export const projectSchema = z.strictObject({
   storage: z
     .strictObject({
       sqlite: z.strictObject({ file: z.string().min(1) }).optional(),
+      postgres: serverStorage.optional(),
+      mysql: serverStorage.optional(),
+      sqlserver: serverStorage.optional(),
       module: path.optional(),
       options: moduleOptions.optional(),
     })
-    .superRefine(oneKind(STORAGE_KINDS))
+    .superRefine(oneKind(STORAGE_BLOCK_KINDS))
     .superRefine(optionsWithModule)
     .optional(),
   hooks,
@@ -506,6 +571,46 @@ export const DEFAULT_MIN_AGE_MS = 1_000;
 
 /** Where the SQLite database lives by default, relative to the project root. */
 export const DEFAULT_DATABASE_FILE = ".pathways/pathways.db";
+
+/**
+ * The environment variable a database server's connection URL is read from when `url` is not set.
+ *
+ * @example
+ * ```ts
+ * process.env[DEFAULT_DATABASE_URL_ENV]; // "postgres://pathways:...@db.internal/pathways"
+ * ```
+ */
+export const DEFAULT_DATABASE_URL_ENV = "PATHWAYS_DATABASE_URL";
+
+/**
+ * The most connections a database server's pool opens, by default.
+ *
+ * @example
+ * ```ts
+ * const max = project.storage.kind === "sqlite" ? 1 : project.storage.pool.max; // 10 by default
+ * ```
+ */
+export const DEFAULT_POOL_MAX = 10;
+
+/**
+ * How long an idle pooled connection to a database server stays open by default, in milliseconds.
+ *
+ * @example
+ * ```ts
+ * DEFAULT_POOL_IDLE_TIMEOUT_MS / 1_000; // 30 seconds
+ * ```
+ */
+export const DEFAULT_POOL_IDLE_TIMEOUT_MS = 30_000;
+
+/**
+ * How long connecting to a database server may take by default, in milliseconds.
+ *
+ * @example
+ * ```ts
+ * DEFAULT_DATABASE_CONNECT_TIMEOUT_MS / 1_000; // 10 seconds
+ * ```
+ */
+export const DEFAULT_DATABASE_CONNECT_TIMEOUT_MS = 10_000;
 
 /** The address a listening endpoint binds to by default: this machine only. */
 export const DEFAULT_HOST = "127.0.0.1";
@@ -743,18 +848,6 @@ export type HookConfig =
     })
   | (HookSettings & { readonly kind: "webhook"; readonly webhook: HttpClientConfig });
 
-/**
- * Where messages are stored: SQLite, or a module whose default export builds a store.
- *
- * @example
- * ```ts
- * const storage: StorageConfig = { kind: "sqlite", file: "/project/.pathways/pathways.db" };
- * ```
- */
-export type StorageConfig =
-  | { readonly kind: "sqlite"; readonly file: string }
-  | { readonly kind: "module"; readonly module: string; readonly options: ModuleOptions };
-
 /** One channel, loaded, validated and resolved. */
 export interface ChannelConfig {
   readonly name: string;
@@ -775,12 +868,84 @@ export interface ChannelConfig {
   readonly hooks: readonly HookConfig[];
 }
 
+/**
+ * SQLite storage: one database file, opened by the bundled better-sqlite3 driver.
+ *
+ * @example
+ * ```ts
+ * const storage: SqliteStorage = { kind: "sqlite", file: "/srv/project/.pathways/pathways.db" };
+ * ```
+ */
+export interface SqliteStorage {
+  readonly kind: "sqlite";
+  /** The database file, resolved to an absolute path. */
+  readonly file: string;
+}
+
+/**
+ * A database server. Its connection URL, which carries the password, is read from the environment
+ * variable `urlEnv` at startup, never from the YAML. `tls` is undefined exactly when `plaintext`.
+ *
+ * @example
+ * ```ts
+ * const storage: ServerStorage = {
+ *   kind: "postgres",
+ *   urlEnv: "PATHWAYS_DATABASE_URL",
+ *   tls: { ca: "/srv/project/tls/db-ca.pem", cert: undefined, key: undefined },
+ *   plaintext: false,
+ *   pool: { max: 10, idleTimeoutMs: 30_000 },
+ *   connectTimeoutMs: 10_000,
+ * };
+ * ```
+ */
+export interface ServerStorage {
+  readonly kind: Exclude<StorageKind, "sqlite">;
+  /** The environment variable that holds the connection URL. */
+  readonly urlEnv: string;
+  readonly tls: ClientTlsFiles | undefined;
+  readonly plaintext: boolean;
+  readonly pool: {
+    /** The most connections the pool opens. */
+    readonly max: number;
+    /** How long an idle connection stays open, in milliseconds. */
+    readonly idleTimeoutMs: number;
+  };
+  /** How long connecting may take, in milliseconds. */
+  readonly connectTimeoutMs: number;
+}
+
+/**
+ * A database the built-in store opens itself: SQLite, or a database server.
+ *
+ * @example
+ * ```ts
+ * const storage: DatabaseStorage = { kind: "sqlite", file: "/srv/project/.pathways/pathways.db" };
+ * ```
+ */
+export type DatabaseStorage = SqliteStorage | ServerStorage;
+
+/**
+ * Where messages are stored, from `pathways.yaml`'s `storage` block: a database, or a module whose
+ * default export builds a store.
+ *
+ * @example
+ * ```ts
+ * const storage: StorageConfig = { kind: "sqlite", file: "/srv/project/.pathways/pathways.db" };
+ * ```
+ */
+export type StorageConfig =
+  | DatabaseStorage
+  | { readonly kind: "module"; readonly module: string; readonly options: ModuleOptions };
+
 /** A whole project: the engine settings and every channel under `channels/`. */
 export interface ProjectConfig {
   readonly root: string;
-  /** Where messages are stored. */
+  /** Where messages are stored: SQLite by default, a database server, or a custom store. */
   readonly storage: StorageConfig;
-  /** The SQLite file: where `storage.sqlite.file` points, or the default. Unused by a custom store. */
+  /**
+   * The SQLite file: where `storage.sqlite.file` points, or the default. Unused by a database server
+   * or a custom store.
+   */
   readonly databaseFile: string;
   readonly settings: Settings;
   /** The engine-wide hooks, which receive every channel's events. */

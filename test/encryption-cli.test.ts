@@ -294,7 +294,7 @@ describe("pathways rekey", () => {
     ).toMatchObject({
       code: EXIT.failed,
       out: "",
-      err: "pathways: the database could not be opened.\n",
+      err: "pathways: the database could not be opened (EEXIST).\n",
     });
   });
 

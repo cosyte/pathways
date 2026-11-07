@@ -96,10 +96,15 @@
     "@cosyte/vitest-config": "^0.0.2",
     "@types/better-sqlite3": "9.6.0",
     "@types/node": "^24.0.0",
+    "@types/pg": "8.23.1",
     "@vitest/coverage-v8": "4.1.4",
     "eslint": "10.5.0",
+    "mysql2": "3.24.6",
+    "pg": "8.23.1",
     "prettier": "3.8.3",
     "simple-git-hooks": "2.13.0",
+    "tarn": "3.1.2",
+    "tedious": "20.3.8",
     "tsup": "8.5.1",
     "tsx": "4.21.0",
     "typescript": "5.9.3",
@@ -117,6 +122,26 @@
     "pino": "^10.4.0",
     "yaml": "^2.9.1",
     "zod": "^4.6.7"
+  },
+  "peerDependencies": {
+    "mysql2": "^3.0.0",
+    "pg": "^8.0.0",
+    "tarn": "^3.0.0",
+    "tedious": "^20.0.0"
+  },
+  "peerDependenciesMeta": {
+    "mysql2": {
+      "optional": true
+    },
+    "pg": {
+      "optional": true
+    },
+    "tarn": {
+      "optional": true
+    },
+    "tedious": {
+      "optional": true
+    }
   },
   "pnpm": {
     "overrides": {

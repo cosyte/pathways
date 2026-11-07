@@ -5,11 +5,17 @@ Pathways, our code-first healthcare integration engine, published (once released
 command runs and tests them. This repository is public. It started from scratch on 2026-11-07.
 
 The first slice runs: a file source, a TypeScript transform in a worker thread per channel
-(`src/engine/`), SQLite storage through Kysely (`src/storage/`), a file destination, and
+(`src/engine/`), storage through Kysely (`src/storage/`), a file destination, and
 `pathways start` and `pathways test`. A channel's `format` is `hl7v2`, `fhir`, `x12`, `ccda`,
 `json` or `text`; the worker parses each with its `@cosyte/*` library, and the types a transform
 is written against are in `src/transform.ts`. Sources and destinations are the public interfaces in
 `src/connectors/types.ts`, and the engine depends on `MessageStore`, not on SQLite.
+Storage is SQLite (better-sqlite3, bundled), PostgreSQL (pg), MySQL or MariaDB (mysql2) or SQL Server
+(tedious and tarn), chosen by `pathways.yaml`'s `storage` block. The server drivers are optional peer
+dependencies, imported only when configured (`src/storage/dialects.ts`); a missing one is a
+configuration error naming the package. One `Store` runs the same queries on all four, with the
+column types per database inside the two migrations, and SQLite's exactly as the first slice wrote
+them. A server's connection URL, which carries its password, comes only from an environment variable.
 Stored bodies and error texts are encrypted at rest by `src/encryption/`: `EncryptedStore` wraps any
 `MessageStore`, each value gets its own AES-256-GCM data key, a `KeyProvider` wraps that key under
 a master key, and `pathways rekey` moves stored values to the current key.
@@ -57,9 +63,30 @@ directory), `ci / actionlint`, CodeQL, and the em-dash gate, which also reads th
 body and commit messages. Inside the umbrella, `.git` is a file, so set
 `SKIP_INSTALL_SIMPLE_GIT_HOOKS=1` before `pnpm attw` or the hook installer's error lands in its JSON.
 
-`pnpm bench [messages]` measures one channel's throughput, file to file through SQLite, with encryption
-at rest off and then on. It is not in CI; run it before and after a change that could move it, and put
-both numbers in the pull request.
+The storage suites run on SQLite always, and on each server whose administrator's URL is in the
+environment; CI's `databases` job (`.github/workflows/databases.yml`) sets all four and runs
+`pnpm test:coverage` with them. Locally, with docker:
+
+```sh
+docker run -d --name pw-postgres -e POSTGRES_PASSWORD=Pathways-Dev-0000 -p 127.0.0.1:55432:5432 postgres:17
+docker run -d --name pw-mysql -e MYSQL_ROOT_PASSWORD=Pathways-Dev-0000 -p 127.0.0.1:53306:3306 mysql:8.4
+docker run -d --name pw-mariadb -e MARIADB_ROOT_PASSWORD=Pathways-Dev-0000 -p 127.0.0.1:53307:3306 mariadb:11
+docker run -d --name pw-sqlserver -e ACCEPT_EULA=Y -e MSSQL_SA_PASSWORD=Pathways-Dev-0000 -p 127.0.0.1:51433:1433 mcr.microsoft.com/mssql/server:2022-latest
+export PATHWAYS_TEST_POSTGRES_URL=postgres://postgres:Pathways-Dev-0000@127.0.0.1:55432/postgres
+export PATHWAYS_TEST_MYSQL_URL=mysql://root:Pathways-Dev-0000@127.0.0.1:53306/mysql
+export PATHWAYS_TEST_MARIADB_URL=mysql://root:Pathways-Dev-0000@127.0.0.1:53307/mysql
+export PATHWAYS_TEST_SQLSERVER_URL=sqlserver://sa:Pathways-Dev-0000@127.0.0.1:51433/master
+```
+
+Each test makes and drops a database of its own. `PATHWAYS_TEST_ALL_DATABASES=1` turns a missing URL
+into a failure instead of a skip, as CI runs it.
+
+`pnpm bench [messages] [database]` measures one channel's throughput, file to file, with encryption
+at rest off and then on: through SQLite by default, or through `postgres`, `mysql` or `sqlserver` at
+the administrator's URL in `PATHWAYS_BENCH_DATABASE_URL`. It is not in CI; run it before and after a
+change that could move it, and put both numbers in the pull request. The bench's SQLite file sits in
+the system temp folder, often a tmpfs, so compare a server with its data on tmpfs too, or say which
+disk each was on: durable commits dominate.
 
 ## Hazard
 
@@ -127,6 +154,23 @@ receiver with the wrong picture of a patient. Keep message text out of logs, err
 - Secrets (tokens, credential headers, key files, master keys) are read when the engine starts, not
   when the configuration loads, so `pathways test` never needs them. A missing one is a `ConfigError` that
   names the file, the key and the variable, never the value.
+- Storage stays portable: a migration is one set of steps under one name for every database, with
+  its column types from `COLUMN_TYPES` in `src/storage/store.ts`. Text compares by code point on all
+  four (MySQL tables and SQL Server text columns take binary collations), ids and epoch milliseconds
+  are 64-bit, and a new migration keeps SQLite's existing files valid. A query is written per
+  database only where SQL differs: `TOP` against `LIMIT`, how an insert returns its id, and the
+  length check that makes SQL Server's and MySQL's `=` exact. Nothing claims rows: one engine process
+  owns a database and reads the head of each queue in order.
+- A database server's connection runs TLS like any other endpoint (`tls`, or `plaintext: true`), and
+  its URL comes from `{ env: NAME }` (`PATHWAYS_DATABASE_URL` by default), never the YAML. TLS is set
+  only in `pathways.yaml`: a URL with TLS options is refused, and a MySQL or SQL Server URL with any
+  options is refused, since mysql2 turns them into driver settings. Storage errors are reported by
+  their driver's code, never its text, which can name the server or the login.
+- `pathways rekey` rewrites values in place. SQLite zeroes the old bytes (`secure_delete`); a
+  database server keeps earlier row versions for a while (PostgreSQL until VACUUM and in its WAL,
+  MySQL in its undo and binary logs, SQL Server in its transaction log, every server in its backups),
+  so on a server the older master key is what keeps them unreadable: it is retired once the server
+  no longer holds them, not as soon as rekey reports nothing under it.
 - The health body holds states and counts only. It answers 503 only when storage cannot be read or
   a source cannot listen.
 - We never call Pathways HIPAA or HITRUST compliant or certified. It is built to the controls an

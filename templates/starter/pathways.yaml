@@ -6,6 +6,12 @@ storage:
     # The message database, relative to this file. Stored messages can hold patient data, so
     # .gitignore keeps this folder out of git.
     file: .pathways/pathways.db
+  # Or a database server in place of sqlite: postgres, mysql (MySQL or MariaDB) or sqlserver. Add its
+  # driver to the project (npm install pg, mysql2, or tedious tarn). Its connection URL holds the
+  # password, so it is read from an environment variable, PATHWAYS_DATABASE_URL unless url says
+  # another; tls: {} verifies the server against Node's built-in roots, tls: { ca: path } against
+  # your own CA:
+  #   postgres: { url: { env: PATHWAYS_DATABASE_URL }, tls: {} }
 
 # Every stored message, and every error stored with one, is encrypted with a data key of its own,
 # which the master key named by `current` wraps. `pathways start` needs this setting: a list of keys,
@@ -16,7 +22,8 @@ storage:
 # an environment variable ({ id: ..., env: NAME }) or from a file the secret store mounts
 # ({ id: ..., file: path }). A key is 32 random bytes in base64 (`openssl rand -base64 32`); it never
 # goes in this file. To rotate, add a new key and make it current, run `pathways rekey`, then remove
-# the old key.
+# the old key. On a database server, which keeps earlier row versions in its logs and backups for a
+# while, remove it once those no longer hold rows written under it.
 encryption:
   keys:
     - id: dev

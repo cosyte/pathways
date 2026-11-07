@@ -6,7 +6,9 @@ import type { z } from "zod";
 
 import {
   channelSchema,
+  DEFAULT_DATABASE_CONNECT_TIMEOUT_MS,
   DEFAULT_DATABASE_FILE,
+  DEFAULT_DATABASE_URL_ENV,
   DEFAULT_HEALTH_TOKEN_ENV,
   DEFAULT_HOOK_TIMEOUT_MS,
   DEFAULT_HOST,
@@ -14,6 +16,8 @@ import {
   DEFAULT_HTTP_TOKEN_ENV,
   DEFAULT_MAX_BYTES,
   DEFAULT_MIN_AGE_MS,
+  DEFAULT_POOL_IDLE_TIMEOUT_MS,
+  DEFAULT_POOL_MAX,
   DEFAULT_SETTINGS,
   projectSchema,
   type ChannelConfig,
@@ -35,6 +39,7 @@ import {
 type ChannelYaml = z.infer<typeof channelSchema>;
 type ProjectYaml = z.infer<typeof projectSchema>;
 type ListenerYaml = NonNullable<ProjectYaml["health"]>;
+type StorageYaml = NonNullable<ProjectYaml["storage"]>;
 type DestinationYaml = ChannelYaml["destinations"][number];
 type HookYaml = NonNullable<ChannelYaml["hooks"]>[number];
 type HttpClientYaml = NonNullable<DestinationYaml["http"]>;
@@ -91,15 +96,7 @@ export async function loadProject(root: string): Promise<ProjectConfig> {
 
   const settings: Settings = mergeSettings(DEFAULT_SETTINGS, project.defaults ?? {});
   const databaseFile = resolve(projectRoot, project.storage?.sqlite?.file ?? DEFAULT_DATABASE_FILE);
-  const storageModule = project.storage?.module;
-  const storage: StorageConfig =
-    storageModule === undefined
-      ? { kind: "sqlite", file: databaseFile }
-      : {
-          kind: "module",
-          module: resolve(projectRoot, storageModule),
-          options: project.storage?.options ?? {},
-        };
+  const storage = resolveStorage(project.storage, projectRoot, databaseFile);
   const hooks = (project.hooks ?? []).map((hook) => resolveHook(hook, projectRoot));
   const encryption = resolveEncryption(project.encryption, projectRoot);
   problems.push(
@@ -275,6 +272,37 @@ function resolveEncryption(
       env === undefined ? { id, file: resolve(root, file as string) } : { id, env },
     ),
     current: encryption.current,
+  };
+}
+
+/**
+ * The storage block, resolved: the SQLite file, TLS files and a custom store's module against the
+ * project root, and every default filled in. The connection URL stays an environment variable name until startup reads it.
+ */
+function resolveStorage(
+  storage: StorageYaml | undefined,
+  root: string,
+  databaseFile: string,
+): StorageConfig {
+  const { postgres, mysql, sqlserver, module } = storage ?? {};
+  if (module !== undefined) {
+    return { kind: "module", module: resolve(root, module), options: storage?.options ?? {} };
+  }
+  const server =
+    (postgres && { kind: "postgres" as const, ...postgres }) ??
+    (mysql && { kind: "mysql" as const, ...mysql }) ??
+    (sqlserver && { kind: "sqlserver" as const, ...sqlserver });
+  if (server === undefined) return { kind: "sqlite", file: databaseFile };
+  return {
+    kind: server.kind,
+    urlEnv: server.url?.env ?? DEFAULT_DATABASE_URL_ENV,
+    tls: server.tls === undefined ? undefined : resolveClientTls(server.tls, root),
+    plaintext: server.plaintext === true,
+    pool: {
+      max: server.pool?.max ?? DEFAULT_POOL_MAX,
+      idleTimeoutMs: server.pool?.idleTimeout ?? DEFAULT_POOL_IDLE_TIMEOUT_MS,
+    },
+    connectTimeoutMs: server.connectTimeout ?? DEFAULT_DATABASE_CONNECT_TIMEOUT_MS,
   };
 }
 

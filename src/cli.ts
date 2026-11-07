@@ -15,7 +15,7 @@ import { healthEndpointFor, type HealthEndpoint } from "./engine/health.js";
 import { ExtensionLoadError } from "./extensions/load.js";
 import { InitError, initProject, STARTER_CHANNEL, STARTER_KEY_FILE } from "./starter/init.js";
 import { openRawStore, openStore, startingKeys, type OpenStoreContext } from "./storage/open.js";
-import { isContentStore, type MessageStore } from "./storage/store.js";
+import { isContentStore, StorageError, type MessageStore } from "./storage/store.js";
 import { describeFailure, runChannelTests } from "./testing/run-tests.js";
 import { VERSION } from "./version.js";
 
@@ -200,12 +200,15 @@ async function start(projectDir: string, once: boolean, io: CliIo): Promise<numb
   // Master keys are read now, at startup, like every other secret: a missing one stops the start.
   const keys = await keysOrExit(project, { env, logger }, io);
   if (typeof keys === "number") return keys;
+  const { storage } = project;
+  if (storage.kind !== "sqlite" && storage.kind !== "module" && storage.plaintext) {
+    logger.warn({ event: "plaintext", endpoint: "storage" });
+  }
   let store: MessageStore;
   try {
     store = await openStore(project, { env, logger, keys });
   } catch (error) {
-    reportStoreError(error, io);
-    return EXIT.failed;
+    return reportStoreError(error, io);
   }
   if (keys === undefined) logger.warn({ event: "unencrypted-storage" });
   const engine = new Engine({ project, store, logger, env });
@@ -250,8 +253,14 @@ async function start(projectDir: string, once: boolean, io: CliIo): Promise<numb
   } catch (error) {
     // A stored value that cannot be decrypted stops the engine, as any storage failure does, and is
     // never handed on garbled. Its message is fixed text and at most a key id.
-    if (!(error instanceof EncryptionError)) throw error;
-    io.err(`pathways: the engine stopped: ${error.message} (${error.code}).\n`);
+    if (error instanceof EncryptionError) {
+      io.err(`pathways: the engine stopped: ${error.message} (${error.code}).\n`);
+      return EXIT.failed;
+    }
+    // Anything else (a database server that went away, say) is reported by its code alone: a
+    // driver's own text can name the server, the login or a stored value.
+    const code = errorCode(error);
+    io.err(`pathways: the engine stopped on an error${code === undefined ? "" : ` (${code})`}.\n`);
     return EXIT.failed;
   } finally {
     await health?.stop();
@@ -284,14 +293,34 @@ async function keysOrExit(
   }
 }
 
-/** Says why the store could not be opened: a custom store's module by file and key, or fixed text. */
-function reportStoreError(error: unknown, io: CliIo): void {
+/**
+ * Says why the store could not be opened, and returns the exit code: `config` for a connection URL,
+ * TLS file or driver package that cannot be had; `failed` for a custom store's module, named by file
+ * and key, or a database that cannot be opened, named by its driver's code. None names the
+ * database, its server or its login.
+ */
+function reportStoreError(error: unknown, io: CliIo): number {
+  if (error instanceof ConfigError) {
+    reportConfigError(error, io);
+    return EXIT.config;
+  }
+  if (error instanceof ExtensionLoadError) {
+    io.err(`pathways: ${error.message}\n`);
+    return EXIT.failed;
+  }
+  const refusal = error instanceof StorageError ? STORAGE_REFUSALS[error.reason] : undefined;
+  const code = errorCode(error);
   io.err(
-    error instanceof ExtensionLoadError
-      ? `pathways: ${error.message}\n`
-      : "pathways: the database could not be opened.\n",
+    `pathways: ${refusal ?? STORAGE_REFUSALS.open}${code === undefined ? "" : ` (${code})`}.\n`,
   );
+  return EXIT.failed;
 }
+
+/** What `pathways` says when a database will not open. */
+const STORAGE_REFUSALS: Readonly<Record<StorageError["reason"], string>> = {
+  open: "the database could not be opened",
+  schema: "the database schema could not be brought up to date",
+};
 
 /** What `rekey` says when `pathways.yaml` names no keys. */
 const REKEY_NEEDS_KEYS =
@@ -323,8 +352,7 @@ async function rekeyStore(
     // Rekey works on the store as it is, below encryption, to rewrite what it holds.
     store = await openRawStore(project, context);
   } catch (error) {
-    reportStoreError(error, io);
-    return EXIT.failed;
+    return reportStoreError(error, io);
   }
   if (!isContentStore(store)) {
     await store.close();
