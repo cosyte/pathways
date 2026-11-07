@@ -2,8 +2,12 @@
 
 Pathways, our code-first healthcare integration engine, published (once released) to npm as
 `@cosyte/pathways` under MIT. Channels are YAML files, transforms are TypeScript, and a `pathways`
-command runs and tests them. This repository is public. It started from scratch on 2026-11-07 and
-holds the package setup and CI so far.
+command runs and tests them. This repository is public. It started from scratch on 2026-11-07.
+
+The first slice runs: a file source, a TypeScript transform in a worker thread per channel
+(`src/engine/`), SQLite storage through Kysely (`src/storage/`), a file destination, and
+`pathways start` and `pathways test`. Sources and destinations are the public interfaces in
+`src/connectors/types.ts`, and the engine depends on `MessageStore`, not on SQLite.
 
 The plan is in the umbrella's `plans/pathways.md`: the V1 scope, the stack, delivery and error
 handling, and the HITRUST-driven controls. `plans/hitrust.md` holds the control map. Read both
@@ -29,7 +33,11 @@ pnpm check:no-emdash
 The first nine are the shared `cosyte/.github` CI pipeline (`ci / verify`), run on Node 24 and 26.
 CI alone also runs `ci / prepublish` (packs the tree and installs the tarball into a clean
 directory), `ci / actionlint`, CodeQL, and the em-dash gate, which also reads the pull request title,
-body and commit messages.
+body and commit messages. Inside the umbrella, `.git` is a file, so set
+`SKIP_INSTALL_SIMPLE_GIT_HOOKS=1` before `pnpm attw` or the hook installer's error lands in its JSON.
+
+`pnpm bench [messages]` measures one channel's throughput, file to file through SQLite. It is not in
+CI; run it before and after a change that could move it, and put both numbers in the pull request.
 
 ## Hazard
 
@@ -49,6 +57,17 @@ receiver with the wrong picture of a patient. Keep message text out of logs, err
 - CLI output and errors carry codes and fixed text, never what the caller typed or what a message
   holds.
 - Run `pnpm attw`, never the bare `attw` CLI, which exits 0 over a package with no types.
+- `src/engine/worker-entry.ts` stays self-contained: Node and package imports only, no relative
+  import, and only syntax type stripping can erase (no enums, namespaces or parameter properties).
+  The tests start it straight from source, and the build emits it as `dist/bin/pathways-worker.mjs`
+  beside the CLI, where `defaultWorkerUrl` looks for it.
+- No top-level `await` in an entry (`src/bin/`, the worker): the shared build also emits CommonJS,
+  which has none.
+- Logs and CLI output carry ids, counts, error names, codes and where a transform threw. Never a
+  message's content, never an error's own text (it can quote the message; `FailureSummary.detail` is
+  stored, not printed), and never a source file name, which can carry a patient's name.
+- A message is stored before its source acknowledges it, and a new delivery is due at once
+  (`next_attempt_at` 0); only a retry sets a time in the future.
 - `scripts/check-no-emdash.mjs` stays plain Node with no dependencies: the shared em-dash gate runs
   it with `node` on Node 22 without installing anything, since pnpm refuses this package below 24.
 - `prepare` sends simple-git-hooks' output to stderr (`1>&2`): on stdout it lands inside

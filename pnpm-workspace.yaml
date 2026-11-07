@@ -36,3 +36,8 @@ trustPolicyExclude:
   # worked example (https://pnpm.io/settings/dependency-resolution). Pinned to the one version, so a
   # later chokidar release is graded again.
   - "chokidar@4.0.3"
+
+# better-sqlite3 is a native addon: its install script fetches (or builds) the binary for this Node.
+# pnpm 10 runs no dependency's install script unless it is named here.
+onlyBuiltDependencies:
+  - better-sqlite3

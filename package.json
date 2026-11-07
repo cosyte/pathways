@@ -77,7 +77,8 @@
     "attw": "node scripts/attw.mjs",
     "release": "changeset publish",
     "prepublishOnly": "pnpm clean && pnpm typecheck && pnpm lint && pnpm test && pnpm build",
-    "prepare": "command -v simple-git-hooks >/dev/null 2>&1 && simple-git-hooks 1>&2 || true"
+    "prepare": "command -v simple-git-hooks >/dev/null 2>&1 && simple-git-hooks 1>&2 || true",
+    "bench": "tsx scripts/bench.ts"
   },
   "simple-git-hooks": {
     "pre-commit": "pnpm phi-scan --staged"
@@ -91,6 +92,7 @@
     "@cosyte/tsconfig": "^0.0.2",
     "@cosyte/tsup-config": "^0.0.1",
     "@cosyte/vitest-config": "^0.0.2",
+    "@types/better-sqlite3": "9.6.0",
     "@types/node": "^24.0.0",
     "@vitest/coverage-v8": "4.1.4",
     "eslint": "10.5.0",
@@ -102,7 +104,14 @@
     "vite": "7.3.6",
     "vitest": "4.1.4"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@cosyte/hl7": "^0.1.0",
+    "better-sqlite3": "^13.0.3",
+    "kysely": "^0.29.8",
+    "pino": "^10.4.0",
+    "yaml": "^2.9.1",
+    "zod": "^4.6.7"
+  },
   "pnpm": {
     "overrides": {
       "esbuild@>=0.27.3 <0.28.1": "0.28.1",
