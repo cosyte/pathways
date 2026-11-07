@@ -104,11 +104,13 @@ describe("ChannelWorker", () => {
   }, 30_000);
 
   it("survives a worker that dies between messages", async () => {
+    // The throw waits 50 ms, so the worker dies after its reply has arrived: with no wait, a busy
+    // test run could see the worker's error before the reply it sent first, and fail the message.
     const worker = await workerFor(
-      "export default (m: string): string => { if (m === 'later') setTimeout(() => { throw new Error('synthetic'); }, 0); return m; };\n",
+      "export default (m: string): string => { if (m === 'later') setTimeout(() => { throw new Error('synthetic'); }, 50); return m; };\n",
     );
     expect(await worker.run(bytes("later"))).toEqual({ ok: true, outputs: [bytes("later")] });
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await new Promise((resolve) => setTimeout(resolve, 300));
     expect(await worker.run(bytes("after"))).toEqual({ ok: true, outputs: [bytes("after")] });
   });
 

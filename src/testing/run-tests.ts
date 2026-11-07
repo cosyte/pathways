@@ -37,8 +37,9 @@ export function expectedName(input: string): string {
 
 /**
  * Runs every input in each channel's `tests/` folder through the channel's transform, in the same
- * worker the engine uses, and compares the output with the saved `<name>.expected.<ext>`. A message
- * the transform filters out expects an empty file; several outputs are joined by a newline.
+ * worker the engine uses, and compares the output with the saved `<name>.expected.<ext>`, byte for
+ * byte, whatever the channel's format. A message the transform filters out expects an empty file;
+ * several outputs are joined by a newline.
  *
  * The report names files and failures, never content: a fixture is synthetic, but the same command
  * must be safe to point at anything.
@@ -149,11 +150,12 @@ function joinOutputs(outputs: readonly Uint8Array[]): Uint8Array {
 }
 
 /**
- * Where two outputs part ways, by line, without quoting either.
+ * Where two outputs part ways, by line and column, without quoting either. The column matters for
+ * formats written on one line, such as compact JSON and most X12.
  *
  * @example
  * ```ts
- * firstDifference(actual, expected); // "output differs from the expected at line 2"
+ * firstDifference(actual, expected); // "output differs from the expected at line 2, column 9"
  * ```
  */
 export function firstDifference(actual: Uint8Array, expected: Uint8Array): string {
@@ -165,7 +167,13 @@ export function firstDifference(actual: Uint8Array, expected: Uint8Array): strin
   const b = split(expected);
   const shared = Math.min(a.length, b.length);
   for (let line = 0; line < shared; line += 1) {
-    if (a[line] !== b[line]) return `output differs from the expected at line ${line + 1}`;
+    const left = a[line] ?? "";
+    const right = b[line] ?? "";
+    if (left !== right) {
+      let column = 0;
+      while (left[column] === right[column]) column += 1;
+      return `output differs from the expected at line ${line + 1}, column ${column + 1}`;
+    }
   }
   if (a.length !== b.length) return `output has ${a.length} lines; the expected has ${b.length}`;
   return "output differs from the expected in its line endings";
@@ -189,7 +197,9 @@ export function describeFailure(failure: FailureSummary, channel: ChannelConfig)
     case "transform":
       return `the transform threw ${failure.name}${where}`;
     case "output":
-      return "the transform returned something that is neither a message nor a string";
+      return failure.code === undefined
+        ? "the transform returned something that is neither a message nor a string"
+        : `the transform's output could not be serialized (${failure.code})`;
     case "timeout":
       return `the transform ran longer than ${channel.settings.timeoutMs} ms`;
     case "memory":

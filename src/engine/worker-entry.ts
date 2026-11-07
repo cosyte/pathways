@@ -5,13 +5,20 @@
 // and straight from `src/` under the tests, where Node runs it through its own type stripping. So it
 // imports only Node built-ins and packages, never a relative module, and uses only syntax that type
 // stripping can erase (no enums, no namespaces, no parameter properties).
+//
+// THE PARSERS LOAD ON FIRST USE. Each `@cosyte/*` library costs a worker time and memory to load, and
+// a channel reads one format, so a worker loads the parser for its own format when it starts and any
+// other library only when a transform hands back that library's model.
 import { isMainThread, parentPort, workerData } from "node:worker_threads";
 import { pathToFileURL } from "node:url";
 
-import { Hl7Message, parseHL7 } from "@cosyte/hl7";
+import type * as Ccda from "@cosyte/ccda";
+import type * as Fhir from "@cosyte/fhir";
+import type * as Hl7 from "@cosyte/hl7";
+import type * as X12 from "@cosyte/x12";
 
 /** The formats this worker can parse. Kept equal to `FORMATS` in the config schema by a test. */
-export type WorkerFormat = "hl7v2" | "text";
+export type WorkerFormat = "hl7v2" | "fhir" | "x12" | "ccda" | "json" | "text";
 
 /** A user's transform, as loaded from its module's default export. */
 export type TransformFunction = (message: unknown) => unknown;
@@ -80,33 +87,222 @@ class StageError extends Error {
   }
 }
 
+/**
+ * A JSON body that cannot be read, or cannot be read exactly. Its text is fixed, because the
+ * `SyntaxError` from `JSON.parse` quotes the body it choked on.
+ */
+class JsonBodyError extends Error {
+  readonly code: string;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = "JsonBodyError";
+    this.code = code;
+  }
+}
+
 const encoder = new TextEncoder();
-const decoder = new TextDecoder();
+/** `text` keeps its first-slice behaviour: bytes that are not UTF-8 become U+FFFD. */
+const lenientUtf8 = new TextDecoder();
+/**
+ * FHIR, X12, C-CDA and JSON are read as UTF-8, and a body that is not UTF-8 fails to parse with
+ * `ERR_ENCODING_INVALID_ENCODED_DATA` rather than being changed in silence.
+ */
+const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
+
+let hl7: Promise<typeof Hl7> | undefined;
+let fhir: Promise<typeof Fhir> | undefined;
+let x12: Promise<typeof X12> | undefined;
+let ccda: Promise<typeof Ccda> | undefined;
+
+/** Each `@cosyte/*` library, imported once, on first use. */
+const libraries = {
+  hl7: (): Promise<typeof Hl7> => (hl7 ??= import("@cosyte/hl7")),
+  fhir: (): Promise<typeof Fhir> => (fhir ??= import("@cosyte/fhir")),
+  x12: (): Promise<typeof X12> => (x12 ??= import("@cosyte/x12")),
+  ccda: (): Promise<typeof Ccda> => (ccda ??= import("@cosyte/ccda")),
+};
 
 /**
- * Parses a stored body into what the transform receives for `format`.
+ * Loads the parser a format reads with, so a channel's first message does not wait for it.
+ * `json` and `text` need none.
  *
  * @example
  * ```ts
- * const message = decode("hl7v2", body); // an Hl7Message
+ * await loadFormat("fhir"); // @cosyte/fhir is now loaded in this thread
  * ```
  */
-export function decode(format: WorkerFormat, body: Uint8Array): unknown {
-  if (format === "text") return decoder.decode(body);
-  return parseHL7(Buffer.from(body.buffer, body.byteOffset, body.byteLength));
+export async function loadFormat(format: WorkerFormat): Promise<void> {
+  switch (format) {
+    case "hl7v2":
+      await libraries.hl7();
+      return;
+    case "fhir":
+      await libraries.fhir();
+      return;
+    case "x12":
+      await libraries.x12();
+      return;
+    case "ccda":
+      await libraries.ccda();
+      return;
+    case "json":
+    case "text":
+      return;
+  }
 }
 
 /**
- * Serializes one transform output back to bytes.
+ * Parses a stored body into what the transform receives for `format`:
+ *
+ * - `hl7v2`: an `Hl7Message` from `@cosyte/hl7`;
+ * - `fhir`: a resource from `@cosyte/fhir`'s JSON reader (its `FhirComplex` model);
+ * - `x12`: an `X12Interchange` from `@cosyte/x12`;
+ * - `ccda`: a `CcdaDocument` from `@cosyte/ccda`;
+ * - `json`: the value `JSON.parse` returns;
+ * - `text`: the body as a string.
+ *
+ * A library's parse failure keeps its stable `code` (`NO_MSH_SEGMENT`, `MALFORMED_JSON`,
+ * `X12_NO_ISA_HEADER`, `NOT_WELL_FORMED_XML` and the rest). `json` refuses a body that is not JSON
+ * (`MALFORMED_JSON`) and a number it cannot hold exactly (`INEXACT_JSON_NUMBER`), so a large id is
+ * never rounded on its way through.
  *
  * @example
  * ```ts
- * const bytes = encode(message); // message.toString(), as UTF-8
+ * const message = await decode("hl7v2", body); // an Hl7Message
+ * const resource = await decode("fhir", body); // a FHIR resource model
  * ```
  */
-export function encode(output: unknown): Uint8Array {
+export async function decode(format: WorkerFormat, body: Uint8Array): Promise<unknown> {
+  switch (format) {
+    case "hl7v2":
+      return (await libraries.hl7()).parseHL7(
+        Buffer.from(body.buffer, body.byteOffset, body.byteLength),
+      );
+    case "fhir":
+      return (await libraries.fhir()).parseResource(strictUtf8.decode(body)).resource;
+    case "x12":
+      return (await libraries.x12()).parseX12(strictUtf8.decode(body));
+    case "ccda":
+      return (await libraries.ccda()).parseCcda(strictUtf8.decode(body));
+    case "json":
+      return parseJson(strictUtf8.decode(body));
+    case "text":
+      return lenientUtf8.decode(body);
+  }
+}
+
+/** `JSON.parse`, refusing a number whose value differs from what the body wrote. */
+function parseJson(text: string): unknown {
+  const reviver = (_key: string, value: unknown, context?: { source?: string }): unknown => {
+    if (
+      typeof value === "number" &&
+      context?.source !== undefined &&
+      canonicalNumber(context.source) !== canonicalNumber(String(value))
+    ) {
+      throw new JsonBodyError(
+        "INEXACT_JSON_NUMBER",
+        "a number in the body cannot be held exactly; use format text to pass it through",
+      );
+    }
+    return value;
+  };
+  try {
+    return JSON.parse(text, reviver) as unknown;
+  } catch (error) {
+    if (error instanceof JsonBodyError) throw error;
+    throw new JsonBodyError("MALFORMED_JSON", "the body is not valid JSON");
+  }
+}
+
+/**
+ * A JSON number literal as sign, significant digits and exponent, so `1.50`, `15e-1` and `1.5`
+ * compare equal and `12345678901234567890` does not equal the double it rounds to.
+ */
+function canonicalNumber(literal: string): string {
+  const match = /^(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(literal);
+  if (match === null) return literal;
+  const [, sign = "", whole = "", fraction = "", exponent = "0"] = match;
+  const digits = `${whole}${fraction}`.replace(/^0+/, "");
+  if (digits === "") return "0";
+  const significant = digits.replace(/0+$/, "");
+  const scale = Number(exponent) - fraction.length + (digits.length - significant.length);
+  return `${sign}${significant}e${scale}`;
+}
+
+/** A plain JSON object or array, as `JSON.parse` builds them, as opposed to an instance of a class. */
+function isPlain(value: object): boolean {
+  if (Array.isArray(value)) return true;
+  const prototype: unknown = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function isFhirModel(value: object): value is Fhir.FhirComplex {
+  const node = value as { kind?: unknown; properties?: unknown };
+  return node.kind === "complex" && Array.isArray(node.properties);
+}
+
+function isX12Model(value: object): value is X12.X12Interchange {
+  const model = value as { isa?: { raw?: unknown }; groups?: unknown; delimiters?: unknown };
+  return (
+    typeof model.isa?.raw === "string" &&
+    Array.isArray(model.groups) &&
+    typeof model.delimiters === "object"
+  );
+}
+
+/**
+ * The text of a model from one of the `@cosyte/*` libraries, or `undefined` when `value` is not one.
+ * A model serializes whatever the channel's format, so a transform can turn one format into another.
+ */
+async function serializeModel(format: WorkerFormat, value: object): Promise<string | undefined> {
+  if (isFhirModel(value)) return (await libraries.fhir()).serializeResource(value);
+  if (isX12Model(value)) return (await libraries.x12()).serializeX12(value);
+  // A JSON object is never a message or a document; only a class instance can be one, and checking
+  // costs nothing for a channel whose own library made it.
+  if (isPlain(value)) return undefined;
+  const asHl7 = async (): Promise<string | undefined> =>
+    value instanceof (await libraries.hl7()).Hl7Message ? value.toString() : undefined;
+  const asCcda = async (): Promise<string | undefined> => {
+    const library = await libraries.ccda();
+    return value instanceof library.CcdaDocument ? library.serializeCcda(value) : undefined;
+  };
+  return format === "ccda"
+    ? ((await asCcda()) ?? (await asHl7()))
+    : ((await asHl7()) ?? (await asCcda()));
+}
+
+/**
+ * Serializes one transform output back to bytes, as UTF-8:
+ *
+ * - a string is sent as it is, whatever the format;
+ * - a model from `@cosyte/hl7`, `@cosyte/fhir`, `@cosyte/x12` or `@cosyte/ccda` is written by its
+ *   own library, whatever the channel's format, so a transform can return another format's model;
+ * - on a `json` channel, any other JSON value (a plain object, an array, a finite number or a
+ *   boolean) is written with `JSON.stringify`. A transform's own array still means several
+ *   messages, so one JSON array goes out as `[list]`.
+ *
+ * Anything else is refused with a `TypeError`. A serializer's own refusal keeps its code.
+ *
+ * @example
+ * ```ts
+ * const bytes = await encode("hl7v2", message); // message.toString(), as UTF-8
+ * const json = await encode("json", { status: "ok" }); // {"status":"ok"}
+ * ```
+ */
+export async function encode(format: WorkerFormat, output: unknown): Promise<Uint8Array> {
   if (typeof output === "string") return encoder.encode(output);
-  if (output instanceof Hl7Message) return encoder.encode(output.toString());
+  if (typeof output === "object" && output !== null) {
+    const text = await serializeModel(format, output);
+    if (text !== undefined) return encoder.encode(text);
+    if (format === "json" && isPlain(output)) return encoder.encode(JSON.stringify(output));
+  }
+  if (
+    format === "json" &&
+    (typeof output === "boolean" || (typeof output === "number" && Number.isFinite(output)))
+  ) {
+    return encoder.encode(JSON.stringify(output));
+  }
   throw new TypeError("the transform returned something that is neither a message nor a string");
 }
 
@@ -126,7 +322,7 @@ export async function runTransform(
 ): Promise<Uint8Array[]> {
   let message: unknown;
   try {
-    message = decode(format, body);
+    message = await decode(format, body);
   } catch (error) {
     throw new StageError("parse", error);
   }
@@ -139,14 +335,15 @@ export async function runTransform(
   if (result === null || result === undefined) return [];
   const outputs: unknown[] = Array.isArray(result) ? result : [result];
   try {
-    return outputs.map(encode);
+    return await Promise.all(outputs.map((output) => encode(format, output)));
   } catch (error) {
     throw new StageError("output", error);
   }
 }
 
 /**
- * Loads the transform module's default export, or the identity function when there is none.
+ * Loads the transform module's default export. With no transform, each message passes through as
+ * it was parsed.
  *
  * @example
  * ```ts
@@ -154,7 +351,8 @@ export async function runTransform(
  * ```
  */
 export async function loadTransform(transformFile: string | undefined): Promise<TransformFunction> {
-  if (transformFile === undefined) return (message) => message;
+  // Wrapped, so a message that is itself an array (a JSON array) passes through as one message.
+  if (transformFile === undefined) return (message) => [message];
   let module: { default?: unknown };
   try {
     module = (await import(pathToFileURL(transformFile).href)) as { default?: unknown };
@@ -217,8 +415,11 @@ function locate(error: unknown, transformFile: string): string | undefined {
 if (!isMainThread && parentPort !== null && isWorkerSetup(workerData)) {
   const port = parentPort;
   const setup = workerData;
-  loadTransform(setup.transformFile).then(
-    (transform) => {
+  const parser = loadFormat(setup.format).catch((error: unknown) => {
+    throw new StageError("load", error);
+  });
+  Promise.all([loadTransform(setup.transformFile), parser]).then(
+    ([transform]) => {
       port.on("message", (request: TransformRequest) => {
         runTransform(transform, setup.format, request.body).then(
           (outputs) =>

@@ -1,9 +1,30 @@
 import { z } from "zod";
 
-/** The message formats a channel can declare. More arrive with later connectors and parsers. */
-export const FORMATS = ["hl7v2", "text"] as const;
+/**
+ * The message formats a channel can declare.
+ *
+ * @example
+ * ```ts
+ * FORMATS.includes("fhir"); // true
+ * ```
+ */
+export const FORMATS = ["hl7v2", "fhir", "x12", "ccda", "json", "text"] as const;
 
-/** A channel's message format: `hl7v2` is parsed with `@cosyte/hl7`, `text` passes through as a string. */
+/**
+ * A channel's message format, and so what its transform receives:
+ *
+ * - `hl7v2`: parsed with `@cosyte/hl7` (the default);
+ * - `fhir`: FHIR R4 JSON, parsed with `@cosyte/fhir`;
+ * - `x12`: an X12 interchange, parsed with `@cosyte/x12`;
+ * - `ccda`: a C-CDA document, parsed with `@cosyte/ccda`;
+ * - `json`: any JSON, as `JSON.parse` reads it;
+ * - `text`: the body as a string, unparsed.
+ *
+ * @example
+ * ```ts
+ * const format: Format = "x12";
+ * ```
+ */
 export type Format = (typeof FORMATS)[number];
 
 const DURATION = /^(\d+)(ms|s|m|h)$/;

@@ -25,12 +25,10 @@ creates an audit trail.
 > 0 over an unopened corpus, is in the docblock of `scripts/phi-scan.ts` under
 > THE COMPLETENESS RULE.
 
-> **This is the STARTER template.** `scripts/phi-scan.ts` ships with the shared
-> machinery and a cross-cutting SSN/email floor ONLY. Before you rely on
-> `pnpm phi-scan` as a real PHI gate for this standard, add structured,
-> field-level detection (names, DOB, MRN / member id, address, phone) in the
-> fenced TODO section of `scripts/phi-scan.ts`: see the sibling parsers
-> (`hl7` / `dicom` / `x12` / `ccda` / `ncpdp`) for worked examples.
+> **What the scan detects.** `scripts/phi-scan.ts` runs the shared SSN and email floor and the
+> field-level detection in `scripts/phi-detect.ts`: the names, dates of birth, identifiers and
+> phones of HL7 v2, FHIR, X12 and C-CDA, in whole messages and in fixtures written inline. Each
+> field detector consults `scripts/phi-allow-list.txt`, which is the remedy for a synthetic token.
 
 ## Format
 

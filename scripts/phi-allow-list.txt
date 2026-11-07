@@ -13,12 +13,13 @@
 #   ID <value>            synthetic id matching an SSN / MRN / member-id shape
 #   EMAILDOMAIN <domain>  reserved / test email domain that is allowed to appear
 #
-# NOTE: the STARTER scanner's floor consumes EMAILDOMAIN and ID (its two shapes
-# are an email and a dashed SSN, and the SSN branch checks the value both as
-# written and with its separators removed, so ONE `ID` entry covers both
-# renderings). NAME / DOB entries are loaded and ready for the structured,
-# field-level detectors you MUST add to scripts/phi-scan.ts before relying on
-# this as a real PHI gate: see the STARTER banner in that file.
+# The engine's floor consumes EMAILDOMAIN and ID (an email, and a dashed SSN
+# checked both as written and with its separators removed). The field-level
+# detectors in scripts/phi-detect.ts consume NAME, DOB and ID for HL7 v2, FHIR,
+# X12 and C-CDA: a NAME line is one name token, matched upper-cased; a DOB line
+# is the date's digits, YYYYMMDD (YYYYMM or YYYY when partial), so one line
+# covers 19700101 in HL7 and X12 and 1970-01-01 in FHIR; an ID line clears an
+# all-digit identifier or a phone.
 #
 # 🛑 EVERY DETECTOR YOU ADD MUST CONSULT THIS FILE. `--allow-fixture` is recorded
 # and then REFUSED, so it cannot reach a clean run: a detector that checks
@@ -42,12 +43,16 @@ EMAILDOMAIN example.test
 # manifest is otherwise worth scanning.
 EMAILDOMAIN cosyte.com
 
-# --- Synthetic person-name tokens (example, extend for your fixtures) ---
-# NAME DOE
-# NAME JOHN
+# --- Synthetic person-name tokens ---
+# The test patient every fixture in this repository uses: test/helpers.ts (HL7
+# v2, FHIR, X12 and C-CDA) and scripts/bench.ts. Obviously not a person.
+NAME TESTPATIENT
+NAME ALPHA
 
-# --- Synthetic dates of birth (example, normalize to your detector's format) ---
-# DOB 19800115
+# --- Synthetic dates of birth ---
+# The test patient's: the first of January 1970, the Unix epoch.
+DOB 19700101
 
-# --- Synthetic ids: SSN / MRN / member-id shapes (example) ---
-# ID MRN12345
+# --- Synthetic ids: SSN / MRN / member-id shapes ---
+# None needed: the fixtures' identifiers carry a TEST prefix, which no detector
+# reads as a real identifier.
