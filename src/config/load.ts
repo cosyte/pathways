@@ -7,13 +7,29 @@ import type { z } from "zod";
 import {
   channelSchema,
   DEFAULT_DATABASE_FILE,
+  DEFAULT_HEALTH_TOKEN_ENV,
+  DEFAULT_HOST,
+  DEFAULT_HTTP_TIMEOUT_MS,
+  DEFAULT_HTTP_TOKEN_ENV,
+  DEFAULT_MAX_BYTES,
   DEFAULT_MIN_AGE_MS,
   DEFAULT_SETTINGS,
   projectSchema,
   type ChannelConfig,
+  type ClientTlsFiles,
+  type EndpointAuth,
+  type FileDestination,
+  type HeaderValue,
+  type HttpDestination,
+  type ListenerConfig,
   type ProjectConfig,
   type Settings,
 } from "./schema.js";
+
+type ChannelYaml = z.infer<typeof channelSchema>;
+type ProjectYaml = z.infer<typeof projectSchema>;
+type ListenerYaml = NonNullable<ProjectYaml["health"]>;
+type DestinationYaml = ChannelYaml["destinations"][number];
 
 /**
  * A project that could not be loaded. `problems` name the file and the key at fault; they hold no
@@ -55,7 +71,7 @@ export async function loadProject(root: string): Promise<ProjectConfig> {
   const show = (file: string): string => relative(projectRoot, file) || file;
 
   const projectFile = join(projectRoot, "pathways.yaml");
-  let project: z.infer<typeof projectSchema> = {};
+  let project: ProjectYaml = {};
   if (await exists(projectFile)) {
     const parsed = await readYaml(projectFile, show, problems);
     if (parsed !== undefined) {
@@ -67,6 +83,10 @@ export async function loadProject(root: string): Promise<ProjectConfig> {
 
   const settings: Settings = mergeSettings(DEFAULT_SETTINGS, project.defaults ?? {});
   const databaseFile = resolve(projectRoot, project.storage?.sqlite.file ?? DEFAULT_DATABASE_FILE);
+  const health =
+    project.health === undefined
+      ? undefined
+      : resolveListener(project.health, projectRoot, DEFAULT_HEALTH_TOKEN_ENV);
 
   const channelsDir = join(projectRoot, "channels");
   const channels: ChannelConfig[] = [];
@@ -113,16 +133,11 @@ export async function loadProject(root: string): Promise<ProjectConfig> {
       name: folder,
       dir: channelDir,
       format: channel.format ?? "hl7v2",
-      source: {
-        kind: "file",
-        dir: resolve(channelDir, channel.source.file.dir),
-        minAgeMs: channel.source.file.minAge ?? DEFAULT_MIN_AGE_MS,
-      },
+      source: resolveSource(channel.source, channelDir),
       transform,
-      destinations: channel.destinations.map((destination) => ({
-        kind: "file" as const,
-        dir: resolve(channelDir, destination.file.dir),
-      })),
+      destinations: channel.destinations.map((destination) =>
+        resolveDestination(destination, channelDir),
+      ),
       settings: mergeSettings(settings, channel),
     });
   }
@@ -133,7 +148,90 @@ export async function loadProject(root: string): Promise<ProjectConfig> {
     );
   }
   if (problems.length > 0) throw new ConfigError(problems);
-  return { root: projectRoot, databaseFile, settings, channels };
+  return { root: projectRoot, databaseFile, settings, health, channels };
+}
+
+function resolveSource(source: ChannelYaml["source"], dir: string): ChannelConfig["source"] {
+  const { http } = source;
+  if (http !== undefined) {
+    return {
+      kind: "http",
+      ...resolveListener(http, dir, DEFAULT_HTTP_TOKEN_ENV),
+      path: http.path ?? "/",
+      maxBytes: http.maxBytes ?? DEFAULT_MAX_BYTES,
+    };
+  }
+  // The schema lets exactly one kind through, so a source that is not HTTP is a file source.
+  const file = source.file as NonNullable<typeof source.file>;
+  return {
+    kind: "file",
+    dir: resolve(dir, file.dir),
+    minAgeMs: file.minAge ?? DEFAULT_MIN_AGE_MS,
+  };
+}
+
+function resolveDestination(
+  destination: DestinationYaml,
+  dir: string,
+): FileDestination | HttpDestination {
+  const { http } = destination;
+  if (http === undefined) {
+    // The schema lets exactly one kind through, so a destination that is not HTTP is a file one.
+    const file = destination.file as NonNullable<typeof destination.file>;
+    return { kind: "file", dir: resolve(dir, file.dir) };
+  }
+  const headers: Record<string, HeaderValue> = {};
+  for (const [name, value] of Object.entries(http.headers ?? {})) {
+    headers[name] = typeof value === "string" ? { value } : { env: value.env };
+  }
+  return {
+    kind: "http",
+    url: http.url,
+    headers,
+    timeoutMs: http.timeout ?? DEFAULT_HTTP_TIMEOUT_MS,
+    tls: http.tls === undefined ? undefined : resolveClientTls(http.tls, dir),
+    plaintext: http.plaintext === true,
+  };
+}
+
+/**
+ * A listening endpoint, resolved. With no `auth`, mutual TLS authenticates when `tls.ca` is set;
+ * otherwise a bearer token is required, read from `defaultTokenEnv`.
+ */
+function resolveListener(
+  listener: ListenerYaml,
+  dir: string,
+  defaultTokenEnv: string,
+): ListenerConfig {
+  const { tls } = listener;
+  let auth: EndpointAuth;
+  if (listener.auth === "none") auth = { kind: "none" };
+  else if (listener.auth !== undefined) auth = { kind: "bearer", env: listener.auth.bearer.env };
+  else if (tls?.ca !== undefined) auth = { kind: "none" };
+  else auth = { kind: "bearer", env: defaultTokenEnv };
+  return {
+    host: listener.host ?? DEFAULT_HOST,
+    port: listener.port,
+    tls:
+      tls === undefined
+        ? undefined
+        : {
+            cert: resolve(dir, tls.cert),
+            key: resolve(dir, tls.key),
+            ca: tls.ca === undefined ? undefined : resolve(dir, tls.ca),
+          },
+    plaintext: listener.plaintext === true,
+    auth,
+  };
+}
+
+function resolveClientTls(
+  tls: { ca?: string | undefined; cert?: string | undefined; key?: string | undefined },
+  dir: string,
+): ClientTlsFiles {
+  const at = (file: string | undefined): string | undefined =>
+    file === undefined ? undefined : resolve(dir, file);
+  return { ca: at(tls.ca), cert: at(tls.cert), key: at(tls.key) };
 }
 
 function mergeSettings(

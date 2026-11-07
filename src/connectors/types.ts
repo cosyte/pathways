@@ -41,6 +41,8 @@ export interface OutgoingMessage {
  */
 export interface DestinationConnector {
   deliver(message: OutgoingMessage): Promise<void>;
+  /** Releases what the destination keeps open between deliveries, such as connections. */
+  stop?(): Promise<void>;
 }
 
 /**

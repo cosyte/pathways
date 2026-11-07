@@ -1,0 +1,425 @@
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+
+import { ConfigError, loadProject } from "../src/config/load.js";
+import type { ChannelConfig } from "../src/config/schema.js";
+import { HttpDestination, HttpSource } from "../src/connectors/http.js";
+import { connectorsFor, Engine } from "../src/engine/engine.js";
+import {
+  channelStatus,
+  healthEndpointFor,
+  HealthEndpoint,
+  type HealthReport,
+} from "../src/engine/health.js";
+import { Store } from "../src/storage/store.js";
+import {
+  ADT_A01,
+  captureLogger,
+  cleanUp,
+  LAB_TRANSFORM,
+  makeProject,
+  type LogEvent,
+} from "./helpers.js";
+import {
+  freePort,
+  makeCertificates,
+  receiver,
+  removeCertificates,
+  send,
+  status,
+  type Certificates,
+  type Receiver,
+} from "./net-helpers.js";
+
+const TOKEN = "synthetic-token-0123456789abcdef";
+const HEALTH_TOKEN = "synthetic-health-token-0123456789";
+const LAB_AUTH = "Bearer synthetic-lab-token-0123456789";
+
+let certs: Certificates;
+beforeAll(() => {
+  certs = makeCertificates();
+});
+afterAll(() => removeCertificates(certs));
+
+const engines: Engine[] = [];
+const stores: Store[] = [];
+const receivers: Receiver[] = [];
+const closers: (() => Promise<void>)[] = [];
+afterEach(async () => {
+  await Promise.all(closers.splice(0).map((close) => close()));
+  await Promise.all(engines.splice(0).map((engine) => engine.stop()));
+  await Promise.all(stores.splice(0).map((store) => store.close()));
+  await Promise.all(receivers.splice(0).map((r) => r.close()));
+  await cleanUp();
+});
+
+interface Setup {
+  readonly engine: Engine;
+  readonly store: Store;
+  readonly events: LogEvent[];
+  readonly lines: string[];
+  readonly clock: { now: number };
+  readonly port: number;
+  readonly lab: Receiver;
+}
+
+/** A channel taking HTTPS with a bearer token and sending to a lab over HTTPS. */
+async function setUp(
+  labAnswer: number,
+  options: { env?: Record<string, string>; source?: string; destination?: string } = {},
+): Promise<Setup> {
+  const lab = await receiver(status(labAnswer), { cert: certs.serverCert, key: certs.serverKey });
+  receivers.push(lab);
+  const port = await freePort();
+  const source =
+    options.source ??
+    `http: { port: ${port}, path: /adt, tls: { cert: ${certs.files.serverCert}, key: ${certs.files.serverKey} } }`;
+  const destination =
+    options.destination ??
+    `http: { url: "${lab.url}", headers: { Authorization: { env: LAB_AUTH } }, tls: { ca: ${certs.files.ca} } }`;
+  const root = await makeProject({
+    "channels/adt/channel.yaml": `source:\n  ${source}\ntransform: ./transform.ts\ndestinations:\n  - ${destination}\n`,
+    "channels/adt/transform.ts": LAB_TRANSFORM,
+  });
+  const project = await loadProject(root);
+  const store = await Store.open(project.databaseFile);
+  stores.push(store);
+  const { logger, events, lines } = captureLogger();
+  const clock = { now: Date.now() };
+  const engine = new Engine({
+    project,
+    store,
+    logger,
+    now: () => clock.now,
+    env: options.env ?? { PATHWAYS_HTTP_TOKEN: TOKEN, LAB_AUTH },
+  });
+  engines.push(engine);
+  await engine.start();
+  return { engine, store, events, lines, clock, port, lab };
+}
+
+function post(port: number, body = ADT_A01, token = TOKEN): ReturnType<typeof send> {
+  return send(port, {
+    path: "/adt",
+    headers: { Authorization: `Bearer ${token}` },
+    body,
+    ca: certs.ca,
+  });
+}
+
+describe("an HTTP channel in the engine", () => {
+  it("takes a message over HTTPS, transforms it, and POSTs the output over HTTPS", async () => {
+    const { engine, store, lab, port, lines, events } = await setUp(200);
+    const answer = await post(port);
+    expect(answer.status).toBe(202);
+    expect(JSON.parse(answer.body)).toEqual({ id: 1 });
+    await engine.tick();
+
+    expect(lab.received).toHaveLength(1);
+    const [request] = lab.received;
+    expect(request?.body.toString("utf8")).toBe(ADT_A01.replace("|LAB|", "|LAB2|"));
+    expect(request?.headers.authorization).toBe(LAB_AUTH);
+    expect(request?.headers["content-type"]).toBe("application/hl7-v2");
+    expect(await store.deliveryCounts("adt")).toEqual({ pending: 0, delivered: 1, failed: 0 });
+
+    expect(events.map((e) => e.event)).toEqual(["received", "transformed", "delivered"]);
+    const log = lines.join("");
+    for (const secret of ["MSH", "TESTPATIENT", TOKEN, "synthetic-lab-token"]) {
+      expect(log).not.toContain(secret);
+    }
+  });
+
+  it("logs a refused request with its status only", async () => {
+    const { port, events, lines } = await setUp(200);
+    expect((await post(port, ADT_A01, "synthetic-wrong-token-000000")).status).toBe(401);
+    expect(events).toEqual([
+      expect.objectContaining({ event: "http-refused", channel: "adt", status: 401 }),
+    ]);
+    expect(lines.join("")).not.toContain("synthetic-wrong-token");
+  });
+
+  it("answers 503 and logs the code when the message cannot be stored", async () => {
+    const { port, store, events } = await setUp(200);
+    await store.close();
+    stores.splice(0);
+    expect((await post(port)).status).toBe(503);
+    expect(events.find((e) => e.event === "receive-failed")).toMatchObject({ channel: "adt" });
+  });
+
+  it("retries a destination answering 503, and fails a delivery answered 400", async () => {
+    const retrying = await setUp(503);
+    await post(retrying.port);
+    await retrying.engine.tick();
+    expect(retrying.events.find((e) => e.event === "delivery-retry")).toMatchObject({
+      code: "HTTP_503",
+      attempt: 1,
+    });
+    expect(await retrying.store.retryingDeliveries("adt")).toBe(1);
+
+    const rejecting = await setUp(400);
+    await post(rejecting.port);
+    await rejecting.engine.tick();
+    expect(rejecting.events.find((e) => e.event === "delivery-rejected")).toMatchObject({
+      reason: "HTTP 400",
+    });
+    expect(await rejecting.store.deliveryCounts("adt")).toEqual({
+      pending: 0,
+      delivered: 0,
+      failed: 1,
+    });
+  });
+
+  it("warns once at startup of a plaintext or unauthenticated endpoint, naming the channel", async () => {
+    const lab = await receiver(status(200));
+    receivers.push(lab);
+    const port = await freePort();
+    const { events } = await setUp(200, {
+      source: `http: { port: ${port}, plaintext: true, auth: none }`,
+      destination: `http: { url: "${lab.url}", plaintext: true }`,
+      env: {},
+    });
+    expect(events).toEqual([
+      expect.objectContaining({
+        level: 40,
+        event: "plaintext",
+        channel: "adt",
+        endpoint: "source",
+      }),
+      expect.objectContaining({ event: "unauthenticated", channel: "adt", endpoint: "source" }),
+      expect.objectContaining({
+        event: "plaintext",
+        channel: "adt",
+        endpoint: "destination",
+        destination: 0,
+      }),
+    ]);
+    expect((await send(port, { body: ADT_A01 })).status).toBe(202);
+  });
+
+  it("refuses to start without the token, a secret header or a TLS file, naming file and key", async () => {
+    await expect(setUp(200, { env: { LAB_AUTH } })).rejects.toThrow(
+      new ConfigError([
+        "channels/adt/channel.yaml: source.http.auth: the environment variable PATHWAYS_HTTP_TOKEN is not set",
+      ]),
+    );
+    await expect(setUp(200, { env: { PATHWAYS_HTTP_TOKEN: TOKEN } })).rejects.toThrow(
+      "channels/adt/channel.yaml: destinations.0.http.headers.Authorization: the environment variable LAB_AUTH is not set",
+    );
+    await expect(
+      setUp(200, { env: { PATHWAYS_HTTP_TOKEN: TOKEN, LAB_AUTH: "synthetic\nsecret" } }),
+    ).rejects.toThrow(
+      "channels/adt/channel.yaml: destinations.0.http.headers.Authorization: the environment variable LAB_AUTH holds characters a header cannot carry",
+    );
+    await expect(
+      setUp(200, {
+        destination: `http: { url: "https://127.0.0.1:1/", tls: { ca: ./missing-ca.crt } }`,
+      }),
+    ).rejects.toThrow(
+      "channels/adt/channel.yaml: destinations.0.http.tls.ca: could not be read (ENOENT)",
+    );
+  });
+
+  it("keeps running when a source cannot listen, retrying it, with health at 503 meanwhile", async () => {
+    const holder = await receiver(status(200));
+    const { engine, events, clock } = await setUp(200, {
+      source: `http: { port: ${holder.port}, path: /adt, plaintext: true }`,
+    });
+    expect(events.find((e) => e.event === "source-start-failed")).toMatchObject({
+      channel: "adt",
+      code: "EADDRINUSE",
+      attempt: 1,
+      retryInMs: 1_000,
+    });
+    let report = await engine.health();
+    expect(report.status).toBe("unavailable");
+    expect(report.channels["adt"]?.source).toBe("down");
+
+    // Not yet due: no new attempt.
+    await engine.tick();
+    expect(events.filter((e) => e.event === "source-start-failed")).toHaveLength(1);
+    clock.now += 1_000;
+    await engine.tick();
+    expect(events.filter((e) => e.event === "source-start-failed").at(-1)).toMatchObject({
+      attempt: 2,
+      retryInMs: 2_000,
+    });
+
+    await holder.close();
+    clock.now += 2_000;
+    await engine.tick();
+    expect(events.at(-1)).toMatchObject({ event: "source-started", channel: "adt" });
+    report = await engine.health();
+    expect(report.status).toBe("ok");
+    expect(report.channels["adt"]?.source).toBe("up");
+  });
+
+  it("builds HTTP connectors from a channel's configuration", async () => {
+    const port = await freePort();
+    const root = await makeProject({
+      "channels/adt/channel.yaml": `source:\n  http: { port: ${port}, plaintext: true, auth: none }\ndestinations:\n  - http: { url: "https://lab.example.test/", headers: { content-type: text/plain } }\n`,
+    });
+    const [channel] = (await loadProject(root)).channels;
+    const { logger } = captureLogger();
+    const built = connectorsFor(channel as ChannelConfig, { now: Date.now, logger, env: {} });
+    expect(built.source).toBeInstanceOf(HttpSource);
+    expect(built.destinations[0]).toBeInstanceOf(HttpDestination);
+    await built.destinations[0]?.stop?.();
+  });
+
+  it("lets a channel's headers replace the default Content-Type, whatever their case", async () => {
+    const lab = await receiver(status(200));
+    receivers.push(lab);
+    const { engine, port } = await setUp(200, {
+      destination: `http: { url: "${lab.url}", plaintext: true, headers: { content-type: "x-application/hl7-v2+er7" } }`,
+    });
+    await post(port);
+    await engine.tick();
+    expect(lab.received[0]?.headers["content-type"]).toBe("x-application/hl7-v2+er7");
+  });
+});
+
+describe("health", () => {
+  it("names a channel's status from its counts", () => {
+    expect(channelStatus({ failed: 0 }, { retrying: 0, failed: 0 })).toBe("ok");
+    expect(channelStatus({ failed: 1 }, { retrying: 0, failed: 0 })).toBe("failed");
+    expect(channelStatus({ failed: 0 }, { retrying: 0, failed: 1 })).toBe("failed");
+    expect(channelStatus({ failed: 1 }, { retrying: 1, failed: 1 })).toBe("retrying");
+  });
+
+  it("reports ok, retrying and failed with counts, at 200, never content", async () => {
+    const ok = await setUp(200);
+    await post(ok.port);
+    await ok.engine.tick();
+    expect(await ok.engine.health()).toEqual({
+      status: "ok",
+      storage: "ok",
+      channels: {
+        adt: {
+          status: "ok",
+          source: "up",
+          messages: { received: 0, transformed: 1, filtered: 0, failed: 0 },
+          deliveries: { pending: 0, delivered: 1, failed: 0, retrying: 0 },
+        },
+      },
+    });
+
+    const retrying = await setUp(503);
+    await post(retrying.port);
+    await retrying.engine.tick();
+    const retryingReport = await retrying.engine.health();
+    expect(retryingReport.status).toBe("ok");
+    expect(retryingReport.channels["adt"]).toMatchObject({
+      status: "retrying",
+      deliveries: { pending: 1, retrying: 1 },
+    });
+
+    const failed = await setUp(422);
+    await post(failed.port);
+    await failed.engine.tick();
+    const failedReport = await failed.engine.health();
+    expect(failedReport.status).toBe("ok");
+    expect(failedReport.channels["adt"]).toMatchObject({
+      status: "failed",
+      deliveries: { failed: 1 },
+    });
+    expect(JSON.stringify(failedReport)).not.toContain("MSH");
+  });
+
+  it("reports 503 when storage cannot be read", async () => {
+    const { engine, store } = await setUp(200);
+    await store.close();
+    stores.splice(0);
+    expect(await engine.health()).toEqual({
+      status: "unavailable",
+      storage: "unreachable",
+      channels: { adt: { status: "unknown", source: "up" } },
+    });
+  });
+
+  it("serves the report over HTTPS with a bearer token: 200, 503, 401 and 405", async () => {
+    let report: HealthReport = { status: "ok", storage: "ok", channels: {} };
+    const refused: number[] = [];
+    const health = new HealthEndpoint({
+      host: "127.0.0.1",
+      port: 0,
+      tls: { cert: certs.serverCert, key: certs.serverKey, ca: undefined },
+      token: HEALTH_TOKEN,
+      report: () => Promise.resolve(report),
+      onRefused: (code) => refused.push(code),
+    });
+    expect(health.port).toBeUndefined();
+    await health.start();
+    closers.push(() => health.stop());
+    const port = health.port ?? 0;
+    const auth = { Authorization: `Bearer ${HEALTH_TOKEN}` };
+    const get = (method = "GET", headers: Record<string, string> = auth): ReturnType<typeof send> =>
+      send(port, { method, path: "/health", headers, ca: certs.ca });
+
+    const ok = await get();
+    expect(ok.status).toBe(200);
+    expect(ok.headers["cache-control"]).toBe("no-store");
+    expect(JSON.parse(ok.body)).toEqual(report);
+    const head = await get("HEAD");
+    expect(head.status).toBe(200);
+    expect(head.body).toBe("");
+
+    report = { status: "unavailable", storage: "unreachable", channels: {} };
+    expect((await get()).status).toBe(503);
+
+    expect((await get("GET", {})).status).toBe(401);
+    const post = await get("POST");
+    expect(post.status).toBe(405);
+    expect(post.headers.allow).toBe("GET, HEAD");
+    expect(refused).toEqual([401, 405]);
+  });
+
+  it("builds the configured endpoint, warning once when it runs without TLS or a token", async () => {
+    const { logger, events } = captureLogger();
+    const report = (): Promise<HealthReport> =>
+      Promise.resolve({ status: "ok", storage: "ok", channels: {} });
+    const open = healthEndpointFor(
+      { host: "127.0.0.1", port: 1, tls: undefined, plaintext: true, auth: { kind: "none" } },
+      report,
+      {},
+      logger,
+    );
+    expect(open).toBeInstanceOf(HealthEndpoint);
+    expect(events).toEqual([
+      expect.objectContaining({ level: 40, event: "plaintext", endpoint: "health" }),
+      expect.objectContaining({ level: 40, event: "unauthenticated", endpoint: "health" }),
+    ]);
+    expect(() =>
+      healthEndpointFor(
+        {
+          host: "127.0.0.1",
+          port: 1,
+          tls: { cert: certs.files.serverCert, key: certs.files.serverKey, ca: undefined },
+          plaintext: false,
+          auth: { kind: "bearer", env: "PATHWAYS_HEALTH_TOKEN" },
+        },
+        report,
+        {},
+        logger,
+      ),
+    ).toThrow(
+      "pathways.yaml: health.auth: the environment variable PATHWAYS_HEALTH_TOKEN is not set",
+    );
+
+    const port = await freePort();
+    const secured = healthEndpointFor(
+      {
+        host: "127.0.0.1",
+        port,
+        tls: { cert: certs.files.serverCert, key: certs.files.serverKey, ca: undefined },
+        plaintext: false,
+        auth: { kind: "bearer", env: "PATHWAYS_HEALTH_TOKEN" },
+      },
+      report,
+      { PATHWAYS_HEALTH_TOKEN: HEALTH_TOKEN },
+      logger,
+    );
+    await secured.start();
+    closers.push(() => secured.stop());
+    expect((await send(port, { method: "GET", ca: certs.ca })).status).toBe(401);
+    expect(events.at(-1)).toMatchObject({ event: "http-refused", endpoint: "health", status: 401 });
+  });
+});

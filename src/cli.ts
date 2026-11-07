@@ -4,8 +4,10 @@ import { pino, type Logger } from "pino";
 
 import { ConfigError, loadProject } from "./config/load.js";
 import type { ProjectConfig } from "./config/schema.js";
+import type { Env } from "./connectors/endpoint.js";
 import { TransformLoadError } from "./engine/channel-worker.js";
-import { Engine } from "./engine/engine.js";
+import { Engine, errorCode } from "./engine/engine.js";
+import { healthEndpointFor, type HealthEndpoint } from "./engine/health.js";
 import { InitError, initProject, STARTER_CHANNEL } from "./starter/init.js";
 import { Store } from "./storage/store.js";
 import { describeFailure, runChannelTests } from "./testing/run-tests.js";
@@ -19,6 +21,8 @@ export interface CliIo {
   readonly signal?: AbortSignal;
   /** The engine's logger. Defaults to JSON lines on stdout. */
   readonly logger?: Logger;
+  /** Where tokens and secret headers are read from. Defaults to `process.env`. */
+  readonly env?: Env;
 }
 
 /** The exit codes `pathways` returns. Scripts branch on these, so they are stable. */
@@ -41,7 +45,8 @@ Commands:
   init [dir]       Write a starter project, with one channel and its tests,
                    into dir (default: the project folder), which must be
                    empty or not exist yet
-  start            Run every channel until stopped
+  start            Run every channel, and the health endpoint if pathways.yaml
+                   configures one, until stopped
   test [name...]   Run each channel's tests/ inputs through its transform and
                    compare the output with the saved .expected files
 
@@ -151,11 +156,15 @@ async function load(projectDir: string, io: CliIo): Promise<ProjectConfig | unde
     return await loadProject(projectDir);
   } catch (error) {
     if (!(error instanceof ConfigError)) throw error;
-    io.err(
-      `pathways: the configuration is invalid:\n${error.problems.map((p) => `  ${p}\n`).join("")}`,
-    );
+    reportConfigError(error, io);
     return undefined;
   }
+}
+
+function reportConfigError(error: ConfigError, io: CliIo): void {
+  io.err(
+    `pathways: the configuration is invalid:\n${error.problems.map((p) => `  ${p}\n`).join("")}`,
+  );
 }
 
 async function start(projectDir: string, once: boolean, io: CliIo): Promise<number> {
@@ -170,11 +179,21 @@ async function start(projectDir: string, once: boolean, io: CliIo): Promise<numb
     return EXIT.failed;
   }
   const logger = io.logger ?? pino({ redact: REDACT });
-  const engine = new Engine({ project, store, logger });
+  const env = io.env ?? process.env;
+  const engine = new Engine({ project, store, logger, env });
+  let health: HealthEndpoint | undefined;
   try {
+    // A single pass does not serve health: it would hold the port a running engine needs.
+    if (project.health !== undefined && !once) {
+      health = healthEndpointFor(project.health, () => engine.health(), env, logger);
+    }
     await engine.start();
   } catch (error) {
     await store.close();
+    if (error instanceof ConfigError) {
+      reportConfigError(error, io);
+      return EXIT.config;
+    }
     if (!(error instanceof TransformLoadError)) throw error;
     const channel = project.channels.find((c) => c.name === error.channel);
     /* v8 ignore next: the engine names only channels it was given */
@@ -185,9 +204,19 @@ async function start(projectDir: string, once: boolean, io: CliIo): Promise<numb
   }
 
   try {
+    await health?.start();
+  } catch (error) {
+    await engine.stop();
+    await store.close();
+    io.err(`pathways: the health endpoint could not listen (${String(errorCode(error))}).\n`);
+    return EXIT.failed;
+  }
+
+  try {
     if (once) await engine.tick();
     else await engine.run(io.signal ?? new AbortController().signal);
   } finally {
+    await health?.stop();
     await engine.stop();
     await store.close();
   }
