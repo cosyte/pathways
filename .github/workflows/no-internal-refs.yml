@@ -5,10 +5,10 @@ name: Public-surface gate
 # comments that ship in dist/*.d.ts. The gate is the internal-refs command of `@cosyte/script-utils`
 # (`pnpm check:no-internal-refs`), and `scripts/internal-refs.json` holds this repository's axes.
 #
-# WHY A LOCAL JOB, and not the shared gate-no-internal-refs-install.yml: the shared gates run on
-# Node 22, and Pathways needs Node 24 (engines, with engine-strict), so pnpm refuses the install
-# there. The job's name is the context the shared caller would publish, so moving to the shared
-# gate once it takes a Node version is a `uses:` line and not a ruleset edit.
+# The installing form of the shared gate, because the command lives in node_modules. It runs on
+# Node 24, our floor: on its default of 22, pnpm refuses the install, because engines.node starts at
+# 24 with engine-strict. The job id stays `no-internal-refs`, so the required context is still
+# `no-internal-refs / public-surface`.
 
 on:
   push:
@@ -26,20 +26,8 @@ permissions:
 
 jobs:
   no-internal-refs:
-    name: no-internal-refs / public-surface
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
-      # The Node floor, which engines.node and ci.yml's matrix state.
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: "24"
-          cache: pnpm
-      # The gate needs its package on disk and nothing built, so no lifecycle script runs.
-      - run: pnpm install --frozen-lockfile --ignore-scripts
-      - name: Scan the public surface
-        run: pnpm check:no-internal-refs
+    uses: cosyte/.github/.github/workflows/gate-no-internal-refs-install.yml@c0db8d8e5927269820de4401b3b5ad6141854b76 # workflows-2026-11-08-c0db8d8e5927
+    with:
+      node-version: "24"
+    permissions:
+      contents: read
