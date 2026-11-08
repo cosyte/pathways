@@ -19,7 +19,8 @@ Required checks, by context: `ci / verify (24, ubuntu-latest)`, `ci / verify (26
 pnpm install --frozen-lockfile
 pnpm typecheck && pnpm lint && pnpm format:check && pnpm phi-scan
 pnpm test && pnpm test:coverage && pnpm build && pnpm attw
-pnpm check:no-emdash
+pnpm check:no-emdash && pnpm check:no-internal-refs
+pnpm check:claude-card && pnpm check:agent-notes
 ```
 
 What CI adds, and why the umbrella needs `SKIP_INSTALL_SIMPLE_GIT_HOOKS=1`:
