@@ -24,7 +24,9 @@ job runs all four.
 
 Run these from the repo root, in this order, before you push. CI runs the first nine on Node 24 and
 26 (`ci / verify`), and the em-dash gate, the public-surface gate, and the CLAUDE.md card checker as
-workflows of their own.
+workflows of their own. The build, test, lint, typecheck and format scripts delegate to
+`cosyte-process` from `@cosyte/process`, which owns the tool versions; `pnpm test` also runs
+`pnpm check:process`, its wiring check.
 
 ```sh
 pnpm install --frozen-lockfile

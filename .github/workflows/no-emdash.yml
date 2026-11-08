@@ -3,9 +3,12 @@ name: Em-dash gate
 # The brand rule, checked on every tracked file and, on a pull request, on its title, body and
 # commit messages.
 #
-# The shared gate installs nothing and runs its default commands, `pnpm check:no-emdash` and
-# `pnpm check:no-emdash --stdin`. It runs them on Node 24, our floor: on its default of 22, pnpm
-# refuses to run a script for a package whose engines.node starts at 24 (engine-strict).
+# The shared gate runs its default commands, `pnpm check:no-emdash` and
+# `pnpm check:no-emdash --stdin`, which call the `cosyte-no-emdash` bin from @cosyte/script-utils.
+# That bin is an installed package, so this caller names the `-install` form of the gate, which
+# installs from the lockfile first and keeps the same job ids, contexts and inputs. It runs on
+# Node 24, our floor: on its default of 22, pnpm refuses to run a script or an install for a package
+# whose engines.node starts at 24 (engine-strict).
 
 on:
   push:
@@ -24,7 +27,7 @@ permissions:
 
 jobs:
   no-emdash:
-    uses: cosyte/.github/.github/workflows/gate-no-emdash.yml@c0db8d8e5927269820de4401b3b5ad6141854b76 # workflows-2026-11-08-c0db8d8e5927
+    uses: cosyte/.github/.github/workflows/gate-no-emdash-install.yml@c0db8d8e5927269820de4401b3b5ad6141854b76 # workflows-2026-11-08-c0db8d8e5927
     with:
       node-version: "24"
     permissions:
