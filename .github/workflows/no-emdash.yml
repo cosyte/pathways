@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   no-emdash:
-    uses: cosyte/.github/.github/workflows/gate-no-emdash.yml@84ecccd771cbc9c1ece003a3f8ff61415360395b # workflows-2026-09-18-84ecccd771cb
+    uses: cosyte/.github/.github/workflows/gate-no-emdash.yml@workflows-2026-11-07-498c7c13c886
     with:
       files-command: "node scripts/check-no-emdash.mjs"
       messages-command: "node scripts/check-no-emdash.mjs --stdin"
