@@ -50,11 +50,11 @@ importers:
         specifier: 2.31.0
         version: 2.31.0(@types/node@24.19.2)
       '@cosyte/eslint-config':
-        specifier: ^0.0.4
-        version: 0.0.4(eslint@10.5.0)(typescript@5.9.3)
+        specifier: ^0.1
+        version: 0.1.2(eslint@10.5.0)(typescript@5.9.3)
       '@cosyte/prettier-config':
-        specifier: ^0.0.2
-        version: 0.0.2
+        specifier: ^0.1
+        version: 0.1.2
       '@cosyte/script-utils':
         specifier: ^0.1.4
         version: 0.1.4
@@ -62,14 +62,14 @@ importers:
         specifier: ^0.1.0
         version: 0.1.0(@cosyte/ccda@0.1.1)(@cosyte/fhir@0.1.0)(@cosyte/hl7@0.1.0)(@cosyte/x12@0.1.1)
       '@cosyte/tsconfig':
-        specifier: ^0.0.2
-        version: 0.0.2
+        specifier: ^0.1
+        version: 0.1.2
       '@cosyte/tsup-config':
-        specifier: ^0.0.1
-        version: 0.0.1(tsup@8.5.1(postcss@8.5.32)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.9.1))
+        specifier: ^0.1
+        version: 0.1.2(tsup@8.5.1(postcss@8.5.32)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.9.1))
       '@cosyte/vitest-config':
-        specifier: ^0.0.2
-        version: 0.0.2(@vitest/coverage-v8@4.1.12)(vite@7.3.7(@types/node@24.19.2)(tsx@4.21.0)(yaml@2.9.1))(vitest@4.1.12)
+        specifier: ^0.1
+        version: 0.1.2(@vitest/coverage-v8@4.1.12)(vite@7.3.7(@types/node@24.19.2)(tsx@4.21.0)(yaml@2.9.1))(vitest@4.1.12)
       '@types/better-sqlite3':
         specifier: 9.6.0
         version: 9.6.0
@@ -292,8 +292,8 @@ packages:
     resolution: {integrity: sha512-fuybRn++xRtfpa1YjaM6ztUUh9slHVI1JiNG98QJBvAs94F19jmu3ZxrMVKYbz1KTnoW8Lj5vHgHjuTdGvT5dg==}
     engines: {node: '>=22.0.0'}
 
-  '@cosyte/eslint-config@0.0.4':
-    resolution: {integrity: sha512-CHQheUswQqC90jYlS4EsFn4jg3T2pjlf8Wgr9xX930MJ6yOAHpN2kuQ4FvmUfOPk1s3xv0CzbZ267gHogvwTPg==}
+  '@cosyte/eslint-config@0.1.2':
+    resolution: {integrity: sha512-4u5sd7iwD4vhfTrCamGcVPxvt6hCDBn/OAZS+XJVriWtfdIILJy99JH4uYS5socLVHMxmmgO3ZfvMKeE+ewRzQ==}
     peerDependencies:
       eslint: ^9.0.0 || ^10.0.0
       typescript: '>=5.0.0'
@@ -315,8 +315,8 @@ packages:
       '@cosyte/hl7':
         optional: true
 
-  '@cosyte/prettier-config@0.0.2':
-    resolution: {integrity: sha512-nmplXQKNq5DZ+Su/tCUF6m9UJ9MOArhw5NG0X9yqi6B5zvxmVXtKMAX1N2bKkqpKhZqyQOR9ALGYVpTx022R/g==}
+  '@cosyte/prettier-config@0.1.2':
+    resolution: {integrity: sha512-bpcOjNAU+IBscFxZk7CBODgd7VRwOirg8LlffJLAQUTobI1JunbvAZa98u1BNv+/m5ILMGVNFopGW9HPNA2H5Q==}
 
   '@cosyte/script-utils@0.1.4':
     resolution: {integrity: sha512-o+4G9E20+9w2r+c817lg6C5Mhtvmhpq1SZSpUXSvURPqcSGL5xX6z6dL4hA2+LQrtaPX1lg6Wk1saJDOFL0BPA==}
@@ -350,20 +350,20 @@ packages:
       '@cosyte/x12':
         optional: true
 
-  '@cosyte/tsconfig@0.0.2':
-    resolution: {integrity: sha512-+V3F04HIlvQskPMz/YuGr40IT89mZ/T/2S5fe5PAxIE3MER3v4fMBdh0/IYRtqqwGEX5g3DNDj61x68Xr8f/9Q==}
+  '@cosyte/tsconfig@0.1.2':
+    resolution: {integrity: sha512-ZTWC9cgdccJwL+EWTEWCtJr/a87TTZWlegTZWHpN7LGW3rALE1glnffOFMVraj4XSUam+DuHVOdGmKF8BhJPlA==}
 
-  '@cosyte/tsup-config@0.0.1':
-    resolution: {integrity: sha512-i15Pa7lLx+E7niBVXiFB8DOSeDNl46PEf3JYzeobqDhU4Yvvczf5l7CrA1o7ikoaIlF9hYF4EBs3AGKZFnKh8A==}
+  '@cosyte/tsup-config@0.1.2':
+    resolution: {integrity: sha512-WxIVTSSjWSBPAxE3VOQGcbNLkQ9WHB9KXeiKeEikUhbD5/2vTAGg/kb8RoR5TPGVQ+1Xzl+akInSjRxsxSYFQQ==}
     peerDependencies:
       tsup: ^8.0.0
 
-  '@cosyte/vitest-config@0.0.2':
-    resolution: {integrity: sha512-2LzDFAXlwjHGVhB1eE5zYyNsGITyGZqenuhZSFIuZ33BEjfIpQtZnpObGr1gXKkrvbtEM36f6Vz0Y3zhEUm7sA==}
+  '@cosyte/vitest-config@0.1.2':
+    resolution: {integrity: sha512-CpyJqlQ/YxQDox7gRTB/6kQgAKZko5sWNcD0F9cvrJyQVUMfYkyFVaDZFR14vCRYnOwUxKv6gU70KnwR5QDXhA==}
     peerDependencies:
-      '@vitest/coverage-v8': ^4.0.0
+      '@vitest/coverage-v8': ^4.0.0 || ^5.0.0
       vite: ^6.0.0 || ^7.0.0 || ^8.0.0
-      vitest: ^4.0.0
+      vitest: ^4.0.0 || ^5.0.0
 
   '@cosyte/x12@0.1.1':
     resolution: {integrity: sha512-gyIBTuLIMTBS068EG86Y5tqXRatVdOwiBARC6oLSFKNkXjIVS+zC1ZpUa6kUtKaLtDWSZDhy6xMsfZSB8Gb4qg==}
@@ -2775,7 +2775,7 @@ snapshots:
     dependencies:
       '@xmldom/xmldom': 0.9.12
 
-  '@cosyte/eslint-config@0.0.4(eslint@10.5.0)(typescript@5.9.3)':
+  '@cosyte/eslint-config@0.1.2(eslint@10.5.0)(typescript@5.9.3)':
     dependencies:
       '@eslint/js': 10.0.1(eslint@10.5.0)
       eslint: 10.5.0
@@ -2794,7 +2794,7 @@ snapshots:
     optionalDependencies:
       '@cosyte/hl7': 0.1.0
 
-  '@cosyte/prettier-config@0.0.2': {}
+  '@cosyte/prettier-config@0.1.2': {}
 
   '@cosyte/script-utils@0.1.4': {}
 
@@ -2805,13 +2805,13 @@ snapshots:
       '@cosyte/hl7': 0.1.0
       '@cosyte/x12': 0.1.1
 
-  '@cosyte/tsconfig@0.0.2': {}
+  '@cosyte/tsconfig@0.1.2': {}
 
-  '@cosyte/tsup-config@0.0.1(tsup@8.5.1(postcss@8.5.32)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.9.1))':
+  '@cosyte/tsup-config@0.1.2(tsup@8.5.1(postcss@8.5.32)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.9.1))':
     dependencies:
       tsup: 8.5.1(postcss@8.5.32)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.9.1)
 
-  '@cosyte/vitest-config@0.0.2(@vitest/coverage-v8@4.1.12)(vite@7.3.7(@types/node@24.19.2)(tsx@4.21.0)(yaml@2.9.1))(vitest@4.1.12)':
+  '@cosyte/vitest-config@0.1.2(@vitest/coverage-v8@4.1.12)(vite@7.3.7(@types/node@24.19.2)(tsx@4.21.0)(yaml@2.9.1))(vitest@4.1.12)':
     dependencies:
       '@vitest/coverage-v8': 4.1.12(vitest@4.1.12)
       vite: 7.3.7(@types/node@24.19.2)(tsx@4.21.0)(yaml@2.9.1)
