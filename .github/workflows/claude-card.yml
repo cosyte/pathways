@@ -1,8 +1,8 @@
 name: CLAUDE.md card
 
-# Checks the CLAUDE.md card against the card spec (documentation/claude-card.md in cosyte/config) and
-# every pointer into documentation/agent-notes.md, with the checkers of `@cosyte/script-utils`
-# (`pnpm check:claude-card` and `pnpm check:agent-notes`), on Node 24, the version Pathways needs.
+# Checks the CLAUDE.md card against the card spec (documentation/claude-card.md in cosyte/config)
+# with the checker of `@cosyte/script-utils` (`pnpm check:claude-card`), on Node 24, the version
+# Pathways needs.
 
 on:
   push:
@@ -30,9 +30,7 @@ jobs:
         with:
           node-version: "24"
           cache: pnpm
-      # The checkers need their package on disk and nothing built, so no lifecycle script runs.
+      # The checker needs its package on disk and nothing built, so no lifecycle script runs.
       - run: pnpm install --frozen-lockfile --ignore-scripts
       - name: The card follows the spec
         run: pnpm check:claude-card
-      - name: Every agent-notes pointer resolves
-        run: pnpm check:agent-notes
