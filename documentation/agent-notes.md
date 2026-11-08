@@ -75,14 +75,19 @@ pnpm test:coverage
 pnpm build
 pnpm attw
 pnpm check:no-emdash
+pnpm check:no-internal-refs
+pnpm check:claude-card
+pnpm check:agent-notes
 ```
 
 The first nine are the shared `cosyte/.github` CI pipeline (`ci / verify`), run on Node 24 and 26.
 CI alone also runs `ci / prepublish` (packs the tree and installs the tarball into a clean
 directory), `ci / actionlint`, CodeQL, and the em-dash gate, which also reads the pull request
-title, body and commit messages. Inside the umbrella, `.git` is a file, so set
-`SKIP_INSTALL_SIMPLE_GIT_HOOKS=1` before `pnpm attw` or the hook installer's error lands in its
-JSON.
+title, body and commit messages. On Node 24, as workflows of their own, it runs the public-surface
+gate (`no-internal-refs / public-surface`, axes in `scripts/internal-refs.json`) and the card and
+agent-notes checkers (`claude-card`), all from `@cosyte/script-utils`. Inside the umbrella, `.git`
+is a file, so set `SKIP_INSTALL_SIMPLE_GIT_HOOKS=1` before `pnpm attw` or the hook installer's error
+lands in its JSON.
 
 ### Databases
 

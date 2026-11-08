@@ -724,8 +724,8 @@ export function isContentStore(store: MessageStore): store is MessageStore & Con
 type DataTypeExpression = ColumnDataType | Expression<unknown>;
 
 /**
- * The column types each database spells differently. SQLite's are the ones the first slice wrote,
- * so a database it made still matches.
+ * The column types each database spells differently. SQLite's are the types the store first wrote,
+ * so a database it made then still matches.
  *
  * - Keys and epoch milliseconds are 64-bit on the servers; SQLite's `integer` already is.
  * - Names, statuses and duplicate keys are indexed, so MySQL and SQL Server need a bounded length.
