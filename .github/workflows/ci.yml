@@ -26,7 +26,7 @@ jobs:
   # (`ci / verify (24, ubuntu-latest)`, `ci / verify (26, ubuntu-latest)`), so change the ruleset
   # first when adding a line, and never drop one before removing its context from the ruleset.
   ci:
-    uses: cosyte/.github/.github/workflows/ci.yml@workflows-2026-11-07-498c7c13c886
+    uses: cosyte/.github/.github/workflows/ci.yml@498c7c13c8869bf11b67fa8324684ec2dc691ec6 # workflows-2026-11-07-498c7c13c886
     with:
       run-phi-scan: true
       node-versions: '["24", "26"]'
