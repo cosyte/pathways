@@ -18,6 +18,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   no-emdash:
     uses: cosyte/.github/.github/workflows/gate-no-emdash.yml@workflows-2026-11-07-498c7c13c886
