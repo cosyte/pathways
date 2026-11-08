@@ -6,9 +6,10 @@ name: Docker
 #
 # It pushes and publishes nothing: where the image is published is not decided yet.
 #
-# NOT A REQUIRED CHECK. The ruleset `ci-required-checks` does not name `image`, so a red run here
-# blocks no merge. It is its own workflow, outside ci.yml's shared `ci` job, so it can never change
-# the contexts that ruleset does require.
+# A REQUIRED CHECK. The ruleset `ci-required-checks` names `image`, so a red run here blocks the
+# merge. That is why the workflow has no path filter: a required check whose workflow a filter
+# skips stays pending, and the pull request cannot merge. It is its own workflow, outside ci.yml's
+# shared `ci` job, so an edit here never changes the contexts that job reports.
 
 on:
   push:
