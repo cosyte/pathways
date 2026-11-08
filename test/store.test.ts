@@ -302,10 +302,9 @@ const CURRENT_SCHEMA = [
 function schemaOf(file: string): string[] {
   const db = new SqliteDatabase(file, { readonly: true });
   const rows = db
-    .prepare<
-      [],
-      { sql: string }
-    >("select sql from sqlite_master where sql is not null order by type, name")
+    .prepare<[], { sql: string }>(
+      "select sql from sqlite_master where sql is not null order by type, name",
+    )
     .all();
   db.close();
   return rows.map((row) => row.sql);

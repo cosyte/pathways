@@ -25,13 +25,7 @@ export type TransformFunction = (message: unknown) => unknown;
 
 /** What stage a failure happened in. */
 export type FailureKind =
-  | "load"
-  | "parse"
-  | "transform"
-  | "output"
-  | "timeout"
-  | "memory"
-  | "crash";
+  "load" | "parse" | "transform" | "output" | "timeout" | "memory" | "crash";
 
 /**
  * A failure, described without the message's content: an error name, a stable code where there is
@@ -59,8 +53,7 @@ export type TransformReply =
 
 /** The worker's first message: ready, or the transform could not be loaded. */
 export type WorkerHello =
-  | { readonly hello: "ready" }
-  | { readonly hello: "load-failed"; readonly failure: FailureSummary };
+  { readonly hello: "ready" } | { readonly hello: "load-failed"; readonly failure: FailureSummary };
 
 /** What the engine hands a new worker. */
 export interface WorkerSetup {

@@ -1,0 +1,5 @@
+{
+  "format": {
+    "globs": ["**/*.{js,mjs,ts,json,md,yml,yaml}"]
+  }
+}

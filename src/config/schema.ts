@@ -727,8 +727,7 @@ export interface ClientTlsFiles {
  * environment variable, or nothing beyond what TLS does (`none`).
  */
 export type EndpointAuth =
-  | { readonly kind: "bearer"; readonly env: string }
-  | { readonly kind: "none" };
+  { readonly kind: "bearer"; readonly env: string } | { readonly kind: "none" };
 
 /** What every listening endpoint is configured with. `tls` is undefined exactly when `plaintext`. */
 export interface ListenerConfig {
@@ -817,8 +816,7 @@ export type HealthConfig = ListenerConfig;
  * ```
  */
 export type MasterKeySource =
-  | { readonly id: string; readonly env: string }
-  | { readonly id: string; readonly file: string };
+  { readonly id: string; readonly env: string } | { readonly id: string; readonly file: string };
 
 /**
  * How stored messages are encrypted at rest, from `pathways.yaml`: under master keys read from
@@ -884,10 +882,7 @@ export interface ChannelConfig {
   /** The transform module, or `undefined` to pass each message through unchanged. */
   readonly transform: string | undefined;
   readonly destinations: readonly (
-    | FileDestination
-    | HttpDestination
-    | MllpDestination
-    | ModuleConnector
+    FileDestination | HttpDestination | MllpDestination | ModuleConnector
   )[];
   readonly settings: Settings;
   /** The channel's own hooks, which receive its events beside the engine-wide ones. */

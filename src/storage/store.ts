@@ -1789,18 +1789,16 @@ export class Store implements MessageStore, ContentStore {
       .orderBy("id", "desc")
       .$call((q) => this.take(q, limit + 1))
       .execute();
-    const items = rows.slice(0, limit).map(
-      (row): AuditEntry => ({
-        id: Number(row.id),
-        at: row.at,
-        actor: row.actor,
-        action: row.action,
-        outcome: row.outcome,
-        channel: row.channel,
-        messageId: int64OrNull(row.message_id),
-        detail: row.detail === null ? {} : (JSON.parse(row.detail) as AuditDetail),
-      }),
-    );
+    const items = rows.slice(0, limit).map((row): AuditEntry => ({
+      id: Number(row.id),
+      at: row.at,
+      actor: row.actor,
+      action: row.action,
+      outcome: row.outcome,
+      channel: row.channel,
+      messageId: int64OrNull(row.message_id),
+      detail: row.detail === null ? {} : (JSON.parse(row.detail) as AuditDetail),
+    }));
     return { items, next: rows.length > limit ? items.at(-1)?.id : undefined };
   }
 

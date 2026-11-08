@@ -130,13 +130,7 @@ export interface FilteredEvent extends LifecycleEventBase {
  * ```
  */
 export type TransformFailureKind =
-  | "load"
-  | "parse"
-  | "transform"
-  | "output"
-  | "timeout"
-  | "memory"
-  | "crash";
+  "load" | "parse" | "transform" | "output" | "timeout" | "memory" | "crash";
 
 /**
  * A message's transform threw, timed out or ran out of memory, or its input or output could not be
@@ -271,14 +265,7 @@ export interface SourceUpEvent extends LifecycleEventBase {
  * ```
  */
 export type AuditEventAction =
-  | "search"
-  | "view"
-  | "content-view"
-  | "replay"
-  | "resend"
-  | "clear"
-  | "retention"
-  | "config";
+  "search" | "view" | "content-view" | "replay" | "resend" | "clear" | "retention" | "config";
 
 /**
  * An entry of the audit log, once it is stored: who did what, to which message, and how it ended.

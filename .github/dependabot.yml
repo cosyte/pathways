@@ -17,6 +17,16 @@ updates:
     commit-message:
       prefix: chore
       include: scope
+    ignore:
+      # @types/node describes the oldest Node this package runs on (engines: >=24), so it stays on
+      # the 24 line. A newer major type-checks calls that Node 24 does not have.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+      # @cosyte/process owns the tool versions. vitest stays a direct devDependency only because test
+      # files import it (typecheck needs its types), pinned to exactly the version process runs;
+      # `cosyte-process check` and test/scripts/process-wiring.test.ts fail on a mismatch. It moves
+      # when process does, never on its own.
+      - dependency-name: "vitest"
   - package-ecosystem: github-actions
     directory: "/"
     schedule:

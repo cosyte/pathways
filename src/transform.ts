@@ -67,12 +67,7 @@ export type CcdaDocument = Ccda.CcdaDocument;
  * ```
  */
 export type JsonValue =
-  | string
-  | number
-  | boolean
-  | null
-  | JsonValue[]
-  | { [key: string]: JsonValue };
+  string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 
 /**
  * The message each format hands a transform, by the `format` a channel declares.
