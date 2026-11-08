@@ -5,11 +5,13 @@
 //
 // database is sqlite (the default), postgres, mysql or sqlserver. A server is reached at the
 // administrator's URL in PATHWAYS_BENCH_DATABASE_URL, the same form as the test URLs in
-// documentation/agent-notes.md#databases; each run creates a database of its own there and drops
-// it afterwards.
+// .github/workflows/databases.yml; each run creates a database of its own there and drops it
+// afterwards.
 //
 // It measures where the engine stands, so a change that slows it shows up; it is not a promise of
-// what a deployment will see, which depends on disks, message sizes and transforms.
+// what a deployment will see, which depends on disks, message sizes and transforms. The SQLite file
+// sits in the system temp folder, often a tmpfs, so compare a server with its data on tmpfs too, or
+// say which disk each was on: durable commits dominate.
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

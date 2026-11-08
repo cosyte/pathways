@@ -23,8 +23,8 @@ job runs all four.
 ## The gate
 
 Run these from the repo root, in this order, before you push. CI runs the first nine on Node 24 and
-26 (`ci / verify`), and the em-dash gate, the public-surface gate, and the CLAUDE.md card and
-agent-notes checkers as workflows of their own.
+26 (`ci / verify`), and the em-dash gate, the public-surface gate, and the CLAUDE.md card checker as
+workflows of their own.
 
 ```sh
 pnpm install --frozen-lockfile
@@ -39,7 +39,6 @@ pnpm attw
 pnpm check:no-emdash
 pnpm check:no-internal-refs
 pnpm check:claude-card
-pnpm check:agent-notes
 ```
 
 The em-dash gate also reads the pull request title, body, and commit messages: pipe each through

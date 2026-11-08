@@ -22,7 +22,7 @@ jobs:
   # ESM/CJS smoke in `verify`, plus `prepublish` and `actionlint`.
   #
   # The Node matrix is stated here on purpose, and it is bound to `engines.node` in package.json:
-  # test/node-support.test.ts fails when they disagree. Each value is a required check
+  # test/package.test.ts fails when they disagree. Each value is a required check
   # (`ci / verify (24, ubuntu-latest)`, `ci / verify (26, ubuntu-latest)`), so change the ruleset
   # first when adding a line, and never drop one before removing its context from the ruleset.
   ci:
