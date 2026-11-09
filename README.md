@@ -48,6 +48,10 @@ Today the repository holds working slices; nothing is released yet:
 
 Watch or star the repository to follow along.
 
+Pathways is an open engine, MIT licensed and free to self-host. We plan to offer hosted, managed
+Pathways as well. Need an integration built, or hosted and run for you? See our
+[integration services](https://cosyte.com/integration-services).
+
 ## License
 
 [MIT](LICENSE)
