@@ -16,9 +16,13 @@ name: Release
 #      (`engines.node`, with `engine-strict=true` in .npmrc), so `pnpm install` there refuses. It
 #      needs the shared workflow to take a Node version for that job, and this caller to pass 24.
 #   3. `@cosyte/pathways` does not exist on npm yet, and npm only lets a trusted publisher be set on
-#      a package that exists, so the first version is published by a maintainer by hand, with 2FA.
-#      The trusted publisher is added after that, and a release through it has to follow within
-#      48 hours or the entry expires.
+#      a package that exists. On a package npm does not have, the shared pipeline takes its direct
+#      publish arm with this job's OIDC token, which no trusted publisher accepts, so that publish
+#      fails. The package is created by a maintainer, with their own npm credential: either
+#      `npm publish` (2FA), or `npm stage publish`, which puts a public `0.0.0-stage` placeholder on
+#      npm and holds the real version until a maintainer approves it with 2FA. The trusted publisher
+#      is added after that, and a publish through it has to follow within 48 hours or the entry
+#      expires.
 #
 # test/package.test.ts holds this caller to the package: the same published reference as ci.yml,
 # this package's name, the same unpublished-dependency allowance as CI's prepublish job, and the
