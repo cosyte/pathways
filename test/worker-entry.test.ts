@@ -14,6 +14,7 @@ import { FORMATS, type Format } from "../src/config/schema.js";
 import {
   decode,
   encode,
+  isWorkerSetup,
   loadFormat,
   loadTransform,
   runTransform,
@@ -311,5 +312,18 @@ describe("loadTransform and summarize", () => {
     const noStack = new Error("x");
     delete noStack.stack;
     expect(summarize(noStack, "/nowhere/transform.ts")).not.toHaveProperty("where");
+  });
+});
+
+describe("isWorkerSetup", () => {
+  it("accepts only the setup the engine sends, so the entry stays idle in any other thread", () => {
+    expect(isWorkerSetup({ pathwaysWorker: true, transformFile: undefined, format: "text" })).toBe(
+      true,
+    );
+    expect(isWorkerSetup({ pathwaysWorker: "true", format: "text" })).toBe(false);
+    expect(isWorkerSetup({ format: "text" })).toBe(false);
+    expect(isWorkerSetup(null)).toBe(false);
+    expect(isWorkerSetup(undefined)).toBe(false);
+    expect(isWorkerSetup("pathwaysWorker")).toBe(false);
   });
 });

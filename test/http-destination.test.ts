@@ -73,6 +73,27 @@ describe("classifyStatus", () => {
 });
 
 describe("HttpDestination", () => {
+  it("delivers on a 2xx whose body breaks off, and the broken body does not stop the next delivery", async () => {
+    let answered = 0;
+    const r = await receiver((_request, response) => {
+      answered += 1;
+      if (answered > 1) {
+        status(200)(_request, response);
+        return;
+      }
+      response.writeHead(200, { "Content-Length": "100" });
+      response.write("synthetic");
+      setTimeout(() => response.socket?.destroy(), 20);
+    });
+    receivers.push(r);
+    const target = destination({ url: r.url });
+    expect(await outcomeOf(target.deliver({ messageId: 1, seq: 0, body: BODY }))).toBe("delivered");
+    // Long enough for the body to break off and its error to arrive.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(await outcomeOf(target.deliver({ messageId: 2, seq: 0, body: BODY }))).toBe("delivered");
+    expect(r.received).toHaveLength(2);
+  });
+
   it("POSTs the body with its headers and Content-Length, and resolves on 2xx", async () => {
     const r = await plainReceiver(204);
     const sent = destination({

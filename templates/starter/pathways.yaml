@@ -7,10 +7,10 @@ storage:
     # .gitignore keeps this folder out of git.
     file: .pathways/pathways.db
   # Or a database server in place of sqlite: postgres, mysql (MySQL or MariaDB) or sqlserver. Add its
-  # driver to the project (npm install pg, mysql2, or tedious tarn). Its connection URL holds the
-  # password, so it is read from an environment variable, PATHWAYS_DATABASE_URL unless url says
-  # another; tls: {} verifies the server against Node's built-in roots, tls: { ca: path } against
-  # your own CA:
+  # driver to the project (npm install pg, mysql2, or tedious tarn); the Docker image carries all
+  # of them. Its connection URL holds the password, so it is read from an environment variable,
+  # PATHWAYS_DATABASE_URL unless url says another; tls: {} verifies the server against Node's
+  # built-in roots, tls: { ca: path } against your own CA:
   #   postgres: { url: { env: PATHWAYS_DATABASE_URL }, tls: {} }
 
 # Every stored message, and every error stored with one, is encrypted with a data key of its own,

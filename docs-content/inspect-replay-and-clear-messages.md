@@ -1,0 +1,108 @@
+---
+id: inspect-replay-and-clear-messages
+title: Inspect, replay and clear messages
+sidebar_label: Messages, replay and clear
+description: "Find stored messages, look at one, run a failed one through a fixed transform, send outputs again, and clear what will not be fixed."
+---
+
+# Inspect, replay and clear messages
+
+The operator commands work on the database, beside a running engine or without one. They open it as
+`pathways start` does, so they need the same `pathways.yaml`, encryption keys and environment. Every
+search, view, replay, resend and clear is written to the [audit log](./read-the-audit-log.md) with the
+operating system user.
+
+## Find messages
+
+```bash
+npx pathways messages
+npx pathways messages --channel adt-to-lab --status failed --since 24h
+```
+
+```text
+ID  CHANNEL     STATE      RECEIVED                  BYTES  DUPLICATE OF  DELIVERIES
+2   adt-to-lab  filtered   2026-11-10T07:40:35.685Z  205    -             -
+1   adt-to-lab  delivered  2026-11-10T07:40:35.679Z  205    -             1 delivered
+```
+
+Messages come newest first, 50 to a page (`--limit`, up to 1,000; the last line gives the
+`--before <id>` for the next page). The list holds ids, states, times, sizes and duplicate flags, never
+content. A message's state is one of:
+
+| State       | Meaning                                                                             |
+| ----------- | ----------------------------------------------------------------------------------- |
+| `received`  | stored, waiting for its transform                                                   |
+| `queued`    | transformed; a delivery waits for its first try                                     |
+| `retrying`  | transformed; a delivery failed and waits to be tried again                          |
+| `delivered` | every delivery is done                                                              |
+| `filtered`  | the transform returned no output                                                    |
+| `failed`    | the transform failed, the source stored it as failed, or a delivery failed for good |
+| `cleared`   | it failed, and an operator cleared it                                               |
+
+## Look at one message
+
+```bash
+npx pathways messages show 17
+npx pathways messages show 17 --content
+```
+
+`show` prints the message's state, times, size and duplicate flag, the stored error cut to its stage,
+name, code and location, and each delivery with its attempts and last error. It prints the content
+only with `--content`: the message as received and its current outputs. That view is PHI, so it is
+written to the audit log first, and not shown if the entry cannot be written.
+
+## Replay a failed message
+
+Fix the transform, then:
+
+```bash
+npx pathways replay 17
+```
+
+```text
+message 17: replayed: 1 delivery queued
+```
+
+`replay` runs the stored message through its channel's transform as it is on disk now, in the same
+kind of worker the engine uses, and queues the outputs as fresh deliveries at the back of each
+destination's queue. Deliveries of the message that had failed for good are cleared. Replay several at
+once with `replay 17 18 23`; they run in the order given.
+
+A replay is refused, changing nothing, when the message is still `received` (the engine will
+transform it), has deliveries still pending (retrying ones included), or its channel is no longer
+configured. It is safe beside a running engine: it never touches a message the engine is working on.
+
+## Send the outputs again
+
+```bash
+npx pathways replay 17 --resend
+```
+
+`--resend` queues the outputs stored from the last transform, without running the transform again:
+for a destination that lost what it was sent, or one that rejected a message and has since been fixed.
+
+## Clear a failed message
+
+```bash
+npx pathways clear 17
+```
+
+`clear` marks a failed message, and its deliveries that failed for good, `cleared`. It no longer
+counts as failed in `pathways status` or on the health endpoint, and retention can delete it once its
+retention period has passed. Nothing is sent.
+
+## Exit codes
+
+| Code | Meaning                                                                   |
+| ---- | ------------------------------------------------------------------------- |
+| 0    | done                                                                      |
+| 1    | a replay, resend or clear was refused, or a replayed message failed again |
+| 4    | a message named does not exist; the others named were still acted on      |
+
+`messages`, `messages show`, `replay`, `clear`, `status`, `retention` and `audit` take `--json`, for
+one JSON document in place of the text.
+
+## Related
+
+- [How delivery and errors work](./delivery-and-errors.md).
+- [Command reference](./command-reference.md).

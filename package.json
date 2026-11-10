@@ -1,6 +1,6 @@
 {
   "name": "@cosyte/pathways",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "description": "A code-first healthcare integration engine for Node.js: channels in YAML, transforms in TypeScript. Early and not yet released.",
   "keywords": [
     "healthcare",
@@ -79,6 +79,8 @@
     "test:coverage": "cosyte-process test --coverage",
     "clean": "rm -rf dist coverage",
     "attw": "cosyte-attw",
+    "version": "changeset version && tsx scripts/sync-version.ts && cosyte-process format",
+    "pack:docs": "cosyte-process pack-docs",
     "release": "changeset publish",
     "prepublishOnly": "pnpm clean && pnpm typecheck && pnpm lint && pnpm test && pnpm build",
     "prepare": "command -v simple-git-hooks >/dev/null 2>&1 && simple-git-hooks 1>&2 || true",

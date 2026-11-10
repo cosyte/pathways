@@ -179,6 +179,79 @@ for (const database of TEST_DATABASES) {
       await store.close();
     });
 
+    it("stores a resumed message once per idempotency key on its channel, returning the first id", async () => {
+      const { store, reopen } = await openStore(database);
+      const first = await store.receive("a", bytes("1"), { idempotencyKey: "k" });
+      // The same key on another channel is another message.
+      const other = await store.receive("b", bytes("1"), { idempotencyKey: "k", resumed: true });
+      // A restart between storing and acknowledging hands the same message in again, resumed.
+      await store.close();
+      const restarted = await reopen();
+      const again = await restarted.receive("a", bytes("1"), {
+        idempotencyKey: "k",
+        resumed: true,
+      });
+      const next = await restarted.receive("a", bytes("2"), {
+        idempotencyKey: "k2",
+        resumed: true,
+      });
+      const unkeyed = await restarted.receive("a", bytes("3"), { resumed: true });
+      expect([first, other, again, next, unkeyed]).toEqual([
+        { id: 1, duplicateOf: undefined },
+        { id: 2, duplicateOf: undefined },
+        { id: 1, duplicateOf: undefined, alreadyStored: true },
+        { id: 4, duplicateOf: undefined },
+        { id: 5, duplicateOf: undefined },
+      ]);
+      expect((await restarted.messageCounts("a")).received).toBe(3);
+      expect(
+        (await restarted.listMessages({ channel: "a", limit: 10 })).items.map((m) => m.id),
+      ).toEqual([5, 4, 1]);
+      await restarted.close();
+    });
+
+    it("looks an idempotency key up only for a resumed message: one handed in for the first time is stored", async () => {
+      const { store } = await openStore(database);
+      await store.receive("a", bytes("1"), { idempotencyKey: "k" });
+      // Not resumed: the source says it never handed this one in, so the key is not looked up.
+      expect(await store.receive("a", bytes("2"), { idempotencyKey: "k" })).toEqual({
+        id: 2,
+        duplicateOf: undefined,
+      });
+      expect(await store.receive("a", bytes("3"), { idempotencyKey: "k", resumed: false })).toEqual(
+        {
+          id: 3,
+          duplicateOf: undefined,
+        },
+      );
+      // Resumed, it is the first message stored under the key that comes back.
+      expect(await store.receive("a", bytes("1"), { idempotencyKey: "k", resumed: true })).toEqual({
+        id: 1,
+        duplicateOf: undefined,
+        alreadyStored: true,
+      });
+      expect((await store.messageCounts("a")).received).toBe(3);
+      await store.close();
+    });
+
+    it("keeps the first message's duplicate flag when an idempotency key repeats with a duplicate key", async () => {
+      const { store } = await openStore(database);
+      await store.receive("a", bytes("1"), { duplicateKey: "d" });
+      const flagged = await store.receive("a", bytes("2"), {
+        duplicateKey: "d",
+        idempotencyKey: "k",
+      });
+      const again = await store.receive("a", bytes("2"), {
+        duplicateKey: "d",
+        idempotencyKey: "k",
+        resumed: true,
+      });
+      expect(flagged).toEqual({ id: 2, duplicateOf: 1 });
+      expect(again).toEqual({ id: 2, duplicateOf: 1, alreadyStored: true });
+      expect((await store.messageCounts("a")).received).toBe(2);
+      await store.close();
+    });
+
     it("stores a message as failed, with its reason, when told to, and never hands it to the transform", async () => {
       const { store } = await openStore(database);
       const { id } = await store.receive("a", bytes("x"), { failure: "inbound: NO_MSH_SEGMENT" });
@@ -282,20 +355,22 @@ const FIRST_SLICE_SCHEMA = [
 ];
 
 /**
- * The schema today: the first slice's, with migration 0003's columns added to its two tables (SQLite
- * appends them to the recorded statement), and the audit log and two indexes beside them.
+ * The schema today: the first slice's, with the columns of migrations 0003 and 0004 added to its two
+ * tables (SQLite appends them to the recorded statement), and the audit log and three indexes beside
+ * them.
  */
 const CURRENT_SCHEMA = [
   `CREATE INDEX "audit_log_by_message" on "audit_log" ("message_id", "id")`,
   `CREATE INDEX "deliveries_by_destination_status" on "deliveries" ("channel", "destination", "status", "id")`,
   `CREATE INDEX "deliveries_by_message" on "deliveries" ("message_id", "status")`,
   `CREATE INDEX "messages_by_channel_dedup_key" on "messages" ("channel", "dedup_key", "id")`,
+  `CREATE INDEX "messages_by_channel_idempotency_key" on "messages" ("channel", "idempotency_key", "id")`,
   `CREATE INDEX "messages_by_channel_status" on "messages" ("channel", "status", "id")`,
   `CREATE TABLE "audit_log" ("id" integer primary key autoincrement, "at" text not null, "actor" text not null, "action" text not null, "outcome" text not null, "channel" text, "message_id" integer, "detail" text)`,
   `CREATE TABLE "deliveries" ("id" integer primary key autoincrement, "message_id" integer not null references "messages" ("id"), "channel" text not null, "destination" integer not null, "seq" integer not null, "body" blob not null, "status" text not null, "attempts" integer not null, "next_attempt_at" integer not null, "last_error" text, "delivered_at" text, "generation" integer default 0 not null)`,
   `CREATE TABLE "kysely_migration" ("name" varchar(255) not null primary key, "timestamp" varchar(255) not null)`,
   `CREATE TABLE "kysely_migration_lock" ("id" varchar(255) not null primary key, "is_locked" integer default 0 not null)`,
-  `CREATE TABLE "messages" ("id" integer primary key autoincrement, "channel" text not null, "received_at" text not null, "body" blob not null, "status" text not null, "error" text, "updated_at" text not null, "dedup_key" text, "duplicate_of" integer, "size" integer, "generation" integer default 0 not null)`,
+  `CREATE TABLE "messages" ("id" integer primary key autoincrement, "channel" text not null, "received_at" text not null, "body" blob not null, "status" text not null, "error" text, "updated_at" text not null, "dedup_key" text, "duplicate_of" integer, "size" integer, "generation" integer default 0 not null, "idempotency_key" text)`,
   `CREATE TABLE sqlite_sequence(name,seq)`,
 ];
 
@@ -311,11 +386,11 @@ function schemaOf(file: string): string[] {
 }
 
 describe("Store on SQLite files the first slice made", () => {
-  it("makes a new database as the first slice did, with 0003's additions, so old and new files are the same", async () => {
+  it("makes a new database as the first slice did, with 0003's and 0004's additions, so old and new files are the same", async () => {
     const file = join(await makeProject({}), "new.db");
     await (await Store.open(file)).close();
     expect(schemaOf(file)).toEqual(CURRENT_SCHEMA);
-    // 0003 only adds: each of the first slice's statements is still there, as it was written.
+    // 0003 and 0004 only add: each of the first slice's statements is still there, as it was written.
     for (const statement of FIRST_SLICE_SCHEMA) {
       const table = /^CREATE TABLE "(messages|deliveries)"/.exec(statement);
       const current =
@@ -326,7 +401,7 @@ describe("Store on SQLite files the first slice made", () => {
     }
   });
 
-  it("opens a database made at migration 0002, keeping its messages, and brings it to 0003 alone", async () => {
+  it("opens a database made at migration 0002, keeping its messages, and brings it to 0003 and 0004 alone", async () => {
     const file = join(await makeProject({}), "at-0002.db");
     const old = new SqliteDatabase(file);
     const statements = FIRST_SLICE_SCHEMA.filter((s) => !s.includes("sqlite_sequence"));
@@ -362,6 +437,7 @@ describe("Store on SQLite files the first slice made", () => {
       "0001-messages-and-deliveries",
       "0002-possible-duplicates",
       "0003-operator-and-audit",
+      "0004-idempotency-keys",
     ]);
     db.close();
   });

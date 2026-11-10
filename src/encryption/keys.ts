@@ -281,5 +281,6 @@ export function readMasterKeys(
 
 function codeSuffix(error: unknown): string {
   const code = (error as { code?: unknown }).code;
+  /* v8 ignore next -- its only caller passes readFileSync's errors, which all carry a code */
   return typeof code === "string" ? ` (${code})` : "";
 }

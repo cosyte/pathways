@@ -7,14 +7,17 @@ name: adt-to-lab
 # hl7v2 messages reach the transform parsed by @cosyte/hl7. `text` passes them as a string.
 format: hl7v2
 
-# Each file dropped into this folder is one message. Once it is stored, the file moves into a
-# processed/ folder inside it, so it is never read twice.
+# Each file dropped into this folder is one message. Once it is stored, encrypted, the file is
+# deleted, so it is never read twice and no plaintext copy is left behind.
 source:
   file:
     dir: ../../data/adt-to-lab/in
     # How long a file must sit unchanged before it is read, so a file still being written is
     # left for the next pass.
     minAge: 1s
+    # keepProcessed: true moves each stored file into a processed/ folder inside this one instead
+    # of deleting it. Those copies are patient data in plaintext, outside the encrypted store, so it
+    # is off by default and the engine warns at start when it is on.
 
 # Filters and edits each message. `pathways test` runs it on every input in tests/ and compares
 # the output with the matching .expected file.

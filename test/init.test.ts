@@ -135,7 +135,9 @@ describe("pathways init", () => {
     const delivered = await readFile(join(outbox, "1-1.hl7"), "utf8");
     expect(delivered).toBe(await readFile(join(target, CHANNEL, "tests/a01.expected.hl7"), "utf8"));
     expect(delivered.split("\r")[0]?.split("|")[4]).toBe("LAB");
-    expect((await readdir(join(inbox, "processed"))).sort()).toEqual(["1-a01.hl7", "2-a08.hl7"]);
+    // Each file is deleted once it is stored: the inbox keeps no plaintext copy.
+    expect(await readdir(inbox)).toEqual([".claimed"]);
+    expect(await readdir(join(inbox, ".claimed", "adt-to-lab"))).toEqual([]);
     expect(await readdir(join(target, ".pathways"))).toContain("pathways.db");
 
     // Encrypted at rest from the first run: the database holds none of the messages' text.

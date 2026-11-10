@@ -40,7 +40,12 @@ describe("loadProject", () => {
         name: "adt",
         dir: join(root, "channels/adt"),
         format: "hl7v2",
-        source: { kind: "file", dir: join(root, "channels/adt/inbox"), minAgeMs: 1_000 },
+        source: {
+          kind: "file",
+          dir: join(root, "channels/adt/inbox"),
+          minAgeMs: 1_000,
+          keepProcessed: false,
+        },
         transform: undefined,
         destinations: [{ kind: "file", dir: join(root, "channels/adt/outbox") }],
         settings: DEFAULT_SETTINGS,
@@ -84,6 +89,19 @@ defaults:
     expect(project.settings.timeoutMs).toBe(3_600_000);
     expect(project.settings.pollIntervalMs).toBe(10);
     expect(project.channels[0]?.source).toMatchObject({ kind: "file", minAgeMs: 0 });
+  });
+
+  it("keeps a plaintext copy of each file only when keepProcessed says so, and nothing else", async () => {
+    const channel = (keep: string): string =>
+      `source:\n  file: { dir: in, keepProcessed: ${keep} }\ndestinations:\n  - file: { dir: out }\n`;
+    const root = await makeProject({ "channels/a/channel.yaml": channel("true") });
+    expect((await loadProject(root)).channels[0]?.source).toMatchObject({
+      kind: "file",
+      keepProcessed: true,
+    });
+    expect(await problemsOf({ "channels/a/channel.yaml": channel("yes please") })).toEqual([
+      expect.stringContaining("keepProcessed"),
+    ]);
   });
 
   it("accepts an empty pathways.yaml and a channel whose name matches its folder", async () => {

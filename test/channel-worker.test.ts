@@ -1,3 +1,4 @@
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
@@ -124,6 +125,27 @@ describe("ChannelWorker", () => {
     });
   });
 
+  it("ignores a message the transform posts itself, even one shaped like a reply", async () => {
+    // A transform runs in the worker thread, so it can post to the engine through parentPort. Only
+    // the worker's own reply, carrying the pending message's id, may settle that message.
+    const worker = await workerFor(
+      [
+        'import { parentPort } from "node:worker_threads";',
+        "export default (m: string): string => {",
+        "  parentPort?.postMessage({ id: 9999, ok: false, failure: { kind: 'transform', name: 'Forged', detail: 'TESTPATIENT' } });",
+        "  parentPort?.postMessage({ id: 9999, ok: true, outputs: [new TextEncoder().encode('forged')] });",
+        "  parentPort?.postMessage('stray');",
+        "  parentPort?.postMessage(null);",
+        "  parentPort?.postMessage(undefined);",
+        "  return m + '!';",
+        "};",
+        "",
+      ].join("\n"),
+    );
+    expect(await worker.run(bytes("hi"))).toEqual({ ok: true, outputs: [bytes("hi!")] });
+    expect(await worker.run(bytes("again"))).toEqual({ ok: true, outputs: [bytes("again!")] });
+  });
+
   it("refuses to start when the transform will not load", async () => {
     const noDefault = await workerFor("export const nothing = 1;\n");
     await expect(noDefault.start()).rejects.toBeInstanceOf(TransformLoadError);
@@ -145,6 +167,41 @@ describe("ChannelWorker", () => {
       workerUrl: new URL(`file://${join(root, "exit.mjs")}`),
     });
     await expect(worker.start()).rejects.toMatchObject({ failure: { kind: "crash" } });
+  });
+
+  it("fails a message when the transform throws outside its call, naming the error without a code", async () => {
+    const worker = await workerFor(
+      "export default (m: string): string | Promise<string> => m !== 'x' ? m : new Promise(() => { setTimeout(() => { throw new RangeError('TESTPATIENT'); }, 10); });\n",
+    );
+    const outcome = await worker.run(bytes("x"));
+    expect(outcome).toMatchObject({ ok: false, failure: { kind: "crash", name: "RangeError" } });
+    expect(outcome.ok ? undefined : outcome.failure).not.toHaveProperty("code");
+    expect(await worker.run(bytes("fine"))).toEqual({ ok: true, outputs: [bytes("fine")] });
+  });
+
+  it("rejects the message whose fresh worker cannot load the transform, and runs the next once it can", async () => {
+    const root = await makeProject({
+      "transform.ts":
+        "export default (m: string): string => { if (m === 'loop') { for (;;) {} } return m; };\n",
+    });
+    const file = join(root, "transform.ts");
+    const worker = new ChannelWorker({
+      channel: "test",
+      transformFile: file,
+      format: "text",
+      timeoutMs: 300,
+      memoryMb: 256,
+    });
+    workers.push(worker);
+    expect(await worker.run(bytes("loop"))).toMatchObject({
+      ok: false,
+      failure: { kind: "timeout" },
+    });
+    // The timed-out worker is gone; the transform on disk now fails to load in its replacement.
+    await writeFile(file, "export const nothing = 1;\n");
+    await expect(worker.run(bytes("first"))).rejects.toBeInstanceOf(TransformLoadError);
+    await writeFile(file, "export default (m: string): string => m.toUpperCase();\n");
+    expect(await worker.run(bytes("next"))).toEqual({ ok: true, outputs: [bytes("NEXT")] });
   });
 
   it("finds the worker beside the built CLI, or beside this source under the tests", () => {

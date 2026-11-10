@@ -116,6 +116,8 @@ interface MessagesTable {
   size: ColumnType<number | string | null, number | null, number | null>;
   /** How often the message was replayed or resent: its current deliveries carry this. Since 0003. */
   generation: Generated<number>;
+  /** A hash of what names this one message to its source, so it is stored once. Since 0004. */
+  idempotency_key: string | null;
 }
 
 interface DeliveriesTable {
@@ -171,6 +173,19 @@ export interface StoreReceiveOptions {
   /** Stores the message as `failed`, with this reason, so it is kept but never transformed. */
   readonly failure?: string | undefined;
   /**
+   * An opaque key that names this one message to its source (the engine passes a hash), stored
+   * with the message. With `resumed`, when a message of the channel was already stored with the
+   * same key, nothing is stored and that message's id comes back with `alreadyStored`: a source
+   * that stored a message and then stopped before it could acknowledge it hands it in again on
+   * restart, and it is stored once.
+   */
+  readonly idempotencyKey?: string | undefined;
+  /**
+   * True when the message may have been stored already under `idempotencyKey`, by an earlier run:
+   * only then is the key looked up.
+   */
+  readonly resumed?: boolean | undefined;
+  /**
    * The body's size in bytes as it arrived; defaults to `body.byteLength`. A storage layer that
    * changes the body on its way in, such as encryption, passes the original size along.
    */
@@ -189,6 +204,11 @@ export interface ReceivedMessage {
   readonly id: number;
   /** The latest earlier message of the channel with the same duplicate key, when there is one. */
   readonly duplicateOf: number | undefined;
+  /**
+   * True when a message of the channel was already stored with the same idempotency key: `id` is
+   * that message's, and nothing new was stored.
+   */
+  readonly alreadyStored?: boolean;
 }
 
 /**
@@ -584,7 +604,11 @@ export interface MessageStore {
   /**
    * Stores an incoming message, durably, before its source acknowledges it: as `received`, or as
    * `failed` when `options.failure` is set. Flags it as a possible duplicate when an earlier
-   * message of the channel has the same `options.duplicateKey`.
+   * message of the channel has the same `options.duplicateKey`. Given `options.resumed`, when a
+   * message of the channel was already stored with the same `options.idempotencyKey`, stores
+   * nothing and returns that message's id with `alreadyStored: true`. A store that ignores the key
+   * still works, and a source that stops between storing and acknowledging then stores that
+   * message twice.
    */
   receive(
     channel: string,
@@ -805,8 +829,13 @@ const COLUMN_TYPES: Readonly<Record<StorageKind, ColumnTypes>> = {
 /**
  * The schema's migrations, in the column types of `kind`. One portable set: each database runs the
  * same steps under the same names, so the migration table reads the same everywhere.
+ *
+ * @example
+ * ```ts
+ * const provider = { getMigrations: () => Promise.resolve(migrations("postgres")) };
+ * ```
  */
-function migrations(kind: StorageKind): Record<string, Migration> {
+export function migrations(kind: StorageKind): Record<string, Migration> {
   const t = COLUMN_TYPES[kind];
   return {
     "0001-messages-and-deliveries": {
@@ -896,6 +925,16 @@ function migrations(kind: StorageKind): Record<string, Migration> {
           .createIndex("audit_log_by_message")
           .on("audit_log")
           .columns(["message_id", "id"])
+          .execute();
+      },
+    },
+    "0004-idempotency-keys": {
+      async up(db: Kysely<unknown>): Promise<void> {
+        await db.schema.alterTable("messages").addColumn("idempotency_key", t.name).execute();
+        await db.schema
+          .createIndex("messages_by_channel_idempotency_key")
+          .on("messages")
+          .columns(["channel", "idempotency_key", "id"])
           .execute();
       },
     },
@@ -1180,8 +1219,11 @@ export class Store implements MessageStore, ContentStore {
 
   /**
    * Stores an incoming message as `received` (or `failed`, given `options.failure`) and returns its
-   * id, with the earlier message it may duplicate. With a duplicate key, the insert, the lookup and
-   * the flag are one transaction; without one, the insert alone.
+   * id, with the earlier message it may duplicate. With a duplicate key, or an idempotency key
+   * that is `resumed`, the insert, the lookups and the flag are one transaction; otherwise, the
+   * insert alone, which stores an idempotency key without looking it up. When a resumed message's
+   * idempotency key is already stored on the channel, the new row is deleted again and that
+   * message's id is returned with `alreadyStored`.
    *
    * Every transaction here writes before it reads. On SQLite, a transaction that reads first cannot
    * write once another process (an operator command beside the engine) has written meanwhile, and
@@ -1193,7 +1235,7 @@ export class Store implements MessageStore, ContentStore {
     options: StoreReceiveOptions = {},
   ): Promise<ReceivedMessage> {
     const at = this.now().toISOString();
-    const { duplicateKey, failure, size } = options;
+    const { duplicateKey, idempotencyKey, resumed, failure, size } = options;
     const insert = (db: Kysely<Tables>): Promise<number> =>
       this.insertMessage(db, {
         channel,
@@ -1205,12 +1247,35 @@ export class Store implements MessageStore, ContentStore {
         dedup_key: duplicateKey ?? null,
         duplicate_of: null,
         size: size ?? body.byteLength,
+        idempotency_key: idempotencyKey ?? null,
       });
-    if (duplicateKey === undefined) {
+    // A message handed in for the first time cannot have been stored: its key is only recorded.
+    const lookUp = resumed === true ? idempotencyKey : undefined;
+    if (duplicateKey === undefined && lookUp === undefined) {
       return { id: await insert(this.db), duplicateOf: undefined };
     }
     return this.db.transaction().execute(async (tx) => {
       const id = await insert(tx);
+      if (lookUp !== undefined) {
+        const stored = await tx
+          .selectFrom("messages")
+          .select(["id", "duplicate_of"])
+          .where("channel", "=", channel)
+          .where("idempotency_key", "=", lookUp)
+          .where("id", "<", id)
+          .orderBy("id")
+          .$call((query) => this.first(query))
+          .executeTakeFirst();
+        if (stored !== undefined) {
+          await tx.deleteFrom("messages").where("id", "=", id).execute();
+          return {
+            id: Number(stored.id),
+            duplicateOf: int64OrNull(stored.duplicate_of) ?? undefined,
+            alreadyStored: true,
+          };
+        }
+      }
+      if (duplicateKey === undefined) return { id, duplicateOf: undefined };
       const earlier = await tx
         .selectFrom("messages")
         .select("id")
