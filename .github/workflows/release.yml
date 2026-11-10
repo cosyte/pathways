@@ -47,10 +47,13 @@ jobs:
       contents: write # create tags / the GitHub release
       id-token: write # npm trusted publishing and provenance
       pull-requests: write # open the "Version Packages" PR
-    uses: cosyte/.github/.github/workflows/release.yml@c0db8d8e5927269820de4401b3b5ad6141854b76 # workflows-2026-11-08-c0db8d8e5927
+    uses: cosyte/.github/.github/workflows/release.yml@402d4e1568e7078f69af42908ab1559ec44e1682 # workflows-2026-11-09-402d4e1568e7
     with:
       package-name: "@cosyte/pathways"
       # Every dependency is on npm, so nothing is excused: the same empty allowance ci.yml gives the
       # prepublish job. The shared default excuses @cosyte/fhir, which has since published.
       expect-unpublished-deps: ""
+      # Every job of the shared pipeline sets up this Node line. Without it the `version` job runs on 22,
+      # where pnpm refuses to install a package whose engines.node starts at 24.
+      node-version: "24"
     secrets: inherit
