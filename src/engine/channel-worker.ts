@@ -179,9 +179,10 @@ export class ChannelWorker {
         }
         resolve(outcome);
       };
-      const onReply = (reply: TransformReply): void => {
-        /* v8 ignore next -- one message runs at a time, and a worker that misses a reply is replaced */
-        if (reply.id !== id) return;
+      const onReply = (reply: unknown): void => {
+        // The transform runs in this worker and can post its own messages through parentPort. Only
+        // a reply that carries this message's id settles it; anything else is ignored.
+        if (!isReplyTo(reply, id)) return;
         finish(
           reply.ok ? { ok: true, outputs: reply.outputs } : { ok: false, failure: reply.failure },
           false,
@@ -212,6 +213,11 @@ export class ChannelWorker {
       worker.postMessage({ id, body } satisfies TransformRequest);
     });
   }
+}
+
+/** Whether a message from the worker is the reply to request `id`. */
+function isReplyTo(message: unknown, id: number): message is TransformReply {
+  return typeof message === "object" && message !== null && (message as { id?: unknown }).id === id;
 }
 
 function describeWorkerError(error: Error, kind: "load" | "crash"): FailureSummary {

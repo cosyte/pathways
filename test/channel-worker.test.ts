@@ -125,6 +125,27 @@ describe("ChannelWorker", () => {
     });
   });
 
+  it("ignores a message the transform posts itself, even one shaped like a reply", async () => {
+    // A transform runs in the worker thread, so it can post to the engine through parentPort. Only
+    // the worker's own reply, carrying the pending message's id, may settle that message.
+    const worker = await workerFor(
+      [
+        'import { parentPort } from "node:worker_threads";',
+        "export default (m: string): string => {",
+        "  parentPort?.postMessage({ id: 9999, ok: false, failure: { kind: 'transform', name: 'Forged', detail: 'TESTPATIENT' } });",
+        "  parentPort?.postMessage({ id: 9999, ok: true, outputs: [new TextEncoder().encode('forged')] });",
+        "  parentPort?.postMessage('stray');",
+        "  parentPort?.postMessage(null);",
+        "  parentPort?.postMessage(undefined);",
+        "  return m + '!';",
+        "};",
+        "",
+      ].join("\n"),
+    );
+    expect(await worker.run(bytes("hi"))).toEqual({ ok: true, outputs: [bytes("hi!")] });
+    expect(await worker.run(bytes("again"))).toEqual({ ok: true, outputs: [bytes("again!")] });
+  });
+
   it("refuses to start when the transform will not load", async () => {
     const noDefault = await workerFor("export const nothing = 1;\n");
     await expect(noDefault.start()).rejects.toBeInstanceOf(TransformLoadError);
