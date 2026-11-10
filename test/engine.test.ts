@@ -98,7 +98,7 @@ describe("Engine", () => {
 
     // Each file is deleted once it is stored, and no plaintext copy is kept.
     expect(await readdir(data(root, "inbox"))).toEqual([CLAIMED_DIR]);
-    expect(await readdir(data(root, "inbox", CLAIMED_DIR))).toEqual([]);
+    expect(await readdir(data(root, "inbox", CLAIMED_DIR, "adt"))).toEqual([]);
     for (const out of ["out-a", "out-b"]) {
       expect(await readdir(data(root, out))).toEqual(["1-1.hl7"]);
       const written = await readFile(data(root, out, "1-1.hl7"), "utf8");
@@ -188,7 +188,7 @@ describe("Engine", () => {
     await expect(crashed.tick()).rejects.toThrow("the process stopped");
     await crashed.stop();
     expect(await store(real)).toEqual({ messages: 1, inbox: [CLAIMED_DIR] });
-    expect(await readdir(data(root, "inbox", CLAIMED_DIR))).toHaveLength(1);
+    expect(await readdir(data(root, "inbox", CLAIMED_DIR, "adt"))).toHaveLength(1);
 
     // The restart finds the claimed file, stores nothing new, deletes it and carries on.
     const second = captureLogger();
@@ -197,7 +197,7 @@ describe("Engine", () => {
     await restarted.start();
     await restarted.tick();
     expect(await store(real)).toEqual({ messages: 1, inbox: [CLAIMED_DIR] });
-    expect(await readdir(data(root, "inbox", CLAIMED_DIR))).toEqual([]);
+    expect(await readdir(data(root, "inbox", CLAIMED_DIR, "adt"))).toEqual([]);
     for (const out of ["out-a", "out-b"])
       expect(await readdir(data(root, out))).toEqual(["1-1.hl7"]);
     expect(second.events.find((e) => e.event === "already-stored")).toMatchObject({
@@ -291,7 +291,11 @@ describe("Engine", () => {
         message.messageId === 1 ? Promise.reject(new DeliveryRejected("AE")) : Promise.resolve(),
     };
     const { root, engine, store, events } = await setUp(LAB_TRANSFORM, (channel) => ({
-      source: new FileSource({ dir: join(channel.dir, "../../data/inbox"), minAgeMs: 0 }),
+      source: new FileSource({
+        dir: join(channel.dir, "../../data/inbox"),
+        channel: channel.name,
+        minAgeMs: 0,
+      }),
       destinations: [
         rejecting,
         new FileDestination({ dir: join(channel.dir, "../../data/out-b"), extension: "hl7" }),

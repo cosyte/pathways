@@ -466,7 +466,12 @@ export default (msg: string): string => {
       store: wrapped,
       logger,
       connectors: (channel: ChannelConfig) => ({
-        source: new FileSource({ dir: join(root, "data/inbox"), minAgeMs: 0, now: Date.now }),
+        source: new FileSource({
+          dir: join(root, "data/inbox"),
+          channel: channel.name,
+          minAgeMs: 0,
+          now: Date.now,
+        }),
         destinations: [
           new FileDestination({ dir: join(root, "data/out"), extension: "hl7" }),
           new Rejecter(),
