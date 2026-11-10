@@ -1,7 +1,7 @@
 name: Release
 
 # Thin caller of the shared release pipeline: Changesets -> npm publish through trusted publishing
-# (OIDC, with provenance) -> docs artifacts -> GitHub release -> repository_dispatch to cosyte/docs.
+# (OIDC, with provenance) -> docs artifacts -> GitHub release -> a dispatch that rebuilds docs.cosyte.com.
 # No npm token exists: the package's trusted publisher on npmjs.com names this repository and this
 # file, and npm exchanges the job's `id-token: write` grant for a short-lived publish token.
 # `secrets: inherit` passes DOCS_REPO_DISPATCH_TOKEN, and RELEASE_PR_TOKEN when one is set.
