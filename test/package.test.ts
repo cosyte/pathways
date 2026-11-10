@@ -111,6 +111,14 @@ describe("the release workflow", () => {
     );
   });
 
+  // The shared pipeline's `version` job installs on Node 22 unless told otherwise, and pnpm refuses
+  // to install a package whose engines.node starts above it, so every release job runs on our floor.
+  it("runs every shared release job on the package's own Node floor", () => {
+    const floor = /^>=(\d+)/.exec(pkg.engines.node)?.[1];
+    expect(floor, "engines.node must state a floor").toBeDefined();
+    expect(job?.with?.["node-version"]).toBe(floor);
+  });
+
   it("has the scripts the shared pipeline runs", () => {
     expect(pkg.scripts["version"]).toBe(
       "changeset version && tsx scripts/sync-version.ts && cosyte-process format",
