@@ -79,6 +79,8 @@
     "test:coverage": "cosyte-process test --coverage",
     "clean": "rm -rf dist coverage",
     "attw": "cosyte-attw",
+    "version": "changeset version && tsx scripts/sync-version.ts && cosyte-process format",
+    "pack:docs": "cosyte-process pack-docs",
     "release": "changeset publish",
     "prepublishOnly": "pnpm clean && pnpm typecheck && pnpm lint && pnpm test && pnpm build",
     "prepare": "command -v simple-git-hooks >/dev/null 2>&1 && simple-git-hooks 1>&2 || true",

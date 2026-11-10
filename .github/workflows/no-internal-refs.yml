@@ -26,7 +26,7 @@ permissions:
 
 jobs:
   no-internal-refs:
-    uses: cosyte/.github/.github/workflows/gate-no-internal-refs-install.yml@c0db8d8e5927269820de4401b3b5ad6141854b76 # workflows-2026-11-08-c0db8d8e5927
+    uses: cosyte/.github/.github/workflows/gate-no-internal-refs-install.yml@402d4e1568e7078f69af42908ab1559ec44e1682 # workflows-2026-11-09-402d4e1568e7
     with:
       node-version: "24"
     permissions:
