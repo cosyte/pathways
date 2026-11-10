@@ -91,7 +91,7 @@
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "0.18.5",
-    "@changesets/cli": "2.31.0",
+    "@changesets/cli": "3.0.3",
     "@cosyte/eslint-config": "^0.1.4",
     "@cosyte/prettier-config": "^0.1.2",
     "@cosyte/process": "^0.1.7",
