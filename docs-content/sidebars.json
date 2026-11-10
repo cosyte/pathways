@@ -1,3 +1,44 @@
 {
-  "docs": ["intro"]
+  "docs": [
+    "intro",
+    { "type": "category", "label": "Installation", "items": ["installation"] },
+    { "type": "category", "label": "Quickstart", "items": ["quickstart"] },
+    { "type": "category", "label": "Tutorials", "items": ["write-a-channel"] },
+    {
+      "type": "category",
+      "label": "How-to guides",
+      "items": [
+        "configure-a-channel",
+        "transform-and-filter-messages",
+        "test-a-channel",
+        "read-and-write-files",
+        "send-and-receive-mllp",
+        "send-and-receive-http",
+        "work-with-formats",
+        "store-messages-in-a-database",
+        "encrypt-stored-messages",
+        "secure-endpoints",
+        "read-the-audit-log",
+        "add-lifecycle-hooks",
+        "write-custom-connectors",
+        "check-status-and-health",
+        "inspect-replay-and-clear-messages",
+        "set-message-retention",
+        "run-in-docker"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Explanation",
+      "items": ["delivery-and-errors", "the-transform-worker", "security-model"]
+    },
+    {
+      "type": "category",
+      "label": "Reference",
+      "items": ["configuration-reference", "command-reference", "logs-and-codes"]
+    },
+    { "type": "category", "label": "Troubleshooting", "items": ["troubleshooting"] },
+    "testing-and-quality",
+    "performance"
+  ]
 }
