@@ -63,7 +63,16 @@ export interface WorkerSetup {
   readonly format: WorkerFormat;
 }
 
-function isWorkerSetup(data: unknown): data is WorkerSetup {
+/**
+ * Whether a thread's `workerData` is a setup the engine sent, so the entry starts only in a worker
+ * the engine started.
+ *
+ * @example
+ * ```ts
+ * isWorkerSetup({ pathwaysWorker: true, transformFile: undefined, format: "text" }); // true
+ * ```
+ */
+export function isWorkerSetup(data: unknown): data is WorkerSetup {
   return (
     typeof data === "object" &&
     data !== null &&
@@ -395,6 +404,7 @@ function locate(error: unknown, transformFile: string): string | undefined {
     if (match === null) continue;
     const [, file, row, column] = match;
     if (file === href || file === transformFile) {
+      /* v8 ignore next -- split returns at least one piece, so pop() always finds one */
       const name = transformFile.split(/[\\/]/).pop() ?? transformFile;
       return `${name}:${row}:${column}`;
     }
