@@ -70,7 +70,12 @@ start --once` run straight after copying a file in can find it too new; run it a
 - Hidden files (a name starting with a dot) and folders are never read.
 - A file that cannot be opened or moved stays where it is, and the engine logs `source-read-failed`
   with the error's code: check the folder's permissions.
-- A file left in `.claimed/` belongs to a run that stopped part way. The next pass stores it, once.
+- A file left in `.claimed/<channel>/` belongs to a run of that channel that stopped part way. The
+  next pass of the same channel stores it, once.
+- Two channels that read one folder share its files: each file goes to whichever channel's pass
+  sees it first.
+- On Windows, a pass that claims a file fails: the file source flushes folders to disk in a way only
+  Linux and macOS allow.
 
 ## The configuration says MLLP needs HL7 v2
 
