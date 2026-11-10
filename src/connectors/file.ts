@@ -88,11 +88,14 @@ function fitted(prefix: string, name: string): string {
 }
 
 /**
- * Flushes a folder's entries to disk, so that a file moved into or out of it stays moved after a
- * power cut, not only after the process stops.
+ * Opens `path` with `flags` and flushes it to disk. On Linux and macOS the path is a folder, opened
+ * to read, and `fsync` writes its entries, so a file moved into or out of it stays moved after a
+ * power cut, not only after the process stops. On Windows it is a claimed file, opened to write:
+ * Node's `fsync` there is `FlushFileBuffers`, which needs a handle with write access and writes the
+ * file's metadata, its name among them, as well as its data.
  */
-async function syncFolder(path: string): Promise<void> {
-  const handle = await open(path, "r");
+async function flush(path: string, flags: "r" | "r+"): Promise<void> {
+  const handle = await open(path, flags);
   try {
     await handle.sync();
   } finally {
@@ -130,6 +133,14 @@ export interface FileSourceOptions {
  * folder to be claimed again. So nothing is lost and nothing is stored twice. With `keepProcessed`,
  * the file moves into `processed/`, prefixed with the message id, instead of being deleted.
  *
+ * How the moves reach the disk depends on the platform. On Linux and macOS the pass flushes the
+ * folders the files moved between. On Windows a folder cannot be flushed that way: Node's `fsync`
+ * there is `FlushFileBuffers`, which needs a handle opened to write, and so refuses a folder opened
+ * to read. So on Windows the pass flushes each claimed file under its new name instead, which
+ * writes the file's metadata, the rename among it, as PostgreSQL's `durable_rename` does there. A file is therefore
+ * opened to write as well as to read before it is claimed on Windows, and one that cannot be (a
+ * read-only file, or one another program holds open for writing) stays where it is.
+ *
  * @example
  * ```ts
  * const source = new FileSource({ dir: "./inbox", channel: "adt-to-lab", minAgeMs: 1_000 });
@@ -163,11 +174,14 @@ export class FileSource implements SourceConnector {
   }
 
   /**
-   * Moves each ready file into the channel's claim folder, then flushes the moves to disk: the claim
-   * folder, `.claimed/` and the source folder, once a pass that claims anything.
+   * Moves each ready file into the channel's claim folder, then flushes the moves to disk, once a
+   * pass that claims anything: on Linux and macOS the claim folder, `.claimed/` and the source
+   * folder; on Windows each claimed file, under its claimed name.
    */
   private async claim(claims: string): Promise<SourceFile[]> {
     const { dir, minAgeMs, now = Date.now, onReadError } = this.options;
+    // Read on each pass, not at load, so the Windows path can be driven from any platform's tests.
+    const windows = process.platform === "win32";
     const at = String(now()).padStart(15, "0");
     const taken: SourceFile[] = [];
     for (const file of await readyFiles(dir, minAgeMs, now())) {
@@ -175,8 +189,9 @@ export class FileSource implements SourceConnector {
       const name = fitted(`${at}.${place}.${randomBytes(4).toString("hex")}-`, file.name);
       const path = join(claims, name);
       try {
-        // Opened before the move, so a file that cannot be read stays where it is.
-        const handle = await open(file.path, "r");
+        // Opened before the move, so a file that cannot be read stays where it is. On Windows it is
+        // opened to write too, as flushing it below needs, so a file that cannot be flushed stays.
+        const handle = await open(file.path, windows ? "r+" : "r");
         try {
           await rename(file.path, path);
         } finally {
@@ -188,10 +203,12 @@ export class FileSource implements SourceConnector {
       }
       taken.push({ name, path });
     }
-    if (taken.length > 0) {
-      await syncFolder(claims);
-      await syncFolder(join(dir, CLAIMED_DIR));
-      await syncFolder(dir);
+    if (windows) {
+      for (const file of taken) await flush(file.path, "r+");
+    } else if (taken.length > 0) {
+      await flush(claims, "r");
+      await flush(join(dir, CLAIMED_DIR), "r");
+      await flush(dir, "r");
     }
     return taken;
   }

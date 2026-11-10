@@ -32,7 +32,7 @@ default), so a file still being written is left for a later pass. It takes them 
 
 1. moves each one into the channel's own hidden folder, `.claimed/<channel>/` inside `dir`, under a
    name of its own;
-2. flushes those moves to disk: the claim folder, `.claimed/` and `dir`, once for the pass;
+2. flushes those moves to disk, once for the pass (how depends on the platform, below);
 3. stores each file's bytes in the database, encrypted, in the order it claimed them;
 4. deletes each file once it is stored.
 
@@ -47,8 +47,22 @@ the file's place in the pass, and a random part. A file name of up to 221 bytes 
 longer one keeps as much of its end as fits in 255 bytes, in whole characters, so the extension stays
 and a file with any name can be claimed.
 
-Flushing a folder opens it and calls `fsync`, which Linux and macOS allow and Windows does not. On
-Windows, a pass that claims a file fails, so run the file source on Linux or macOS.
+### How the moves reach the disk
+
+- **Linux and macOS.** The source flushes the folders the files moved between: the claim folder,
+  `.claimed/` and `dir`. It opens each folder and calls `fsync`, which writes the folder's entries
+  to disk.
+- **Windows.** A folder cannot be flushed this way: Node's `fsync` there is `FlushFileBuffers`,
+  which needs a handle opened to write, and so refuses a folder opened to read as Linux and macOS
+  open it. Instead the source flushes each claimed file under its new name. `FlushFileBuffers` writes a file's metadata as well as its data,
+  and on NTFS a rename is part of the file's metadata. This is the same step PostgreSQL takes to
+  make a rename last on Windows.
+
+On Windows the source also opens each file to write before it claims it, since flushing it needs
+that. A file it cannot open to write stays where it is, and the engine logs `source-read-failed`
+with the error's code (`EPERM` for a read-only file); clear its read-only attribute and the next
+pass takes it. A file another program still holds open for writing is left the same way, until
+that program closes it.
 
 ### Two channels on one folder
 

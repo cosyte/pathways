@@ -116,6 +116,18 @@ export async function dropFile(path: string, contents: string | Uint8Array): Pro
   await utimes(path, past, past);
 }
 
+/**
+ * Makes `process.platform` read `platform`, so code that branches on it runs its path for that
+ * platform whatever the tests run on. Returns what puts the real value back.
+ */
+export function usePlatform(platform: NodeJS.Platform): () => void {
+  const real = Object.getOwnPropertyDescriptor(process, "platform");
+  Object.defineProperty(process, "platform", { value: platform, configurable: true });
+  return () => {
+    if (real !== undefined) Object.defineProperty(process, "platform", real);
+  };
+}
+
 /** Removes every folder {@link makeProject} made. */
 export async function cleanUp(): Promise<void> {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
