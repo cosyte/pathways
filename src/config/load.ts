@@ -339,6 +339,7 @@ function resolveSource(
     kind: "file",
     dir: resolve(dir, file.dir),
     minAgeMs: file.minAge ?? DEFAULT_MIN_AGE_MS,
+    keepProcessed: file.keepProcessed ?? false,
   };
 }
 

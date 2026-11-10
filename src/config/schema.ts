@@ -512,6 +512,7 @@ export const channelSchema = z
           .strictObject({
             dir: z.string().min(1),
             minAge: duration.optional(),
+            keepProcessed: z.boolean().optional(),
           })
           .optional(),
         http: httpSource.optional(),
@@ -693,6 +694,11 @@ export interface FileSource {
   readonly kind: "file";
   readonly dir: string;
   readonly minAgeMs: number;
+  /**
+   * Whether each file is moved into `processed/` once it is stored, a plaintext copy outside the
+   * encrypted store, instead of being deleted. Off unless the channel sets `keepProcessed: true`.
+   */
+  readonly keepProcessed: boolean;
 }
 
 /** A file destination, with its folder resolved to an absolute path. */

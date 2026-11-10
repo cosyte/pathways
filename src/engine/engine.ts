@@ -144,6 +144,7 @@ export async function connectorsFor(
       sourceConnector = new FileSource({
         dir: source.dir,
         minAgeMs: source.minAgeMs,
+        keepProcessed: source.keepProcessed,
         now,
         onReadError: (error) => {
           logger.warn({
@@ -514,6 +515,9 @@ export class Engine {
     } else if (source.kind === "mllp" && source.plaintext) {
       // MLLP carries no credentials of its own: mutual TLS (tls.ca) is how a source checks who sends.
       logger.warn({ event: "plaintext", channel: config.name, endpoint: "source" });
+    } else if (source.kind === "file" && source.keepProcessed) {
+      // Each stored file stays in processed/ as it arrived: patient data outside the encrypted store.
+      logger.warn({ event: "plaintext-copies", channel: config.name, endpoint: "source" });
     }
     for (const [index, destination] of config.destinations.entries()) {
       if ((destination.kind === "http" || destination.kind === "mllp") && destination.plaintext) {
@@ -589,15 +593,15 @@ export class Engine {
     const { store, logger } = this.options;
     return {
       receive: async (body, options = {}) => {
-        const { duplicateKey, failure } = options;
+        const { duplicateKey, idempotencyKey, resumed, failure } = options;
         let received: ReceivedMessage;
         try {
           received = await store.receive(config.name, body, {
-            // Storage keeps a hash of the key, so a sender's identifiers are not stored twice.
-            duplicateKey:
-              duplicateKey === undefined
-                ? undefined
-                : createHash("sha256").update(duplicateKey).digest("hex"),
+            // Storage keeps a hash of each key, so a sender's identifiers and a file's name are not
+            // stored.
+            duplicateKey: hashed(duplicateKey),
+            idempotencyKey: hashed(idempotencyKey),
+            resumed,
             failure,
             size: body.byteLength,
           });
@@ -612,6 +616,11 @@ export class Engine {
             code,
           }));
           throw error;
+        }
+        if (received.alreadyStored === true) {
+          // Handed in again after a stop between storing and acknowledging: stored once already.
+          logger.info({ event: "already-stored", channel: config.name, message: received.id });
+          return received.id;
         }
         logger.info({
           event: "received",
@@ -787,4 +796,9 @@ export function errorCode(error: unknown): string | undefined {
 /** An error's name, or the type of what was thrown when it is not an error: never its text. */
 function errorName(error: unknown): string {
   return error instanceof Error ? error.name : typeof error;
+}
+
+/** A key's SHA-256 in hex, as storage keeps it, or undefined when there is no key. */
+function hashed(key: string | undefined): string | undefined {
+  return key === undefined ? undefined : createHash("sha256").update(key).digest("hex");
 }

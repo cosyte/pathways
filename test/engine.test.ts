@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { loadProject } from "../src/config/load.js";
 import type { ChannelConfig } from "../src/config/schema.js";
-import { FileDestination, FileSource } from "../src/connectors/file.js";
+import { CLAIMED_DIR, FileDestination, FileSource, PROCESSED_DIR } from "../src/connectors/file.js";
 import {
   DeliveryRejected,
   type DestinationConnector,
@@ -21,7 +21,7 @@ import {
   storedFailure,
   type ChannelConnectors,
 } from "../src/engine/engine.js";
-import { Store } from "../src/storage/store.js";
+import { Store, type MessageStore } from "../src/storage/store.js";
 import {
   ADT_A01,
   ADT_A08,
@@ -96,11 +96,9 @@ describe("Engine", () => {
     await dropFile(data(root, "inbox", "TESTPATIENT-a08.hl7"), ADT_A08);
     await engine.tick();
 
-    expect((await readdir(data(root, "inbox"))).sort()).toEqual(["processed"]);
-    expect((await readdir(data(root, "inbox", "processed"))).sort()).toEqual([
-      "1-TESTPATIENT-a01.hl7",
-      "2-TESTPATIENT-a08.hl7",
-    ]);
+    // Each file is deleted once it is stored, and no plaintext copy is kept.
+    expect(await readdir(data(root, "inbox"))).toEqual([CLAIMED_DIR]);
+    expect(await readdir(data(root, "inbox", CLAIMED_DIR))).toEqual([]);
     for (const out of ["out-a", "out-b"]) {
       expect(await readdir(data(root, out))).toEqual(["1-1.hl7"]);
       const written = await readFile(data(root, out, "1-1.hl7"), "utf8");
@@ -124,6 +122,97 @@ describe("Engine", () => {
     const log = lines.join("");
     expect(log).not.toContain("TESTPATIENT");
     expect(log).not.toContain("MSH");
+  });
+
+  it("keeps a plaintext copy of each file in processed/ only when the channel says so, and warns once at start", async () => {
+    const root = await makeProject({
+      "channels/adt/channel.yaml": CHANNEL.replace(
+        "minAge: 0 }",
+        "minAge: 0, keepProcessed: true }",
+      ),
+      "channels/adt/transform.ts": LAB_TRANSFORM,
+      "channels/other/channel.yaml": CHANNEL.replace("data/inbox", "data/other-inbox"),
+      "channels/other/transform.ts": LAB_TRANSFORM,
+    });
+    const project = await loadProject(root);
+    const store = await Store.open(project.databaseFile);
+    stores.push(store);
+    const { logger, events } = captureLogger();
+    const engine = new Engine({ project, store, logger });
+    engines.push(engine);
+    await engine.start();
+    await dropFile(data(root, "inbox", "TESTPATIENT-a01.hl7"), ADT_A01);
+    await engine.tick();
+    await dropFile(data(root, "inbox", "TESTPATIENT-a08.hl7"), ADT_A08);
+    await engine.tick();
+    await engine.tick();
+
+    expect((await readdir(data(root, "inbox", PROCESSED_DIR))).sort()).toEqual([
+      "1-TESTPATIENT-a01.hl7",
+      "2-TESTPATIENT-a08.hl7",
+    ]);
+    const warnings = events.filter((e) => e.event === "plaintext-copies");
+    expect(warnings).toEqual([
+      expect.objectContaining({ level: 40, channel: "adt", endpoint: "source" }),
+    ]);
+  });
+
+  it("stores a file once when the engine stops between storing it and deleting it", async () => {
+    const root = await makeProject({
+      "channels/adt/channel.yaml": CHANNEL,
+      "channels/adt/transform.ts": LAB_TRANSFORM,
+    });
+    const project = await loadProject(root);
+    const real = await Store.open(project.databaseFile);
+    stores.push(real);
+    // The first run stops right after the store commits, before the file is deleted.
+    let stopAfterStore = true;
+    const stopping = new Proxy(real, {
+      get(target, property, receiver) {
+        if (property !== "receive") return Reflect.get(target, property, receiver) as unknown;
+        return async (...args: Parameters<MessageStore["receive"]>) => {
+          const received = await target.receive(...args);
+          if (stopAfterStore) {
+            stopAfterStore = false;
+            throw new Error("the process stopped");
+          }
+          return received;
+        };
+      },
+    });
+    await dropFile(data(root, "inbox", "TESTPATIENT-a01.hl7"), ADT_A01);
+    const first = captureLogger();
+    const crashed = new Engine({ project, store: stopping, logger: first.logger });
+    engines.push(crashed);
+    await crashed.start();
+    await expect(crashed.tick()).rejects.toThrow("the process stopped");
+    await crashed.stop();
+    expect(await store(real)).toEqual({ messages: 1, inbox: [CLAIMED_DIR] });
+    expect(await readdir(data(root, "inbox", CLAIMED_DIR))).toHaveLength(1);
+
+    // The restart finds the claimed file, stores nothing new, deletes it and carries on.
+    const second = captureLogger();
+    const restarted = new Engine({ project, store: real, logger: second.logger });
+    engines.push(restarted);
+    await restarted.start();
+    await restarted.tick();
+    expect(await store(real)).toEqual({ messages: 1, inbox: [CLAIMED_DIR] });
+    expect(await readdir(data(root, "inbox", CLAIMED_DIR))).toEqual([]);
+    for (const out of ["out-a", "out-b"])
+      expect(await readdir(data(root, out))).toEqual(["1-1.hl7"]);
+    expect(second.events.find((e) => e.event === "already-stored")).toMatchObject({
+      channel: "adt",
+      message: 1,
+    });
+    expect(second.events.filter((e) => e.event === "received")).toEqual([]);
+
+    async function store(s: Store): Promise<{ messages: number; inbox: string[] }> {
+      const counts = await s.messageCounts("adt");
+      return {
+        messages: Object.values(counts).reduce((a, b) => a + b, 0),
+        inbox: await readdir(data(root, "inbox")),
+      };
+    }
   });
 
   it("fails a message whose transform throws, and moves on to the next", async () => {
@@ -258,7 +347,7 @@ describe("Engine", () => {
     await chmod(file, 0o000);
     await engine.tick();
     await chmod(file, 0o644);
-    expect(await readdir(data(root, "inbox"))).toContain("TESTPATIENT.hl7");
+    expect(await readdir(data(root, "inbox"))).toEqual([CLAIMED_DIR, "TESTPATIENT.hl7"]);
     const warning = events.find((e) => e.event === "source-read-failed");
     expect(warning).toMatchObject({ channel: "adt", code: "EACCES" });
     expect(JSON.stringify(warning)).not.toContain("TESTPATIENT");
