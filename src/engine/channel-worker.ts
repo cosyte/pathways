@@ -180,6 +180,7 @@ export class ChannelWorker {
         resolve(outcome);
       };
       const onReply = (reply: TransformReply): void => {
+        /* v8 ignore next -- one message runs at a time, and a worker that misses a reply is replaced */
         if (reply.id !== id) return;
         finish(
           reply.ok ? { ok: true, outputs: reply.outputs } : { ok: false, failure: reply.failure },

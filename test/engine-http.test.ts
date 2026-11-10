@@ -378,6 +378,23 @@ describe("health", () => {
     expect(refused).toEqual([401, 405]);
   });
 
+  it("refuses with 401 and 405 when no one is told of refusals", async () => {
+    const health = new HealthEndpoint({
+      host: "127.0.0.1",
+      port: 0,
+      tls: undefined,
+      token: HEALTH_TOKEN,
+      report: () => Promise.resolve({ status: "ok", storage: "ok", channels: {} }),
+    });
+    await health.start();
+    closers.push(() => health.stop());
+    const port = health.port ?? 0;
+    const auth = { Authorization: `Bearer ${HEALTH_TOKEN}` };
+    expect((await send(port, { method: "GET", path: "/health" })).status).toBe(401);
+    expect((await send(port, { method: "POST", path: "/health", headers: auth })).status).toBe(405);
+    expect((await send(port, { method: "GET", path: "/health", headers: auth })).status).toBe(200);
+  });
+
   it("builds the configured endpoint, warning once when it runs without TLS or a token", async () => {
     const { logger, events } = captureLogger();
     const report = (): Promise<HealthReport> =>

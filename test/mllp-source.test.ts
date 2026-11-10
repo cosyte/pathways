@@ -111,6 +111,37 @@ describe("MllpSource", () => {
     expect(JSON.stringify(events)).not.toContain("synthetic");
   });
 
+  it("sends no ACK and closes the connection when handling a message fails past storing it", async () => {
+    const { sink, received } = recordingSink();
+    const events: MllpEvent[] = [];
+    const { port } = await startSource(sink, {
+      onEvent: (event) => {
+        events.push(event);
+        // The report of an unreadable message fails, once: the next report is the failure's own.
+        if (event.event === "mllp-unreadable") throw new TypeError("synthetic report failure");
+      },
+    });
+    const result = await exchange(port, ["not an HL7 message"], { replies: 1 });
+    expect(result).toEqual({ replies: [], closed: true });
+    expect(received).toHaveLength(1);
+    expect(events.at(-1)).toEqual({
+      level: "warn",
+      event: "mllp-source-failed",
+      name: "TypeError",
+      code: undefined,
+    });
+  });
+
+  it("warns when it listens on every interface", async () => {
+    const { sink } = recordingSink();
+    const { events } = await startSource(sink, { host: "0.0.0.0" });
+    expect(events).toContainEqual({
+      level: "warn",
+      event: "mllp-security-warning",
+      code: "MLLP_BIND_ALL_INTERFACES",
+    });
+  });
+
   it.each(["AE", "AR"] as const)(
     "answers %s when storing fails and onStoreFailure says so",
     async (code) => {

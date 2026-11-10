@@ -661,7 +661,11 @@ function table(rows: readonly (readonly string[])[]): string[] {
   }
   return rows.map((row) =>
     row
-      .map((cell, column) => (column === row.length - 1 ? cell : cell.padEnd(widths[column] ?? 0)))
+      .map((cell, column) => {
+        if (column === row.length - 1) return cell;
+        /* v8 ignore next -- the loop above set a width for every column of every row */
+        return cell.padEnd(widths[column] ?? 0);
+      })
       .join("  "),
   );
 }

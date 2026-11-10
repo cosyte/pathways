@@ -191,6 +191,19 @@ describe.skipIf(!TLS_TESTS)("the webhook hook", () => {
     );
   });
 
+  it("warns of an engine-wide hook over plain HTTP without naming a channel", async () => {
+    const plain = await listen(status(200), false);
+    const { engine, events } = await startEngine(
+      `hooks:\n  - { webhook: { url: "${plain.url}", plaintext: true }, events: [delivered] }\n`,
+    );
+    await engine.tick();
+    await engine.stop();
+    expect(plain.received).toHaveLength(1);
+    const warning = events.find((e) => e.event === "plaintext" && e["endpoint"] === "hook");
+    expect(warning).toMatchObject({ level: 40, hook: "pathways.yaml: hooks.0" });
+    expect(warning).not.toHaveProperty("channel");
+  });
+
   it("refuses to start when a header's environment variable is not set", async () => {
     const root = await makeProject({
       "pathways.yaml": `hooks:\n  - webhook:\n      url: https://127.0.0.1:9/in\n      headers: { Authorization: { env: MISSING_TOKEN } }\n`,
