@@ -6,16 +6,13 @@ name: Release
 # file, and npm exchanges the job's `id-token: write` grant for a short-lived publish token.
 # `secrets: inherit` passes DOCS_REPO_DISPATCH_TOKEN, and RELEASE_PR_TOKEN when one is set.
 #
-# Before the first run, three things outside this file have to hold, or the run fails and nothing is
+# Before the first publish, two things outside this file have to hold, or the run fails and nothing is
 # published:
 #
 #   1. A `release` environment on this repository with at least one required reviewer and a custom
 #      deployment branch policy naming `main` and nothing else. The shared pipeline's first step
 #      reads that environment and refuses the run when either rule is missing.
-#   2. The shared pipeline's version job runs on Node 22, and this package's floor is Node 24
-#      (`engines.node`, with `engine-strict=true` in .npmrc), so `pnpm install` there refuses. It
-#      needs the shared workflow to take a Node version for that job, and this caller to pass 24.
-#   3. `@cosyte/pathways` does not exist on npm yet, and npm only lets a trusted publisher be set on
+#   2. `@cosyte/pathways` does not exist on npm yet, and npm only lets a trusted publisher be set on
 #      a package that exists. On a package npm does not have, the shared pipeline takes its direct
 #      publish arm with this job's OIDC token, which no trusted publisher accepts, so that publish
 #      fails. The package is created by a maintainer, with their own npm credential: either
@@ -25,8 +22,9 @@ name: Release
 #      expires.
 #
 # test/package.test.ts holds this caller to the package: the same published reference as ci.yml,
-# this package's name, the same unpublished-dependency allowance as CI's prepublish job, and the
-# `version` and `pack:docs` scripts the shared pipeline runs.
+# this package's name, the same unpublished-dependency allowance as CI's prepublish job, the Node
+# floor `engines.node` states as the release jobs' Node line, and the `version` and `pack:docs`
+# scripts the shared pipeline runs.
 
 on:
   push:
@@ -51,9 +49,10 @@ jobs:
     with:
       package-name: "@cosyte/pathways"
       # Every dependency is on npm, so nothing is excused: the same empty allowance ci.yml gives the
-      # prepublish job. The shared default excuses @cosyte/fhir, which has since published.
+      # prepublish job.
       expect-unpublished-deps: ""
-      # Every job of the shared pipeline sets up this Node line. Without it the `version` job runs on 22,
-      # where pnpm refuses to install a package whose engines.node starts at 24.
+      # Every job of the shared pipeline sets up this Node line, our floor (`engines.node`, with
+      # `engine-strict=true` in .npmrc). Without it the `version` job runs on 22, where pnpm refuses
+      # to install this package.
       node-version: "24"
     secrets: inherit
