@@ -167,7 +167,9 @@ export function firstDifference(actual: Uint8Array, expected: Uint8Array): strin
   const b = split(expected);
   const shared = Math.min(a.length, b.length);
   for (let line = 0; line < shared; line += 1) {
+    /* v8 ignore next -- line is below both lengths, so a[line] exists */
     const left = a[line] ?? "";
+    /* v8 ignore next -- line is below both lengths, so b[line] exists */
     const right = b[line] ?? "";
     if (left !== right) {
       let column = 0;

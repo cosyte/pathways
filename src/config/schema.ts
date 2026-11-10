@@ -58,7 +58,11 @@ const duration = z
     z.number().int().nonnegative(),
     z.string().regex(DURATION, 'a duration such as "500ms", "5s", "2m", "1h" or "30d"'),
   ])
-  .transform((value) => (typeof value === "number" ? value : (parseDuration(value) ?? 0)));
+  .transform((value) => {
+    if (typeof value === "number") return value;
+    /* v8 ignore next -- the string matched DURATION above, so parseDuration reads it */
+    return parseDuration(value) ?? 0;
+  });
 
 /** A size in megabytes, written as a number of megabytes or as `256MB`. */
 const megabytes = z
@@ -70,6 +74,7 @@ const bytes = z
   .union([z.number().int().positive(), z.string().regex(BYTES, 'a size such as "64KB" or "10MB"')])
   .transform((value) => {
     if (typeof value === "number") return value;
+    /* v8 ignore next -- the string matched BYTES above, so exec finds it again */
     const [, amount, unit] = BYTES.exec(value) ?? [];
     return Number(amount) * UNIT_BYTES[unit as keyof typeof UNIT_BYTES];
   });

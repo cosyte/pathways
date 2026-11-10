@@ -640,6 +640,7 @@ function parseOperator(
         if (rest.length !== 2 || listing.some((name) => values[name] !== undefined)) {
           return usage(io);
         }
+        /* v8 ignore next -- rest holds exactly two entries here, so rest[1] is set */
         const id = parseId(rest[1] ?? "");
         if (id === undefined) return invalid(io, "a message id is a positive whole number.");
         return (context) => showCommand(context, id, values.content === true);

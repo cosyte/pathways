@@ -92,6 +92,7 @@ export function readHeader(payload: Uint8Array): HeaderReading {
     }
   }
   const msh = header.part("MSH");
+  /* v8 ignore next -- the parse found an MSH, and a field it lacks reads as empty text */
   const controlId = msh?.field(10)?.text ?? "";
   if (controlId.trim() === "") return unusable(header, "NO_CONTROL_ID");
   const sender = [3, 4].map((field) => msh?.field(field)?.text).join("|");

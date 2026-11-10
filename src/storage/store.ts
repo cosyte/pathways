@@ -829,8 +829,13 @@ const COLUMN_TYPES: Readonly<Record<StorageKind, ColumnTypes>> = {
 /**
  * The schema's migrations, in the column types of `kind`. One portable set: each database runs the
  * same steps under the same names, so the migration table reads the same everywhere.
+ *
+ * @example
+ * ```ts
+ * const provider = { getMigrations: () => Promise.resolve(migrations("postgres")) };
+ * ```
  */
-function migrations(kind: StorageKind): Record<string, Migration> {
+export function migrations(kind: StorageKind): Record<string, Migration> {
   const t = COLUMN_TYPES[kind];
   return {
     "0001-messages-and-deliveries": {
