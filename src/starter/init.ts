@@ -163,5 +163,6 @@ async function guard<T>(operation: Promise<T>): Promise<T> {
 
 function codeOf(error: unknown): string | undefined {
   const code = (error as { code?: unknown } | null)?.code;
+  /* v8 ignore next -- its callers pass file system errors, which all carry a code */
   return typeof code === "string" ? code : undefined;
 }

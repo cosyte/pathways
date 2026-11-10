@@ -383,6 +383,48 @@ describe("operator reads and rekey, beside encryption", () => {
   });
 });
 
+describe("rekey, on rows whose body and error are under different keys", () => {
+  it("rewrites only the value under an older key, and leaves the one under the current key as it was", async () => {
+    const raw = await Store.open(":memory:");
+    stores.push(raw);
+    const old = new LocalKeyProvider([["old", Buffer.alloc(KEY_BYTES, 1)]], "old");
+    const both = new LocalKeyProvider(
+      [
+        ["new", Buffer.alloc(KEY_BYTES, 2)],
+        ["old", Buffer.alloc(KEY_BYTES, 1)],
+      ],
+      "new",
+    );
+    const body = new TextEncoder().encode(ADT_A01);
+    // Received under the old key, its transform failing after the key was rotated; and the other
+    // way round, its error written by an operator command still running with the old key current.
+    const first = await new EncryptedStore(raw, old).receive("adt", body);
+    await new EncryptedStore(raw, both).failTransform(first.id, "transform: TypeError");
+    const second = await new EncryptedStore(raw, both).receive("adt", body);
+    await new EncryptedStore(raw, old).failTransform(second.id, "transform: RangeError");
+    const before = await raw.storedContent("messages", 0, 10);
+
+    expect(await rekey(raw, both)).toMatchObject({ reencrypted: 2, current: 2, changed: 0 });
+    const after = await raw.storedContent("messages", 0, 10);
+    const same = (x: Uint8Array | undefined, y: Uint8Array | undefined): boolean =>
+      Buffer.from(x ?? []).equals(Buffer.from(y ?? []));
+    expect(same(after[0]?.body, before[0]?.body)).toBe(false);
+    expect(after[0]?.error).toBe(before[0]?.error);
+    expect(same(after[1]?.body, before[1]?.body)).toBe(true);
+    expect(after[1]?.error).not.toBe(before[1]?.error);
+    // The old key can go: everything reads under the new one alone.
+    const read = new EncryptedStore(
+      raw,
+      new LocalKeyProvider([["new", Buffer.alloc(KEY_BYTES, 2)]], "new"),
+    );
+    for (const id of [first.id, second.id]) {
+      expect(new TextDecoder().decode(await read.messageBody(id))).toBe(ADT_A01);
+    }
+    expect((await read.message(first.id))?.error).toBe("transform: TypeError");
+    expect((await read.message(second.id))?.error).toBe("transform: RangeError");
+  });
+});
+
 describe("a replay storage refuses", () => {
   it("is reported as storage says: changed meanwhile, or gone", async () => {
     const setup = await setUp(THROWS);

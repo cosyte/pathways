@@ -163,12 +163,10 @@ export async function replayMessages(
         return refuse(id, channel.name, "transform-load", describeFailure(worker, channel));
       }
       const body = await store.messageBody(id);
-      /* v8 ignore start: retention deleted it between the two reads, a race too narrow to test */
       if (body === undefined) {
         await audit.record({ action: mode, outcome: "not-found", messageId: id });
         return { id, outcome: "not-found" };
       }
-      /* v8 ignore stop */
       const outcome = await worker.run(body);
       outputs = outcome.ok ? outcome.outputs : [];
       failure = outcome.ok ? undefined : outcome.failure;
