@@ -33,3 +33,7 @@ node_modules/
 
 # Git / VCS internals
 .git/
+# The API reference, which cosyte-docs-reference (from @cosyte/process) generates from the TSDoc
+# comments in src/. Its --check compares the committed pages with what it writes, byte for byte, so
+# formatting them here would make the check fail on every run.
+docs-content/api/
