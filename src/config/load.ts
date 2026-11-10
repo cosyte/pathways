@@ -81,7 +81,8 @@ export class ConfigError extends Error {
 export async function loadProject(root: string): Promise<ProjectConfig> {
   const projectRoot = resolve(root);
   const problems: string[] = [];
-  const show = (file: string): string => relative(projectRoot, file) || file;
+  // The project folder itself shows as ".", so a problem never repeats the path the caller typed.
+  const show = (file: string): string => relative(projectRoot, file) || ".";
 
   const projectFile = join(projectRoot, "pathways.yaml");
   let project: ProjectYaml = {};
@@ -464,6 +465,7 @@ async function readYaml(
   } catch (error) {
     if (error instanceof YAMLParseError) {
       const at = error.linePos?.[0];
+      /* v8 ignore next -- yaml's parse sets linePos on every error it throws (prettyErrors is on) */
       const where = at === undefined ? "" : ` at line ${at.line}, column ${at.col}`;
       problems.push(`${show(file)}: not valid YAML${where} (${error.code})`);
     } else {
