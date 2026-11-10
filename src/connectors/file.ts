@@ -139,7 +139,9 @@ export interface FileSourceOptions {
  * to read. So on Windows the pass flushes each claimed file under its new name instead, which
  * writes the file's metadata, the rename among it, as PostgreSQL's `durable_rename` does there. A file is therefore
  * opened to write as well as to read before it is claimed on Windows, and one that cannot be (a
- * read-only file, or one another program holds open for writing) stays where it is.
+ * read-only file, or one another program holds open without sharing write or delete access)
+ * stays where it is; a writer that shares that access does not stop the claim, and `minAgeMs` is
+ * what keeps a file still being written from being taken.
  *
  * @example
  * ```ts

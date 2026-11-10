@@ -61,8 +61,10 @@ and a file with any name can be claimed.
 On Windows the source also opens each file to write before it claims it, since flushing it needs
 that. A file it cannot open to write stays where it is, and the engine logs `source-read-failed`
 with the error's code (`EPERM` for a read-only file); clear its read-only attribute and the next
-pass takes it. A file another program still holds open for writing is left the same way, until
-that program closes it.
+pass takes it. A file another program holds open without sharing write or delete access is left
+the same way, until that program closes it. A program that shares that access (as most do,
+Node's own write streams among them) does not stop the claim, so `minAgeMs` is what keeps a file
+that is still being written from being taken too soon.
 
 ### Two channels on one folder
 
