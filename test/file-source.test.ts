@@ -1,11 +1,11 @@
 import { chmod, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { CLAIMED_DIR, FileSource, PROCESSED_DIR } from "../src/connectors/file.js";
 import type { MessageSink, ReceiveOptions } from "../src/connectors/types.js";
-import { cleanUp, dropFile, makeProject } from "./helpers.js";
+import { cleanUp, dropFile, makeProject, usePlatform } from "./helpers.js";
 
 afterEach(cleanUp);
 
@@ -74,7 +74,17 @@ async function claimed(dir: string, name = channel): Promise<string[]> {
 /** A claimed file's name less its claim id. */
 const original = (claim: string | undefined): string => String(claim).slice(34);
 
-describe("FileSource", () => {
+/** Is the test run as root, who can open any file whatever its mode? */
+const root = process.getuid?.() === 0;
+
+// Every behavior holds on both of the file source's paths: the one it takes on this platform, and
+// the one it takes on Windows, which flushes each claimed file in place of the folders.
+describe.each([
+  ["on this platform", process.platform],
+  ["on Windows", "win32"],
+] as const)("FileSource %s", (_, platform) => {
+  beforeEach(() => usePlatform(platform));
+
   it("stores each file and deletes it, keeping no copy, by default", async () => {
     const dir = await inbox();
     await dropFile(join(dir, "b.hl7"), "second");
@@ -261,7 +271,7 @@ describe("FileSource", () => {
     expect(await readdir(claimsOf(dir, "lab"))).toEqual([]);
   });
 
-  it.skipIf(process.getuid?.() === 0)(
+  it.skipIf(root)(
     "leaves a file it cannot claim where it is, and says so, then carries on",
     async () => {
       const dir = await inbox();
@@ -289,7 +299,7 @@ describe("FileSource", () => {
     },
   );
 
-  it.skipIf(process.getuid?.() === 0)(
+  it.skipIf(root)(
     "leaves a file it cannot read where it is, and says so, then carries on",
     async () => {
       const dir = await inbox();
@@ -318,7 +328,7 @@ describe("FileSource", () => {
     },
   );
 
-  it.skipIf(process.getuid?.() === 0)(
+  it.skipIf(root)(
     "keeps a claimed file it cannot read for the next pass, and says so, then carries on",
     async () => {
       const dir = await inbox();
@@ -363,4 +373,46 @@ describe("FileSource", () => {
     expect(received).toEqual([]);
     expect(await readdir(claimsOf(dir))).toEqual(["a-folder"]);
   });
+});
+
+describe("FileSource, a file it cannot open to write", () => {
+  it.skipIf(root)(
+    "is claimed on Linux and macOS, and on Windows stays where it is, said, until it can be flushed",
+    async () => {
+      const dir = await inbox();
+      await dropFile(join(dir, "a.hl7"), "read-only");
+      // On Windows this sets the read-only attribute; elsewhere it takes away write permission.
+      await chmod(join(dir, "a.hl7"), 0o444);
+      const errors: unknown[] = [];
+      const { sink, received } = idempotentSink();
+      const source = new FileSource({
+        dir,
+        channel,
+        minAgeMs: 0,
+        onReadError: (error) => errors.push(error),
+      });
+
+      // Windows flushes a claimed file through a handle opened to write, so this one is left.
+      const restore = usePlatform("win32");
+      try {
+        await source.poll(sink);
+      } finally {
+        restore();
+      }
+      expect(received).toEqual([]);
+      expect(errors).toHaveLength(1);
+      expect(["EACCES", "EPERM"]).toContain((errors[0] as { code?: unknown }).code);
+      expect((await readdir(dir)).sort()).toEqual([CLAIMED_DIR, "a.hl7"]);
+
+      // Linux and macOS flush the folders instead, and need only read the file.
+      const linux = usePlatform("linux");
+      try {
+        await source.poll(sink);
+      } finally {
+        linux();
+      }
+      expect(received.map((r) => r.body)).toEqual(["read-only"]);
+      expect(await readdir(dir)).toEqual([CLAIMED_DIR]);
+    },
+  );
 });

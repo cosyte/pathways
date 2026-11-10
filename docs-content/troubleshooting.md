@@ -74,8 +74,9 @@ start --once` run straight after copying a file in can find it too new; run it a
   next pass of the same channel stores it, once.
 - Two channels that read one folder share its files: each file goes to whichever channel's pass
   sees it first.
-- On Windows, a pass that claims a file fails: the file source flushes folders to disk in a way only
-  Linux and macOS allow.
+- On Windows, the source must also be able to open a file to write before it takes it: a read-only
+  file stays where it is, and the engine logs `source-read-failed` with `EPERM`. Clear the file's
+  read-only attribute.
 
 ## The configuration says MLLP needs HL7 v2
 
