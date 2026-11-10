@@ -1,5 +1,7 @@
 # The Pathways image: the `pathways` command on Google's distroless Node 24 image, which has no shell
 # and no package manager (the fewest packages to patch) and has glibc for the native SQLite driver.
+# It carries every database driver, so one image stores messages in SQLite (the default), PostgreSQL
+# (pg), MySQL or MariaDB (mysql2), or SQL Server (tedious and tarn), as pathways.yaml's storage says.
 # It runs as the distroless `nonroot` user (uid 65532). Mount a project folder at /project:
 #
 #   docker build --tag pathways .
@@ -17,7 +19,7 @@
 # above it. To move one, look up the tag's current index digest and change the two together.
 #
 # .github/workflows/docker.yml builds this and runs it against a starter project made by
-# `pathways init`.
+# `pathways init`, on SQLite and on PostgreSQL, MySQL and SQL Server.
 
 # node:24-trixie-slim (Node 24, Debian 13), pinned 2026-11-07.
 FROM node:24-trixie-slim@sha256:0820eaa85e07d0490446dd01d14707e17e6108a36988cf374899cd057eb3812d AS toolchain
@@ -39,15 +41,23 @@ RUN npm install --global "$(node -p 'require("./package.json").packageManager')"
 # built for glibc and musl on each platform; its only script runs node-gyp, which needs Python, to
 # confirm that a binary is there. The other scripts are esbuild's, which pnpm already skips here,
 # and this package's own `prepare`, which installs git hooks.
+#
+# The database server drivers are optional peer dependencies, which a production install leaves
+# out. scripts/copy-drivers.ts copies each one package.json's peerDependencies names, with every
+# package it loads, from this full install into /drivers, at the versions the lockfile pins.
 FROM toolchain AS build
 RUN pnpm install --frozen-lockfile --ignore-scripts
+COPY scripts/copy-drivers.ts ./scripts/
+RUN node scripts/copy-drivers.ts . /drivers
 COPY tsconfig.json tsup.config.ts ./
 COPY src ./src
 RUN pnpm build
 
-# The production dependencies only. better-sqlite3 also carries what this image never uses: the C
-# sources it was built from and its binaries for other platforms. Those are dropped, keeping the
-# glibc build for this platform; `test -f` fails the build if that one is missing.
+# The production dependencies, with the database drivers laid over them. better-sqlite3 also
+# carries what this image never uses: the C sources it was built from and its binaries for other
+# platforms. Those are dropped, keeping the glibc build for this platform; `test -f` fails the build
+# if that one is missing. The drivers come from the same lockfile, so a package both installs hold
+# is the same files. The last step fails the build if any driver does not load.
 FROM toolchain AS deps
 RUN pnpm install --frozen-lockfile --prod --ignore-scripts \
  && sqlite="$(node -p 'require("node:path").dirname(require.resolve("better-sqlite3/package.json"))')" \
@@ -55,6 +65,9 @@ RUN pnpm install --frozen-lockfile --prod --ignore-scripts \
  && test -f "$sqlite/prebuilds/$keep" \
  && find "$sqlite/prebuilds" -type f ! -name "$keep" -delete \
  && rm -r "$sqlite/deps" "$sqlite/src"
+COPY --from=build /drivers/node_modules /build/node_modules
+RUN node --input-type=module --eval 'for (const name of Object.keys(JSON.parse(process.argv[1]))) await import(name);' \
+      "$(node -p 'JSON.stringify(require("./package.json").peerDependencies)')"
 
 # What both runtime targets copy: owned by root, so the nonroot user can read it but not change it.
 # init reads templates/starter/ from two folders above dist/bin/pathways.mjs.

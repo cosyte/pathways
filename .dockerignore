@@ -8,5 +8,6 @@
 !tsconfig.json
 !tsup.config.ts
 !src/
+!scripts/copy-drivers.ts
 !templates/
 !LICENSE
