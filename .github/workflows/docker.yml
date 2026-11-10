@@ -2,7 +2,10 @@ name: Docker
 
 # Builds the image from the Dockerfile and runs it against a starter project written by
 # `pathways init` inside the image: `--version`, `pathways test`, `pathways start --once`, the
-# default command as the nonroot user stopped by `docker stop`, and the debug target's shell.
+# default command as the nonroot user stopped by `docker stop`, and the debug target's shell. Those
+# store messages in SQLite, the default. `pathways start --once` then runs again on PostgreSQL,
+# MySQL and SQL Server, service containers here, through the drivers the image carries: pg, mysql2,
+# and tedious with tarn.
 #
 # It pushes and publishes nothing: where the image is published is not decided yet.
 #
@@ -29,6 +32,50 @@ jobs:
   image:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # The same images and digests as databases.yml, which says how to move them. They live for one
+    # job on the runner's loopback, hold synthetic messages only, and run without TLS, under a
+    # throwaway password that is not a secret. MariaDB is left out: it uses MySQL's driver, mysql2.
+    services:
+      # postgres:17 (PostgreSQL 17.11), pinned 2026-11-07.
+      postgres:
+        image: postgres@sha256:ff87138949ad9a46f32ff23bd6852b52ce024a13dffe9b4087be98292cdd3b4f
+        env:
+          POSTGRES_PASSWORD: Pathways-CI-0000
+          POSTGRES_DB: pathways
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+      # mysql:8.4 (MySQL 8.4.13), pinned 2026-11-07.
+      mysql:
+        image: mysql@sha256:a81d043930e51745522bd5c430961cf8286f0a23f0a9a2a6e0108f7ea71b0902
+        env:
+          MYSQL_ROOT_PASSWORD: Pathways-CI-0000
+          MYSQL_DATABASE: pathways
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping --host 127.0.0.1 --silent"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+      # mcr.microsoft.com/mssql/server:2022-latest (SQL Server 2022 CU27 GDR, 16.0.4305.5), pinned
+      # 2026-11-07.
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server@sha256:cf8f0ab2ebe61feec2eed2629061a07d247f791c2a8ddda74a4ac9f06a291718
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: Pathways-CI-0000
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P Pathways-CI-0000 -Q 'SELECT 1' -b -o /dev/null"
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 30
     env:
       IMAGE: pathways:ci
       DEBUG_IMAGE: pathways:ci-debug
@@ -87,6 +134,8 @@ jobs:
           test "$delivered" = "1-1.hl7"
           cmp "$outbox/1-1.hl7" "$project/channels/adt-to-lab/tests/a01.expected.hl7"
           test -f "$project/.pathways/pathways.db"
+          # Each file is deleted once it is stored, encrypted: the inbox keeps no plaintext copy.
+          test -z "$(find "$inbox" -type f)"
 
       # The way most people will run it: the default command (`start -C /project`) as uid 65532,
       # stopped with SIGTERM by `docker stop`, which must end it cleanly with exit code 0.
@@ -110,6 +159,45 @@ jobs:
           echo "exit code after docker stop: $code"
           test "$code" = 0
           cmp "$project/data/adt-to-lab/out/3-1.hl7" "$project/channels/adt-to-lab/tests/a01.expected.hl7"
+
+      # Each server gets a starter project of its own whose pathways.yaml stores messages there, in
+      # a database of its own. The image reaches the service containers on the runner's loopback,
+      # so it runs on the host's network.
+      - name: pathways start --once delivers the A01 through PostgreSQL, MySQL and SQL Server
+        env:
+          SQLSERVER_CONTAINER: ${{ job.services.sqlserver.id }}
+        run: |
+          docker exec "$SQLSERVER_CONTAINER" /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa \
+            -P Pathways-CI-0000 -b -Q "CREATE DATABASE pathways"
+          declare -A urls=(
+            [postgres]="postgres://postgres:Pathways-CI-0000@127.0.0.1:5432/pathways"
+            [mysql]="mysql://root:Pathways-CI-0000@127.0.0.1:3306/pathways"
+            [sqlserver]="sqlserver://sa:Pathways-CI-0000@127.0.0.1:1433/pathways"
+          )
+          for kind in postgres mysql sqlserver; do
+            echo "::group::$kind"
+            project="$RUNNER_TEMP/$kind"
+            mkdir "$project"
+            docker run --rm --user "$(id -u):$(id -g)" --volume "$project:/project" "$IMAGE" init /project
+            # The server in place of SQLite, with the starter's development key.
+            printf 'storage:\n  %s: { plaintext: true }\nencryption:\n  keys:\n    - id: dev\n      file: .pathways/dev.key\n  current: dev\n' \
+              "$kind" > "$project/pathways.yaml"
+            inbox="$project/data/adt-to-lab/in"
+            mkdir -p "$inbox"
+            cp "$project/channels/adt-to-lab/tests/a01.hl7" "$project/channels/adt-to-lab/tests/a08.hl7" "$inbox/"
+            touch -d '1 minute ago' "$inbox/a01.hl7" "$inbox/a08.hl7"
+            run=(docker run --rm --network host --user "$(id -u):$(id -g)"
+              --env "PATHWAYS_DATABASE_URL=${urls[$kind]}" --volume "$project:/project" "$IMAGE")
+            "${run[@]}" start --once
+            cmp "$project/data/adt-to-lab/out/1-1.hl7" "$project/channels/adt-to-lab/tests/a01.expected.hl7"
+            test -z "$(find "$inbox" -type f)"
+            # Stored on the server: no SQLite file, and the status command reads both messages back.
+            test ! -e "$project/.pathways/pathways.db"
+            counts="$("${run[@]}" status --json | jq -c '.channels["adt-to-lab"] | [.messages.transformed, .messages.filtered, .deliveries.delivered]')"
+            echo "$kind: transformed, filtered, delivered: $counts"
+            test "$counts" = "[1,1,1]"
+            echo "::endgroup::"
+          done
 
       - name: The debug target has a shell and the same command
         run: |

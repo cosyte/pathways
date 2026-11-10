@@ -11,6 +11,8 @@
  * ```ts
  * await sink.receive(body, { duplicateKey: `${sender}|${controlId}` });
  * await sink.receive(body, { failure: "inbound: NO_MSH_SEGMENT" });
+ * await sink.receive(body, { idempotencyKey: `queue|${deliveryTag}` });
+ * await sink.receive(body, { idempotencyKey: `queue|${deliveryTag}`, resumed: true });
  * ```
  */
 export interface ReceiveOptions {
@@ -27,6 +29,21 @@ export interface ReceiveOptions {
    * code, never message content.
    */
   readonly failure?: string | undefined;
+  /**
+   * What names this one message to the source, the same every time the source hands it in. It is
+   * stored with the message, so that when the source hands the message in again with `resumed`,
+   * after a stop between storing it and acknowledging it, it is stored once. The engine keeps a
+   * hash of the key, never the key itself. A custom store may ignore it, and then stores such a
+   * message twice.
+   */
+  readonly idempotencyKey?: string | undefined;
+  /**
+   * True when the source hands in again, under the same `idempotencyKey`, a message that an earlier
+   * run may have stored already: one it took in and never acknowledged. When a message of the
+   * channel was stored with that key, nothing new is stored and that message's id comes back. Only
+   * these messages are looked up, so a message handed in for the first time costs no lookup.
+   */
+  readonly resumed?: boolean | undefined;
 }
 
 /**
