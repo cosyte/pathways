@@ -143,6 +143,7 @@ export async function connectorsFor(
     case "file":
       sourceConnector = new FileSource({
         dir: source.dir,
+        channel: channel.name,
         minAgeMs: source.minAgeMs,
         keepProcessed: source.keepProcessed,
         now,

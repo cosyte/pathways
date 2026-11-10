@@ -137,7 +137,7 @@ describe("pathways init", () => {
     expect(delivered.split("\r")[0]?.split("|")[4]).toBe("LAB");
     // Each file is deleted once it is stored: the inbox keeps no plaintext copy.
     expect(await readdir(inbox)).toEqual([".claimed"]);
-    expect(await readdir(join(inbox, ".claimed"))).toEqual([]);
+    expect(await readdir(join(inbox, ".claimed", "adt-to-lab"))).toEqual([]);
     expect(await readdir(join(target, ".pathways"))).toContain("pathways.db");
 
     // Encrypted at rest from the first run: the database holds none of the messages' text.
