@@ -6,8 +6,10 @@ import type { Logger } from "pino";
 
 import { ConfigError } from "../config/load.js";
 import {
+  DEFAULT_DELIVERY_TIMEOUT_MS,
   DEFAULT_RETRY,
   type ChannelConfig,
+  type DestinationConfig,
   type Format,
   type ProjectConfig,
   type RetryPolicy,
@@ -52,6 +54,7 @@ import { ChannelWorker, TransformLoadError, type TransformOutcome } from "./chan
 import type { EngineFence } from "./lease.js";
 import { channelStatus, type ChannelHealth, type EngineHealth } from "./health.js";
 import type { FailureSummary } from "./worker-entry.js";
+import { nextPollAt, pollOf } from "./schedule.js";
 import { copyFacts, keepFacts, sourceFacts } from "./source-facts.js";
 
 /**
@@ -69,19 +72,37 @@ export const RETRY_MAX_MS = DEFAULT_RETRY.maxMs;
 export const LIVE_GRACE_MS = 60_000;
 
 /**
- * How long the engine loop may go without a step before liveness answers `stalled`: 60 seconds,
- * plus the poll interval, plus the longest time limit one step can take. A step is a message taken
- * in by a polled source, one transform, one delivery attempt, a channel's turn in a pass, or one
- * channel of a retention run. The longest step is the longest of each channel's transform timeout, each HTTP
- * destination's timeout, and twice each MLLP destination's ACK timeout (one to connect, one for the
- * ACK) plus a second. A custom destination has no time limit of its own: one that never returns
- * stalls the engine, and liveness says so. Nor has one channel's retention delete: one that takes
- * longer than the bound (a very large backlog past its retention period) makes liveness say stalled
- * until it is done.
+ * How long one delivery to `destination` may take in all (connecting, sending and waiting for the
+ * receiver to confirm) before the engine cuts it off and counts the attempt as failed, to be
+ * retried: an HTTP destination's `timeout` plus a second, twice an MLLP destination's `ackTimeout`
+ * (one to connect, one for the ACK) plus a second, and a file or module destination's `timeout`,
+ * 30 seconds by default. The second of grace lets the destination's own timeout, with its code,
+ * come first.
  *
  * @example
  * ```ts
- * livenessBoundMs(project); // 95000 with a 1s poll interval and HTTP destinations at 30s
+ * deliveryDeadlineMs({ kind: "file", dir: "/srv/out" }); // 30000
+ * ```
+ */
+export function deliveryDeadlineMs(destination: DestinationConfig | undefined): number {
+  if (destination?.kind === "http") return destination.timeoutMs + 1_000;
+  if (destination?.kind === "mllp") return 2 * destination.ackTimeoutMs + 1_000;
+  return destination?.timeoutMs ?? DEFAULT_DELIVERY_TIMEOUT_MS;
+}
+
+/**
+ * How long the engine loop may go without a step before liveness answers `stalled`: 60 seconds,
+ * plus the poll interval, plus the longest time limit one step can take. A step is a message taken
+ * in by a polled source, one transform, one delivery attempt, a channel's turn in a pass, or one
+ * channel of a retention run. The longest step is the longest of each channel's transform timeout
+ * and each destination's {@link deliveryDeadlineMs}. A polled source's pass runs beside the loop,
+ * cut off at its own deadline, so it holds no step up. One channel's retention delete has no time
+ * limit: one that takes longer than the bound (a very large backlog past its retention period)
+ * makes liveness say stalled until it is done.
+ *
+ * @example
+ * ```ts
+ * livenessBoundMs(project); // 92000 with a 1s poll interval and HTTP destinations at 30s
  * ```
  */
 export function livenessBoundMs(project: ProjectConfig): number {
@@ -89,13 +110,51 @@ export function livenessBoundMs(project: ProjectConfig): number {
   for (const channel of project.channels) {
     longest = Math.max(longest, channel.settings.timeoutMs);
     for (const destination of channel.destinations) {
-      if (destination.kind === "http") longest = Math.max(longest, destination.timeoutMs);
-      if (destination.kind === "mllp") {
-        longest = Math.max(longest, 2 * destination.ackTimeoutMs + 1_000);
-      }
+      longest = Math.max(longest, deliveryDeadlineMs(destination));
     }
   }
   return LIVE_GRACE_MS + project.settings.pollIntervalMs + longest;
+}
+
+/**
+ * Waits `ms`, or until `signal` aborts, whichever comes first; never rejects. The engine waits with
+ * one for its loop, a pass's deadline and a delivery's; tests pass their own clock's.
+ *
+ * @example
+ * ```ts
+ * const wait: EngineWait = (ms, signal) => clock.sleep(ms, signal);
+ * ```
+ */
+export type EngineWait = (ms: number, signal: AbortSignal) => Promise<void>;
+
+/** {@link EngineWait} on Node's timers, a longer wait than one holds cut to the longest it does. */
+const realWait: EngineWait = (ms, signal) =>
+  sleep(Math.min(ms, MAX_STOP_DEADLINE_MS), undefined, { signal }).catch(() => undefined);
+
+/** A code a source reports with `sourceDown`, kept only when it is shaped as a code. */
+const SOURCE_CODE = /^[A-Za-z0-9_.:-]{1,64}$/;
+
+/**
+ * Why a delivery was cut off at its deadline: its code, `DELIVERY_TIMEOUT`, is what the retry
+ * records and logs.
+ */
+class DeliveryTimeout extends Error {
+  readonly code = "DELIVERY_TIMEOUT";
+
+  constructor(ms: number) {
+    super(`the delivery took longer than ${String(ms)}ms`);
+    this.name = "DeliveryTimeout";
+  }
+}
+
+/** What a sink refuses a message with once its pass was cut off at its deadline. */
+class PassCut extends Error {
+  readonly code = "POLL_DEADLINE";
+
+  constructor() {
+    super("the pass was cut off at its deadline");
+    this.name = "PassCut";
+  }
 }
 
 /** Readiness reads storage at most this often; a probe in between is told the last answer. */
@@ -495,6 +554,11 @@ export interface EngineOptions {
    * pass their own.
    */
   readonly random?: () => number;
+  /**
+   * How the engine waits: between passes, and for a pass's or a delivery's deadline. Defaults to
+   * Node's timers; tests pass their own clock's, with `now` from the same clock.
+   */
+  readonly wait?: EngineWait;
 }
 
 interface RunningChannel {
@@ -524,8 +588,19 @@ interface RunningChannel {
    * is when that one runs: two commands at once never leave a paused source listening.
    */
   sourcing: Promise<unknown>;
-  /** Set while its source polls, so a pause can wait for the poll under way. */
+  /** Set while its source polls, until the pass ends or is cut off, so a pause can wait for it. */
   polling: Promise<void> | undefined;
+  /**
+   * Set while the source's own `poll` call has not returned, a pass cut off at its deadline among
+   * them: no pass starts meanwhile, so a pass never overlaps itself.
+   */
+  inFlight: Promise<void> | undefined;
+  /** Aborted to cut the source's pass under way off, and set while it runs. */
+  cut: AbortController | undefined;
+  /** While {@link Engine.run} runs: when the source's next pass is due, `Infinity` for never. */
+  nextPollAt: number;
+  /** Set while a running source says it lost its connection: how often in a row, and the code. */
+  lost: { readonly attempts: number; readonly code: string } | undefined;
   /** Set while a pass works on this channel, so a stop can wait for it. */
   busy: Promise<void> | undefined;
   /** Aborted by a halt, to cut off the delivery in flight; replaced once used. */
@@ -666,12 +741,19 @@ export class Engine {
   private hooks: HookSet | undefined;
   /** The environment the engine started with: a reload reads the transform's configuration from it. */
   private env: Env = process.env;
+  private readonly wait: EngineWait;
+  /**
+   * Set while {@link run} runs: aborted to wake its loop when a pass ends, and the first failure of
+   * a pass that ran beside it, which ends the run.
+   */
+  private schedule: { wake: AbortController; failure: { error: unknown } | undefined } | undefined;
 
   /** @param options The project, the store, the logger and, for tests, a clock and connectors. */
   constructor(options: EngineOptions) {
     this.options = options;
     this.now = options.now ?? Date.now;
     this.monotonic = options.monotonic ?? (() => performance.now());
+    this.wait = options.wait ?? realWait;
     this.audit =
       options.audit ??
       new AuditLog(options.store, {
@@ -763,6 +845,10 @@ export class Engine {
           open: false,
           sourcing: Promise.resolve(),
           polling: undefined,
+          inFlight: undefined,
+          cut: undefined,
+          nextPollAt: 0,
+          lost: undefined,
           busy: undefined,
           halt: new AbortController(),
           draining: false,
@@ -845,12 +931,21 @@ export class Engine {
    * messages go on through the transform and delivery; a stopped channel does nothing.
    */
   async tick(): Promise<void> {
+    await this.passes(false);
+  }
+
+  /**
+   * One pass over every channel. Unscheduled (a {@link tick}), each polled source is polled and its
+   * pass waited for, up to its deadline; scheduled (in {@link run}), a source is polled only when its
+   * pass is due, and the pass runs beside the loop.
+   */
+  private async passes(scheduled: boolean): Promise<void> {
     await this.syncStates();
     for (const channel of this.channels) {
       this.step();
       this.options.fence?.check();
       if (channel.state === "stopped") continue;
-      const pass = this.pass(channel);
+      const pass = this.pass(channel, scheduled);
       channel.busy = settled(pass);
       try {
         await pass;
@@ -941,27 +1036,73 @@ export class Engine {
   }
 
   /**
-   * Runs passes until `signal` aborts, waiting the poll interval between them. Retention runs after
-   * the first pass and then once every `retentionInterval`.
+   * Runs passes until `signal` aborts. Each pass transforms and delivers what every channel has
+   * waiting, and polls each polled source whose pass is due, by its own schedule (its `poll:`, or
+   * the engine-wide `pollInterval`). A source's pass runs beside the loop, so one that hangs holds
+   * up no other channel: it is cut off at its deadline, and no pass of that source starts while its
+   * last `poll` call has not returned. A pass due while the engine was down is not made up. The loop
+   * waits the poll interval between passes, or less when a source's pass is due sooner or one
+   * ends. Retention runs after the first pass and then once every `retentionInterval`. A source's
+   * `poll` that rejects before its deadline ends the run with that error, as it would a tick.
    */
   async run(signal: AbortSignal): Promise<void> {
     const { pollIntervalMs, retentionIntervalMs } = this.options.project.settings;
     let retentionAt = this.now();
     this.steppedAt = this.monotonic();
+    const schedule = { wake: new AbortController(), failure: undefined };
+    this.schedule = schedule;
+    const started = this.now();
+    for (const channel of this.channels) {
+      channel.nextPollAt = nextPollAt(this.pollOf(channel).schedule, started, true);
+    }
     try {
       while (!signal.aborted) {
-        await this.tick();
+        await this.passes(true);
         this.step();
         if (this.now() >= retentionAt) {
           await this.retention();
           this.step();
           retentionAt = this.now() + retentionIntervalMs;
         }
-        await sleep(pollIntervalMs, undefined, { signal }).catch(() => undefined);
+        this.raise(schedule);
+        if (schedule.wake.signal.aborted) schedule.wake = new AbortController();
+        await this.wait(
+          this.untilDue(pollIntervalMs),
+          AbortSignal.any([signal, schedule.wake.signal]),
+        );
+        this.raise(schedule);
       }
     } finally {
       this.steppedAt = undefined;
+      this.schedule = undefined;
+      // A pass under way is cut off: what it is storing is stored, and it takes nothing more in.
+      for (const channel of this.channels) channel.cut?.abort();
+      await Promise.all(this.channels.map((channel) => channel.polling ?? Promise.resolve()));
+      await Promise.all(this.channels.flatMap((channel) => [...channel.receiving]));
     }
+  }
+
+  /** Throws the failure of a pass that ran beside {@link run}'s loop, if one failed. */
+  private raise(schedule: NonNullable<Engine["schedule"]>): void {
+    if (schedule.failure !== undefined) throw schedule.failure.error;
+  }
+
+  /**
+   * How long {@link run}'s loop waits: the poll interval, or less when a running channel's source
+   * has a pass due sooner; 0 when one is due already.
+   */
+  private untilDue(pollIntervalMs: number): number {
+    let soonest = this.now() + pollIntervalMs;
+    for (const channel of this.channels) {
+      if (channel.state !== "running" || channel.connectors.source.poll === undefined) continue;
+      soonest = Math.min(soonest, channel.nextPollAt);
+    }
+    return Math.max(0, soonest - this.now());
+  }
+
+  /** The channel's poll settings: its own, or the engine-wide interval with the default deadline. */
+  private pollOf(channel: RunningChannel): ReturnType<typeof pollOf> {
+    return pollOf(channel.config, this.options.project.settings.pollIntervalMs);
   }
 
   /**
@@ -980,7 +1121,7 @@ export class Engine {
    * that takes over 5 seconds counts as unreachable.
    */
   async ready(): Promise<boolean> {
-    if (this.channels.some((channel) => channel.down !== undefined)) return false;
+    if (this.channels.some(isDown)) return false;
     const now = this.monotonic();
     if (this.storageCheck === undefined || now - this.storageCheck.at >= STORAGE_CHECK_EVERY_MS) {
       this.storageCheck = { at: now, reachable: this.readStorage() };
@@ -1070,9 +1211,7 @@ export class Engine {
   async health(): Promise<EngineHealth> {
     const { project, store } = this.options;
     const states = this.channelStates();
-    const down = new Set(
-      this.channels.filter((channel) => channel.down !== undefined).map((c) => c.config.name),
-    );
+    const down = new Set(this.channels.filter(isDown).map((c) => c.config.name));
     const source = (name: string): "up" | "down" => (down.has(name) ? "down" : "up");
     const channels: Record<string, ChannelHealth> = {};
     let storage: EngineHealth["storage"] = "ok";
@@ -1135,24 +1274,87 @@ export class Engine {
   }
 
   /** One channel's part of a pass. */
-  private async pass(channel: RunningChannel): Promise<void> {
+  private async pass(channel: RunningChannel, scheduled: boolean): Promise<void> {
     if (channel.state === "running") {
       if (channel.down !== undefined && channel.down.nextAt <= this.now()) {
         await this.syncSource(channel);
       }
-      const { source } = channel.connectors;
-      if (source.poll !== undefined) {
-        const poll = source.poll(this.sinkFor(channel));
-        channel.polling = settled(poll);
-        try {
-          await poll;
-        } finally {
-          channel.polling = undefined;
-        }
+      if (channel.connectors.source.poll !== undefined) {
+        if (!scheduled) await this.poll(channel);
+        else if (channel.nextPollAt <= this.now()) this.pollBeside(channel);
       }
     }
     await this.transformAll(channel);
     await this.deliverAll(channel);
+  }
+
+  /**
+   * Starts a due pass of the channel's source beside {@link run}'s loop. Once it ends the next is
+   * scheduled from then and the loop is woken to transform what it took in; a pass that rejects
+   * before its deadline ends the run.
+   */
+  private pollBeside(channel: RunningChannel): void {
+    const schedule = this.schedule;
+    /* v8 ignore next: only run() schedules, and it sets the schedule first */
+    if (schedule === undefined) return;
+    channel.nextPollAt = Number.POSITIVE_INFINITY;
+    this.poll(channel).then(
+      () => {
+        channel.nextPollAt = nextPollAt(this.pollOf(channel).schedule, this.now(), false);
+        schedule.wake.abort();
+      },
+      (error: unknown) => {
+        schedule.failure ??= { error };
+        schedule.wake.abort();
+      },
+    );
+  }
+
+  /**
+   * One pass of the channel's source, settled when its `poll` returns or at the pass's deadline,
+   * whichever is first. At the deadline, or when {@link run} ends, the pass is cut off: its sink
+   * takes nothing more in (each later `receive` rejects with the code `POLL_DEADLINE`, so the source
+   * keeps the message), the signal handed to `poll` aborts, and no pass starts until that `poll`
+   * call returns. A pass asked for while one is still in flight is refused, and logged. Rejects as
+   * the source's `poll` does before the deadline.
+   */
+  private async poll(channel: RunningChannel): Promise<void> {
+    const { logger } = this.options;
+    const name = channel.config.name;
+    if (channel.inFlight !== undefined) {
+      logger.warn({ event: "poll-overlap", channel: name });
+      return;
+    }
+    const { deadlineMs } = this.pollOf(channel);
+    const cut = new AbortController();
+    channel.cut = cut;
+    const ended = new AbortController();
+    const call = (async () => {
+      // A poll method is set: pass() checks before it calls this.
+      await (channel.connectors.source.poll as NonNullable<SourceConnector["poll"]>)(
+        this.sinkFor(channel, cut.signal),
+        cut.signal,
+      );
+    })();
+    // No other pass starts while this is set, so the one that clears it is this pass's own.
+    channel.inFlight = settled(call).then(() => {
+      channel.inFlight = undefined;
+    });
+    const deadline = this.wait(deadlineMs, AbortSignal.any([ended.signal, cut.signal])).then(
+      () => !ended.signal.aborted,
+    );
+    const pass = Promise.race([call.then(() => false), deadline]);
+    channel.polling = settled(pass);
+    try {
+      if ((await pass) && !cut.signal.aborted) {
+        cut.abort();
+        logger.warn({ event: "poll-deadline", channel: name, deadlineMs });
+      }
+    } finally {
+      ended.abort();
+      channel.polling = undefined;
+      channel.cut = undefined;
+    }
   }
 
   /** Every channel's stored state, or `undefined` when the store keeps none. */
@@ -1232,6 +1434,8 @@ export class Engine {
     if (channel.state === state) return Promise.resolve();
     channel.state = state;
     this.options.logger.info({ event: "channel-state", channel: channel.config.name, state });
+    // A running loop looks at once: a resumed source's pass may be due already.
+    this.schedule?.wake.abort();
     return this.syncSource(channel);
   }
 
@@ -1251,6 +1455,7 @@ export class Engine {
     // Paused or stopped: the source takes nothing more in. One that could not listen is not down
     // any more, only paused, and is not tried again until a resume.
     channel.down = undefined;
+    channel.lost = undefined;
     if (channel.open) {
       channel.open = false;
       await channel.connectors.source.stop?.();
@@ -1454,11 +1659,21 @@ export class Engine {
     return new Date(this.now() + inMs).toISOString();
   }
 
-  private sinkFor(channel: RunningChannel): MessageSink {
+  /**
+   * The sink a channel's source hands messages to. Given `cut`, the signal of a polled source's pass,
+   * it refuses every message once that aborts, before storing it.
+   */
+  private sinkFor(channel: RunningChannel, cut?: AbortSignal): MessageSink {
     const { config } = channel;
     const { store, logger } = this.options;
     const sink: MessageSink = {
+      sourceDown: (code) => this.sourceDown(channel, code),
+      sourceUp: () => {
+        this.sourceUp(channel);
+      },
       receive: async (body, options = {}) => {
+        // Before anything is stored: the source keeps the message for a later pass.
+        if (cut?.aborted === true) throw new PassCut();
         const { duplicateKey, idempotencyKey, resumed, failure, source } = options;
         let received: ReceivedMessage;
         const receivedAt = this.at();
@@ -1551,6 +1766,48 @@ export class Engine {
     // A store that copies each body it stores makes a sink that keeps none, so a source may free a
     // body it is done with once it is stored.
     return copiesBodies(store) ? markCopiesBodies(sink) : sink;
+  }
+
+  /**
+   * A running source lost its connection: noted, so health shows the source down and readiness
+   * fails, logged and sent to the hooks as `source-down`. Returns how long the source should wait
+   * before it tries again: 1 second, doubling with each report in a row, to 5 minutes. A code that
+   * is not shaped as one (letters, digits and `_.:-`, at most 64) is kept as `UNSPECIFIED`, so no
+   * text a source passes reaches a log.
+   */
+  private sourceDown(channel: RunningChannel, reported: string): number {
+    const name = channel.config.name;
+    const code = SOURCE_CODE.test(reported) ? reported : "UNSPECIFIED";
+    const attempts = (channel.lost?.attempts ?? 0) + 1;
+    const wait = retryDelay(attempts);
+    channel.lost = { attempts, code };
+    this.options.logger.error({
+      event: "source-lost",
+      channel: name,
+      attempt: attempts,
+      retryInMs: wait,
+      code,
+    });
+    this.emit(channel, () => ({
+      type: "source-down",
+      at: this.at(),
+      channel: name,
+      attempt: attempts,
+      retryInMs: wait,
+      retryAt: this.at(wait),
+      name: "SourceDown",
+      code,
+    }));
+    return wait;
+  }
+
+  /** A source that said it lost its connection has it again: health and the hooks hear so. */
+  private sourceUp(channel: RunningChannel): void {
+    if (channel.lost === undefined) return;
+    channel.lost = undefined;
+    const name = channel.config.name;
+    this.options.logger.info({ event: "source-regained", channel: name });
+    this.emit(channel, () => ({ type: "source-up", at: this.at(), channel: name }));
   }
 
   private async transformAll(channel: RunningChannel): Promise<void> {
@@ -1707,7 +1964,15 @@ export class Engine {
             ...this.epoch(),
           );
         }
-        const { signal } = channel.halt;
+        const halt = channel.halt.signal;
+        // The whole attempt (connecting, sending, and the receiver's confirmation) is bounded.
+        const limitMs = deliveryDeadlineMs(config.destinations[index]);
+        const expired = new AbortController();
+        const ended = new AbortController();
+        const signal = AbortSignal.any([halt, expired.signal]);
+        void this.wait(limitMs, ended.signal).then(() => {
+          if (!ended.signal.aborted) expired.abort();
+        });
         try {
           await untilAborted(
             destination.deliver({
@@ -1719,8 +1984,9 @@ export class Engine {
             }),
             signal,
           );
-        } catch (error) {
-          if (signal.aborted) {
+        } catch (thrown) {
+          ended.abort();
+          if (halt.aborted) {
             // Halted: no outcome is recorded, so the delivery stays pending, and its marker (when
             // written) flags the next send as a possible duplicate, since the receiver may have it.
             logger.warn({
@@ -1732,6 +1998,8 @@ export class Engine {
             });
             return;
           }
+          // Cut off at the deadline: an attempt that failed, retried as any other.
+          const error = expired.signal.aborted ? new DeliveryTimeout(limitMs) : thrown;
           if (error instanceof DeliveryRejected) {
             await store.failDelivery(delivery.id, `rejected: ${error.reason}`, ...this.epoch());
             logger.warn({
@@ -1843,6 +2111,7 @@ export class Engine {
           if (policy.rotate) continue;
           break;
         }
+        ended.abort();
         // Delivered: freed now when the store handed it over and the destination kept none of it.
         if (copiesBodies(store) && copiesBodies(destination)) release(delivery.body);
         faultPoint("after-send-before-record");
@@ -1891,11 +2160,11 @@ export function errorCode(error: unknown): string | undefined {
  * Settles as `work` does, or rejects as soon as `signal` aborts, leaving `work` to settle unheard.
  */
 function untilAborted(work: Promise<void>, signal: AbortSignal): Promise<void> {
-  // The signal is read just before the send starts, with nothing awaited between, so it cannot
-  // have aborted yet: a halt replaces a used signal with a fresh one.
+  // The signal is made just before the send starts, with nothing awaited between, so it cannot
+  // have aborted yet: a halt replaces a used signal with a fresh one, and the deadline is a timer.
   return new Promise((resolve, reject) => {
     const onAbort = (): void => {
-      reject(new Error("the channel was halted"));
+      reject(new Error("the send was cut off"));
     };
     signal.addEventListener("abort", onAbort, { once: true });
     work.then(
@@ -1909,6 +2178,11 @@ function untilAborted(work: Promise<void>, signal: AbortSignal): Promise<void> {
       },
     );
   });
+}
+
+/** Whether a channel's source is down: it cannot listen, or it said it lost its connection. */
+function isDown(channel: { readonly down: unknown; readonly lost: unknown }): boolean {
+  return channel.down !== undefined || channel.lost !== undefined;
 }
 
 /** Waits for `work` to settle, either way: its own caller handles a rejection. */

@@ -19,8 +19,9 @@ stops the start, with the file and key at fault.
 
 ## Bring messages in
 
-A source either polls, with `poll(sink)`, which the engine calls on every pass, or listens, with
-`start(sink)` once and `stop()` at shutdown. It hands each message to `sink.receive(body)`, which
+A source either polls, with `poll(sink, signal)`, which the engine calls on each pass its schedule
+makes due (the source's [`poll`](./configuration-reference.md#poll-schedule), or every
+`pollInterval`), or listens, with `start(sink)` once and `stop()` at shutdown. It hands each message to `sink.receive(body)`, which
 resolves once the message is stored. **Acknowledge the sender only after that**: it is what keeps a
 crash from losing a message.
 
@@ -68,6 +69,58 @@ export default ((options, context) => {
 Only resumed messages are looked up, so a message handed in for the first time costs nothing extra.
 [`ReceiveOptions`](./api/README.md#receiveoptions) has the rest, including `duplicateKey`, which flags
 a repeat without dropping it.
+
+A pass that runs past its deadline (5 minutes unless `poll` sets `deadline`) is cut off: `signal`
+aborts, and every later `sink.receive` of that pass rejects with the code `POLL_DEADLINE` before it
+stores anything, so the source keeps the message. Pass `signal` to a listing or a query that can
+hang. The engine starts no pass of the source while the last `poll` call has not returned.
+
+### Say when the connection drops
+
+A source that holds a connection open (to a broker, a remote server, a socket it dialled) tells the
+engine when it loses it, with `sink.sourceDown(code)`, and when it has it again, with
+`sink.sourceUp()`. Meanwhile the health endpoint shows the channel's source `down` and answers 503,
+readiness fails, the log says `source-lost`, and the hooks get `source-down`. `sourceDown` returns
+how long to wait before trying again: 1 second, doubling with each loss in a row, up to 5 minutes.
+Pass a short code such as `ECONNRESET`, never an error's text: a code that is not letters, digits
+and `_.:-` (at most 64 characters) is logged as `UNSPECIFIED`.
+
+```ts runnable title="channels/queue-in/reconnect.ts"
+import type { MessageSink } from "@cosyte/pathways";
+
+/** What a broker client gives back once it connects. */
+export interface Connection {
+  /** Settles with a short code, such as ECONNRESET, when the connection drops. */
+  readonly closed: Promise<string>;
+}
+
+/**
+ * Keeps a listening source's connection open: tells the engine when it drops and when it is back,
+ * and waits as long as the engine says before it tries again.
+ */
+export async function keepConnected(
+  sink: MessageSink,
+  connect: () => Promise<Connection>,
+  signal: AbortSignal,
+): Promise<void> {
+  while (!signal.aborted) {
+    let code: string;
+    try {
+      const connection = await connect();
+      sink.sourceUp?.();
+      code = await connection.closed;
+    } catch (error) {
+      code = (error as { code?: string }).code ?? "CONNECT_FAILED";
+    }
+    if (signal.aborted) return;
+    const wait = sink.sourceDown?.(code) ?? 1_000;
+    await new Promise((resolve) => setTimeout(resolve, wait));
+  }
+}
+```
+
+The engine's sink always has both methods; they are optional on `MessageSink` so a sink a test
+builds by hand need not have them.
 
 ## Send messages out
 

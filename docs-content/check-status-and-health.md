@@ -82,8 +82,9 @@ engine lease's epoch while it holds it, else `null`; and `draining`, `true` once
 and is closing its sources.
 
 The answer is 503, with `status: "unavailable"`, only when the engine itself is broken: the database
-cannot be read (`storage: "unreachable"`, and each channel's status `unknown`), or a source cannot
-listen (its `source: "down"`; the engine keeps trying it). A destination that is down shows as a
+cannot be read (`storage: "unreachable"`, and each channel's status `unknown`), or a source is down
+(its `source: "down"`): it cannot listen, and the engine keeps trying it, or it said it lost its
+connection (a broker, a remote server or a socket it dialled), until it says it has it again. A destination that is down shows as a
 channel `retrying`, and the answer stays 200, because restarting the engine would not bring the
 destination back. Point a restart policy at the status code, and an alert at the channels.
 
@@ -118,29 +119,31 @@ It listens on `127.0.0.1` unless `host` says otherwise; inside a container, set 
 a probe from outside it to reach it. It serves plain HTTP only, which `plaintext: true` says: it
 answers one word and takes nothing in.
 
-| Path      | 200     | 503                                                                                                                                          |
-| --------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/livez`  | `live`  | `stalled`: the engine loop has made no step within its bound                                                                                 |
-| `/readyz` | `ready` | `starting`, `standby`, `draining`, `fenced` (the engine lost its lease), or `unavailable`: storage cannot be read, or a source cannot listen |
+| Path      | 200     | 503                                                                                                                                    |
+| --------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `/livez`  | `live`  | `stalled`: the engine loop has made no step within its bound                                                                           |
+| `/readyz` | `ready` | `starting`, `standby`, `draining`, `fenced` (the engine lost its lease), or `unavailable`: storage cannot be read, or a source is down |
 
 Every other path answers 404, and every method but `GET` and `HEAD` 405.
 
 **Liveness** looks at the engine loop alone. A step is a message taken in by a polled source, one
 transform, one delivery attempt, a channel's turn in a pass, or one channel of a retention run. The bound is 60
 seconds, plus the poll interval, plus the longest time one step can take: the longest of each
-channel's transform `timeout`, each HTTP destination's `timeout`, and twice each MLLP destination's
-`ackTimeout` (one to connect, one for the ACK) plus a second. A source that cannot listen or a
+channel's transform `timeout` and each destination's
+[delivery deadline](./configuration-reference.md#every-delivery-has-a-deadline) (an HTTP
+destination's `timeout` plus a second, twice an MLLP destination's `ackTimeout` plus a second, and a
+file or module destination's `timeout`, 30 seconds by default). A polled source's pass runs beside
+the loop and is cut off at its own deadline, so it holds no step up. A source that is down or a
 destination that is down never makes the engine stalled, since the loop keeps stepping while it
 retries them and a restart would not bring them back; a standby, and an engine still starting or
-stopping, are always live. A custom destination has no time limit of its own, so one that never
-returns does stall the engine. Nor has one channel's retention delete: a channel with a very large
+stopping, are always live. One channel's retention delete has no time limit: a channel with a very large
 backlog past its retention period (the first run after a long outage, or after `retention` was
 shortened) can take longer than the bound to delete, and `/livez` answers `stalled` until it is
 done. Run `pathways retention` by hand first in that case. Point a restart policy at `/livez`.
 
 **Readiness** is 503 until the engine is running, and while it runs when storage cannot be read
 (read at most once a second, and counted unreachable after 5 seconds without an answer) or a source
-cannot listen. On SIGTERM or SIGINT it turns 503 `draining` at once, while the sources are still
+is down. On SIGTERM or SIGINT it turns 503 `draining` at once, while the sources are still
 closing, and the listener closes last. Point a load balancer or a readiness probe at `/readyz`.
 
 ```bash

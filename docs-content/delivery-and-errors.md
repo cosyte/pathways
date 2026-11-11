@@ -68,6 +68,28 @@ both times. A channel that would rather save it sets
 `resendFlag: false` (in `defaults:` or its `channel.yaml`); then no marker is written, and a resend
 after a crash goes out unflagged, as it did before.
 
+## Drop a duplicate at the receiver
+
+Each output Pathways sends carries an id that stays the same on every attempt, a resend after a
+crash, a retry after a timeout and a `pathways replay --resend` included: its message's id and its
+output number, `messageId` and `seq` on the outgoing message. A file destination names each file
+`<messageId>-<seq>`, so a second copy replaces the first. A custom destination can send the pair to
+its receiver, as a header or a key, and the receiver can keep the last ids it took and drop a copy.
+An MLLP receiver can do the same with the MSH-10 control ID, which Pathways sends unchanged.
+
+The pair is unique within one Pathways database: a second database numbers its messages from 1 too,
+so a receiver fed by two prefixes the pair with which one sent it.
+
+## Every attempt has a deadline
+
+Each attempt, connecting, sending and waiting for the receiver to confirm, is cut off at a deadline:
+an HTTP destination's `timeout` and a second, twice an MLLP destination's `ackTimeout` and a second,
+and a file or module destination's `timeout` (30 seconds unless its block sets one). An attempt cut
+off is retried as any other failure, with the code `DELIVERY_TIMEOUT`, and the destination was handed
+an aborted `signal`; a receiver may have the message by then, which is what the stable id above is
+for. See
+[Every delivery has a deadline](./configuration-reference.md#every-delivery-has-a-deadline).
+
 ## Taking a message in
 
 - **MLLP** answers `AA` only once the message is stored. If it cannot be stored, it sends no ACK and

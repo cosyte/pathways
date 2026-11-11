@@ -44,6 +44,10 @@ A `transform-failed` line's `kind` is `load`, `parse`, `transform`, `output`, `t
 | ------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
 | `source-start-failed`                                              | a source could not listen (`code`, such as `EADDRINUSE`); tried again after `retryInMs`                                                         |
 | `source-started`                                                   | a source that was down is listening again                                                                                                       |
+| `source-lost`                                                      | a running source said it lost its connection (`code`, `attempt`); it should try again after `retryInMs`                                         |
+| `source-regained`                                                  | a source that said it lost its connection has it again                                                                                          |
+| `poll-deadline`                                                    | a polled source's pass ran past its `deadlineMs` and was cut off; the source took nothing more in that pass                                     |
+| `poll-overlap`                                                     | a polled source's pass came due while its last `poll` call had not returned, and was skipped                                                    |
 | `source-read-failed`                                               | a file source could not claim or read a file; it stays for the next pass                                                                        |
 | `source-file-set-aside`                                            | a file source will not take a file, by `reason` (`too-large` or `unreadable`); `moved` says whether it went into `errorDir`, and `code` why not |
 | `http-refused`                                                     | an HTTP source or the health endpoint refused a request, with its `status`                                                                      |
@@ -105,6 +109,7 @@ keeps the operating system's code, such as `ECONNREFUSED` or `ENOTFOUND`.
 | `MLLP_CONNECTION`         | MLLP      | the connection ended with no other code       |
 | `HTTP_<status>`           | HTTP      | a 408, 425, 429 or 5xx answer, or a held 3xx  |
 | `ETIMEDOUT`               | HTTP      | no answer within `timeout`                    |
+| `DELIVERY_TIMEOUT`        | any       | the attempt ran past its deadline, cut off    |
 
 A `delivery-retry` line's `retryInMs` is the backoff, or the wait a 429's or a 503's `Retry-After`
 asked for when that is longer, up to the destination's `retry.max`, 5 minutes by default. A
