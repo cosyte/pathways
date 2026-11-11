@@ -134,7 +134,6 @@ for (const database of TEST_DATABASES) {
         delivered: 2,
         failed: 0,
         cleared: 0,
-        "dry-run": 0,
       });
 
       // Logs carry ids and counts, never content or file names.
@@ -271,7 +270,6 @@ for (const database of TEST_DATABASES) {
         delivered: 2,
         failed: 0,
         cleared: 0,
-        "dry-run": 0,
       });
       expect(events.filter((e) => e.event === "delivery-retry")).toEqual([
         expect.objectContaining({ destination: 0, attempt: 1, retryInMs: 1_000 }),
@@ -299,7 +297,6 @@ for (const database of TEST_DATABASES) {
         delivered: 4,
         failed: 0,
         cleared: 0,
-        "dry-run": 0,
       });
       const delivered = events
         .filter((e) => e.event === "delivered" && e.destination === 0)
@@ -331,7 +328,6 @@ for (const database of TEST_DATABASES) {
         delivered: 3,
         failed: 1,
         cleared: 0,
-        "dry-run": 0,
       });
       expect(events.find((e) => e.event === "delivery-rejected")).toMatchObject({
         reason: "AE",
@@ -362,7 +358,6 @@ for (const database of TEST_DATABASES) {
         delivered: 2,
         failed: 0,
         cleared: 0,
-        "dry-run": 0,
       });
       await engine.stop();
       expect(stopped).toBe(true);

@@ -88,6 +88,7 @@ export type {
   ClearResult,
   ContentStore,
   ContentTable,
+  DeliveryCounts,
   DeliveryStatus,
   DeliveryTally,
   ExpireResult,

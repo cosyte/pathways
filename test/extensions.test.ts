@@ -299,7 +299,6 @@ describe("custom connectors", () => {
       delivered: 4,
       failed: 0,
       cleared: 0,
-      "dry-run": 0,
     });
     // The factory got its options as written, and the channel's context.
     expect(bench.notes["source"]).toEqual([
@@ -369,7 +368,6 @@ describe("custom connectors", () => {
       delivered: 1,
       failed: 1,
       cleared: 0,
-      "dry-run": 0,
     });
   });
 

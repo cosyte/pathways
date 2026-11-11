@@ -244,7 +244,6 @@ describe("lifecycle hooks in the engine", () => {
       delivered: 2,
       failed: 0,
       cleared: 0,
-      "dry-run": 0,
     });
     expect(events.filter((e) => e.event === "hook-timeout")).toEqual([]);
     await eventually(() => events.filter((e) => e.event === "hook-timeout").length === 2);

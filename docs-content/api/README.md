@@ -1890,9 +1890,9 @@ A message's deliveries, every generation, oldest first, without bodies.
 
 ##### deliveryCounts()
 
-> **deliveryCounts**(`channel`): `Promise`\<`Record`\<[`DeliveryStatus`](#deliverystatus), `number`\>\>
+> **deliveryCounts**(`channel`): `Promise`\<[`DeliveryCounts`](#deliverycounts-1)\>
 
-How many deliveries of a channel stand at each status.
+How many deliveries of a channel stand at each status; `dry-run` only when some ran dry.
 
 ###### Parameters
 
@@ -1902,7 +1902,7 @@ How many deliveries of a channel stand at each status.
 
 ###### Returns
 
-`Promise`\<`Record`\<[`DeliveryStatus`](#deliverystatus), `number`\>\>
+`Promise`\<[`DeliveryCounts`](#deliverycounts-1)\>
 
 ##### expire()
 
@@ -3824,6 +3824,27 @@ const table: ContentTable = "deliveries";
 
 ***
 
+### DeliveryCounts
+
+> **DeliveryCounts** = `Readonly`\<`Record`\<`Exclude`\<[`DeliveryStatus`](#deliverystatus), `"dry-run"`\>, `number`\>\> & `object`
+
+How many deliveries stand at each status. `dry-run` is there only when some delivery ran dry, so
+the counts of a project that never runs a destination dry read as they did before dry runs.
+
+#### Type Declaration
+
+##### dry-run?
+
+> `readonly` `optional` **dry-run?**: `number`
+
+#### Example
+
+```ts
+const recorded = (counts: DeliveryCounts): number => counts.delivered + (counts["dry-run"] ?? 0);
+```
+
+***
+
 ### DeliveryStatus
 
 > **DeliveryStatus** = `"pending"` \| `"delivered"` \| `"failed"` \| `"cleared"` \| `"dry-run"`
@@ -3842,10 +3863,17 @@ const open = (status: DeliveryStatus): boolean => status === "pending";
 
 ### DeliveryTally
 
-> **DeliveryTally** = `Readonly`\<`Record`\<[`DeliveryStatus`](#deliverystatus) \| `"retrying"`, `number`\>\>
+> **DeliveryTally** = [`DeliveryCounts`](#deliverycounts-1) & `object`
 
 How many of one message's deliveries stand at each status. `retrying` counts the pending ones
-that have failed at least once, so it is part of `pending`.
+that have failed at least once, so it is part of `pending`. `dry-run` is there only when one ran
+dry.
+
+#### Type Declaration
+
+##### retrying
+
+> `readonly` **retrying**: `number`
 
 #### Example
 

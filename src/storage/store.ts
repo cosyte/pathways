@@ -93,15 +93,29 @@ export const MESSAGE_STATES = [
 export type MessageState = (typeof MESSAGE_STATES)[number];
 
 /**
+ * How many deliveries stand at each status. `dry-run` is there only when some delivery ran dry, so
+ * the counts of a project that never runs a destination dry read as they did before dry runs.
+ *
+ * @example
+ * ```ts
+ * const recorded = (counts: DeliveryCounts): number => counts.delivered + (counts["dry-run"] ?? 0);
+ * ```
+ */
+export type DeliveryCounts = Readonly<Record<Exclude<DeliveryStatus, "dry-run">, number>> & {
+  readonly "dry-run"?: number;
+};
+
+/**
  * How many of one message's deliveries stand at each status. `retrying` counts the pending ones
- * that have failed at least once, so it is part of `pending`.
+ * that have failed at least once, so it is part of `pending`. `dry-run` is there only when one ran
+ * dry.
  *
  * @example
  * ```ts
  * const open = (tally: DeliveryTally): number => tally.pending + tally.failed;
  * ```
  */
-export type DeliveryTally = Readonly<Record<DeliveryStatus | "retrying", number>>;
+export type DeliveryTally = DeliveryCounts & { readonly retrying: number };
 
 /**
  * Retention marks the messages it is about to delete with this status, inside the transaction that
@@ -779,8 +793,8 @@ export interface MessageStore {
   leaseHolder?(name: string): Promise<LeaseHolder | undefined>;
   /** How many messages of a channel stand at each status. The health endpoint reports these. */
   messageCounts(channel: string): Promise<Record<MessageStatus, number>>;
-  /** How many deliveries of a channel stand at each status. */
-  deliveryCounts(channel: string): Promise<Record<DeliveryStatus, number>>;
+  /** How many deliveries of a channel stand at each status; `dry-run` only when some ran dry. */
+  deliveryCounts(channel: string): Promise<DeliveryCounts>;
   /** How many of a channel's pending deliveries have failed at least once and wait for a retry. */
   retryingDeliveries(channel: string): Promise<number>;
 
@@ -1178,7 +1192,7 @@ const EXPIRE_BATCH = 500;
  *
  * @example
  * ```ts
- * messageState("transformed", { pending: 1, retrying: 1, delivered: 0, failed: 0, cleared: 0, "dry-run": 0 }); // "retrying"
+ * messageState("transformed", { pending: 1, retrying: 1, delivered: 0, failed: 0, cleared: 0 }); // "retrying"
  * ```
  */
 export function messageState(status: MessageStatus, deliveries: DeliveryTally): MessageState {
@@ -1187,7 +1201,7 @@ export function messageState(status: MessageStatus, deliveries: DeliveryTally): 
   if (deliveries.retrying > 0) return "retrying";
   if (deliveries.pending > 0) return "queued";
   if (deliveries.cleared > 0) return "cleared";
-  if (deliveries["dry-run"] > 0) return "dry-run";
+  if ((deliveries["dry-run"] ?? 0) > 0) return "dry-run";
   return "delivered";
 }
 
@@ -1283,8 +1297,18 @@ function readStatus(status: StoredStatus): MessageStatus {
   return status;
 }
 
-function emptyTally(): Record<DeliveryStatus | "retrying", number> {
-  return { pending: 0, retrying: 0, delivered: 0, failed: 0, cleared: 0, "dry-run": 0 };
+/** A tally being counted: `dry-run` is added by the first delivery that ran dry. */
+type Tallying = Record<Exclude<DeliveryStatus, "dry-run"> | "retrying", number> & {
+  "dry-run"?: number;
+};
+
+function emptyTally(): Tallying {
+  return { pending: 0, retrying: 0, delivered: 0, failed: 0, cleared: 0 };
+}
+
+/** Counts one more delivery at `status`. */
+function countOne(tally: Tallying, status: DeliveryStatus): void {
+  tally[status] = (tally[status] ?? 0) + 1;
 }
 
 /** Thrown inside a transaction to roll it back and say why. */
@@ -1943,21 +1967,22 @@ export class Store implements MessageStore, ContentStore {
   }
 
   /** How many deliveries of `channel` stand at each status. */
-  async deliveryCounts(channel: string): Promise<Record<DeliveryStatus, number>> {
+  async deliveryCounts(channel: string): Promise<DeliveryCounts> {
     const rows = await this.db
       .selectFrom("deliveries")
       .select(["status", (eb) => eb.fn.countAll<number | string>().as("count")])
       .where("channel", "=", channel)
       .groupBy("status")
       .execute();
-    const counts: Record<DeliveryStatus, number> = {
+    // `dry-run` is set only by a row of it, so a channel that never ran dry reads as before.
+    const counts: { -readonly [S in keyof DeliveryCounts]: DeliveryCounts[S] } = {
       pending: 0,
       delivered: 0,
       failed: 0,
       cleared: 0,
-      "dry-run": 0,
     };
     for (const row of rows) counts[row.status] = Number(row.count);
+    return counts;
     return counts;
   }
 
@@ -2377,7 +2402,7 @@ export class Store implements MessageStore, ContentStore {
 
   /** Adds each message's state and its current deliveries' tally. */
   private async summarize(rows: readonly MessageRow[]): Promise<MessageSummary[]> {
-    const tallies = new Map<number, Record<DeliveryStatus | "retrying", number>>();
+    const tallies = new Map<number, Tallying>();
     if (rows.length > 0) {
       const generation = new Map(rows.map((row) => [Number(row.id), row.generation]));
       const deliveries = await this.db
@@ -2393,7 +2418,7 @@ export class Store implements MessageStore, ContentStore {
         const messageId = Number(delivery.message_id);
         if (delivery.generation !== generation.get(messageId)) continue;
         const tally = tallies.get(messageId) ?? emptyTally();
-        tally[delivery.status] += 1;
+        countOne(tally, delivery.status);
         if (delivery.status === "pending" && delivery.attempts > 0) tally.retrying += 1;
         tallies.set(messageId, tally);
       }

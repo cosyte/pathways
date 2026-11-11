@@ -10,7 +10,7 @@ import {
   type Env,
 } from "../connectors/endpoint.js";
 import type { ServerTlsMaterial } from "../connectors/tls.js";
-import type { DeliveryStatus, MessageStatus } from "../storage/store.js";
+import type { DeliveryTally, MessageStatus } from "../storage/store.js";
 
 /**
  * One channel's state: `retrying` while a delivery waits to be tried again, else `failed` while it
@@ -25,8 +25,11 @@ export interface ChannelHealth {
   readonly source: "up" | "down";
   /** Absent when storage could not be read. */
   readonly messages?: Readonly<Record<MessageStatus, number>>;
-  /** Absent when storage could not be read. `retrying` counts pending deliveries that failed once. */
-  readonly deliveries?: Readonly<Record<DeliveryStatus | "retrying", number>>;
+  /**
+   * Absent when storage could not be read. `retrying` counts pending deliveries that failed once;
+   * `dry-run` is there only when a destination ran dry.
+   */
+  readonly deliveries?: DeliveryTally;
 }
 
 /**

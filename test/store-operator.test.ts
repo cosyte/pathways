@@ -160,7 +160,6 @@ for (const database of TEST_DATABASES) {
           delivered: 0,
           failed: 0,
           cleared: 0,
-          "dry-run": 0,
         });
         await store.close();
       });
@@ -210,7 +209,6 @@ for (const database of TEST_DATABASES) {
             delivered: 0,
             failed: 0,
             cleared: 0,
-            "dry-run": 0,
           },
         });
         expect(Object.keys(summary ?? {})).not.toContain("error");
@@ -414,7 +412,6 @@ for (const database of TEST_DATABASES) {
           delivered: 0,
           failed: 0,
           cleared: 2,
-          "dry-run": 0,
         });
         expect((await store.message(transformed))?.state).toBe("cleared");
         await store.close();

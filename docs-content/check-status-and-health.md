@@ -59,14 +59,7 @@ A `GET` or `HEAD` on any path answers with JSON:
       "status": "retrying",
       "source": "up",
       "messages": { "received": 0, "transformed": 41, "filtered": 3, "failed": 1, "cleared": 0 },
-      "deliveries": {
-        "pending": 2,
-        "delivered": 39,
-        "failed": 0,
-        "cleared": 0,
-        "dry-run": 0,
-        "retrying": 1
-      }
+      "deliveries": { "pending": 2, "delivered": 39, "failed": 0, "cleared": 0, "retrying": 1 }
     }
   }
 }
@@ -83,7 +76,8 @@ takes the engine lease, so a readiness check routes nothing to it; point a liven
 if a standby that answers at all counts as alive. See
 [a standby](./store-messages-in-a-database.md#a-standby).
 
-The body holds states and counts, never content. `pathways start --once` does not serve the endpoint.
+A channel's `deliveries` also counts `dry-run` once one of its destinations has
+[run dry](./upgrade-pathways.md#watch-a-destination-before-it-sends). The body holds states and counts, never content. `pathways start --once` does not serve the endpoint.
 
 ## Logs
 

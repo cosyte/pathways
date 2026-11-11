@@ -3,7 +3,7 @@ import type {
   AuditInput,
   AuditQuery,
   ClearResult,
-  DeliveryStatus,
+  DeliveryCounts,
   ExpireResult,
   LeaseClaim,
   LeaseClaimant,
@@ -195,7 +195,7 @@ abstract class CodecStore implements MessageStore {
   }
 
   /** How many deliveries of `channel` stand at each status. */
-  deliveryCounts(channel: string): Promise<Record<DeliveryStatus, number>> {
+  deliveryCounts(channel: string): Promise<DeliveryCounts> {
     return this.#inner.deliveryCounts(channel);
   }
 

@@ -306,7 +306,6 @@ async function recovered(setup: Project, resent = 0): Promise<void> {
       delivered: (NOTES + resent) * DESTINATIONS.length,
       failed: 0,
       cleared: 0,
-      "dry-run": 0,
     });
   });
   const inbox = join(setup.root, "data/inbox");

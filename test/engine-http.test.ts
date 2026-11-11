@@ -124,7 +124,6 @@ describe("an HTTP channel in the engine", () => {
       delivered: 1,
       failed: 0,
       cleared: 0,
-      "dry-run": 0,
     });
 
     expect(events.map((e) => e.event)).toEqual(["received", "transformed", "delivered"]);
@@ -172,7 +171,6 @@ describe("an HTTP channel in the engine", () => {
       delivered: 0,
       failed: 1,
       cleared: 0,
-      "dry-run": 0,
     });
   });
 
@@ -305,14 +303,7 @@ describe("health", () => {
           status: "ok",
           source: "up",
           messages: { received: 0, transformed: 1, filtered: 0, failed: 0, cleared: 0 },
-          deliveries: {
-            pending: 0,
-            delivered: 1,
-            failed: 0,
-            cleared: 0,
-            "dry-run": 0,
-            retrying: 0,
-          },
+          deliveries: { pending: 0, delivered: 1, failed: 0, cleared: 0, retrying: 0 },
         },
       },
     });
