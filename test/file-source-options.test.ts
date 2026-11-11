@@ -305,6 +305,37 @@ describe.each([
     expect(await tree(dir)).toEqual(["errors/a.hl7"]);
   });
 
+  it("sets aside a file that cannot be opened only while it is still where the pass found it", async () => {
+    const dir = await inbox();
+    const errorDir = join(dir, "errors");
+    await dropFile(join(dir, "a.hl7"), "12345");
+    await dropFile(join(dir, "b.hl7"), "1");
+    const faults: FileFault[] = [];
+    const errors: unknown[] = [];
+    const source = sourceOn(dir, {
+      maxSize: 4,
+      errorDir,
+      readTries: 1,
+      onReadError: (error) => errors.push(error),
+      // b.hl7 goes after the pass found it, so it cannot be opened, and is gone when it is set aside.
+      onFileFault: (fault) => {
+        faults.push(fault);
+        if (faults.length === 1) unlinkSync(join(dir, "b.hl7"));
+      },
+    });
+    expect(await pass(source)).toEqual([]);
+    expect(errors).toEqual([expect.objectContaining({ code: "ENOENT" })]);
+    expect(faults).toEqual([
+      { reason: "too-large", moved: true },
+      {
+        reason: "unreadable",
+        moved: false,
+        error: expect.objectContaining({ code: "ESTALE" }) as unknown,
+      },
+    ]);
+    expect(await tree(dir)).toEqual(["errors/a.hl7"]);
+  });
+
   it("claims at most maxPerPoll files a pass, and the rest on the next", async () => {
     const dir = await inbox();
     for (const name of ["a.hl7", "b.hl7", "c.hl7"]) await dropFile(join(dir, name), name);

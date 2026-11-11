@@ -12,7 +12,7 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
+import { dirname, join, posix, resolve, sep } from "node:path";
 import { createContext, Script } from "node:vm";
 
 import { DEFAULT_READ_TRIES, type PathPattern } from "../config/schema.js";
@@ -334,8 +334,8 @@ export class FileSource implements SourceConnector {
    */
   private async inside(path: string, root: string, id?: FileId): Promise<boolean> {
     try {
-      const from = relative(root, await realpath(dirname(path)));
-      if (from === ".." || from.startsWith(`..${sep}`) || isAbsolute(from)) return false;
+      const folder = await realpath(dirname(path));
+      if (folder !== root && !folder.startsWith(join(root, sep))) return false;
       if (id === undefined) return true;
       const now = await lstat(path, { bigint: true });
       return now.dev === id.dev && now.ino === id.ino;
