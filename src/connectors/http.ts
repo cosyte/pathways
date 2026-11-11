@@ -8,9 +8,9 @@ import {
 import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 
 import { Endpoint, refuse, reply } from "./endpoint.js";
+import { failureOf, transientError } from "./http-core.js";
 import { clientTlsOptions, type ClientTlsMaterial, type ServerTlsMaterial } from "./tls.js";
 import {
-  DeliveryRejected,
   type DestinationConnector,
   type MessageSink,
   type OutgoingMessage,
@@ -144,41 +144,6 @@ function readBody(
   });
 }
 
-/** What an HTTP destination does with each status class. */
-export type HttpOutcome = "delivered" | "retry" | "rejected";
-
-/**
- * Classifies an HTTP status: 2xx is delivered; 408, 429 and 5xx are worth a retry; any other 4xx is a
- * rejection that sending again will not fix. A 1xx or 3xx (redirects are not followed, since following
- * one could send a message to a host nobody configured) is retried, so nothing is lost while someone
- * fixes the URL.
- *
- * @example
- * ```ts
- * classifyStatus(204); // "delivered"
- * classifyStatus(503); // "retry"
- * classifyStatus(400); // "rejected"
- * ```
- */
-export function classifyStatus(status: number): HttpOutcome {
-  if (status >= 200 && status < 300) return "delivered";
-  if (status >= 400 && status < 500 && status !== 408 && status !== 429) return "rejected";
-  return "retry";
-}
-
-/**
- * A failed attempt worth retrying: a plain error whose `code` is an HTTP status (`HTTP_503`), a
- * timeout (`ETIMEDOUT`) or the network's own code (`ECONNREFUSED`). Its text holds only the code.
- *
- * @example
- * ```ts
- * throw transientError("HTTP_503");
- * ```
- */
-export function transientError(code: string): Error & { readonly code: string } {
-  return Object.assign(new Error(`the HTTP delivery did not complete (${code})`), { code });
-}
-
 const NO_TLS: ClientTlsMaterial = { ca: undefined, cert: undefined, key: undefined };
 
 /** Options for an {@link HttpDestination}. */
@@ -191,13 +156,17 @@ export interface HttpDestinationOptions {
   readonly timeoutMs: number;
   /** The CA to trust and a client certificate to present, for an `https://` url. */
   readonly tls?: ClientTlsMaterial;
+  /** Epoch milliseconds now, which a Retry-After date is read against. Defaults to `Date.now`. */
+  readonly now?: () => number;
 }
 
 /**
- * POSTs each output to a URL. The server's certificate is always verified. A 2xx answer is
- * delivered; 408, 429, 5xx, a network error or a timeout throws a plain error with a `code`, which
- * the engine retries; any other 4xx throws a {@link DeliveryRejected} whose reason is the status.
- * Redirects are not followed. The response body is read and dropped, never logged.
+ * POSTs each output to a URL. The server's certificate is always verified. The answer is read by
+ * the shared status table (`classifyStatus`): a 2xx is delivered; a 408, 425, 429, 5xx, a network
+ * error or a timeout throws a `RetryableError` with a `code`, and on a 429 or a 503 the wait its
+ * Retry-After asks for; a 3xx throws a `RedirectHeld`, never followed; a final 1xx or any other 4xx
+ * throws a `DeliveryRejected` whose reason is the status. The response body is read and dropped,
+ * never logged.
  *
  * @example
  * ```ts
@@ -214,10 +183,12 @@ export class HttpDestination implements DestinationConnector {
   private readonly url: URL;
   private readonly agent: HttpAgent;
   private readonly send: typeof httpRequest;
+  private readonly now: () => number;
 
-  /** @param options The URL, headers, timeout and TLS. */
+  /** @param options The URL, headers, timeout, TLS and, for tests, a clock. */
   constructor(options: HttpDestinationOptions) {
     this.options = options;
+    this.now = options.now ?? Date.now;
     this.url = new URL(options.url);
     if (this.url.protocol === "https:") {
       this.agent = new HttpsAgent({ keepAlive: true, ...clientTlsOptions(options.tls ?? NO_TLS) });
@@ -243,11 +214,9 @@ export class HttpDestination implements DestinationConnector {
         // Drain and drop the body, so the connection can be reused and nothing of it is kept.
         response.on("error", () => undefined);
         response.resume();
-        const status = Number(response.statusCode);
-        const outcome = classifyStatus(status);
-        if (outcome === "delivered") resolve();
-        else if (outcome === "rejected") reject(new DeliveryRejected(`HTTP ${status}`));
-        else reject(transientError(`HTTP_${status}`));
+        const failure = failureOf(response, this.url, this.now());
+        if (failure === undefined) resolve();
+        else reject(failure);
       });
       request.on("error", (error: Error & { code?: unknown }) => {
         clearTimeout(timer);

@@ -107,7 +107,8 @@ and each may add:
 | `timeout` | duration above zero                 | `5s`        |
 
 The event names are `received`, `receive-failed`, `transformed`, `filtered`, `transform-failed`,
-`delivered`, `delivery-retry`, `delivery-rejected`, `source-down`, `source-up` and `audit`. See
+`delivered`, `delivery-retry`, `delivery-redirected`, `delivery-rejected`, `source-down`, `source-up`
+and `audit`. See
 [Add lifecycle hooks](./add-lifecycle-hooks.md).
 
 ### Health endpoint
@@ -189,6 +190,11 @@ The URL may not hold a user name or password. A header whose name holds `auth`, 
 `secret`, `password`, `key`, `signature` or `credential` must be an env reference. `Content-Length`,
 `Transfer-Encoding`, `Connection` and `Keep-Alive` are set by Pathways and may not be given.
 `Content-Type` defaults by format.
+
+There is no key for retries: a 2xx is delivered; a 408, 425, 429, 5xx, a network error or no answer
+within `timeout` is retried, waiting longer when a 429 or a 503 asks with `Retry-After`, never more
+than 5 minutes; a 3xx is held, never followed, and retried every 5 minutes; a final 1xx or any other
+4xx fails the delivery for good. See [Send and receive over HTTP](./send-and-receive-http.md).
 
 #### MLLP destination
 

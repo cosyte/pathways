@@ -112,7 +112,9 @@ difference. To stop git changing them, add `*.hl7 -text` to the project's `.gita
 `pathways status` shows the channel `retrying`, with the delivery, its attempts and its next try. The
 destination keeps retrying, with its later messages behind it, until the delivery succeeds. Its stored
 code says why: `ECONNREFUSED` (nothing is listening), `CONNECT_TIMEOUT` or `ACK_TIMEOUT`, `ACK_AR`,
-`HTTP_503`. Fix the destination and the queue moves on its own. A message is never dropped to unblock
+`HTTP_503`. A 3xx code, such as `HTTP_301`, means the destination's URL moved: the delivery is held,
+never followed, and `delivery-redirected` names the host it points to; fix the `url`. Fix the
+destination and the queue moves on its own. A message is never dropped to unblock
 a queue. See [How delivery and errors work](./delivery-and-errors.md).
 
 ## A source is down and health answers 503

@@ -87,14 +87,26 @@ destinations:
 
 The answer decides what happens:
 
-| The server answers                                              | The delivery                                  |
-| --------------------------------------------------------------- | --------------------------------------------- |
-| 2xx                                                             | delivered                                     |
-| 408, 429, 5xx, a 1xx or 3xx, no answer in time, a network error | retried, with later outputs waiting behind it |
-| any other 4xx                                                   | failed for good; the destination moves on     |
+| The server answers                                     | The delivery                                                      |
+| ------------------------------------------------------ | ----------------------------------------------------------------- |
+| 2xx                                                    | delivered                                                         |
+| 408, 425, 429, 5xx, no answer in time, a network error | retried, with later outputs waiting behind it                     |
+| 3xx                                                    | held: retried every 5 minutes, never followed, with its own event |
+| a final 1xx, any other 4xx                             | failed for good; the destination moves on                         |
 
-Redirects are not followed, since following one could send a message to a host nobody configured. The
-response body is read and dropped, never logged.
+A retry waits 1 second, then 2, 4, 8 and so on, up to 5 minutes. When a 429 or a 503 carries a
+`Retry-After` header, the retry waits as long as it asks if that is longer, still never more than 5
+minutes. `Retry-After` is read as a whole number of seconds (`Retry-After: 120`) or as an HTTP date
+(`Retry-After: Wed, 11 Nov 2026 09:30:00 GMT`), and a date already past counts as no wait. A value
+that is negative, has a fraction, is empty, has more than nine digits or is not a date that exists,
+or a header sent twice, is ignored, and the retry waits its usual time. On any other status the
+header is ignored. The time of the next attempt is stored, so a restart keeps the wait.
+
+Redirects are not followed, since following one could send a message to a host nobody configured. A
+3xx answer holds the delivery: no connection is made to its `Location`, the delivery is tried again
+every 5 minutes, and the engine logs `delivery-redirected` and sends hooks a `delivery-redirected`
+event, each naming the status and the host the `Location` names, never its path or query. Fix the
+destination's `url` and the queue moves on. The response body is read and dropped, never logged.
 
 ## Related
 

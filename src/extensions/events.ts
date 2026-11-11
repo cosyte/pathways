@@ -19,6 +19,7 @@ export const LIFECYCLE_EVENTS = [
   "transform-failed",
   "delivered",
   "delivery-retry",
+  "delivery-redirected",
   "delivery-rejected",
   "source-down",
   "source-up",
@@ -185,7 +186,9 @@ export interface DeliveredEvent extends DeliveryEventBase {
 
 /**
  * A delivery failed in a way worth trying again (a refused connection, a timeout, an MLLP `AR`, an
- * HTTP 5xx). The destination retries it after `retryInMs`, and its later deliveries wait behind it.
+ * HTTP 408, 425, 429 or 5xx). The destination retries it after `retryInMs`, and its later deliveries
+ * wait behind it. `retryInMs` is the backoff, or the wait a 429's or a 503's Retry-After asked for
+ * when that is longer, up to five minutes.
  *
  * @example
  * ```ts
@@ -202,6 +205,29 @@ export interface DeliveryRetryEvent extends DeliveryEventBase {
   readonly name: string;
   /** The error's code, such as `ECONNREFUSED`, `ACK_TIMEOUT` or `HTTP_503`. */
   readonly code: string | undefined;
+}
+
+/**
+ * An HTTP destination answered with a redirect (a 3xx). Redirects are never followed, since
+ * following one could send a message to a host nobody configured: the delivery is held and tried
+ * again after the longest wait, five minutes, and its later deliveries wait behind it, until the
+ * destination's URL is fixed. It names the Location's host only, never its path or query.
+ *
+ * @example
+ * ```ts
+ * if (event.type === "delivery-redirected") page(`${event.channel} moved to ${event.locationHost}`);
+ * ```
+ */
+export interface DeliveryRedirectedEvent extends DeliveryEventBase {
+  readonly type: "delivery-redirected";
+  /** How long until the next attempt, in milliseconds. */
+  readonly retryInMs: number;
+  /** When the next attempt is due, as an ISO 8601 time in UTC. */
+  readonly retryAt: string;
+  /** The 3xx status, such as 301 or 308. */
+  readonly status: number;
+  /** The host the Location names, with its port when it has one, or undefined when it names none. */
+  readonly locationHost: string | undefined;
 }
 
 /**
@@ -326,6 +352,7 @@ export type LifecycleEvent =
   | TransformFailedEvent
   | DeliveredEvent
   | DeliveryRetryEvent
+  | DeliveryRedirectedEvent
   | DeliveryRejectedEvent
   | SourceDownEvent
   | SourceUpEvent

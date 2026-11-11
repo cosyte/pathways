@@ -13,19 +13,20 @@ codes and times, never a message's content, so a hook can send them anywhere.
 
 ## The events
 
-| Event               | When                                                                              |
-| ------------------- | --------------------------------------------------------------------------------- |
-| `received`          | a message is stored, before its source acknowledges it                            |
-| `receive-failed`    | a message could not be stored, so its source did not acknowledge it               |
-| `transformed`       | the transform returned one or more outputs, now queued for every destination      |
-| `filtered`          | the transform returned no output                                                  |
-| `transform-failed`  | the transform threw, timed out or ran out of memory, or the message did not parse |
-| `delivered`         | a destination accepted an output                                                  |
-| `delivery-retry`    | a delivery failed in a way worth trying again; it is retried after `retryInMs`    |
-| `delivery-rejected` | a destination rejected an output for good                                         |
-| `source-down`       | a source could not start listening; it is tried again after `retryInMs`           |
-| `source-up`         | a source that was down is listening again                                         |
-| `audit`             | an audit log entry was stored (engine-wide hooks only)                            |
+| Event                 | When                                                                              |
+| --------------------- | --------------------------------------------------------------------------------- |
+| `received`            | a message is stored, before its source acknowledges it                            |
+| `receive-failed`      | a message could not be stored, so its source did not acknowledge it               |
+| `transformed`         | the transform returned one or more outputs, now queued for every destination      |
+| `filtered`            | the transform returned no output                                                  |
+| `transform-failed`    | the transform threw, timed out or ran out of memory, or the message did not parse |
+| `delivered`           | a destination accepted an output                                                  |
+| `delivery-retry`      | a delivery failed in a way worth trying again; it is retried after `retryInMs`    |
+| `delivery-redirected` | an HTTP destination answered a redirect; it is held and retried after `retryInMs` |
+| `delivery-rejected`   | a destination rejected an output for good                                         |
+| `source-down`         | a source could not start listening; it is tried again after `retryInMs`           |
+| `source-up`           | a source that was down is listening again                                         |
+| `audit`               | an audit log entry was stored (engine-wide hooks only)                            |
 
 [`LifecycleEvent`](./api/README.md#lifecycleevent) in the reference lists each event's fields.
 
