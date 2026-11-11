@@ -1,4 +1,4 @@
-import { symlink, writeFile } from "node:fs/promises";
+import { stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -833,6 +833,20 @@ describe("pathways start with a secret provider", () => {
     expect(ran.err).toBe(
       "pathways: the configuration is invalid:\n  pathways.yaml: encryption.keys.0: the key synth: the secret keys/synth from the provider vault could not be resolved (SecretError ERR_PATHWAYS_SECRET_NOT_FOUND)\n",
     );
+  });
+
+  it("refuses rekey and every operator command, exit 3, naming a secret it cannot have, before opening the store", async () => {
+    const root = await vaultProject({ secrets: {} });
+    for (const argv of [["rekey"], ["status"], ["messages"], ["replay", "1"]]) {
+      const ran = await pathways([...argv, "-C", root]);
+      expect(ran, argv.join(" ")).toMatchObject({
+        code: EXIT.config,
+        out: "",
+        err: "pathways: the configuration is invalid:\n  pathways.yaml: encryption.keys.0: the key synth: the secret keys/synth from the provider vault could not be resolved (SecretError ERR_PATHWAYS_SECRET_NOT_FOUND)\n",
+      });
+    }
+    // Refused before the store was opened: no command made a database.
+    await expect(stat(join(root, ".pathways"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("lets every operator command read an engine-wide webhook's header from the provider", async () => {
