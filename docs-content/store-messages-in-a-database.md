@@ -30,8 +30,9 @@ rewritten value is overwritten with zeros.
 
 1. Install the driver in the project: `pg` for PostgreSQL, `mysql2` for MySQL or MariaDB, or
    `tedious` and `tarn` for SQL Server. The Docker image carries all of them.
-2. Create a database and a login for Pathways. Pathways creates its tables and brings them up to date
-   itself when it opens the database.
+2. Create a database and a login for Pathways. Pathways creates its tables when it first opens the
+   database, and adds to them as later versions need (see
+   [schema changes](#schema-changes-expand-and-contract)).
 3. Name the database server in `pathways.yaml`:
 
 ```yaml title="pathways.yaml"
@@ -124,7 +125,7 @@ writes the release to the audit log); `pathways lease status` shows who holds it
 of an engine that is still running stops it at its next renewal.
 
 The operator commands (`status`, `messages`, `replay`, `clear`, `retention`, `audit`, `rekey`,
-`lease`) take no lease and are safe to run beside a running engine.
+`lease`, `migrate`) take no lease and are safe to run beside a running engine.
 
 ### A standby
 
@@ -148,6 +149,53 @@ remove it, stop every engine and drop the table.
 If the database becomes unreachable while the engine runs, the engine stops with exit code 1 and the
 driver's error code, for a supervisor (systemd, Docker, Kubernetes) to restart it. Nothing is lost: a
 message is acknowledged only once it is stored, and a delivery is recorded only once it is done.
+
+## Schema changes: expand and contract
+
+Pathways records its schema in the database. The `schema_info` table holds one row for each schema
+step applied: its generation (its place in the list of steps, from 1), its tag, the oldest Pathways
+version that may run on the schema once it is applied, the Pathways version that applied it, and
+when. The schema's generation is the highest applied.
+
+Every step is tagged `expand` or `contract`:
+
+- An **expand** step only adds: a table, a column that may be empty, an index. The Pathways version
+  before it keeps running on the schema after it, so it is safe while deliveries are in flight.
+- A **contract** step removes or changes something an older Pathways reads. It names the oldest
+  Pathways that runs once it is applied, and only `pathways migrate --contract` applies it.
+
+A release's code runs on its schema both before and after its own contract steps. So an upgrade is
+two moves: start the new version, which applies its expand steps, and contract later, once no older
+engine runs. Until then you can stop the new version and start the old one again on the same
+database, from this version on. Pathways 0.0.1 does not read `schema_info` and refuses a database a
+later version has opened, so the only way back to 0.0.1 is a backup taken before the upgrade.
+[Upgrade Pathways](./upgrade-pathways.md) walks through it.
+
+When Pathways opens the database (`pathways start`, and every command that reads messages), it reads
+`schema_info` before it applies anything:
+
+- A schema that lacks expand steps this version has gets them, under the migration lock, and each is
+  recorded. Contract steps are left for `pathways migrate --contract`.
+- A schema a newer Pathways moved forward with expand steps opens as it is: nothing is applied.
+- A schema a newer Pathways contracted past this version is refused, naming both versions:
+
+```text
+pathways: the database schema is generation 9 and needs Pathways 0.3.0 or later; this is Pathways 0.2.0.
+```
+
+With `pathways start --no-migrate`, Pathways applies nothing and refuses a schema that lacks an expand
+step it needs, for a database that `pathways migrate` keeps up to date:
+
+```text
+pathways: the database schema is generation 4, last changed by Pathways 0.0.1; this is Pathways 0.0.2, which needs generation 7. Run pathways migrate first, or start without --no-migrate.
+```
+
+The migration lock is the database's own, taken through Kysely's migrator: a PostgreSQL advisory
+lock, MySQL's and MariaDB's `GET_LOCK`, or SQL Server's `sp_getapplock`, each held on the one
+connection that runs the steps. Inside it the applied steps are read again, so when several engines
+start at once each step is applied once. On SQLite the steps run in one `BEGIN IMMEDIATE`
+transaction, so a second process waits for the first. Unlike the engine lease, this lock is held
+only while steps run, on one connection, so a session lock fits it.
 
 ## Your own store
 
@@ -177,6 +225,7 @@ at start.
 
 ## Related
 
+- [Upgrade Pathways](./upgrade-pathways.md).
 - [Encrypt stored messages and rotate keys](./encrypt-stored-messages.md).
 - [Set message retention](./set-message-retention.md).
 - [Configuration reference: storage](./configuration-reference.md#storage).

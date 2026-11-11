@@ -6,6 +6,7 @@ import { EncryptedStore, UnencryptedStore } from "../encryption/encrypted-store.
 import { keysToStart, type KeyProvider } from "../encryption/keys.js";
 import { customKeyProvider, customStore } from "../extensions/build.js";
 import { resolveSecrets, type Secrets } from "../secrets/resolve.js";
+import type { SchemaMode } from "./schema.js";
 import { Store, type MessageStore } from "./store.js";
 
 /**
@@ -25,6 +26,11 @@ export interface OpenStoreContext {
    * to a provider `secrets:` names are resolved here.
    */
   readonly secrets?: Secrets | undefined;
+  /**
+   * How a built-in store treats its schema when it opens (`StoreOptions.migrate`): `expand` by
+   * default. A custom store keeps its own schema and ignores it.
+   */
+  readonly migrate?: SchemaMode;
 }
 
 /**
@@ -47,8 +53,8 @@ export async function storeSecrets(
 
 /**
  * The key provider `pathways.yaml`'s `encryption` names, ready to use: the built-in one over master
- * keys read now from their files, environment variables or secret providers, or a custom one a module builds
- * (`encryption: { provider: { module, options } }`). `undefined` for `encryption: none`.
+ * keys read now from their files, environment variables or secret providers, or a custom one a
+ * module builds (`encryption: { provider: { module, options } }`). `undefined` for `encryption: none`.
  *
  * @throws {ConfigError} when `encryption` is not set, or a master key cannot be read.
  * @throws {ExtensionLoadError} when a custom provider's module, factory or result is wrong.
@@ -95,9 +101,10 @@ export async function openRawStore(
   context: OpenStoreContext,
 ): Promise<MessageStore> {
   const { storage } = project;
-  if (storage.kind === "sqlite") return Store.open(storage, { env: context.env });
   if (storage.kind !== "module") {
-    return Store.open(storage, { env: await storeSecrets(project, context) });
+    const { migrate } = context;
+    const env = storage.kind === "sqlite" ? context.env : await storeSecrets(project, context);
+    return Store.open(storage, migrate === undefined ? { env } : { env, migrate });
   }
   return customStore(
     storage,

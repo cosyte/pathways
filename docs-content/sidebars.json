@@ -27,6 +27,7 @@
         "check-status-and-health",
         "inspect-replay-and-clear-messages",
         "set-message-retention",
+        "upgrade-pathways",
         "run-in-docker"
       ]
     },
