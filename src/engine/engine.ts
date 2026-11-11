@@ -203,15 +203,27 @@ export async function connectorsFor(
       break;
     case "http": {
       const { tls, token } = listenerSecurity(source, env, `${file}: source.http`);
+      const { response } = source;
       sourceConnector = new HttpSource({
         host: source.host,
         port: source.port,
-        path: source.path,
+        paths: source.paths,
+        methods: source.methods,
+        response:
+          response.kind === "fixed"
+            ? {
+                ...response,
+                headers: resolveHeaders({}, response.headers, env, `${file}: source.http.response`),
+              }
+            : response,
         maxBytes: source.maxBytes,
         tls,
         token,
         onRefused: (status) => {
           logger.warn({ event: "http-refused", channel: channel.name, status });
+        },
+        onUnreadable: (message, problem) => {
+          logger.warn({ event: "http-unreadable", channel: channel.name, message, problem });
         },
       });
       break;
