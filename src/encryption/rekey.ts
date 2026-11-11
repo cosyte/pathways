@@ -1,4 +1,11 @@
-import type { ContentStore, ContentTable } from "../storage/store.js";
+import type { MetaIndexConfig } from "../config/schema.js";
+import {
+  isMetaStore,
+  type ContentStore,
+  type ContentTable,
+  type MetaStore,
+} from "../storage/store.js";
+import { MetaIndexer, type MessageMeta, type MetaTag } from "./blind-index.js";
 import {
   decryptTextWithKeyId,
   decryptWithKeyId,
@@ -36,6 +43,12 @@ export interface RekeyCounts {
   readonly unreadable: number;
   /** Values the engine changed while rekey ran, left for the next run. */
   readonly changed: number;
+  /**
+   * Messages whose metadata index tags were derived again from their decrypted metadata, under the
+   * current key and the channel's `index:` block as it stands: tags under an older key, or for an
+   * index added, changed or removed since the message was stored.
+   */
+  readonly retagged: number;
 }
 
 /**
@@ -54,6 +67,11 @@ export interface RekeyOptions {
   readonly encryptPlaintext?: boolean;
   /** How many rows to read at a time. */
   readonly pageSize?: number;
+  /**
+   * Each channel's `index:` entries, by channel name. Each message's metadata tags are derived
+   * again to match them; without it, every tag is removed as the metadata is rewritten.
+   */
+  readonly indexes?: ReadonlyMap<string, readonly MetaIndexConfig[]> | undefined;
 }
 
 /**
@@ -110,7 +128,12 @@ export async function rekey(
     unencrypted: 0,
     unreadable: 0,
     changed: 0,
+    retagged: 0,
   };
+  if (isMetaStore(store)) {
+    const indexer = new MetaIndexer(keys, options.indexes ?? new Map());
+    await rekeyMeta(store, keys, indexer, { encryptPlaintext, pageSize }, counts);
+  }
   for (const table of TABLES) {
     let after = 0;
     for (;;) {
@@ -141,6 +164,84 @@ export async function rekey(
     }
   }
   return counts;
+}
+
+/**
+ * Re-encrypts each message's metadata under the current key, and derives its index tags again
+ * when they differ from what the current key and indexes give. A message whose metadata cannot be
+ * read keeps its tags.
+ */
+async function rekeyMeta(
+  store: MetaStore,
+  keys: KeyProvider,
+  indexer: MetaIndexer,
+  options: { readonly encryptPlaintext: boolean; readonly pageSize: number },
+  counts: Record<keyof RekeyCounts, number>,
+): Promise<void> {
+  let after = 0;
+  for (;;) {
+    const rows = await store.storedMeta(after, options.pageSize);
+    if (rows.length === 0) break;
+    for (const row of rows) {
+      after = row.id;
+      const opened = await openMeta(row.meta, keys, options.encryptPlaintext);
+      if (opened.kind === "unreadable") {
+        counts.unreadable += 1;
+        continue;
+      }
+      const tags = await indexer.tagsFor(row.channel, JSON.parse(opened.text) as MessageMeta);
+      const retag = !sameTags(row.tags, tags);
+      const rewrite = "value" in opened;
+      if (!rewrite && !retag) {
+        counts[opened.kind] += 1;
+        continue;
+      }
+      const replaced = await store.replaceMeta(row, {
+        meta: rewrite ? opened.value : row.meta,
+        tags,
+      });
+      counts[replaced ? opened.kind : "changed"] += 1;
+      if (replaced && retag) counts.retagged += 1;
+    }
+  }
+}
+
+/** Stored metadata, decrypted, with what rekey does with its value. */
+type OpenedMeta =
+  | { readonly kind: "unreadable" }
+  | { readonly kind: "current" | "unencrypted"; readonly text: string }
+  | { readonly kind: "reencrypted" | "encrypted"; readonly text: string; readonly value: string };
+
+async function openMeta(
+  value: string,
+  keys: KeyProvider,
+  encryptPlaintext: boolean,
+): Promise<OpenedMeta> {
+  if (!isEncryptedText(value)) {
+    return encryptPlaintext
+      ? { kind: "encrypted", text: value, value: await encryptText(value, keys) }
+      : { kind: "unencrypted", text: value };
+  }
+  let opened: { text: string; keyId: string };
+  try {
+    opened = await decryptTextWithKeyId(value, keys);
+  } catch (error) {
+    if (error instanceof EncryptionError) return { kind: "unreadable" };
+    throw error;
+  }
+  if (opened.keyId === keys.currentKeyId) return { kind: "current", text: opened.text };
+  return {
+    kind: "reencrypted",
+    text: opened.text,
+    value: await encryptText(opened.text, keys),
+  };
+}
+
+/** Whether two sets of tags are the same, in any order. */
+function sameTags(stored: readonly MetaTag[], wanted: readonly MetaTag[]): boolean {
+  const key = (tag: MetaTag): string => `${tag.index}\0${tag.keyId}\0${tag.tag}`;
+  const have = new Set(stored.map(key));
+  return stored.length === wanted.length && wanted.every((tag) => have.has(key(tag)));
 }
 
 async function rekeyBody(

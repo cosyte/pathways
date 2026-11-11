@@ -7,6 +7,7 @@ import type { z } from "zod";
 import { normalisePath } from "../connectors/http-path.js";
 import { secretSourceOf, secretUses, type SecretSourceYaml } from "../secrets/sources.js";
 import { referencesIn, resolvingEnv, variableAt, type EnvReference } from "./env-ref.js";
+import { DEFAULT_INDEX_BITS, isLowEntropyKey } from "./meta-index.js";
 import {
   BUILT_IN_SECRET_PROVIDERS,
   channelSchema,
@@ -120,6 +121,7 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
 
   const projectFile = join(projectRoot, "pathways.yaml");
   const environment: EnvReference[] = [];
+  const warnings: string[] = [];
   let project: ProjectYaml = {};
   let projectEnv: ReadonlyMap<string, string> = new Map();
   if (await exists(projectFile)) {
@@ -288,6 +290,23 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
       continue;
     }
     environment.push(...references);
+    const indexes = (channel.index ?? []).map((entry) =>
+      typeof entry === "string"
+        ? { key: entry, bits: DEFAULT_INDEX_BITS }
+        : { key: entry.key, bits: entry.bits ?? DEFAULT_INDEX_BITS },
+    );
+    for (const [index, { key }] of indexes.entries()) {
+      if (encryption?.kind === "none") {
+        problems.push(
+          `${show(file)}: index.${index}: an index needs encryption keys, and pathways.yaml sets encryption: none`,
+        );
+      }
+      if (isLowEntropyKey(key)) {
+        warnings.push(
+          `${show(file)}: index.${index}: ${key} has few or guessable values, so the spread of its tags in the database shows how its values are spread; index a key whose values are many and hard to guess, such as an MRN or an accession number`,
+        );
+      }
+    }
     channels.push({
       name: folder,
       dir: channelDir,
@@ -299,6 +318,7 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
       hooks: channelHooks,
       // The schema checked each value is JSON.
       config: (channel.config ?? {}) as TransformConfigBlock,
+      ...(indexes.length > 0 ? { indexes } : {}),
     });
   }
 
@@ -334,6 +354,7 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
     secrets,
     channels,
     environment,
+    ...(warnings.length > 0 ? { warnings } : {}),
   };
 }
 

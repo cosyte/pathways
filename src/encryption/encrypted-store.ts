@@ -1,4 +1,5 @@
 import type {
+  MessageState,
   AuditEntry,
   AuditInput,
   AuditQuery,
@@ -38,6 +39,118 @@ import {
   isEncryptedText,
 } from "./envelope.js";
 import type { KeyProvider } from "./keys.js";
+import type { MetaIndexConfig } from "../config/schema.js";
+import { MetaIndexer, metaText, type MessageMeta, type MetaCondition } from "./blind-index.js";
+
+/**
+ * A metadata search: the messages of `channel` whose metadata holds every `where` pair, newest
+ * first, with the other filters of a listing. Each key must be one of the channel's indexes.
+ *
+ * @example
+ * ```ts
+ * const search: MetaSearch = { channel: "adt", where: [["mrn", "SYN-000123"]], limit: 50 };
+ * ```
+ */
+export interface MetaSearch {
+  readonly channel: string;
+  /** Each pair a `ctx.meta` key and the value it must hold, compared as text. */
+  readonly where: readonly (readonly [string, string])[];
+  readonly state?: MessageState | undefined;
+  /** Received at or after this time (ISO 8601, UTC). */
+  readonly since?: string | undefined;
+  /** Received before this time (ISO 8601, UTC). */
+  readonly until?: string | undefined;
+  /** Only ids below this one: the `next` of the page before. */
+  readonly before?: number | undefined;
+  readonly limit: number;
+  /**
+   * The most rows the page reads and decrypts: {@link META_SEARCH_MAX_CANDIDATES} when not given.
+   * A page that reaches it ends there, with `next` set to go on. A whole number of 1 or more:
+   * anything else is refused with a `RangeError`.
+   */
+  readonly maxCandidates?: number | undefined;
+}
+
+/**
+ * One page of a metadata search. `candidates` counts the rows whose tags matched and whose metadata
+ * was decrypted to confirm them, the matches among them; `next` continues the search.
+ *
+ * @example
+ * ```ts
+ * const { items, next, candidates }: MetaSearchPage = await store.findByMeta(search);
+ * ```
+ */
+export interface MetaSearchPage extends Page<MessageSummary> {
+  readonly candidates: number;
+}
+
+/**
+ * The most rows one page of a metadata search reads and decrypts. A page that reaches it ends
+ * early, with `next` set to go on from where it stopped, so a search is never unbounded.
+ *
+ * @example
+ * ```ts
+ * const most = META_SEARCH_MAX_CANDIDATES; // 10,000
+ * ```
+ */
+export const META_SEARCH_MAX_CANDIDATES = 10_000;
+
+/** How many candidate rows a metadata search reads at a time. */
+const META_SEARCH_BATCH = 200;
+
+/**
+ * A metadata search that cannot run: `not-indexed` when a key is not one of the channel's indexes
+ * (`key` names it), `unsupported` when the store underneath cannot be searched by tag.
+ *
+ * @example
+ * ```ts
+ * if (error instanceof MetaSearchError && error.reason === "not-indexed") console.error(error.key);
+ * ```
+ */
+export class MetaSearchError extends Error {
+  readonly reason: "not-indexed" | "unsupported";
+  readonly key: string | undefined;
+
+  /**
+   * @param reason Why the search cannot run.
+   * @param key The key that is not indexed, for `not-indexed`.
+   */
+  constructor(reason: "not-indexed" | "unsupported", key?: string) {
+    super(
+      reason === "not-indexed"
+        ? `the channel has no index on the ctx.meta key ${String(key)}`
+        : "this store cannot be searched by metadata",
+    );
+    this.name = "MetaSearchError";
+    this.reason = reason;
+    this.key = key;
+  }
+}
+
+/**
+ * The search method a store opened by `openStore` has: {@link EncryptedStore} and
+ * {@link UnencryptedStore} both.
+ *
+ * @example
+ * ```ts
+ * if (canSearchMeta(store)) await store.findByMeta(search);
+ * ```
+ */
+export interface MetaSearchStore {
+  findByMeta(search: MetaSearch): Promise<MetaSearchPage>;
+}
+
+/**
+ * Whether `store` can run a metadata search.
+ *
+ * @example
+ * ```ts
+ * if (!canSearchMeta(store)) throw new Error("no metadata search");
+ * ```
+ */
+export function canSearchMeta(store: object): store is MetaSearchStore {
+  return typeof (store as Partial<MetaSearchStore>).findByMeta === "function";
+}
 
 /** How a wrapper turns what the engine hands it into what storage keeps, and back. */
 interface Codec {
@@ -58,9 +171,11 @@ interface Codec {
  * through a codec on their way in and out, and everything else straight through. A method added to
  * {@link MessageStore} that carries a body or an error text belongs here too, through the codec.
  */
-abstract class CodecStore implements MessageStore {
+abstract class CodecStore implements MessageStore, MetaSearchStore {
   readonly #inner: MessageStore;
   readonly #codec: Codec;
+  /** Computes the index tags of each message's metadata; undefined when nothing is indexed. */
+  readonly #indexer: MetaIndexer | undefined;
   /** Whether the store underneath keeps no body it is handed, and reads each into a buffer of its own. */
   readonly #innerCopies: boolean;
 
@@ -84,9 +199,10 @@ abstract class CodecStore implements MessageStore {
   /** Straight through, present only when the store underneath has it. */
   readonly markDryRun?: (deliveryId: number, epoch?: number) => Promise<void>;
 
-  protected constructor(inner: MessageStore, codec: Codec) {
+  protected constructor(inner: MessageStore, codec: Codec, indexer?: MetaIndexer) {
     this.#inner = inner;
     this.#codec = codec;
+    this.#indexer = indexer;
     const leases = leaseStore(inner);
     if (leases !== undefined) {
       this.acquireLease = leases.acquireLease;
@@ -132,19 +248,98 @@ abstract class CodecStore implements MessageStore {
     return body;
   }
 
-  /** Stores an incoming message, its body and any failure reason passed through the codec. */
+  /**
+   * Stores an incoming message, its body, any failure reason and its metadata passed through the
+   * codec, and its metadata's index tags beside it.
+   */
   async receive(
     channel: string,
     body: Uint8Array,
     options: StoreReceiveOptions = {},
   ): Promise<ReceivedMessage> {
-    const { failure } = options;
+    const { failure, meta } = options;
     return this.#stored([body], async ([stored]) =>
       this.#inner.receive(channel, stored as Uint8Array, {
         ...options,
         failure: failure === undefined ? undefined : await this.#codec.storeText(failure),
+        ...(meta === undefined
+          ? {}
+          : {
+              meta: undefined,
+              storedMeta: await this.#codec.storeText(JSON.stringify(meta)),
+              metaTags: (await this.#indexer?.tagsFor(channel, meta)) ?? [],
+            }),
       }),
     );
+  }
+
+  /**
+   * The messages of a channel whose metadata holds every pair of `search.where`, newest first. Each
+   * key must be one of the channel's indexes: the search looks up the value's tag under every master
+   * key id, then decrypts each row it finds and keeps only those that hold the value, since a
+   * truncated tag is shared by many values. It reads at most {@link META_SEARCH_MAX_CANDIDATES} rows
+   * a page; a page can hold fewer than `limit` messages and still have a `next`.
+   *
+   * @throws {MetaSearchError} when a key is not indexed, or the store underneath cannot be searched.
+   * @throws {RangeError} when `maxCandidates` is below 1 or not a whole number.
+   */
+  async findByMeta(search: MetaSearch): Promise<MetaSearchPage> {
+    const { channel, where, state, since, until, limit } = search;
+    const most = search.maxCandidates ?? META_SEARCH_MAX_CANDIDATES;
+    // A cap below one would read no row and never end the page.
+    if (!Number.isInteger(most) || most < 1) {
+      throw new RangeError("maxCandidates must be a whole number of 1 or more");
+    }
+    const batch = Math.min(META_SEARCH_BATCH, most);
+    const conditions: MetaCondition[] = [];
+    for (const [key, value] of where) {
+      const condition = await this.#indexer?.condition(channel, key, value);
+      if (condition === undefined) throw new MetaSearchError("not-indexed", key);
+      conditions.push(condition);
+    }
+    const inner = this.#inner;
+    if (typeof inner.metaCandidates !== "function") throw new MetaSearchError("unsupported");
+    const confirmed: number[] = [];
+    let candidates = 0;
+    let before = search.before;
+    let next: number | undefined;
+    scan: for (;;) {
+      const rows = await inner.metaCandidates({
+        channel,
+        conditions,
+        state,
+        since,
+        until,
+        before,
+        limit: batch,
+      });
+      for (const row of rows) {
+        if (confirmed.length === limit) {
+          next = confirmed.at(-1);
+          break scan;
+        }
+        if (candidates === most) {
+          next = before;
+          break scan;
+        }
+        candidates += 1;
+        before = row.id;
+        if (await this.#holds(row.meta, where)) confirmed.push(row.id);
+      }
+      if (rows.length < batch) break;
+    }
+    const page = await inner.listMessages({ ids: confirmed, limit: Math.max(confirmed.length, 1) });
+    return { items: page.items, next, candidates };
+  }
+
+  /** Whether stored metadata, read back through the codec, holds every pair. */
+  async #holds(stored: string, where: MetaSearch["where"]): Promise<boolean> {
+    // Stored by receive() from a MessageMeta: flat values only.
+    const meta = JSON.parse(await this.#codec.readText(stored)) as MessageMeta;
+    return where.every(([key, value]) => {
+      const held = meta[key];
+      return held !== undefined && metaText(held) === value;
+    });
   }
 
   /** The oldest message of `channel` waiting for its transform, its body read back. */
@@ -342,15 +537,26 @@ export class EncryptedStore extends CodecStore {
   /**
    * @param inner The store that keeps the encrypted values.
    * @param keys Wraps each value's data key under the current master key, and unwraps it again.
+   * @param indexes Each channel's `index:` entries, by channel name: their keys of each message's
+   *   metadata are stored as index tags too.
+   * @throws {ConfigError} when a channel has an index and `keys` cannot derive index keys.
    */
-  constructor(inner: MessageStore, keys: KeyProvider) {
-    super(inner, {
-      storeBody: (body) => encrypt(body, keys),
-      readBody: (stored) => decrypt(stored, keys),
-      storeText: (text) => encryptText(text, keys),
-      readText: (stored) => decryptText(stored, keys),
-      copies: true,
-    });
+  constructor(
+    inner: MessageStore,
+    keys: KeyProvider,
+    indexes: ReadonlyMap<string, readonly MetaIndexConfig[]> = new Map(),
+  ) {
+    super(
+      inner,
+      {
+        storeBody: (body) => encrypt(body, keys),
+        readBody: (stored) => decrypt(stored, keys),
+        storeText: (text) => encryptText(text, keys),
+        readText: (stored) => decryptText(stored, keys),
+        copies: true,
+      },
+      new MetaIndexer(keys, indexes),
+    );
   }
 }
 

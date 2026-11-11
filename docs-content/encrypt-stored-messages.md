@@ -102,7 +102,9 @@ key's id.
    it meanwhile, and counts any it skipped under "changed while rekey ran". It exits 0 once every value
    is under the current key, and 1 while any is not; run it again until it exits 0. On SQLite it then
    empties the write-ahead log into the database file; if another connection is still in the middle
-   of a read after five seconds, it exits 1 and says so, and you run it again.
+   of a read after five seconds, it exits 1 and says so, and you run it again. Rekey also
+   re-encrypts each message's metadata and derives its
+   [index tags](./search-messages-by-metadata.md#rotate-the-key) again under the new key.
 
 4. Remove the old key from the list: on SQLite, once rekey exits 0; on a database server, only once
    the server no longer keeps earlier versions of the rewritten rows, as below. On either, keep the
@@ -161,7 +163,10 @@ encryption:
 The provider says which master key is current (`currentKeyId`), wraps each new 32-byte data key under
 it (`wrapKey`), and unwraps a data key under the key whose id is stored beside it (`unwrapKey`).
 Rotation is the provider's to offer: it keeps unwrapping under its older keys while it wraps under the
-current one, and `pathways rekey` works with it as with the built-in keys.
+current one, and `pathways rekey` works with it as with the built-in keys. A channel with an
+[`index:` block](./search-messages-by-metadata.md) also needs the provider to derive a key for each
+index from a master key (`deriveIndexKey`, with HKDF-SHA-256, and `keyIds`, the ids it holds); a
+provider whose keys never leave the service may not, and `pathways start` then refuses the block.
 [`KeyProviderFactory`](./api/README.md#keyproviderfactory) is the factory's type.
 
 ## Related
