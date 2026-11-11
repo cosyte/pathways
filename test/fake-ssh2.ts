@@ -312,7 +312,10 @@ class FakeSftp {
   ext_openssh_fsync(handle: Buffer, cb: Callback): void {
     this.request("fsync", cb, (done) => {
       fsync(handle.readUInt32BE(), (error) => {
-        done(error);
+        // OpenSSH's server runs on Linux and the BSDs, where fsync takes a descriptor opened to read.
+        // Windows' FlushFileBuffers refuses one, so the stand-in, backed by this machine's files,
+        // answers there as the real server would.
+        done(process.platform === "win32" ? null : error);
       });
     });
   }
