@@ -1485,6 +1485,45 @@ export const projectSchema = z
       "Settings for a whole Pathways project. This schema checks a subset of what pathways start checks: run pathways validate for the rest.",
   });
 
+/** The longest `regex:` a file source's `include` or `exclude` takes, in characters. */
+export const MAX_REGEX_LENGTH = 256;
+
+/** Whether `text` is a regular expression JavaScript compiles with the `u` flag. */
+function compiles(text: string): boolean {
+  try {
+    new RegExp(text, "u");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** A file source's `include` or `exclude`: globs, or `{ regex }` for a regular expression. */
+const pathPatterns = (description: string) =>
+  z
+    .array(
+      z.union([
+        envable(
+          z.string().min(1).meta({
+            description: "A glob, as Node's path.matchesGlob reads it, matched on the path with /.",
+          }),
+        ),
+        z.strictObject({
+          regex: envable(
+            z
+              .string()
+              .min(1)
+              .max(MAX_REGEX_LENGTH)
+              .refine(compiles, "a regular expression JavaScript compiles with the u flag")
+              .meta({
+                description: `A regular expression, at most ${String(MAX_REGEX_LENGTH)} characters, tested on the path with /.`,
+              }),
+          ),
+        }),
+      ]),
+    )
+    .meta({ description });
+
 /** A channel's `source:` block: exactly one kind. */
 const source = restate(
   z
@@ -1501,6 +1540,77 @@ const source = restate(
             z.boolean().meta({
               description:
                 "Move each stored file into processed/ instead of deleting it. Those copies are plaintext. Default false.",
+            }),
+          ).optional(),
+          include: pathPatterns(
+            "Take only files whose path from dir matches one of these: a glob such as **/*.hl7, or { regex }. Default: every file.",
+          ).optional(),
+          exclude: pathPatterns(
+            "Leave files whose path from dir matches one of these: a glob, or { regex }. Default: none.",
+          ).optional(),
+          recursive: envable(
+            z.boolean().meta({
+              description:
+                "Read the subfolders of dir too, never .claimed, processed or errorDir. Symbolic links are never followed. Default false.",
+            }),
+          ).optional(),
+          ignoreDot: envable(
+            z.boolean().meta({
+              description:
+                "Leave files and folders whose name starts with a dot. Default true; false reads them.",
+            }),
+          ).optional(),
+          minSize: envable(
+            z.union([z.literal(0), bytes]).meta({
+              description:
+                "The smallest file taken: a size such as 1B or 1KB, or a number of bytes. A smaller file is left. Default 1: an empty file is left.",
+            }),
+          ).optional(),
+          maxSize: bytes
+            .meta({
+              description:
+                "The largest file taken: a size such as 64KB or 10MB, or a number of bytes. A larger file moves into errorDir, or stays. Default: no limit.",
+            })
+            .optional(),
+          maxPerPoll: envable(
+            z
+              .number()
+              .int()
+              .positive()
+              .meta({ description: "The most files claimed in one pass. Default: no limit." }),
+          ).optional(),
+          sortBy: envable(
+            z.enum(["name", "mtime"]).meta({
+              description:
+                "The order files are taken in: name, by path from dir (the default), or mtime, oldest change first.",
+            }),
+          ).optional(),
+          stable: envable(
+            z.boolean().meta({
+              description:
+                "Take a file only once two passes in a row find the same size and change time, as well as minAge. Default false.",
+            }),
+          ).optional(),
+          doneFile: envable(
+            z
+              .string()
+              .min(1)
+              .regex(/^[^/\\\0]+$/, "a suffix such as .done, with no / or \\")
+              .meta({
+                description:
+                  "A suffix such as .done: a file is taken only once a file of its name plus the suffix is there, and that marker is deleted once the file is claimed. Default: none.",
+              }),
+          ).optional(),
+          errorDir: path
+            .meta({
+              description:
+                "Where a file larger than maxSize, or one that fails to open readTries passes in a row, is moved as it arrived, relative to this file. Never a message that fails. Default: none, so it stays.",
+            })
+            .optional(),
+          readTries: envable(
+            z.number().int().positive().meta({
+              description:
+                "How many passes in a row a file fails to open before it moves into errorDir. Default 3.",
             }),
           ).optional(),
         })
@@ -1775,6 +1885,9 @@ export const DEFAULT_LEASE_TTL_MS = 15_000;
 /** How long a file must sit unchanged in a file source before it is read, by default. */
 export const DEFAULT_MIN_AGE_MS = 1_000;
 
+/** How many passes in a row a file source fails to open a file before it sets it aside, by default. */
+export const DEFAULT_READ_TRIES = 3;
+
 /** Where the SQLite database lives by default, relative to the project root. */
 export const DEFAULT_DATABASE_FILE = ".pathways/pathways.db";
 
@@ -1878,7 +1991,37 @@ export interface FileSource {
    * encrypted store, instead of being deleted. Off unless the channel sets `keepProcessed: true`.
    */
   readonly keepProcessed: boolean;
+  /** Globs and `{ regex }` patterns a file's path from `dir` must match one of. Empty: every file. */
+  readonly include: readonly PathPattern[];
+  /** Globs and `{ regex }` patterns a file's path from `dir` must match none of. */
+  readonly exclude: readonly PathPattern[];
+  /** Whether subfolders are read too. */
+  readonly recursive: boolean;
+  /** Whether files and folders whose name starts with a dot are left. */
+  readonly ignoreDot: boolean;
+  /** The smallest file taken, in bytes. */
+  readonly minSize: number;
+  /** The largest file taken, in bytes, or `undefined` for no limit. */
+  readonly maxSize: number | undefined;
+  /** The most files claimed in one pass, or `undefined` for no limit. */
+  readonly maxPerPoll: number | undefined;
+  /** The order files are claimed in. */
+  readonly sortBy: "name" | "mtime";
+  /** Whether a file must be found unchanged on two passes in a row. */
+  readonly stable: boolean;
+  /** The suffix of the marker file a file waits for, or `undefined`. */
+  readonly doneFile: string | undefined;
+  /** Where a file that cannot be taken is moved, resolved to an absolute path, or `undefined`. */
+  readonly errorDir: string | undefined;
+  /** How many passes in a row a file fails to open before it moves into `errorDir`. */
+  readonly readTries: number;
 }
+
+/**
+ * A pattern a file source matches on a file's path from its folder, written with `/`: a glob as
+ * Node's `path.matchesGlob` reads it, or a regular expression.
+ */
+export type PathPattern = { readonly glob: string } | { readonly regex: string };
 
 /** A file destination, with its folder resolved to an absolute path. */
 export interface FileDestination {
