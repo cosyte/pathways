@@ -386,6 +386,7 @@ const CURRENT_SCHEMA = [
   `CREATE INDEX "messages_by_channel_idempotency_key" on "messages" ("channel", "idempotency_key", "id")`,
   `CREATE INDEX "messages_by_channel_status" on "messages" ("channel", "status", "id")`,
   `CREATE TABLE "audit_log" ("id" integer primary key autoincrement, "at" text not null, "actor" text not null, "action" text not null, "outcome" text not null, "channel" text, "message_id" integer, "detail" text)`,
+  `CREATE TABLE "channel_states" ("channel" text primary key, "state" text not null, "changed_at" integer not null)`,
   `CREATE TABLE "deliveries" ("id" integer primary key autoincrement, "message_id" integer not null references "messages" ("id"), "channel" text not null, "destination" integer not null, "seq" integer not null, "body" blob not null, "status" text not null, "attempts" integer not null, "next_attempt_at" integer not null, "last_error" text, "delivered_at" text, "generation" integer default 0 not null, "sending_at" integer, "sending_attempt" integer, "interrupted_attempt" integer)`,
   `CREATE TABLE "kysely_migration" ("name" varchar(255) not null primary key, "timestamp" varchar(255) not null)`,
   `CREATE TABLE "kysely_migration_lock" ("id" varchar(255) not null primary key, "is_locked" integer default 0 not null)`,
@@ -462,6 +463,7 @@ describe("Store on SQLite files the first slice made", () => {
       "0005-send-markers",
       "0006-leases",
       "0007-schema-info",
+      "0009-channel-states",
     ]);
     db.close();
   });

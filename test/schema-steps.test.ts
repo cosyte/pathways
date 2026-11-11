@@ -57,8 +57,8 @@ function laterSteps(database: TestDatabase, extra: Record<string, SchemaStep> = 
   return recordedSteps(
     {
       ...migrations(database.kind),
-      "0008-contract": { tag: "contract", minEngine: "2.0.0", up: table("fake_contract") },
-      "0009-expand": { tag: "expand", up: table("fake_expand") },
+      "0010-contract": { tag: "contract", minEngine: "2.0.0", up: table("fake_contract") },
+      "0011-expand": { tag: "expand", up: table("fake_expand") },
       ...extra,
     },
     "2.0.0",
@@ -100,21 +100,21 @@ for (const database of TEST_DATABASES) {
       const opened = await openSchema(db, database.kind, steps, "2.0.0", "expand");
       expect(opened.error).toBeUndefined();
       const state = opened.state;
-      expect(names(state?.pending ?? [])).toEqual(["0008-contract"]);
-      expect(state).toMatchObject({ generation: 9, minEngine: "0.0.1", changedBy: "2.0.0" });
-      expect(state?.applied.at(-1)).toEqual({ name: "0009-expand", generation: 9, tag: "expand" });
+      expect(names(state?.pending ?? [])).toEqual(["0010-contract"]);
+      expect(state).toMatchObject({ generation: 10, minEngine: "0.0.1", changedBy: "2.0.0" });
+      expect(state?.applied.at(-1)).toEqual({ name: "0011-expand", generation: 10, tag: "expand" });
 
       // Without --contract, migrate leaves it waiting; a dry run with it says it would apply it.
       const plain = await migrateSchema(db, database.kind, steps, "2.0.0");
       expect(plain).toMatchObject({ steps: [], dryRun: false });
-      expect(names(plain.waiting)).toEqual(["0008-contract"]);
+      expect(names(plain.waiting)).toEqual(["0010-contract"]);
       const dry = await migrateSchema(db, database.kind, steps, "2.0.0", {
         contract: true,
         dryRun: true,
       });
-      expect(dry.steps).toEqual([{ name: "0008-contract", generation: 8, tag: "contract" }]);
+      expect(dry.steps).toEqual([{ name: "0010-contract", generation: 9, tag: "contract" }]);
       expect(dry.after).toBe(dry.before);
-      expect(names((await readSchema(db, steps)).pending)).toEqual(["0008-contract"]);
+      expect(names((await readSchema(db, steps)).pending)).toEqual(["0010-contract"]);
 
       // Inside the rollback window, counted from the last change, it is refused.
       const window = { contract: true, rollbackWindowMs: 2 * HOUR };
@@ -126,14 +126,14 @@ for (const database of TEST_DATABASES) {
         reason: "rollback-window",
         until: new Date(T0.getTime() + 2 * HOUR).toISOString(),
       });
-      expect(names((await readSchema(db, steps)).pending)).toEqual(["0008-contract"]);
+      expect(names((await readSchema(db, steps)).pending)).toEqual(["0010-contract"]);
 
       const done = await migrateSchema(db, database.kind, steps, "2.0.0", {
         ...window,
         now: new Date(T0.getTime() + 3 * HOUR),
       });
-      expect(names(done.steps)).toEqual(["0008-contract"]);
-      expect(done.after).toMatchObject({ generation: 9, minEngine: "2.0.0", pending: [] });
+      expect(names(done.steps)).toEqual(["0010-contract"]);
+      expect(done.after).toMatchObject({ generation: 10, minEngine: "2.0.0", pending: [] });
       expect(done.refused).toBeUndefined();
 
       // Nothing left: a second run applies nothing.
@@ -150,7 +150,7 @@ for (const database of TEST_DATABASES) {
       });
       expect(report.before.changedAt).toBeUndefined();
       expect(report.refused).toBeUndefined();
-      expect(names(report.steps)).toContain("0008-contract");
+      expect(names(report.steps)).toContain("0010-contract");
     });
 
     it("refuses an engine older than a contract step allows, at open and in migrate, naming both versions", async () => {
@@ -170,9 +170,9 @@ for (const database of TEST_DATABASES) {
           reason: "engine-too-old",
           engine: "1.0.0",
           schemaVersion: "2.0.0",
-          generation: 9,
+          generation: 10,
           message:
-            "the database schema is generation 9 and needs Pathways 2.0.0 or later; this is Pathways 1.0.0",
+            "the database schema is generation 10 and needs Pathways 2.0.0 or later; this is Pathways 1.0.0",
         });
       }
       await expect(migrateSchema(db, database.kind, own, "1.0.0")).rejects.toThrow(
@@ -180,7 +180,7 @@ for (const database of TEST_DATABASES) {
       );
       // Inspecting refuses nothing: it says what the schema is.
       const inspected = await openSchema(db, database.kind, own, "1.0.0", "inspect");
-      expect(inspected.state?.unknown).toEqual(["0008-contract", "0009-expand"]);
+      expect(inspected.state?.unknown).toEqual(["0010-contract", "0011-expand"]);
     });
 
     it("leaves a schema a newer Pathways moved forward as it is when asked to migrate", async () => {
@@ -189,7 +189,7 @@ for (const database of TEST_DATABASES) {
       const own = recordedSteps(migrations(database.kind), "1.0.0", () => T0);
       const report = await migrateSchema(db, database.kind, own, "1.0.0", { contract: true });
       expect(report).toMatchObject({ steps: [], waiting: [] });
-      expect(report.before.unknown).toEqual(["0009-expand"]);
+      expect(report.before.unknown).toEqual(["0011-expand"]);
     });
 
     it("reports a step that fails, and records none of it", async () => {

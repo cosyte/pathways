@@ -2,6 +2,7 @@ import type {
   AuditEntry,
   AuditInput,
   AuditQuery,
+  ChannelRunState,
   ClearResult,
   DeliveryCounts,
   ExpireResult,
@@ -25,7 +26,7 @@ import type {
   StoredMessage,
   StoreReceiveOptions,
 } from "../storage/store.js";
-import { leaseStore } from "../storage/store.js";
+import { channelStateStore, leaseStore } from "../storage/store.js";
 import { copiesBodies, markCopiesBodies, release } from "../storage/ownership.js";
 import {
   decrypt,
@@ -72,6 +73,9 @@ abstract class CodecStore implements MessageStore {
   readonly renewLease?: (name: string, epoch: number, ttlMs: number) => Promise<boolean>;
   readonly releaseLease?: (name: string, epoch?: number) => Promise<boolean>;
   readonly leaseHolder?: (name: string) => Promise<LeaseHolder | undefined>;
+  /** The channel state methods, straight through, present only when the store underneath has both. */
+  readonly channelStates?: () => Promise<Record<string, ChannelRunState>>;
+  readonly setChannelState?: (channel: string, state: ChannelRunState) => Promise<void>;
   /** Straight through, present only when the store underneath has it. */
   readonly markDryRun?: (deliveryId: number, epoch?: number) => Promise<void>;
 
@@ -84,6 +88,11 @@ abstract class CodecStore implements MessageStore {
       this.renewLease = leases.renewLease;
       this.releaseLease = leases.releaseLease;
       this.leaseHolder = leases.leaseHolder;
+    }
+    const states = channelStateStore(inner);
+    if (states !== undefined) {
+      this.channelStates = states.channelStates;
+      this.setChannelState = states.setChannelState;
     }
     if (inner.markDryRun !== undefined) this.markDryRun = inner.markDryRun.bind(inner);
     this.#innerCopies = copiesBodies(inner);

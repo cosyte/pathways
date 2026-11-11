@@ -146,6 +146,13 @@ The `leases` table comes with migration `0006-leases`, which only adds the table
 while deliveries are in flight, and an older Pathways never reads it. It has no rollback step; to
 remove it, stop every engine and drop the table.
 
+The `channel_states` table, migration `0009-channel-states`, holds each channel an operator paused or
+stopped (see [pause, stop and reload a channel](./pause-stop-and-reload-a-channel.md)); a channel
+with no row runs. It too only adds a table, and has no rollback step: dropping it, with every engine
+stopped, sets every channel running again. A custom store may implement `channelStates` and
+`setChannelState`; one without them keeps a channel's state in the engine only, and a restart
+forgets it.
+
 If the database becomes unreachable while the engine runs, the engine stops with exit code 1 and the
 driver's error code, for a supervisor (systemd, Docker, Kubernetes) to restart it. Nothing is lost: a
 message is acknowledged only once it is stored, and a delivery is recorded only once it is done.
@@ -187,7 +194,7 @@ With `pathways start --no-migrate`, Pathways applies nothing and refuses a schem
 step it needs, for a database that `pathways migrate` keeps up to date:
 
 ```text
-pathways: the database schema is generation 4, last changed by Pathways 0.0.1; this is Pathways 0.0.2, which needs generation 7. Run pathways migrate first, or start without --no-migrate.
+pathways: the database schema is generation 4, last changed by Pathways 0.0.1; this is Pathways 0.0.2, which needs generation 8. Run pathways migrate first, or start without --no-migrate.
 ```
 
 The migration lock is the database's own, taken through Kysely's migrator: a PostgreSQL advisory
