@@ -41,7 +41,12 @@ trustPolicyExclude:
   # later chokidar release is graded again.
   - "chokidar@4.0.3"
 
-# better-sqlite3 is a native addon: its install script fetches (or builds) the binary for this Node.
-# pnpm 10 runs no dependency's install script unless it is named here.
-onlyBuiltDependencies:
+# better-sqlite3 is a native addon that carries its binaries inside the package, one per system
+# (prebuilds/), so its install script is not run. That script only runs node-gyp to confirm a binary
+# is there, and node-gyp needs Python everywhere and Visual Studio on Windows to do it: on the
+# windows-latest runner, measured 2026-11-11, pnpm's node-gyp 11.5.0 could not read the version of
+# the Visual Studio 18 there and failed the install. pnpm 10 runs no dependency's install script
+# unless it is named in onlyBuiltDependencies; naming it here says it is skipped on purpose. The
+# Docker image installs the same way (--ignore-scripts).
+ignoredBuiltDependencies:
   - better-sqlite3

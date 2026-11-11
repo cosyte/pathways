@@ -9,6 +9,7 @@
 // THE PARSERS LOAD ON FIRST USE. Each `@cosyte/*` library costs a worker time and memory to load, and
 // a channel reads one format, so a worker loads the parser for its own format when it starts and any
 // other library only when a transform hands back that library's model.
+import { realpathSync } from "node:fs";
 import { isMainThread, parentPort, workerData } from "node:worker_threads";
 import { pathToFileURL } from "node:url";
 
@@ -522,15 +523,26 @@ export function summarize(error: unknown, transformFile?: string): FailureSummar
   };
 }
 
-/** `file:line:column` of the first stack frame inside the transform module, if there is one. */
+/**
+ * `file:line:column` of the first stack frame inside the transform module, if there is one. Node
+ * loads a module from its real path, so a frame names that path when the configured one runs through
+ * a link: macOS's temporary folder (`/var` is `/private/var`), or a project reached through a link.
+ * So a frame matches the configured path or the real one, as a path or a file URL.
+ */
 function locate(error: unknown, transformFile: string): string | undefined {
   if (!(error instanceof Error) || error.stack === undefined) return undefined;
-  const href = pathToFileURL(transformFile).href;
+  const names = new Set([transformFile, pathToFileURL(transformFile).href]);
+  try {
+    const real = realpathSync(transformFile);
+    names.add(real).add(pathToFileURL(real).href);
+  } catch {
+    // The file is gone since it loaded: the configured path is all there is to match.
+  }
   for (const line of error.stack.split("\n")) {
     const match = /\(?((?:file:\/\/)?[^\s()]+):(\d+):(\d+)\)?\s*$/.exec(line.trim());
     if (match === null) continue;
     const [, file, row, column] = match;
-    if (file === href || file === transformFile) {
+    if (names.has(String(file))) {
       /* v8 ignore next -- split returns at least one piece, so pop() always finds one */
       const name = transformFile.split(/[\\/]/).pop() ?? transformFile;
       return `${name}:${row}:${column}`;
