@@ -28,7 +28,10 @@ codes and times, never a message's content, so a hook can send them anywhere.
 | `source-up`           | a source that was down is listening again                                         |
 | `audit`               | an audit log entry was stored (engine-wide hooks only)                            |
 
-[`LifecycleEvent`](./api/README.md#lifecycleevent) in the reference lists each event's fields.
+[`LifecycleEvent`](./api/README.md#lifecycleevent) in the reference lists each event's fields. A
+delivery event carries `resend: { previousAttempts }` when the attempt was a possible duplicate, sent
+again after an earlier one was cut off by a stop: see
+[Delivery and errors](./delivery-and-errors.md#a-resend-after-a-crash-is-flagged).
 
 ## Where hooks go
 

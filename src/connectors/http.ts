@@ -160,6 +160,11 @@ export interface HttpDestinationOptions {
   readonly tls?: ClientTlsMaterial;
   /** Epoch milliseconds now, which a Retry-After date is read against. Defaults to `Date.now`. */
   readonly now?: () => number;
+  /**
+   * The header that flags a possible duplicate: sent only on a resend after an attempt was cut
+   * off, its value the number of attempts before. Undefined sends none.
+   */
+  readonly resendHeader?: string | undefined;
 }
 
 /**
@@ -204,12 +209,16 @@ export class HttpDestination implements DestinationConnector {
 
   /** Sends one output. */
   deliver(message: OutgoingMessage): Promise<void> {
-    const { headers, timeoutMs } = this.options;
+    const { headers, timeoutMs, resendHeader } = this.options;
+    const flag =
+      resendHeader === undefined || message.resend === undefined
+        ? {}
+        : { [resendHeader]: String(message.resend.previousAttempts) };
     return new Promise((resolve, reject) => {
       const request = this.send(this.url, {
         method: "POST",
         agent: this.agent,
-        headers: { ...headers, "Content-Length": message.body.byteLength },
+        headers: { ...headers, ...flag, "Content-Length": message.body.byteLength },
       });
       const timer = setTimeout(() => request.destroy(transientError("ETIMEDOUT")), timeoutMs);
       request.once("response", (response) => {

@@ -17,7 +17,32 @@ delivered only after its destination accepted it. So a crash at any point loses 
 
 The price is that a crash between a destination accepting an output and Pathways recording it means
 the output is sent again on restart. A receiver can, rarely, see a duplicate. Pathways sends at least
-once, not exactly once.
+once, not exactly once, and it flags the resend.
+
+## A resend after a crash is flagged
+
+Before each attempt, Pathways writes a marker on the delivery: the attempt's number and when it
+started. The write that records the outcome (delivered, retry, or failed) clears it. So a delivery
+found still marked, on the next start, is one whose attempt was cut off after the destination was
+handed the output: the receiver may have it. Pathways sends it again, never drops it, and:
+
+- logs `possible-duplicate` (a warning) with the message, the delivery, the destination, the reason
+  `send-interrupted` and the attempt that was cut off;
+- hands the destination `resend: { previousAttempts }` on the outgoing message, and puts the same
+  `resend` on the attempt's lifecycle events (`delivered`, `delivery-retry` and the rest);
+- keeps the flag on the delivery, so every later attempt of it is flagged too, and
+  `pathways messages show` names it under `RESENT`.
+
+What the receiver sees depends on the destination:
+
+- **HTTP** sends the message unchanged. With `resendHeader` set on the destination, a resend carries
+  that header, its value the number of attempts before it; no other request carries it.
+- **MLLP** sends the message unchanged: the same bytes, with the same MSH-10 control ID, so a
+  receiver that checks control IDs can spot the repeat. Pathways adds nothing to the message.
+- **Files** are written again under the same name, so the copy replaces the first.
+- **A custom destination** reads `message.resend` and does what its receiver needs.
+
+A delivery cut off before its marker was written was never handed over, and is sent as usual.
 
 ## Taking a message in
 

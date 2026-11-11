@@ -270,7 +270,7 @@ describe("pathways messages show", () => {
     const retrying = await runCli(["messages", "show", "4", "-C", root]);
     expect(retrying.out).toMatch(/Deliveries:\n {2}ID +GENERATION +DESTINATION +OUTPUT +STATUS/);
     expect(retrying.out).toMatch(/ delivered +0 +delivered \d{4}-/);
-    expect(retrying.out).toMatch(/ pending +1 +next try \d{4}-[^ ]+ +delivery: E[A-Z]+\n/);
+    expect(retrying.out).toMatch(/ pending +1 +next try \d{4}-[^ ]+ +delivery: E[A-Z]+ +-\n/);
 
     const json = JSON.parse(
       (await runCli(["messages", "show", "3", "--json", "-C", root])).out,

@@ -9,8 +9,10 @@
 // exist. So on Windows the engine is only ever ended hard here, never sent SIGTERM; Ctrl+C in its
 // console is the SIGINT a person or a service wrapper sends, and the command reference says so. The
 // hard stop runs on every system: it loses no message, and the hook events still queued are lost.
+// So does the hard stop in the middle of a send, the receiver given the message and the engine
+// ended before it could record that: the next start sends that message again, flagged.
 import { spawn, type ChildProcess } from "node:child_process";
-import { readdir, readFile, writeFile } from "node:fs/promises";
+import { readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
@@ -165,5 +167,90 @@ describe("pathways start, stopped from outside", () => {
     expect(
       (await readdir(join(root, "data/inbox"))).filter((name) => !name.startsWith(".")),
     ).toEqual([]);
+  }, 30_000);
+});
+
+/**
+ * A destination that appends each message it is handed to `options.log`, as a JSON line of its id
+ * and its resend flag, and then, while `options.hold` exists, never answers about message 2: the
+ * receiver has it, and the engine waits for an outcome that never comes.
+ */
+const HOLDING_DESTINATION = `
+import { appendFileSync, existsSync } from "node:fs";
+interface Outgoing { messageId: number; seq: number; body: Uint8Array; resend?: { previousAttempts: number } }
+export default (options: { log: string; hold: string }) => ({
+  deliver(message: Outgoing): Promise<void> {
+    appendFileSync(options.log, JSON.stringify({ id: message.messageId, resend: message.resend ?? null }) + "\\n");
+    if (message.messageId === 2 && existsSync(options.hold)) return new Promise<void>(() => undefined);
+    return Promise.resolve();
+  },
+});
+`;
+
+describe("pathways start, ended in the middle of a send", () => {
+  it("sends the message in flight again, flagged, and nothing else twice", async () => {
+    const root = await makeProject({
+      "test.key": `${generateKey()}\n`,
+      "destination.ts": HOLDING_DESTINATION,
+      "channels/adt/transform.ts": LAB_TRANSFORM,
+      hold: "",
+    });
+    const log = join(root, "sent.jsonl");
+    const hold = join(root, "hold");
+    await writeFile(
+      join(root, "pathways.yaml"),
+      "encryption:\n  keys: [{ id: test, file: ./test.key }]\n  current: test\n" +
+        "defaults:\n  pollInterval: 10ms\n",
+    );
+    await writeFile(
+      join(root, "channels/adt/channel.yaml"),
+      "source:\n  file: { dir: ../../data/inbox, minAge: 0 }\ntransform: ./transform.ts\n" +
+        "destinations:\n  - module: ../../destination.ts\n" +
+        `    options: { log: ${JSON.stringify(log)}, hold: ${JSON.stringify(hold)} }\n`,
+    );
+    const sent = async (): Promise<{ id: number; resend: unknown }[]> =>
+      (await readFile(log, "utf8").catch(() => ""))
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as { id: number; resend: unknown });
+
+    const engine = start(root);
+    try {
+      for (let i = 0; i < MESSAGES; i += 1) {
+        await dropFileWhileRunning(join(root, `data/inbox/${String(i)}.hl7`), ADT_A01);
+      }
+      // Message 2 is in flight: the receiver has it, and its outcome is never recorded.
+      for (let i = 0; (await sent()).length < 2; i += 1) {
+        if (i >= 1_000) throw new Error("the running engine did not send in time");
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    } finally {
+      // A hard stop, on every system: SIGKILL on Linux and macOS, TerminateProcess on Windows.
+      engine.child.kill("SIGKILL");
+    }
+    const ended = await engine.exited;
+    expect(ended.code === 0 && ended.signal === null).toBe(false);
+    expect(await sent()).toEqual([
+      { id: 1, resend: null },
+      { id: 2, resend: null },
+    ]);
+
+    // The next start sends message 2 again, flagged, then message 3 for the first time.
+    await rm(hold);
+    const again = start(root, true);
+    expect(await again.exited).toEqual({ code: 0, signal: null });
+    expect(again.stderr()).toBe("");
+    expect(await sent()).toEqual([
+      { id: 1, resend: null },
+      { id: 2, resend: null },
+      { id: 2, resend: { previousAttempts: 1 } },
+      { id: 3, resend: null },
+    ]);
+
+    // A clean restart after that sends nothing at all.
+    const clean = start(root, true);
+    expect(await clean.exited).toEqual({ code: 0, signal: null });
+    expect(clean.stderr()).toBe("");
+    expect(await sent()).toHaveLength(4);
   }, 30_000);
 });

@@ -373,6 +373,7 @@ function resolveDestination(
     kind: "http",
     ...resolveHttpClient(http, dir),
     timeoutMs: http.timeout ?? DEFAULT_HTTP_TIMEOUT_MS,
+    resendHeader: http.resendHeader,
   };
 }
 

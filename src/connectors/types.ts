@@ -87,6 +87,22 @@ export interface SourceConnector {
 }
 
 /**
+ * Set on a message that is being sent again after an attempt was cut off: the engine stopped after
+ * handing it to the destination and before it recorded the outcome, so the receiver may have it
+ * already. The message is the same; only the flag tells it apart.
+ *
+ * @example
+ * ```ts
+ * const header = (resend: Resend | undefined): string | undefined =>
+ *   resend === undefined ? undefined : String(resend.previousAttempts);
+ * ```
+ */
+export interface Resend {
+  /** How many attempts were made before this one, the one cut off among them. */
+  readonly previousAttempts: number;
+}
+
+/**
  * One output of one message, on its way to one destination.
  *
  * @example
@@ -100,6 +116,12 @@ export interface OutgoingMessage {
   /** Which output of that message's transform this is, from 0. */
   readonly seq: number;
   readonly body: Uint8Array;
+  /**
+   * Set when this is a possible duplicate: an earlier attempt was cut off after the send, so the
+   * receiver may have it already. A destination may tell the receiver so (an HTTP destination's
+   * `resendHeader`); it sends the message either way. Undefined on every other send.
+   */
+  readonly resend?: Resend | undefined;
 }
 
 /**

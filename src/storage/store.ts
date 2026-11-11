@@ -135,6 +135,16 @@ interface DeliveriesTable {
   delivered_at: string | null;
   /** The message's generation this delivery was queued for. Since 0003. */
   generation: Generated<number>;
+  /**
+   * When the attempt in flight was handed to its destination, in epoch milliseconds: set before the
+   * send and cleared by its outcome, so a row found with it set was cut off between the two. Since
+   * 0005.
+   */
+  sending_at: ColumnType<number | string | null, number | null, number | null>;
+  /** The number of the attempt in flight, beside `sending_at`. Since 0005. */
+  sending_attempt: number | null;
+  /** The latest attempt found cut off: set means every later send is a possible duplicate. Since 0005. */
+  interrupted_attempt: number | null;
 }
 
 /** The audit log. Rows are only ever inserted: nothing here updates or deletes one. Since 0003. */
@@ -277,6 +287,43 @@ export interface StoredDelivery {
   readonly deliveredAt: string | null;
   /** The last failure, as stored: a stage and a code, such as `delivery: ECONNREFUSED`. */
   readonly error: string | null;
+  /**
+   * Set when an attempt of this delivery was cut off, its outcome never recorded, so the receiver
+   * may have it more than once: the number of the latest such attempt. Every later send of it is
+   * flagged as a possible duplicate.
+   */
+  readonly interruptedAttempt?: number | undefined;
+}
+
+/**
+ * The marker written on a delivery before it is handed to its destination: which attempt it is and
+ * when it started. The outcome write clears it, so a delivery found still marked was cut off between
+ * the send and the record of it, and the receiver may have it.
+ *
+ * @example
+ * ```ts
+ * await store.markSending(delivery.id, { attempt: delivery.attempts + 1, at: Date.now() });
+ * ```
+ */
+export interface SendingMarker {
+  /** The attempt's number, from 1. */
+  readonly attempt: number;
+  /** When it started, in epoch milliseconds. */
+  readonly at: number;
+}
+
+/**
+ * What {@link MessageStore.markSending} writes: the marker, and, when the delivery was found marked,
+ * the number of the attempt that was cut off.
+ *
+ * @example
+ * ```ts
+ * const start: SendStart = { attempt: 2, at: Date.now(), interruptedAttempt: 1 };
+ * ```
+ */
+export interface SendStart extends SendingMarker {
+  /** The attempt found cut off, kept on the delivery so every later send of it is flagged. */
+  readonly interruptedAttempt?: number | undefined;
 }
 
 /**
@@ -325,6 +372,14 @@ export interface PendingDelivery {
   readonly attempts: number;
   /** Epoch milliseconds before which this delivery must not be tried again. */
   readonly nextAttemptAt: number;
+  /**
+   * The marker of an attempt whose outcome was never recorded: set means it was cut off after it
+   * was handed to the destination, which may have it. Undefined when there is none, and from a
+   * store that keeps no marker.
+   */
+  readonly sending?: SendingMarker | undefined;
+  /** The latest attempt found cut off, kept after it: see {@link StoredDelivery.interruptedAttempt}. */
+  readonly interruptedAttempt?: number | undefined;
 }
 
 /**
@@ -583,7 +638,9 @@ export interface AuditQuery {
  * Every method is the engine's only path to that data, so an adapter keeps these promises: `receive`
  * is durable before it resolves; `completeTransform` writes all its deliveries and the message's new
  * status, or none of them; `nextDelivery` returns the lowest pending id for that destination, so
- * deliveries stay in order; and a new delivery is due at once (`nextAttemptAt` 0). For the operator
+ * deliveries stay in order; a new delivery is due at once (`nextAttemptAt` 0); `markSending` is
+ * durable before it resolves, `nextDelivery` returns the marker it wrote, and `markDelivered`,
+ * `scheduleRetry` and `failDelivery` clear it in the same write as their outcome. For the operator
  * commands: `requeue` and `clear` change nothing unless the message still stands where the caller
  * found it, and write their audit entry in the same transaction as their change; `expire` deletes
  * only done messages, with their deliveries, and never an audit entry.
@@ -624,6 +681,12 @@ export interface MessageStore {
   ): Promise<void>;
   failTransform(messageId: number, error: string): Promise<void>;
   nextDelivery(channel: string, destination: number): Promise<PendingDelivery | undefined>;
+  /**
+   * Writes the marker before a delivery is handed to its destination, in one write: the attempt and
+   * its start, and the attempt found cut off when `start.interruptedAttempt` is set. A delivery
+   * {@link nextDelivery} returns still marked was cut off, and its next send is flagged.
+   */
+  markSending(deliveryId: number, start: SendStart): Promise<void>;
   markDelivered(deliveryId: number): Promise<void>;
   scheduleRetry(
     deliveryId: number,
@@ -936,6 +999,17 @@ export function migrations(kind: StorageKind): Record<string, Migration> {
           .createIndex("messages_by_channel_idempotency_key")
           .on("messages")
           .columns(["channel", "idempotency_key", "id"])
+          .execute();
+      },
+    },
+    "0005-send-markers": {
+      // Expand only: three columns that may be null, which an older Pathways never reads.
+      async up(db: Kysely<unknown>): Promise<void> {
+        await db.schema.alterTable("deliveries").addColumn("sending_at", t.int64).execute();
+        await db.schema.alterTable("deliveries").addColumn("sending_attempt", "integer").execute();
+        await db.schema
+          .alterTable("deliveries")
+          .addColumn("interrupted_attempt", "integer")
           .execute();
       },
     },
@@ -1340,6 +1414,7 @@ export class Store implements MessageStore, ContentStore {
         "next_attempt_at",
         "delivered_at",
         "last_error",
+        "interrupted_attempt",
       ])
       .where("message_id", "=", messageId)
       .orderBy("id")
@@ -1354,6 +1429,7 @@ export class Store implements MessageStore, ContentStore {
       nextAttemptAt: Number(row.next_attempt_at),
       deliveredAt: row.delivered_at,
       error: row.last_error,
+      ...(row.interrupted_attempt === null ? {} : { interruptedAttempt: row.interrupted_attempt }),
     }));
   }
 
@@ -1481,7 +1557,17 @@ export class Store implements MessageStore, ContentStore {
   async nextDelivery(channel: string, destination: number): Promise<PendingDelivery | undefined> {
     const row = await this.db
       .selectFrom("deliveries")
-      .select(["id", "message_id", "seq", "body", "attempts", "next_attempt_at"])
+      .select([
+        "id",
+        "message_id",
+        "seq",
+        "body",
+        "attempts",
+        "next_attempt_at",
+        "sending_at",
+        "sending_attempt",
+        "interrupted_attempt",
+      ])
       .where("channel", "=", channel)
       .where("destination", "=", destination)
       .where("status", "=", "pending")
@@ -1489,6 +1575,7 @@ export class Store implements MessageStore, ContentStore {
       .$call((query) => this.first(query))
       .executeTakeFirst();
     if (row === undefined) return undefined;
+    const sendingAt = int64OrNull(row.sending_at);
     return {
       id: Number(row.id),
       messageId: Number(row.message_id),
@@ -1496,19 +1583,42 @@ export class Store implements MessageStore, ContentStore {
       body: row.body,
       attempts: row.attempts,
       nextAttemptAt: Number(row.next_attempt_at),
+      ...(sendingAt === null || row.sending_attempt === null
+        ? {}
+        : { sending: { attempt: row.sending_attempt, at: sendingAt } }),
+      ...(row.interrupted_attempt === null ? {} : { interruptedAttempt: row.interrupted_attempt }),
     };
   }
 
-  /** Marks a delivery done. */
-  async markDelivered(deliveryId: number): Promise<void> {
+  /** Writes the marker before a send, in one UPDATE: see {@link MessageStore.markSending}. */
+  async markSending(deliveryId: number, start: SendStart): Promise<void> {
+    const { attempt, at, interruptedAttempt } = start;
     await this.db
       .updateTable("deliveries")
-      .set({ status: "delivered", delivered_at: this.now().toISOString() })
+      .set({
+        sending_at: at,
+        sending_attempt: attempt,
+        ...(interruptedAttempt === undefined ? {} : { interrupted_attempt: interruptedAttempt }),
+      })
       .where("id", "=", deliveryId)
       .execute();
   }
 
-  /** Records a failed attempt and when to try again. */
+  /** Marks a delivery done, and clears its marker. */
+  async markDelivered(deliveryId: number): Promise<void> {
+    await this.db
+      .updateTable("deliveries")
+      .set({
+        status: "delivered",
+        delivered_at: this.now().toISOString(),
+        sending_at: null,
+        sending_attempt: null,
+      })
+      .where("id", "=", deliveryId)
+      .execute();
+  }
+
+  /** Records a failed attempt and when to try again, and clears the marker. */
   async scheduleRetry(
     deliveryId: number,
     attempts: number,
@@ -1517,16 +1627,22 @@ export class Store implements MessageStore, ContentStore {
   ): Promise<void> {
     await this.db
       .updateTable("deliveries")
-      .set({ attempts, next_attempt_at: nextAttemptAt, last_error: error })
+      .set({
+        attempts,
+        next_attempt_at: nextAttemptAt,
+        last_error: error,
+        sending_at: null,
+        sending_attempt: null,
+      })
       .where("id", "=", deliveryId)
       .execute();
   }
 
-  /** Marks a delivery `failed` for good, so its destination moves on to the next. */
+  /** Marks a delivery `failed` for good, so its destination moves on to the next; clears the marker. */
   async failDelivery(deliveryId: number, error: string): Promise<void> {
     await this.db
       .updateTable("deliveries")
-      .set({ status: "failed", last_error: error })
+      .set({ status: "failed", last_error: error, sending_at: null, sending_attempt: null })
       .where("id", "=", deliveryId)
       .execute();
   }

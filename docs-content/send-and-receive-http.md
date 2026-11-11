@@ -84,6 +84,10 @@ destinations:
   present a client certificate. The server's certificate is always verified.
 - **`timeout`** (30 seconds by default) is how long one attempt may take, from connecting to the
   answer.
+- **`resendHeader`**, when set, names a header sent only on a possible duplicate: a resend after an
+  attempt was cut off by a stop, so the server may have the message already. Its value is the number
+  of attempts before, such as `1`. The body is the same either way. See
+  [Delivery and errors](./delivery-and-errors.md#a-resend-after-a-crash-is-flagged).
 
 The answer decides what happens:
 

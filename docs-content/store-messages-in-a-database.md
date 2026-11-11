@@ -102,6 +102,12 @@ The factory receives `options` and a context with the project folder, the enviro
 texts: Pathways wraps every store, its own and yours, in the same encryption layer. To be rekeyed, a
 store also implements [`ContentStore`](./api/README.md#contentstore).
 
+A store keeps the marker the engine writes before each send: `markSending` stores the attempt and
+its start, `nextDelivery` returns it as `sending`, and `markDelivered`, `scheduleRetry` and
+`failDelivery` clear it in the same write as their outcome. That is how a resend after a crash is
+flagged. A store written before `markSending` existed adds it, and the two fields `nextDelivery`
+and `deliveries` return.
+
 ## Related
 
 - [Encrypt stored messages and rotate keys](./encrypt-stored-messages.md).

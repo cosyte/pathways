@@ -355,7 +355,7 @@ const FIRST_SLICE_SCHEMA = [
 ];
 
 /**
- * The schema today: the first slice's, with the columns of migrations 0003 and 0004 added to its two
+ * The schema today: the first slice's, with the columns of migrations 0003, 0004 and 0005 added to its two
  * tables (SQLite appends them to the recorded statement), and the audit log and three indexes beside
  * them.
  */
@@ -367,7 +367,7 @@ const CURRENT_SCHEMA = [
   `CREATE INDEX "messages_by_channel_idempotency_key" on "messages" ("channel", "idempotency_key", "id")`,
   `CREATE INDEX "messages_by_channel_status" on "messages" ("channel", "status", "id")`,
   `CREATE TABLE "audit_log" ("id" integer primary key autoincrement, "at" text not null, "actor" text not null, "action" text not null, "outcome" text not null, "channel" text, "message_id" integer, "detail" text)`,
-  `CREATE TABLE "deliveries" ("id" integer primary key autoincrement, "message_id" integer not null references "messages" ("id"), "channel" text not null, "destination" integer not null, "seq" integer not null, "body" blob not null, "status" text not null, "attempts" integer not null, "next_attempt_at" integer not null, "last_error" text, "delivered_at" text, "generation" integer default 0 not null)`,
+  `CREATE TABLE "deliveries" ("id" integer primary key autoincrement, "message_id" integer not null references "messages" ("id"), "channel" text not null, "destination" integer not null, "seq" integer not null, "body" blob not null, "status" text not null, "attempts" integer not null, "next_attempt_at" integer not null, "last_error" text, "delivered_at" text, "generation" integer default 0 not null, "sending_at" integer, "sending_attempt" integer, "interrupted_attempt" integer)`,
   `CREATE TABLE "kysely_migration" ("name" varchar(255) not null primary key, "timestamp" varchar(255) not null)`,
   `CREATE TABLE "kysely_migration_lock" ("id" varchar(255) not null primary key, "is_locked" integer default 0 not null)`,
   `CREATE TABLE "messages" ("id" integer primary key autoincrement, "channel" text not null, "received_at" text not null, "body" blob not null, "status" text not null, "error" text, "updated_at" text not null, "dedup_key" text, "duplicate_of" integer, "size" integer, "generation" integer default 0 not null, "idempotency_key" text)`,
@@ -386,11 +386,11 @@ function schemaOf(file: string): string[] {
 }
 
 describe("Store on SQLite files the first slice made", () => {
-  it("makes a new database as the first slice did, with 0003's and 0004's additions, so old and new files are the same", async () => {
+  it("makes a new database as the first slice did, with 0003's, 0004's and 0005's additions, so old and new files are the same", async () => {
     const file = join(await makeProject({}), "new.db");
     await (await Store.open(file)).close();
     expect(schemaOf(file)).toEqual(CURRENT_SCHEMA);
-    // 0003 and 0004 only add: each of the first slice's statements is still there, as it was written.
+    // 0003, 0004 and 0005 only add: each of the first slice's statements is still there, as it was written.
     for (const statement of FIRST_SLICE_SCHEMA) {
       const table = /^CREATE TABLE "(messages|deliveries)"/.exec(statement);
       const current =
@@ -401,7 +401,7 @@ describe("Store on SQLite files the first slice made", () => {
     }
   });
 
-  it("opens a database made at migration 0002, keeping its messages, and brings it to 0003 and 0004 alone", async () => {
+  it("opens a database made at migration 0002, keeping its messages, and brings it to 0003, 0004 and 0005 alone", async () => {
     const file = join(await makeProject({}), "at-0002.db");
     const old = new SqliteDatabase(file);
     const statements = FIRST_SLICE_SCHEMA.filter((s) => !s.includes("sqlite_sequence"));
@@ -438,6 +438,7 @@ describe("Store on SQLite files the first slice made", () => {
       "0002-possible-duplicates",
       "0003-operator-and-audit",
       "0004-idempotency-keys",
+      "0005-send-markers",
     ]);
     db.close();
   });

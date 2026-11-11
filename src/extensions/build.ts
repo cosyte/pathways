@@ -19,6 +19,7 @@ const STORE_METHODS = Object.keys({
   completeTransform: true,
   failTransform: true,
   nextDelivery: true,
+  markSending: true,
   markDelivered: true,
   scheduleRetry: true,
   failDelivery: true,

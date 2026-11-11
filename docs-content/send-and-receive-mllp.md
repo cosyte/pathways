@@ -96,6 +96,11 @@ late ACK can never answer the wrong message. The ACK decides what happens:
 
 An output that holds an MLLP framing byte can never be sent, so it fails at once.
 
+A resend after an attempt was cut off by a stop is sent unchanged: the same bytes, with the same
+MSH-10 control ID, so a receiver that checks control IDs can spot the repeat. Pathways adds no field
+to the message. The engine logs it as a `possible-duplicate`; see
+[Delivery and errors](./delivery-and-errors.md#a-resend-after-a-crash-is-flagged).
+
 ## Related
 
 - [Authenticate endpoints and use TLS](./secure-endpoints.md).

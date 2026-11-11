@@ -579,6 +579,22 @@ The destination's place in the channel's `destinations:` list, from 0.
 
 [`DeliveryEventBase`](#deliveryeventbase).[`messageId`](#messageid-6)
 
+##### resend?
+
+> `readonly` `optional` **resend?**: `object`
+
+Set when this attempt was a possible duplicate: an earlier one was cut off after the send, so
+the receiver may have the message already. `previousAttempts` counts the attempts before it.
+Absent otherwise.
+
+###### previousAttempts
+
+> `readonly` **previousAttempts**: `number`
+
+###### Inherited from
+
+[`DeliveryEventBase`](#deliveryeventbase).[`resend`](#resend-1)
+
 ##### type
 
 > `readonly` **type**: `"delivered"`
@@ -651,6 +667,18 @@ The destination's place in the channel's `destinations:` list, from 0.
 ##### messageId
 
 > `readonly` **messageId**: `number`
+
+##### resend?
+
+> `readonly` `optional` **resend?**: `object`
+
+Set when this attempt was a possible duplicate: an earlier one was cut off after the send, so
+the receiver may have the message already. `previousAttempts` counts the attempts before it.
+Absent otherwise.
+
+###### previousAttempts
+
+> `readonly` **previousAttempts**: `number`
 
 ##### type
 
@@ -742,6 +770,22 @@ The host the Location names, with its port when it has one, or undefined when it
 ###### Inherited from
 
 [`DeliveryEventBase`](#deliveryeventbase).[`messageId`](#messageid-6)
+
+##### resend?
+
+> `readonly` `optional` **resend?**: `object`
+
+Set when this attempt was a possible duplicate: an earlier one was cut off after the send, so
+the receiver may have the message already. `previousAttempts` counts the attempts before it.
+Absent otherwise.
+
+###### previousAttempts
+
+> `readonly` **previousAttempts**: `number`
+
+###### Inherited from
+
+[`DeliveryEventBase`](#deliveryeventbase).[`resend`](#resend-1)
 
 ##### retryAt
 
@@ -850,6 +894,22 @@ The destination's place in the channel's `destinations:` list, from 0.
 
 The destination's short, stable reason, such as `AE` or `HTTP 400`.
 
+##### resend?
+
+> `readonly` `optional` **resend?**: `object`
+
+Set when this attempt was a possible duplicate: an earlier one was cut off after the send, so
+the receiver may have the message already. `previousAttempts` counts the attempts before it.
+Absent otherwise.
+
+###### previousAttempts
+
+> `readonly` **previousAttempts**: `number`
+
+###### Inherited from
+
+[`DeliveryEventBase`](#deliveryeventbase).[`resend`](#resend-1)
+
 ##### type
 
 > `readonly` **type**: `"delivery-rejected"`
@@ -946,6 +1006,22 @@ The destination's place in the channel's `destinations:` list, from 0.
 > `readonly` **name**: `string`
 
 The error's name, such as `MllpDeliveryError`.
+
+##### resend?
+
+> `readonly` `optional` **resend?**: `object`
+
+Set when this attempt was a possible duplicate: an earlier one was cut off after the send, so
+the receiver may have the message already. `previousAttempts` counts the attempts before it.
+Absent otherwise.
+
+###### previousAttempts
+
+> `readonly` **previousAttempts**: `number`
+
+###### Inherited from
+
+[`DeliveryEventBase`](#deliveryeventbase).[`resend`](#resend-1)
 
 ##### retryAt
 
@@ -1539,7 +1615,9 @@ here, so a wrapping layer sees them all.
 Every method is the engine's only path to that data, so an adapter keeps these promises: `receive`
 is durable before it resolves; `completeTransform` writes all its deliveries and the message's new
 status, or none of them; `nextDelivery` returns the lowest pending id for that destination, so
-deliveries stay in order; and a new delivery is due at once (`nextAttemptAt` 0). For the operator
+deliveries stay in order; a new delivery is due at once (`nextAttemptAt` 0); `markSending` is
+durable before it resolves, `nextDelivery` returns the marker it wrote, and `markDelivered`,
+`scheduleRetry` and `failDelivery` clear it in the same write as their outcome. For the operator
 commands: `requeue` and `clear` change nothing unless the message still stands where the caller
 found it, and write their audit entry in the same transaction as their change; `expire` deletes
 only done messages, with their deliveries, and never an audit entry.
@@ -1795,6 +1873,28 @@ A channel's retrying deliveries, oldest first, at most `limit`.
 ###### deliveryId
 
 `number`
+
+###### Returns
+
+`Promise`\<`void`\>
+
+##### markSending()
+
+> **markSending**(`deliveryId`, `start`): `Promise`\<`void`\>
+
+Writes the marker before a delivery is handed to its destination, in one write: the attempt and
+its start, and the attempt found cut off when `start.interruptedAttempt` is set. A delivery
+[nextDelivery](#nextdelivery) returns still marked was cut off, and its next send is flagged.
+
+###### Parameters
+
+###### deliveryId
+
+`number`
+
+###### start
+
+[`SendStart`](#sendstart)
 
 ###### Returns
 
@@ -2140,6 +2240,14 @@ const name = (message: OutgoingMessage): string => `${message.messageId}-${messa
 
 The id of the stored message this came from.
 
+##### resend?
+
+> `readonly` `optional` **resend?**: [`Resend`](#resend-6)
+
+Set when this is a possible duplicate: an earlier attempt was cut off after the send, so the
+receiver may have it already. A destination may tell the receiver so (an HTTP destination's
+`resendHeader`); it sends the message either way. Undefined on every other send.
+
 ##### seq
 
 > `readonly` **seq**: `number`
@@ -2201,6 +2309,12 @@ const due = (delivery: PendingDelivery): boolean => delivery.nextAttemptAt <= Da
 
 > `readonly` **id**: `number`
 
+##### interruptedAttempt?
+
+> `readonly` `optional` **interruptedAttempt?**: `number`
+
+The latest attempt found cut off, kept after it: see [StoredDelivery.interruptedAttempt](#interruptedattempt-2).
+
 ##### messageId
 
 > `readonly` **messageId**: `number`
@@ -2210,6 +2324,14 @@ const due = (delivery: PendingDelivery): boolean => delivery.nextAttemptAt <= Da
 > `readonly` **nextAttemptAt**: `number`
 
 Epoch milliseconds before which this delivery must not be tried again.
+
+##### sending?
+
+> `readonly` `optional` **sending?**: [`SendingMarker`](#sendingmarker)
+
+The marker of an attempt whose outcome was never recorded: set means it was cut off after it
+was handed to the destination, which may have it. Undefined when there is none, and from a
+store that keeps no marker.
 
 ##### seq
 
@@ -2496,6 +2618,29 @@ transform filtered the message out.
 
 ***
 
+### Resend
+
+Set on a message that is being sent again after an attempt was cut off: the engine stopped after
+handing it to the destination and before it recorded the outcome, so the receiver may have it
+already. The message is the same; only the flag tells it apart.
+
+#### Example
+
+```ts
+const header = (resend: Resend | undefined): string | undefined =>
+  resend === undefined ? undefined : String(resend.previousAttempts);
+```
+
+#### Properties
+
+##### previousAttempts
+
+> `readonly` **previousAttempts**: `number`
+
+How many attempts were made before this one, the one cut off among them.
+
+***
+
 ### RetryingDelivery
 
 A pending delivery that has failed at least once and waits to be tried again.
@@ -2529,6 +2674,83 @@ const late = (d: RetryingDelivery): boolean => d.nextAttemptAt > Date.now() + 60
 > `readonly` **nextAttemptAt**: `number`
 
 Epoch milliseconds of the next try.
+
+***
+
+### SendingMarker
+
+The marker written on a delivery before it is handed to its destination: which attempt it is and
+when it started. The outcome write clears it, so a delivery found still marked was cut off between
+the send and the record of it, and the receiver may have it.
+
+#### Example
+
+```ts
+await store.markSending(delivery.id, { attempt: delivery.attempts + 1, at: Date.now() });
+```
+
+#### Extended by
+
+- [`SendStart`](#sendstart)
+
+#### Properties
+
+##### at
+
+> `readonly` **at**: `number`
+
+When it started, in epoch milliseconds.
+
+##### attempt
+
+> `readonly` **attempt**: `number`
+
+The attempt's number, from 1.
+
+***
+
+### SendStart
+
+What [MessageStore.markSending](#marksending) writes: the marker, and, when the delivery was found marked,
+the number of the attempt that was cut off.
+
+#### Example
+
+```ts
+const start: SendStart = { attempt: 2, at: Date.now(), interruptedAttempt: 1 };
+```
+
+#### Extends
+
+- [`SendingMarker`](#sendingmarker)
+
+#### Properties
+
+##### at
+
+> `readonly` **at**: `number`
+
+When it started, in epoch milliseconds.
+
+###### Inherited from
+
+[`SendingMarker`](#sendingmarker).[`at`](#at-11)
+
+##### attempt
+
+> `readonly` **attempt**: `number`
+
+The attempt's number, from 1.
+
+###### Inherited from
+
+[`SendingMarker`](#sendingmarker).[`attempt`](#attempt-5)
+
+##### interruptedAttempt?
+
+> `readonly` `optional` **interruptedAttempt?**: `number`
+
+The attempt found cut off, kept on the delivery so every later send of it is flagged.
 
 ***
 
@@ -2777,6 +2999,14 @@ The last failure, as stored: a stage and a code, such as `delivery: ECONNREFUSED
 ##### id
 
 > `readonly` **id**: `number`
+
+##### interruptedAttempt?
+
+> `readonly` `optional` **interruptedAttempt?**: `number`
+
+Set when an attempt of this delivery was cut off, its outcome never recorded, so the receiver
+may have it more than once: the number of the latest such attempt. Every later send of it is
+flagged as a possible duplicate.
 
 ##### nextAttemptAt
 

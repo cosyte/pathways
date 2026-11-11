@@ -21,6 +21,8 @@ import type {
   RequeueRequest,
   RequeueResult,
   RetryingDelivery,
+  SendingMarker,
+  SendStart,
   StoredDelivery,
   StoredMessage,
   StoreFactory,
@@ -54,6 +56,8 @@ interface DeliveryRow {
   nextAttemptAt: number;
   error: string | null;
   deliveredAt: string | null;
+  sending: SendingMarker | undefined;
+  interruptedAttempt: number | undefined;
 }
 
 const now = (): string => new Date().toISOString();
@@ -125,12 +129,32 @@ export class MemoryStore implements MessageStore {
       (d) => d.channel === channel && d.destination === destination && d.status === "pending",
     );
     if (row === undefined) return Promise.resolve(undefined);
-    const { id, messageId, seq, body, attempts, nextAttemptAt } = row;
-    return Promise.resolve({ id, messageId, seq, body, attempts, nextAttemptAt });
+    const { id, messageId, seq, body, attempts, nextAttemptAt, sending, interruptedAttempt } = row;
+    return Promise.resolve({
+      id,
+      messageId,
+      seq,
+      body,
+      attempts,
+      nextAttemptAt,
+      sending,
+      interruptedAttempt,
+    });
+  }
+
+  markSending(deliveryId: number, start: SendStart): Promise<void> {
+    const row = this.delivery(deliveryId);
+    row.sending = { attempt: start.attempt, at: start.at };
+    if (start.interruptedAttempt !== undefined) row.interruptedAttempt = start.interruptedAttempt;
+    return Promise.resolve();
   }
 
   markDelivered(deliveryId: number): Promise<void> {
-    Object.assign(this.delivery(deliveryId), { status: "delivered", deliveredAt: now() });
+    Object.assign(this.delivery(deliveryId), {
+      status: "delivered",
+      deliveredAt: now(),
+      sending: undefined,
+    });
     return Promise.resolve();
   }
 
@@ -140,12 +164,17 @@ export class MemoryStore implements MessageStore {
     nextAttemptAt: number,
     error: string,
   ): Promise<void> {
-    Object.assign(this.delivery(deliveryId), { attempts, nextAttemptAt, error });
+    Object.assign(this.delivery(deliveryId), {
+      attempts,
+      nextAttemptAt,
+      error,
+      sending: undefined,
+    });
     return Promise.resolve();
   }
 
   failDelivery(deliveryId: number, error: string): Promise<void> {
-    Object.assign(this.delivery(deliveryId), { status: "failed", error });
+    Object.assign(this.delivery(deliveryId), { status: "failed", error, sending: undefined });
     return Promise.resolve();
   }
 
@@ -209,6 +238,7 @@ export class MemoryStore implements MessageStore {
           nextAttemptAt: d.nextAttemptAt,
           deliveredAt: d.deliveredAt,
           error: d.error,
+          interruptedAttempt: d.interruptedAttempt,
         })),
     );
   }
@@ -415,6 +445,8 @@ export class MemoryStore implements MessageStore {
           nextAttemptAt: 0,
           error: null,
           deliveredAt: null,
+          sending: undefined,
+          interruptedAttempt: undefined,
         });
         queued += 1;
       }
