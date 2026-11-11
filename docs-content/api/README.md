@@ -1245,6 +1245,43 @@ context.logger.warn({ event: "inbox-read-failed", code: "EACCES" });
 
 ***
 
+### FileSourceFacts
+
+What a file source knows about a message: the file's name as it was dropped, its size in bytes,
+and when it was stored.
+
+#### Example
+
+```ts
+const name = (source: FileSourceFacts): string => source.name;
+```
+
+#### Properties
+
+##### kind
+
+> `readonly` **kind**: `"file"`
+
+##### name
+
+> `readonly` **name**: `string`
+
+The file's name as it was dropped in the folder. It can carry a patient's name: never log it.
+
+##### receivedAt
+
+> `readonly` **receivedAt**: `string`
+
+When the message was stored, as an ISO 8601 time.
+
+##### size
+
+> `readonly` **size**: `number`
+
+The body's size in bytes.
+
+***
+
 ### FilteredEvent
 
 A message's transform returned no output, so nothing is delivered.
@@ -1344,6 +1381,56 @@ Where to read credentials and other settings from: `process.env` when the engine
 ###### Inherited from
 
 [`ExtensionContext`](#extensioncontext).[`logger`](#logger-1)
+
+***
+
+### HttpSourceFacts
+
+What an HTTP source knows about a message: the request's method, its path as the source matched
+it, the sender's address, and the headers the channel's `contextHeaders` names, by lower-case
+name. `Authorization`, `Proxy-Authorization` and `Cookie` are never among them.
+
+#### Example
+
+```ts
+const requestId = (source: HttpSourceFacts): string | undefined => source.headers["x-request-id"];
+```
+
+#### Properties
+
+##### headers
+
+> `readonly` **headers**: `Readonly`\<`Record`\<`string`, `string`\>\>
+
+The listed headers the request carried, by lower-case name; several values joined by `, `.
+
+##### kind
+
+> `readonly` **kind**: `"http"`
+
+##### method
+
+> `readonly` **method**: `string`
+
+`POST` or `PUT`.
+
+##### path
+
+> `readonly` **path**: `string`
+
+The path the request was sent to, as the source matched it, without a query.
+
+##### receivedAt
+
+> `readonly` **receivedAt**: `string`
+
+When the message was stored, as an ISO 8601 time.
+
+##### remoteAddress
+
+> `readonly` **remoteAddress**: `string` \| `undefined`
+
+The sender's IP address, when the connection still had one.
 
 ***
 
@@ -2447,6 +2534,73 @@ An X12 interchange, parsed with `@cosyte/x12`.
 
 ***
 
+### MllpSourceFacts
+
+What an MLLP source knows about a message: the sender's address and, over mutual TLS, the common
+name in the subject of the certificate the sender presented.
+
+#### Example
+
+```ts
+const peer = (source: MllpSourceFacts): string => source.tlsPeerSubject ?? "unknown";
+```
+
+#### Properties
+
+##### kind
+
+> `readonly` **kind**: `"mllp"`
+
+##### receivedAt
+
+> `readonly` **receivedAt**: `string`
+
+When the message was stored, as an ISO 8601 time.
+
+##### remoteAddress
+
+> `readonly` **remoteAddress**: `string` \| `undefined`
+
+The sender's IP address, when the connection had one.
+
+##### tlsPeerSubject
+
+> `readonly` **tlsPeerSubject**: `string` \| `undefined`
+
+The common name (CN) in the subject of the sender's TLS certificate, when it presented one.
+
+***
+
+### ModuleSourceFacts
+
+What a custom source knows about a message: whatever it passed as `source` to `sink.receive`.
+
+#### Example
+
+```ts
+const queue = (source: ModuleSourceFacts): JsonValue | undefined => source.facts["queue"];
+```
+
+#### Properties
+
+##### facts
+
+> `readonly` **facts**: `Readonly`\<`Record`\<`string`, [`JsonValue`](#jsonvalue)\>\>
+
+What the source passed, or `{}` when it passed nothing.
+
+##### kind
+
+> `readonly` **kind**: `"module"`
+
+##### receivedAt
+
+> `readonly` **receivedAt**: `string`
+
+When the message was stored, as an ISO 8601 time.
+
+***
+
 ### OutgoingMessage
 
 One output of one message, on its way to one destination.
@@ -2759,6 +2913,7 @@ await sink.receive(body, { duplicateKey: `${sender}|${controlId}` });
 await sink.receive(body, { failure: "inbound: NO_MSH_SEGMENT" });
 await sink.receive(body, { idempotencyKey: `queue|${deliveryTag}` });
 await sink.receive(body, { idempotencyKey: `queue|${deliveryTag}`, resumed: true });
+await sink.receive(body, { source: { queue: "inbound", deliveryTag } });
 ```
 
 #### Properties
@@ -2798,6 +2953,17 @@ True when the source hands in again, under the same `idempotencyKey`, a message 
 run may have stored already: one it took in and never acknowledged. When a message of the
 channel was stored with that key, nothing new is stored and that message's id comes back. Only
 these messages are looked up, so a message handed in for the first time costs no lookup.
+
+##### source?
+
+> `readonly` `optional` **source?**: `Readonly`\<`Record`\<`string`, [`JsonValue`](#jsonvalue)\>\>
+
+What the source knows about the message, which the channel's transform reads as
+`ctx.source.facts`: a map of plain JSON values (strings, finite numbers, booleans, null, lists
+and maps). Anything else is refused with the code `INVALID_SOURCE_FACTS` before the message is
+stored. It is never logged, sent to a hook or stored: the engine holds it in memory until the
+message is transformed, so a message taken in before the engine restarts is transformed
+without it.
 
 ***
 
@@ -3330,7 +3496,7 @@ which can quote the message: never print it.
 
 ###### Inherited from
 
-[`MessageSummary`](#messagesummary).[`receivedAt`](#receivedat)
+[`MessageSummary`](#messagesummary).[`receivedAt`](#receivedat-2)
 
 ##### size
 
@@ -3340,7 +3506,7 @@ The body's size in bytes, or null for a message stored before sizes were kept.
 
 ###### Inherited from
 
-[`MessageSummary`](#messagesummary).[`size`](#size)
+[`MessageSummary`](#messagesummary).[`size`](#size-1)
 
 ##### state
 
@@ -3421,6 +3587,87 @@ only then is the key looked up.
 
 The body's size in bytes as it arrived; defaults to `body.byteLength`. A storage layer that
 changes the body on its way in, such as encryption, passes the original size along.
+
+***
+
+### TransformConfig
+
+The configuration a transform reads as `ctx.config`: the `config:` block of `pathways.yaml`, with
+the channel's own `config:` block over it key by key, and each `{ env: NAME }` read from the
+engine's environment when it starts. It is empty here: name your keys and their types by
+declaration merging, once per project, and `ctx.config` is typed by them.
+
+#### Example
+
+```ts
+declare module "@cosyte/pathways" {
+  interface TransformConfig {
+    readonly facility: string;
+    readonly labCodes: readonly string[];
+  }
+}
+```
+
+#### Properties
+
+##### facility?
+
+> `readonly` `optional` **facility?**: `string`
+
+***
+
+### TransformContext
+
+The second argument a transform receives: a frozen plain object, built for each message.
+
+Nothing in it is logged, sent to a hook or shown on the health endpoint. A transform reads it; to
+change what is sent, it changes what it returns.
+
+#### Example
+
+```ts
+import type { Transform } from "@cosyte/pathways";
+
+export default ((msg, ctx) => {
+  if (ctx?.source?.kind === "mllp" && ctx.source.tlsPeerSubject !== "lab.example.test") return null;
+  return msg;
+}) satisfies Transform;
+```
+
+#### Properties
+
+##### attempt
+
+> `readonly` **attempt**: `number`
+
+Which run of the transform this is for the message: 1 the first time, and one more for each
+replay or resend before this one.
+
+##### config
+
+> `readonly` **config**: `Readonly`\<[`TransformConfig`](#transformconfig)\>
+
+The channel's configuration, resolved when the engine (or the command) started.
+
+##### messageId
+
+> `readonly` **messageId**: `number`
+
+The stored message's id. 0 under `pathways test`, which stores nothing.
+
+##### meta
+
+> `readonly` **meta**: `Readonly`\<`Record`\<`string`, `string` \| `number` \| `boolean`\>\>
+
+A per-message map of flat values. Always empty in this release: nothing sets it yet.
+
+##### source
+
+> `readonly` **source**: [`SourceFacts`](#sourcefacts) \| `undefined`
+
+What the source knew about the message when it took it in. Undefined when that is not known:
+under `pathways test`, on a replay, and for a message taken in before the engine last started,
+since the facts are kept in memory until the message is transformed and not stored.
 
 ***
 
@@ -4339,6 +4586,21 @@ export default ((options, context) => ({
 
 ***
 
+### SourceFacts
+
+> **SourceFacts** = [`FileSourceFacts`](#filesourcefacts) \| [`HttpSourceFacts`](#httpsourcefacts) \| [`MllpSourceFacts`](#mllpsourcefacts) \| [`ModuleSourceFacts`](#modulesourcefacts)
+
+What the source knew about a message when it took it in, by the kind of source.
+
+#### Example
+
+```ts
+const from = (source: SourceFacts): string | undefined =>
+  source.kind === "http" || source.kind === "mllp" ? source.remoteAddress : undefined;
+```
+
+***
+
 ### StoreFactory
 
 > **StoreFactory**\<`Options`\> = (`options`, `context`) => [`MessageStore`](#messagestore) \| `Promise`\<[`MessageStore`](#messagestore)\>
@@ -4384,11 +4646,16 @@ export default (async (options, context) => {
 
 ### Transform
 
-> **Transform**\<`In`, `Out`\> = (`message`) => [`TransformOutput`](#transformoutput)\<`Out`\> \| `Promise`\<[`TransformOutput`](#transformoutput)\<`Out`\>\>
+> **Transform**\<`In`, `Out`\> = (`message`, `ctx?`) => [`TransformOutput`](#transformoutput)\<`Out`\> \| `Promise`\<[`TransformOutput`](#transformoutput)\<`Out`\>\>
 
 A channel's transform: the default export of its `transform.ts`. It receives the parsed message
 (an `Hl7Message` from `@cosyte/hl7` unless you name another type) and returns what to send. It
 may be async.
+
+Its second argument, `ctx`, is a [TransformContext](#transformcontext): the message's id, which run this is,
+what its source knew, and the channel's configuration. The engine always passes it; it is optional
+in the type, so a transform that takes one argument is a `Transform` too, and a test can call one
+with the message alone.
 
 `Out` is what it returns, when that differs from what it receives: a transform from HL7 v2 to FHIR
 is a `Transform<Hl7Message, FhirResource>`. A model from any of the four libraries is written by
@@ -4409,6 +4676,10 @@ its own library, and a string is sent as it is.
 ##### message
 
 `In`
+
+##### ctx?
+
+[`TransformContext`](#transformcontext)
 
 #### Returns
 
