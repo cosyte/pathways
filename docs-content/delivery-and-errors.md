@@ -44,11 +44,26 @@ What the receiver sees depends on the destination:
 
 A delivery cut off before its marker was written was never handed over, and is sent as usual.
 
-The marker costs one more write per attempt. On a GitHub runner, `pathways start --once` with
-SQLite took about 5% longer for a single 1 MiB message with it, and about 1.5% longer for 100 small
-HL7 v2 messages. A channel that would rather save it sets `resendFlag: false` (in `defaults:` or its
-`channel.yaml`); then no marker is written, and a resend after a crash goes out unflagged, as it did
-before.
+What the flag does not cover:
+
+- **A retry after a timeout or a lost answer goes out unflagged.** When a destination times out, or
+  the connection drops before the answer, the receiver may already hold the message, but Pathways
+  records that attempt as failed and retries it as usual. The flag covers a process that was cut off
+  between the send and the record, not an attempt whose answer never came.
+- **Two engines on one database are not fenced yet.** If two engines read the same database, both
+  could find the same marked delivery and both send it. Run one engine per database.
+- **The marker is as durable as the database.** On SQLite it survives a process kill. Whether it
+  survives a power loss depends on the database's sync setting (SQLite's `synchronous`), the same as
+  for stored messages.
+- **Migration `0005-send-markers` has no rollback step.** It only adds three columns that may be
+  null, and nothing in Pathways removes them.
+
+The marker costs one more write per attempt. On a GitHub runner, two runs of the same comparison
+put it between about 1% and 5% for `pathways start --once` with a single 1 MiB message on SQLite,
+and about 1.5% to 2% on 100 small HL7 v2 messages, under the comparison's 3% regression threshold
+both times. A channel that would rather save it sets
+`resendFlag: false` (in `defaults:` or its `channel.yaml`); then no marker is written, and a resend
+after a crash goes out unflagged, as it did before.
 
 ## Taking a message in
 
