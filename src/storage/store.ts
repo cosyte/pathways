@@ -1145,21 +1145,15 @@ export function migrations(kind: StorageKind): Record<string, Migration> {
 }
 
 /**
- * Now, in epoch milliseconds, by the database's own clock: every lease decision reads it inside
+ * Now, in epoch milliseconds, by each database's own clock: every lease decision reads it inside
  * the statement that makes the change, so no node's clock, skewed or not, takes part.
  */
-function databaseNow(kind: StorageKind): RawBuilder<number> {
-  switch (kind) {
-    case "sqlite":
-      return sql<number>`cast((julianday('now') - 2440587.5) * 86400000 as integer)`;
-    case "postgres":
-      return sql<number>`cast(floor(extract(epoch from statement_timestamp()) * 1000) as bigint)`;
-    case "mysql":
-      return sql<number>`cast(floor(unix_timestamp(current_timestamp(3)) * 1000) as signed)`;
-    case "sqlserver":
-      return sql<number>`datediff_big(millisecond, cast('1970-01-01' as datetime2), sysutcdatetime())`;
-  }
-}
+const DATABASE_NOW: Readonly<Record<StorageKind, RawBuilder<number>>> = {
+  sqlite: sql<number>`cast((julianday('now') - 2440587.5) * 86400000 as integer)`,
+  postgres: sql<number>`cast(floor(extract(epoch from statement_timestamp()) * 1000) as bigint)`,
+  mysql: sql<number>`cast(floor(unix_timestamp(current_timestamp(3)) * 1000) as signed)`,
+  sqlserver: sql<number>`datediff_big(millisecond, cast('1970-01-01' as datetime2), sysutcdatetime())`,
+};
 
 /** How many messages retention deletes in one transaction, so the engine is never held up long. */
 const EXPIRE_BATCH = 500;
@@ -1815,7 +1809,7 @@ export class Store implements MessageStore, ContentStore {
    * on the first request; two first requests at once both try, and one insert is refused.
    */
   async acquireLease(name: string, claimant: LeaseClaimant, ttlMs: number): Promise<LeaseClaim> {
-    const now = databaseNow(this.kind);
+    const now = DATABASE_NOW[this.kind];
     const take = (): Promise<{ numUpdatedRows: bigint }> =>
       this.db
         .updateTable("leases")
@@ -1829,7 +1823,7 @@ export class Store implements MessageStore, ContentStore {
         .where("name", "=", name)
         .where("expires_at", "<=", now)
         .executeTakeFirst();
-    for (let round = 0; round < 3; round += 1) {
+    for (let round = 0; round < 2; round += 1) {
       if ((await take()).numUpdatedRows > 0n) {
         const row = await this.db
           .selectFrom("leases")
@@ -1840,24 +1834,22 @@ export class Store implements MessageStore, ContentStore {
         return { acquired: true, epoch: Number(row.epoch) };
       }
       const holder = await this.leaseHolder(name);
-      if (holder !== undefined && holder.expiresInMs > 0) return { acquired: false, holder };
-      if (holder === undefined) {
-        // The first request for this lease: make its row, lapsed. Another engine asking at the
-        // same moment may make it first, and then this insert is refused, which is fine.
-        await this.db
-          .insertInto("leases")
-          .values({ name, owner: "", host: "", epoch: 0, since: 0, expires_at: 0 })
-          .execute()
-          .catch(() => undefined);
-      }
+      if (holder !== undefined) return { acquired: false, holder };
+      // The first request for this lease: make its row, lapsed, and take it. Another engine asking
+      // at the same moment may make it first, and then this insert is refused, which is fine.
+      await this.db
+        .insertInto("leases")
+        .values({ name, owner: "", host: "", epoch: 0, since: 0, expires_at: 0 })
+        .execute()
+        .catch(() => undefined);
     }
-    /* v8 ignore next 2: three rounds pass only while another engine takes and frees it each time */
+    /* v8 ignore next 2: the row exists after the first round, so the second takes or refuses */
     throw new Error("the lease could not be taken or read");
   }
 
   /** Extends the lease while it carries `epoch` and has not lapsed, by the database's clock. */
   async renewLease(name: string, epoch: number, ttlMs: number): Promise<boolean> {
-    const now = databaseNow(this.kind);
+    const now = DATABASE_NOW[this.kind];
     const renewed = await this.db
       .updateTable("leases")
       .set({ expires_at: sql<number>`${now} + ${ttlMs}` })
@@ -1885,7 +1877,7 @@ export class Store implements MessageStore, ContentStore {
     const row = await this.db
       .selectFrom("leases")
       .select(["owner", "host", "epoch", "since", "expires_at"])
-      .select(databaseNow(this.kind).as("now"))
+      .select(DATABASE_NOW[this.kind].as("now"))
       .where("name", "=", name)
       .executeTakeFirst();
     if (row === undefined || row.owner === "") return undefined;

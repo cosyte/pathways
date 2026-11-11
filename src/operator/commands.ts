@@ -522,30 +522,26 @@ export async function leaseReleaseCommand(context: OperatorContext): Promise<num
   const leases = leaseStore(context.store);
   if (leases === undefined) return noLeases(context);
   const holder = await leases.leaseHolder(ENGINE_LEASE);
-  const released =
-    holder !== undefined &&
-    holder.expiresInMs > 0 &&
-    (await leases.releaseLease(ENGINE_LEASE, holder.epoch));
-  const detail: AuditDetail =
-    holder === undefined
-      ? { reason: "free" }
-      : {
-          node: holder.node,
-          epoch: holder.epoch,
-          leftMs: Math.max(0, holder.expiresInMs),
-          ...(released ? {} : { reason: "free" }),
-        };
+  const held = holder !== undefined && holder.expiresInMs > 0 ? holder : undefined;
+  if (held === undefined || !(await leases.releaseLease(ENGINE_LEASE, held.epoch))) {
+    await context.audit.record({
+      action: "lease-release",
+      outcome: "refused",
+      detail: { reason: "free" },
+    });
+    print(context, { released: false, holder: holder ?? null }, [
+      "Engine lease: nothing to release; it is free.",
+    ]);
+    return EXIT.failed;
+  }
   await context.audit.record({
     action: "lease-release",
-    outcome: released ? "ok" : "refused",
-    detail,
+    detail: { node: held.node, epoch: held.epoch, leftMs: held.expiresInMs },
   });
-  const line =
-    released && holder !== undefined
-      ? `Engine lease released: it was held by ${describeHolder(holder)}. The next engine to start takes it.`
-      : "Engine lease: nothing to release; it is free.";
-  print(context, { released, holder: holder ?? null }, [line]);
-  return released ? EXIT.ok : EXIT.failed;
+  print(context, { released: true, holder: held }, [
+    `Engine lease released: it was held by ${describeHolder(held)}. The next engine to start takes it.`,
+  ]);
+  return EXIT.ok;
 }
 
 function noLeases(context: OperatorContext): number {

@@ -148,6 +148,28 @@ describe("An engine lease", () => {
     await second.lease.release();
   });
 
+  it("is told once, when a renewal fails after the lease was already lost", async () => {
+    vi.useFakeTimers();
+    let fail: (error: Error) => void = () => undefined;
+    const store = fakeStore({
+      renew: () =>
+        new Promise<boolean>((_, reject) => {
+          fail = reject;
+        }),
+    });
+    const { lease, clock, lost } = leaseOn(store);
+    await lease.acquire();
+    clock.now += 1_000;
+    await vi.advanceTimersByTimeAsync(1_000);
+    clock.now += 5_000;
+    expect(() => {
+      lease.check();
+    }).toThrow(LeaseLostError);
+    fail(new Error("ECONNRESET"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(lost).toEqual(["renewal-late"]);
+  });
+
   it("is lost when a renewal comes later than the lease lasts, as after a pause", async () => {
     vi.useFakeTimers();
     const store = fakeStore({});

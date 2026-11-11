@@ -30,8 +30,28 @@ export function engineLease(): LeaseRow | undefined {
   return leaseRows.get("engine");
 }
 
+/** How a store of this module fails, for the tests of what the engine does then. */
+interface Failing {
+  /** `acquireLease` rejects: with an error with a code, or one without. */
+  readonly acquire?: "code" | "plain";
+  /** `releaseLease` rejects. */
+  readonly release?: boolean;
+}
+
 export class LeasedMemoryStore extends MemoryStore {
+  readonly failing: Failing;
+
+  constructor(failing: Failing = {}) {
+    super();
+    this.failing = failing;
+  }
+
   acquireLease(name: string, claimant: LeaseClaimant, ttlMs: number): Promise<LeaseClaim> {
+    if (this.failing.acquire !== undefined) {
+      const error = new Error("the database went away");
+      if (this.failing.acquire === "code") Object.assign(error, { code: "ECONNRESET" });
+      return Promise.reject(error);
+    }
     const now = Date.now();
     const row = leaseRows.get(name);
     if (row !== undefined && row.expiresAt > now) {
@@ -53,6 +73,9 @@ export class LeasedMemoryStore extends MemoryStore {
   }
 
   releaseLease(name: string, epoch?: number): Promise<boolean> {
+    if (this.failing.release === true) {
+      return Promise.reject(Object.assign(new Error("gone"), { code: "ECONNRESET" }));
+    }
     const row = leaseRows.get(name);
     if (row === undefined || (epoch !== undefined && row.epoch !== epoch)) {
       return Promise.resolve(false);
@@ -124,6 +147,6 @@ function holderOf(row: LeaseRow, now: number): LeaseHolder {
 }
 
 /** A storage adapter module's default export: `storage: { module: ./lease-memory-store.ts }`. */
-const leasedMemoryStore = (() => new LeasedMemoryStore()) satisfies StoreFactory;
+const leasedMemoryStore = ((options) => new LeasedMemoryStore(options)) satisfies StoreFactory;
 
 export default leasedMemoryStore;

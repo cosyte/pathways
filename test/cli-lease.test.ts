@@ -240,6 +240,30 @@ describe("pathways start on a custom store", () => {
     expect((await cli(["lease", "release", "--force", "-C", root])).code).toBe(EXIT.failed);
   });
 
+  it("says so and exits 1 when the lease cannot be asked for, and runs on when it cannot be freed", async () => {
+    for (const [acquire, shown] of [
+      ["code", " (ECONNRESET)"],
+      ["plain", ""],
+    ] as const) {
+      const root = await project(
+        `storage: { module: ${LEASED_STORE_FILE}, options: { acquire: ${acquire} } }\n`,
+      );
+      expect(await cli(["start", "--once", "-C", root])).toMatchObject({
+        code: EXIT.failed,
+        err: `pathways: the engine lease could not be taken${shown}.\n`,
+      });
+    }
+    const root = await project(
+      `storage: { module: ${LEASED_STORE_FILE}, options: { release: true } }\n`,
+    );
+    const ran = await cli(["start", "--once", "-C", root]);
+    expect(ran.code).toBe(EXIT.ok);
+    expect(ran.events.find((e) => e.event === "lease-release-failed")).toMatchObject({
+      level: 40,
+      code: "ECONNRESET",
+    });
+  });
+
   /** A destination that takes the engine lease's epoch up by one as it delivers, then waits `waitMs`. */
   const stealing = (waitMs: number): string => `
 import { engineLease } from ${JSON.stringify(pathToFileURL(LEASED_STORE_FILE).href)};
