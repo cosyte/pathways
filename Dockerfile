@@ -9,6 +9,12 @@
 #   docker run --rm --volume "$PWD:/project" pathways test
 #   docker run --rm --volume "$PWD:/project" pathways start --once
 #
+# `docker stop` sends SIGTERM (STOPSIGNAL says so outright): the engine turns not ready, closes its
+# sources, and exits 0. The image has no shell or curl, so its HEALTHCHECK runs `pathways probe`,
+# which asks the probe listener of pathways.yaml's `probes` block for /livez. Without that block the
+# check fails and Docker reports the container unhealthy; add the block, or run with
+# --no-healthcheck.
+#
 # The `debug` target is the same image on distroless's debug variant, which adds busybox's shell for
 # troubleshooting. Do not run it in production:
 #
@@ -84,6 +90,9 @@ LABEL org.opencontainers.image.source="https://github.com/cosyte/pathways" \
 COPY --from=app /app /app
 USER 65532:65532
 WORKDIR /project
+STOPSIGNAL SIGTERM
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+  CMD ["/nodejs/bin/node", "/app/dist/bin/pathways.mjs", "probe", "-C", "/project"]
 ENTRYPOINT ["/nodejs/bin/node", "/app/dist/bin/pathways.mjs"]
 CMD ["start", "-C", "/project"]
 
@@ -94,5 +103,8 @@ LABEL org.opencontainers.image.source="https://github.com/cosyte/pathways" \
 COPY --from=app /app /app
 USER 65532:65532
 WORKDIR /project
+STOPSIGNAL SIGTERM
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+  CMD ["/nodejs/bin/node", "/app/dist/bin/pathways.mjs", "probe", "-C", "/project"]
 ENTRYPOINT ["/nodejs/bin/node", "/app/dist/bin/pathways.mjs"]
 CMD ["start", "-C", "/project"]

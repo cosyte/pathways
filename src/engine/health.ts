@@ -11,6 +11,7 @@ import {
 } from "../connectors/endpoint.js";
 import type { ServerTlsMaterial } from "../connectors/tls.js";
 import type { DeliveryStatus, MessageStatus } from "../storage/store.js";
+import { answerProbe, type EngineRole, type Probes } from "./probes.js";
 
 /**
  * One channel's state: `retrying` while a delivery waits to be tried again, else `failed` while it
@@ -36,10 +37,39 @@ export interface ChannelHealth {
  * bring it back. A standby (`pathways start --standby`) answers `standby`, with 503 and no channels,
  * until it takes the engine lease, so a load balancer's readiness check sends it nothing.
  */
-export interface HealthReport {
+export interface HealthReport extends EngineIdentity {
   readonly status: "ok" | "unavailable" | "standby";
   readonly storage: "ok" | "unreachable";
   readonly channels: Readonly<Record<string, ChannelHealth>>;
+}
+
+/** What the engine itself reports: the status, storage, and each channel. */
+export type EngineHealth = Pick<HealthReport, "status" | "storage" | "channels">;
+
+/**
+ * Which engine answers, and where it stands: states and numbers only.
+ *
+ * @example
+ * ```ts
+ * const identity: EngineIdentity = {
+ *   version: "0.0.1", schemaGeneration: 6, node: "3f9a1c2b7d4e5f60",
+ *   role: "active", leaseEpoch: 3, draining: false,
+ * };
+ * ```
+ */
+export interface EngineIdentity {
+  /** The version of `@cosyte/pathways` the engine runs. */
+  readonly version: string;
+  /** How many schema migrations this version brings a built-in store to; null for a custom store. */
+  readonly schemaGeneration: number | null;
+  /** This process's node id: the one it holds the engine lease under. */
+  readonly node: string;
+  /** `single` on a store without leases, else `active` or `standby`. */
+  readonly role: EngineRole;
+  /** The engine lease's epoch while this engine holds it, else null. */
+  readonly leaseEpoch: number | null;
+  /** True once the engine was told to stop and is closing its sources. */
+  readonly draining: boolean;
 }
 
 /**
@@ -70,14 +100,17 @@ export interface HealthEndpointOptions {
   readonly token: string | undefined;
   /** Builds the report each request answers with. */
   readonly report: () => Promise<HealthReport>;
+  /** The probes `/livez` and `/readyz` answer, behind the same authentication. */
+  readonly probes?: Probes;
   /** Told the status of each request refused (401, 405). */
   readonly onRefused?: (status: number) => void;
 }
 
 /**
  * The health endpoint: `GET` (or `HEAD`) on any path answers 200 with a {@link HealthReport}, or
- * 503 when the engine itself is broken or is a standby. It is authenticated like an HTTP source: a bearer token by
- * default, or mutual TLS.
+ * 503 when the engine itself is broken or is a standby. Given probes, `/livez` and `/readyz` answer
+ * as the probe listener does, with one word. It is authenticated like an HTTP source: a bearer
+ * token by default, or mutual TLS.
  *
  * @example
  * ```ts
@@ -93,7 +126,7 @@ export class HealthEndpoint {
 
   /** @param options Where to listen, TLS, the token, and where the report comes from. */
   constructor(options: HealthEndpointOptions) {
-    const { host, port, tls, token, report, onRefused } = options;
+    const { host, port, tls, token, report, probes, onRefused } = options;
     this.endpoint = new Endpoint(
       { host, port, tls, token, ...(onRefused === undefined ? {} : { onRefused }) },
       async (request, response) => {
@@ -102,6 +135,7 @@ export class HealthEndpoint {
           onRefused?.(405);
           return;
         }
+        if (probes !== undefined && (await answerProbe(request, response, probes))) return;
         const body = await report();
         reply(response, body.status === "ok" ? 200 : 503, body);
       },
@@ -131,7 +165,7 @@ export class HealthEndpoint {
  * @throws {ConfigError} when a TLS file cannot be read or loaded, or the token is missing or weak.
  * @example
  * ```ts
- * const health = healthEndpointFor(project.health, () => engine.health(), process.env, logger);
+ * const health = healthEndpointFor(project.health, () => report(), process.env, logger, probes);
  * await health.start();
  * ```
  */
@@ -140,6 +174,7 @@ export function healthEndpointFor(
   report: () => Promise<HealthReport>,
   env: Env,
   logger: Logger,
+  probes?: Probes,
 ): HealthEndpoint {
   const { tls, token } = listenerSecurity(config, env, "pathways.yaml: health");
   for (const warning of listenerWarnings(config)) {
@@ -151,6 +186,7 @@ export function healthEndpointFor(
     tls,
     token,
     report,
+    ...(probes === undefined ? {} : { probes }),
     onRefused: (status) => logger.warn({ event: "http-refused", endpoint: "health", status }),
   });
 }

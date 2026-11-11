@@ -2,7 +2,8 @@ name: Docker
 
 # Builds the image from the Dockerfile and runs it against a starter project written by
 # `pathways init` inside the image: `--version`, `pathways test`, `pathways start --once`, the
-# default command as the nonroot user stopped by `docker stop`, and the debug target's shell. Those
+# default command as the nonroot user stopped by `docker stop`, the HEALTHCHECK against the probe
+# listener, and the debug target's shell. Those
 # store messages in SQLite, the default. `pathways start --once` then runs again on PostgreSQL,
 # MySQL, MariaDB and SQL Server, service containers here, through the drivers the image carries: pg,
 # mysql2 (for MySQL and MariaDB), and tedious with tarn.
@@ -172,6 +173,31 @@ jobs:
           echo "exit code after docker stop: $code"
           test "$code" = 0
           cmp "$project/data/adt-to-lab/out/3-1.hl7" "$project/channels/adt-to-lab/tests/a01.expected.hl7"
+
+      # The image's HEALTHCHECK runs `pathways probe` against the probes block: the container turns
+      # healthy, and `probe --ready` says ready. The interval is shortened here only.
+      - name: The health check reads the probe listener
+        run: |
+          project="$RUNNER_TEMP/project"
+          # The project is uid 65532's since the step before.
+          printf 'probes:\n  port: 9091\n  plaintext: true\n' | sudo tee -a "$project/pathways.yaml" > /dev/null
+          docker run --detach --name pathways-probes --health-interval 1s --health-start-period 30s \
+            --volume "$project:/project" "$IMAGE"
+          status=""
+          for _ in $(seq 1 60); do
+            status="$(docker inspect --format '{{.State.Health.Status}}' pathways-probes)"
+            if [ "$status" = healthy ]; then break; fi
+            sleep 1
+          done
+          ready="$(docker exec pathways-probes /nodejs/bin/node /app/dist/bin/pathways.mjs probe --ready -C /project || true)"
+          docker stop pathways-probes
+          code="$(docker inspect --format '{{.State.ExitCode}}' pathways-probes)"
+          docker logs pathways-probes
+          docker rm pathways-probes
+          echo "health: $status, probe --ready: $ready, exit code after docker stop: $code"
+          test "$status" = healthy
+          test "$ready" = ready
+          test "$code" = 0
 
       # Each server gets a starter project of its own whose pathways.yaml stores messages there, in
       # a database of its own. The image reaches the service containers on the runner's loopback,

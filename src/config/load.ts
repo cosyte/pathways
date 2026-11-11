@@ -117,6 +117,21 @@ export async function loadProject(root: string): Promise<ProjectConfig> {
     project.health === undefined
       ? undefined
       : resolveListener(project.health, projectRoot, DEFAULT_HEALTH_TOKEN_ENV);
+  const probes =
+    project.probes === undefined
+      ? undefined
+      : {
+          host: project.probes.host ?? DEFAULT_HOST,
+          port: project.probes.port,
+          tls:
+            project.probes.tls === undefined
+              ? undefined
+              : {
+                  cert: resolve(projectRoot, project.probes.tls.cert),
+                  key: resolve(projectRoot, project.probes.tls.key),
+                },
+          plaintext: project.probes.plaintext === true,
+        };
   const lease = {
     ttlMs: project.lease?.ttl ?? DEFAULT_LEASE_TTL_MS,
     standby: project.lease?.standby ?? false,
@@ -215,6 +230,7 @@ export async function loadProject(root: string): Promise<ProjectConfig> {
     settings,
     hooks,
     health,
+    probes,
     lease,
     encryption,
     channels,

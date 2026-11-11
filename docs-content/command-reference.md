@@ -39,11 +39,12 @@ Pathways. Nothing is written if the folder is not empty.
 pathways start [--once | --standby]
 ```
 
-Runs every channel, and the health endpoint if `pathways.yaml` configures one, until it receives
-SIGINT or SIGTERM. Retention runs after the first pass and then every `retentionInterval`. Needs
+Runs every channel, and the health endpoint and the probe listener if `pathways.yaml` configures
+them, until it receives SIGINT or SIGTERM. Retention runs after the first pass and then every `retentionInterval`. Needs
 `encryption` in `pathways.yaml`.
 
-On either signal it stops cleanly and exits 0: sources stop taking messages, what is being stored is
+On either signal it stops cleanly and exits 0: `/readyz` answers 503 `draining` at once, sources stop
+taking messages, what is being stored is
 answered, and each [lifecycle hook](./add-lifecycle-hooks.md) gets up to its time limit to finish the
 events queued for it. Windows has no SIGTERM. There Ctrl+C in the engine's console is SIGINT and
 stops it the same way, while ending the process (Task Manager, `taskkill /F`, or a service manager
@@ -61,7 +62,7 @@ See [one engine per database](./store-messages-in-a-database.md#one-engine-per-d
 
 | Option      | Meaning                                                                                                                                                                 |
 | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--once`    | take in, transform and deliver what is waiting, then exit; no health endpoint, no retention                                                                             |
+| `--once`    | take in, transform and deliver what is waiting, then exit; no health endpoint, no probe listener, no retention                                                          |
 | `--standby` | hold no lease and open no source until the engine holding the lease stops, then take over; health answers 503 `standby` until then. Needs a database server, not SQLite |
 
 ## pathways test
@@ -193,15 +194,33 @@ host is gone, so the next start takes it at once instead of after it lapses, and
 to the audit log (`lease-release`); it exits 1 when the lease is already free. An engine still
 running under a lease freed this way stops at its next renewal.
 
+## pathways probe
+
+```text
+pathways probe [--ready]
+```
+
+Asks the probe listener of the engine running in this project (the `probes` block of
+`pathways.yaml`) for `/livez`, or `/readyz` with `--ready`, prints the word it answers, and exits 0
+on a 200 and 1 on anything else. It exits 1, saying why, when `pathways.yaml` has no `probes` block,
+when the configuration is invalid, or when nothing answers within 5 seconds, so a container's health
+check sees only 0 or 1. It reads `pathways.yaml` and opens no database. A listener on `0.0.0.0` or
+`::` is asked on the loopback address; over TLS the certificate is not checked, since the request
+carries nothing and only the status is read.
+
+| Option    | Meaning                            |
+| --------- | ---------------------------------- |
+| `--ready` | ask `/readyz` in place of `/livez` |
+
 ## Exit codes
 
-| Code | Meaning                                                                                                                                                                                                                                                                                                                                     |
-| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0    | done                                                                                                                                                                                                                                                                                                                                        |
-| 1    | a test failed; the engine, a command or an extension module could not start or stopped on an error; `init` could not write; `rekey` left a value not under the current key; a replay, resend or clear was refused, or the message failed again; another engine holds the lease, the engine lost its lease, or there was no lease to release |
-| 2    | the command line was not understood; nothing was done                                                                                                                                                                                                                                                                                       |
-| 3    | the configuration is invalid; nothing was done                                                                                                                                                                                                                                                                                              |
-| 4    | a message named does not exist; any others named were still acted on                                                                                                                                                                                                                                                                        |
+| Code | Meaning                                                                                                                                                                                                                                                                                                                                                                                      |
+| ---- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0    | done                                                                                                                                                                                                                                                                                                                                                                                         |
+| 1    | a test failed; the engine, a command or an extension module could not start or stopped on an error; `init` could not write; `rekey` left a value not under the current key; a replay, resend or clear was refused, or the message failed again; another engine holds the lease, the engine lost its lease, or there was no lease to release; `probe` found the engine not alive or not ready |
+| 2    | the command line was not understood; nothing was done                                                                                                                                                                                                                                                                                                                                        |
+| 3    | the configuration is invalid; nothing was done                                                                                                                                                                                                                                                                                                                                               |
+| 4    | a message named does not exist; any others named were still acted on                                                                                                                                                                                                                                                                                                                         |
 
 ## Related
 

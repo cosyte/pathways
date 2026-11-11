@@ -11,13 +11,26 @@ import { ENCRYPTION_REQUIRED, type KeyProvider } from "./encryption/keys.js";
 import { rekey, rekeyComplete, type RekeyCounts } from "./encryption/rekey.js";
 import { TransformLoadError } from "./engine/channel-worker.js";
 import { Engine, errorCode } from "./engine/engine.js";
-import { healthEndpointFor, type HealthEndpoint, type HealthReport } from "./engine/health.js";
+import {
+  healthEndpointFor,
+  type EngineIdentity,
+  type HealthEndpoint,
+  type HealthReport,
+} from "./engine/health.js";
 import {
   describeHolder,
   EngineLease,
   LeaseCheckFailed,
+  nodeId,
   type LeaseLossReason,
 } from "./engine/lease.js";
+import {
+  askProbe,
+  engineProbes,
+  probeEndpointFor,
+  type EnginePhase,
+  type ProbeEndpoint,
+} from "./engine/probes.js";
 import { EXIT } from "./exit.js";
 import { HookSet } from "./extensions/hooks.js";
 import { ExtensionLoadError } from "./extensions/load.js";
@@ -48,6 +61,7 @@ import {
   isContentStore,
   leaseStore,
   LeaseLostError,
+  migrations,
   StorageError,
   type MessageStore,
 } from "./storage/store.js";
@@ -109,6 +123,10 @@ Commands:
   rekey               Re-encrypt every stored message under the current key
                       of pathways.yaml's encryption, so older keys can be
                       retired
+  probe [--ready]     Ask the running engine's probe listener (pathways.yaml's
+                      probes block) whether it is alive, or with --ready
+                      whether it is ready for traffic: exits 0 if so, 1 if
+                      not. For a container's health check
   lease status        Who holds the engine lease, since when, its epoch and
                       the time it has left
   lease release --force
@@ -125,6 +143,7 @@ Options:
       --standby         start: hold no lease and open no source until the
                         engine holding the lease stops, then take over.
                         Needs a database server
+      --ready           probe: ask /readyz in place of /livez
       --force           lease release: say the lease's host is gone
       --update          test: save the current outputs as the expected ones
       --json            status, messages, replay, clear, retention, audit,
@@ -161,8 +180,9 @@ Exit codes: 0 done; 1 a test failed, the engine, a command or an extension
 module could not start or stopped on an error, init could not write the
 project, rekey left a value not under the current key, a replay, resend or
 clear was refused or the message failed again, another engine holds the lease,
-the engine lost its lease, or there was no lease to release; 2 the command line was not
-understood; 3 the configuration is invalid; 4 a message named does not exist.
+the engine lost its lease, there was no lease to release, or probe found the
+engine not alive or not ready (probe exits only 0 or 1); 2 the command line was
+not understood; 3 the configuration is invalid; 4 a message named does not exist.
 `;
 
 /** Redaction paths for the engine's logger, in case a field that can hold content is ever logged. */
@@ -188,6 +208,7 @@ const OPTIONS: Readonly<Record<string, readonly OptionName[]>> = {
   audit: ["json", "action", "message", "channel", "since", "until", "limit", "before"],
   rekey: ["encrypt-plaintext"],
   lease: ["json", "force"],
+  probe: ["ready"],
 };
 
 /**
@@ -248,6 +269,9 @@ export async function run(argv: readonly string[], io: CliIo): Promise<number> {
     case "rekey":
       if (rest.length > 0) return usage(io);
       return rekeyStore(projectDir, values["encrypt-plaintext"] === true, io);
+    case "probe":
+      if (rest.length > 0) return usage(io);
+      return probe(projectDir, values.ready === true, io);
     default:
       return operator(command, rest, values, projectDir, io);
   }
@@ -401,8 +425,11 @@ function auditFor(store: MessageStore, io: CliIo, onListenerError: (error: unkno
   return audit;
 }
 
-/** What a standby's health endpoint answers until it takes the lease: 503, and no counts. */
-const STANDBY_REPORT: HealthReport = { status: "standby", storage: "ok", channels: {} };
+/**
+ * How many schema migrations this version brings a built-in store to: the same on every database,
+ * since each runs the same steps under the same names.
+ */
+const SCHEMA_GENERATION = Object.keys(migrations("sqlite")).length;
 
 /** How `pathways start` runs: one pass, or as a standby (`undefined` leaves it to pathways.yaml). */
 interface StartMode {
@@ -438,6 +465,9 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
   // Aborted by the caller's signal, or at once when the lease is lost.
   const stopping = new AbortController();
   const signal = AbortSignal.any([io.signal ?? new AbortController().signal, stopping.signal]);
+  // Where this engine stands, for readiness and the health body. Told to stop, it drains: its
+  // sources close while the probes still answer, 503 draining.
+  let phase: EnginePhase = standby ? "standby" : "starting";
   const lease =
     leases === undefined
       ? undefined
@@ -446,9 +476,22 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
           ttlMs: project.lease.ttlMs,
           onLost: (reason) => {
             logger.error({ event: "lease-lost", reason, epoch: lease?.epoch });
+            phase = "fenced";
             stopping.abort();
           },
         });
+  signal.addEventListener("abort", () => {
+    if (phase !== "fenced") phase = "draining";
+  });
+  const node = lease?.claimant.node ?? nodeId();
+  const identity = (): EngineIdentity => ({
+    version: VERSION,
+    schemaGeneration: project.storage.kind === "module" ? null : SCHEMA_GENERATION,
+    node,
+    role: lease === undefined ? "single" : phase === "standby" ? "standby" : "active",
+    leaseEpoch: lease?.epoch ?? null,
+    draining: phase === "draining",
+  });
 
   const audit = auditFor(store, io, (error) => {
     logger.warn({ event: "audit-listener-failed", code: errorCode(error) });
@@ -462,19 +505,30 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
     ...(lease === undefined ? {} : { fence: lease }),
   });
   let active = !standby;
+  const report = async (): Promise<HealthReport> => {
+    // A standby answers 503 with no counts until it takes the lease.
+    const { channels, ...engineHealth } = active
+      ? await engine.health()
+      : { status: "standby" as const, storage: "ok" as const, channels: {} };
+    return { ...engineHealth, ...identity(), channels };
+  };
+  const probes = engineProbes({
+    phase: () => phase,
+    live: () => engine.live(),
+    ready: () => engine.ready(),
+  });
   let health: HealthEndpoint | undefined;
-  // A single pass does not serve health: it would hold the port a running engine needs.
-  if (project.health !== undefined && !once) {
+  let probeListener: ProbeEndpoint | undefined;
+  // A single pass serves neither: it would hold the ports a running engine needs.
+  if (!once) {
     try {
-      health = healthEndpointFor(
-        project.health,
-        () => (active ? engine.health() : Promise.resolve(STANDBY_REPORT)),
-        env,
-        logger,
-      );
+      if (project.health !== undefined) {
+        health = healthEndpointFor(project.health, report, env, logger, probes);
+      }
+      if (project.probes !== undefined) probeListener = probeEndpointFor(project.probes, probes);
     } catch (error) {
       await store.close();
-      /* v8 ignore next: healthEndpointFor throws only ConfigError */
+      /* v8 ignore next: healthEndpointFor and probeEndpointFor throw only ConfigError */
       if (!(error instanceof ConfigError)) throw error;
       reportConfigError(error, io);
       return EXIT.config;
@@ -482,9 +536,12 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
   }
 
   try {
+    // The probes answer from the first moment: starting, or standby, before the lease is taken.
+    if (!(await listen(probeListener, "the probe listener", io))) return EXIT.failed;
     if (lease !== undefined) {
       const taken = await takeLease(lease, { standby, health, signal, logger, io });
       if (taken !== true) return taken;
+      if (phase === "standby") phase = "starting";
     }
     return await runEngine(engine, project, store, audit, io, {
       once,
@@ -496,8 +553,19 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
       onActive: () => {
         active = true;
       },
+      onRunning: () => {
+        if (phase === "starting") phase = "running";
+      },
+      onStopping: () => {
+        if (phase !== "fenced") phase = "draining";
+      },
+      onFenced: () => {
+        phase = "fenced";
+      },
     });
   } finally {
+    // The engine has stopped, its sources closed, before the probes stop answering.
+    await probeListener?.stop();
     await health?.stop();
     await lease?.release().catch((error: unknown) => {
       logger.warn({ event: "lease-release-failed", code: errorCode(error) });
@@ -507,12 +575,21 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
 }
 
 /** Starts the health endpoint, if there is one; says why and returns false when it cannot listen. */
-async function listenHealth(health: HealthEndpoint | undefined, io: CliIo): Promise<boolean> {
+function listenHealth(health: HealthEndpoint | undefined, io: CliIo): Promise<boolean> {
+  return listen(health, "the health endpoint", io);
+}
+
+/** Starts a listener, if there is one; says why and returns false when it cannot listen. */
+async function listen(
+  listener: { start(): Promise<void> } | undefined,
+  name: string,
+  io: CliIo,
+): Promise<boolean> {
   try {
-    await health?.start();
+    await listener?.start();
     return true;
   } catch (error) {
-    io.err(`pathways: the health endpoint could not listen (${String(errorCode(error))}).\n`);
+    io.err(`pathways: ${name} could not listen (${String(errorCode(error))}).\n`);
     return false;
   }
 }
@@ -590,6 +667,12 @@ async function runEngine(
     readonly health: HealthEndpoint | undefined;
     readonly logger: Logger;
     readonly onActive: () => void;
+    /** The engine loop is about to start: ready for traffic. */
+    readonly onRunning: () => void;
+    /** The engine is about to stop, its sources to close. */
+    readonly onStopping: () => void;
+    /** The engine lease was found lost, or a write was refused under its epoch. */
+    readonly onFenced: () => void;
   },
 ): Promise<number> {
   try {
@@ -622,12 +705,17 @@ async function runEngine(
       return EXIT.failed;
     }
     if (!(await listenHealth(run.health, io))) return EXIT.failed;
+    run.onRunning();
     if (run.once) await engine.tick();
     else await engine.run(run.signal);
   } catch (error) {
     // The lease was found lost before a send or a take: logged when it was lost.
-    if (error instanceof LeaseCheckFailed) return leaseLost(io, error.reason);
+    if (error instanceof LeaseCheckFailed) {
+      run.onFenced();
+      return leaseLost(io, error.reason);
+    }
     if (error instanceof LeaseLostError) {
+      run.onFenced();
       // A write the database refused under this engine's epoch: logged as such even when a late
       // renewal was noticed first, since the refusal is what shows another engine took over.
       if (run.lease?.lossReason === undefined) run.lease?.writeRefused();
@@ -647,11 +735,37 @@ async function runEngine(
     io.err(`pathways: the engine stopped on an error${code === undefined ? "" : ` (${code})`}.\n`);
     return EXIT.failed;
   } finally {
+    run.onStopping();
     await engine.stop();
   }
   // The lease was lost between passes: the run ended at once, before the next check.
   if (run.lease?.lossReason !== undefined) return leaseLost(io, run.lease.lossReason);
   return EXIT.ok;
+}
+
+/**
+ * `pathways probe [--ready]`: asks the probe listener of the engine running in this project for
+ * `/livez`, or `/readyz`, and exits 0 on a 200 and 1 on anything else, a configuration without a
+ * `probes` block or one that is invalid among them, so a container's health check reads only 0 or
+ * 1. Prints the one word the engine answered, or why there was none.
+ */
+async function probe(projectDir: string, ready: boolean, io: CliIo): Promise<number> {
+  const project = await load(projectDir, io);
+  if (project === undefined) return EXIT.failed;
+  if (project.probes === undefined) {
+    io.err("pathways: pathways.yaml has no probes block, so there is nothing to ask.\n");
+    return EXIT.failed;
+  }
+  const result = await askProbe(project.probes, { ready });
+  if (result.status === undefined) {
+    io.err(
+      `pathways: the probe listener did not answer${result.code === undefined ? "" : ` (${result.code})`}.\n`,
+    );
+    return EXIT.failed;
+  }
+  // Only a word the engine answers is printed, never whatever else held the port.
+  io.out(`${/^[a-z-]{1,40}$/.test(result.word) ? result.word : String(result.status)}\n`);
+  return result.status === 200 ? EXIT.ok : EXIT.failed;
 }
 
 /**
@@ -984,6 +1098,7 @@ function parseCli(argv: readonly string[]) {
       project: { type: "string", short: "C" },
       once: { type: "boolean" },
       standby: { type: "boolean" },
+      ready: { type: "boolean" },
       force: { type: "boolean" },
       update: { type: "boolean" },
       json: { type: "boolean" },

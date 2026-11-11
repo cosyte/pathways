@@ -2,7 +2,7 @@
 id: check-status-and-health
 title: Check status and health
 sidebar_label: Status and health
-description: "See each channel's counts, retrying deliveries and failed messages from the command line, and serve a health endpoint a monitor can poll."
+description: "See each channel's counts, retrying deliveries and failed messages from the command line, serve a health endpoint a monitor can poll, and answer a load balancer's or an orchestrator's liveness and readiness probes."
 ---
 
 # Check status and health
@@ -48,12 +48,18 @@ health:
 curl --cacert certs/ca.pem -H "Authorization: Bearer $PATHWAYS_HEALTH_TOKEN" https://localhost:9090/
 ```
 
-A `GET` or `HEAD` on any path answers with JSON:
+A `GET` or `HEAD` on any path but `/livez` and `/readyz` answers with JSON:
 
 ```json
 {
   "status": "ok",
   "storage": "ok",
+  "version": "0.0.1",
+  "schemaGeneration": 6,
+  "node": "3f9a1c2b7d4e5f60",
+  "role": "active",
+  "leaseEpoch": 3,
+  "draining": false,
   "channels": {
     "adt-to-lab": {
       "status": "retrying",
@@ -64,6 +70,13 @@ A `GET` or `HEAD` on any path answers with JSON:
   }
 }
 ```
+
+Beside the status and the channels, the body says which engine answered: `version`, the version of
+`@cosyte/pathways` it runs; `schemaGeneration`, how many schema migrations that version brings the
+database to (`null` with a custom store); `node`, the node id it holds the engine lease under;
+`role`, `active` or `standby`, or `single` on a custom store without leases; `leaseEpoch`, the
+engine lease's epoch while it holds it, else `null`; and `draining`, `true` once it was told to stop
+and is closing its sources.
 
 The answer is 503, with `status: "unavailable"`, only when the engine itself is broken: the database
 cannot be read (`storage: "unreachable"`, and each channel's status `unknown`), or a source cannot
@@ -78,6 +91,54 @@ if a standby that answers at all counts as alive. See
 
 The body holds states and counts, never content. `pathways start --once` does not serve the endpoint.
 
+`/livez` and `/readyz` on the health endpoint answer as the probe listener below does, behind the
+same token.
+
+## Probe liveness and readiness
+
+A load balancer's health check or an orchestrator's probe often cannot send a token, so a `probes`
+block in `pathways.yaml` opens a second listener that needs none. It answers two paths, each with a
+status code and one word, and nothing else: no channel name, no count, nothing stored.
+
+```yaml title="pathways.yaml"
+probes:
+  port: 9091
+  plaintext: true
+```
+
+It listens on `127.0.0.1` unless `host` says otherwise; inside a container, set `host: 0.0.0.0` for
+a probe from outside it to reach it. `tls: { cert, key }` serves it over HTTPS.
+
+| Path      | 200     | 503                                                                                                                                          |
+| --------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/livez`  | `live`  | `stalled`: the engine loop has made no step within its bound                                                                                 |
+| `/readyz` | `ready` | `starting`, `standby`, `draining`, `fenced` (the engine lost its lease), or `unavailable`: storage cannot be read, or a source cannot listen |
+
+Every other path answers 404, and every method but `GET` and `HEAD` 405.
+
+**Liveness** looks at the engine loop alone. A step is a message taken in by a polled source, one
+transform, one delivery attempt, a channel's turn in a pass, or a retention run. The bound is 60
+seconds, plus the poll interval, plus the longest time one step can take: the longest of each
+channel's transform `timeout`, each HTTP destination's `timeout`, and twice each MLLP destination's
+`ackTimeout` (one to connect, one for the ACK) plus a second. A source that cannot listen or a
+destination that is down never makes the engine stalled, since the loop keeps stepping while it
+retries them and a restart would not bring them back; a standby, and an engine still starting or
+stopping, are always live. A custom destination has no time limit of its own, so one that never
+returns does stall the engine. Point a restart policy at `/livez`.
+
+**Readiness** is 503 until the engine is running, and while it runs when storage cannot be read
+(read at most once a second, and counted unreachable after 5 seconds without an answer) or a source
+cannot listen. On SIGTERM or SIGINT it turns 503 `draining` at once, while the sources are still
+closing, and the listener closes last. Point a load balancer or a readiness probe at `/readyz`.
+
+```bash
+curl http://127.0.0.1:9091/readyz
+```
+
+`pathways probe` asks the same listener from the command line, and exits 0 or 1: `pathways probe`
+for liveness, `pathways probe --ready` for readiness. The Docker image's health check runs it; see
+[Run Pathways in Docker](./run-in-docker.md#health-check).
+
 ## Logs
 
 The engine writes one JSON line per step to standard output, through pino: `received`,
@@ -89,3 +150,4 @@ Ship them with whatever collects your standard output.
 
 - [Inspect, replay and clear messages](./inspect-replay-and-clear-messages.md).
 - [Add lifecycle hooks and webhooks](./add-lifecycle-hooks.md), to be told rather than to ask.
+- [Configuration reference](./configuration-reference.md#probe-listener): the `probes` block.

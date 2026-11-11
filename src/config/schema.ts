@@ -792,6 +792,34 @@ const health = restate(
   (json) => Object.assign(json, TLS_OR_PLAINTEXT),
 );
 
+/**
+ * The probe listener: a liveness and a readiness answer, one word each, with no token. TLS takes a
+ * certificate and key only, since a load balancer's or an orchestrator's probe presents no client
+ * certificate.
+ */
+const probes = restate(
+  z
+    .strictObject({
+      port,
+      host: host
+        .meta({ description: "The address to listen on. Default 127.0.0.1, this machine only." })
+        .optional(),
+      tls: z
+        .strictObject({ cert: path, key: path })
+        .meta({
+          description: "TLS: cert and key, paths to PEM files. Required unless plaintext: true.",
+        })
+        .optional(),
+      plaintext,
+    })
+    .meta({
+      description:
+        "The probe listener, off unless set: GET /livez and /readyz answer 200 or 503 and one word, with no token and no channel names or counts, for a load balancer or an orchestrator.",
+    })
+    .superRefine((value, ctx) => tlsOrPlaintext(value, ctx, LISTENER_TLS_REQUIRED)),
+  (json) => Object.assign(json, TLS_OR_PLAINTEXT),
+);
+
 /** The engine lease: how long it lasts, and whether this engine waits as a standby. */
 const lease = z
   .strictObject({
@@ -824,6 +852,7 @@ export const projectSchema = z
       .meta({ description: "Settings for every channel. A channel can override most of them." })
       .optional(),
     health: health.optional(),
+    probes: probes.optional(),
     lease: lease.optional(),
   })
   .meta({
@@ -1275,6 +1304,22 @@ export interface MllpDestination {
 export type HealthConfig = ListenerConfig;
 
 /**
+ * The probe listener, from `pathways.yaml`'s `probes` block: where it listens, and its TLS (`tls` is
+ * undefined exactly when `plaintext`). It takes no token.
+ *
+ * @example
+ * ```ts
+ * const probes: ProbesConfig = { host: "127.0.0.1", port: 9091, tls: undefined, plaintext: true };
+ * ```
+ */
+export interface ProbesConfig {
+  readonly host: string;
+  readonly port: number;
+  readonly tls: { readonly cert: string; readonly key: string } | undefined;
+  readonly plaintext: boolean;
+}
+
+/**
  * A master key: its id, and where its value is read when the engine starts. A file path is
  * resolved against the project root.
  *
@@ -1456,6 +1501,8 @@ export interface ProjectConfig {
   readonly hooks: readonly HookConfig[];
   /** The health endpoint, or undefined when `pathways.yaml` does not configure one. */
   readonly health: HealthConfig | undefined;
+  /** The probe listener, or undefined when `pathways.yaml` does not configure one. */
+  readonly probes: ProbesConfig | undefined;
   /** The engine lease's time to live, and whether to start as a standby. */
   readonly lease: LeaseConfig;
   /**

@@ -31,8 +31,26 @@ docker run --rm --volume "$PWD:/project" pathways start --once
 docker run --rm --volume "$PWD:/project" pathways status
 ```
 
-`docker stop` sends the engine SIGTERM, and it stops cleanly: sources stop taking messages, what is
-being stored is answered, and the process exits 0.
+`docker stop` sends the engine SIGTERM, the image's stop signal, and it stops cleanly: readiness
+turns 503, sources stop taking messages, what is being stored is answered, and the process exits 0.
+
+## Health check
+
+The image has no shell and no `curl`, so its `HEALTHCHECK` runs `pathways probe -C /project`, which
+asks the probe listener for `/livez` every 30 seconds and exits 0 or 1. Add a `probes` block to
+`pathways.yaml` for it to ask:
+
+```yaml title="pathways.yaml"
+probes:
+  port: 9091
+  plaintext: true
+```
+
+Without the block the check fails and Docker reports the container `unhealthy`; the engine runs on
+regardless. To leave the check out, run with `--no-healthcheck`. For a probe from outside the
+container (a load balancer, an orchestrator), set `host: 0.0.0.0` and publish the port
+(`--publish 9091:9091`). See
+[probe liveness and readiness](./check-status-and-health.md#probe-liveness-and-readiness).
 
 ## Files and permissions
 
@@ -76,5 +94,5 @@ docker run --rm -it --entrypoint /busybox/sh --volume "$PWD:/project" pathways:d
 ## Related
 
 - [Store messages in a database server](./store-messages-in-a-database.md).
-- [Check status and health](./check-status-and-health.md): the health endpoint, for a monitor or an
-  orchestrator's probe. The image has no shell or `curl`, so a probe calls it from outside.
+- [Check status and health](./check-status-and-health.md): the health endpoint, for a monitor, and
+  the probe listener, for a load balancer or an orchestrator.
