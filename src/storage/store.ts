@@ -431,6 +431,24 @@ export interface PendingDelivery {
 }
 
 /**
+ * What {@link MessageStore.nextDelivery} looks for. Without `dueBy` it returns the oldest pending
+ * delivery, due or not, which keeps a destination in order.
+ *
+ * @example
+ * ```ts
+ * const due = await store.nextDelivery("adt", 0, { dueBy: Date.now() });
+ * ```
+ */
+export interface NextDeliveryOptions {
+  /**
+   * Only a delivery due by this time, in epoch milliseconds: the oldest whose `nextAttemptAt` is at
+   * or before it, passing over any still waiting for a retry. The engine asks this for a destination
+   * with `retry.rotate: true`. A store that ignores it keeps that destination in order.
+   */
+  readonly dueBy?: number | undefined;
+}
+
+/**
  * Which messages {@link MessageStore.listMessages} returns: newest first, every filter optional.
  *
  * @example
@@ -743,7 +761,11 @@ export interface MessageStore {
   ): Promise<void>;
   /** Fenced by `epoch` when it is given. */
   failTransform(messageId: number, error: string, epoch?: number): Promise<void>;
-  nextDelivery(channel: string, destination: number): Promise<PendingDelivery | undefined>;
+  nextDelivery(
+    channel: string,
+    destination: number,
+    options?: NextDeliveryOptions,
+  ): Promise<PendingDelivery | undefined>;
   /**
    * Writes the marker before a delivery is handed to its destination, in one write: the attempt and
    * its start, and the attempt found cut off when `start.interruptedAttempt` is set. A delivery
@@ -1811,9 +1833,15 @@ export class Store implements MessageStore, ContentStore {
 
   /**
    * The oldest pending delivery for one destination of one channel. Later deliveries wait behind it,
-   * which is what keeps a destination's messages in order.
+   * which is what keeps a destination's messages in order. With `options.dueBy`, the oldest due by
+   * then, passing over any still waiting for a retry.
    */
-  async nextDelivery(channel: string, destination: number): Promise<PendingDelivery | undefined> {
+  async nextDelivery(
+    channel: string,
+    destination: number,
+    options: NextDeliveryOptions = {},
+  ): Promise<PendingDelivery | undefined> {
+    const { dueBy } = options;
     const row = await this.db
       .selectFrom("deliveries")
       .select([
@@ -1830,6 +1858,7 @@ export class Store implements MessageStore, ContentStore {
       .where("channel", "=", channel)
       .where("destination", "=", destination)
       .where("status", "=", "pending")
+      .$if(dueBy !== undefined, (q) => q.where("next_attempt_at", "<=", dueBy as number))
       .orderBy("id")
       .$call((query) => this.first(query))
       .executeTakeFirst();
