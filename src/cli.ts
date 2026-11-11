@@ -209,7 +209,7 @@ Options:
                         upgrade them first
       --force           lease release: say the lease's host is gone
       --deadline <time> channel stop, halt: how long to wait for the work in
-                        flight, such as 30s (default 30s)
+                        flight, such as 30s (default 30s, at most 24d)
       --update          test: save the current outputs as the expected ones
       --print           validate: print the configuration as start reads it,
                         as JSON, with each setting read from the environment
