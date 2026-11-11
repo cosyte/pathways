@@ -90,7 +90,7 @@ const HAND_HL7: Record<string, string | Uint8Array> = {
   "CRLF endings": ADT.replaceAll("\r", "\r\n"),
   "no final CR": ADT.slice(0, -1),
   "blank lines": ADT.replaceAll("\r", "\r\r"),
-  "other delimiters": ADT.replaceAll("|", "#").replace("MSH#^~\\&", "MSH#^~\\&"),
+  "other delimiters": ADT.replaceAll("|", "#"),
   escapes: ADT.replace("TESTPATIENT^ALPHA^Q", "TEST\\F\\PATIENT^AL\\S\\PHA^Q\\T\\R\\E\\"),
   repetitions: ADT.replace("TEST0000042^^^TESTFAC^MR", "A1^^^TESTFAC^MR~A2^^^TESTFAC^MR~~A3"),
   "trailing garbage": `${ADT}garbage after the message`,
