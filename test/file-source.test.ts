@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { chmod, mkdir, open, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -6,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { CLAIMED_DIR, FileSource, PROCESSED_DIR } from "../src/connectors/file.js";
 import type { MessageSink, ReceiveOptions } from "../src/connectors/types.js";
-import { cleanUp, dropFile, makeProject, usePlatform } from "./helpers.js";
+import { cleanUp, dropFile, holdExclusively, makeProject, usePlatform } from "./helpers.js";
 
 afterEach(cleanUp);
 
@@ -485,25 +484,7 @@ describe("FileSource, natively", () => {
       const dir = await inbox();
       const file = join(dir, "a.hl7");
       await dropFile(file, "locked");
-      // PowerShell opens it sharing nothing, as some writers do, and holds it until its input ends.
-      const holder = spawn(
-        "powershell.exe",
-        [
-          "-NoProfile",
-          "-NonInteractive",
-          "-Command",
-          `$f = [System.IO.File]::Open('${file}', 'Open', 'ReadWrite', 'None'); ` +
-            "[Console]::Out.WriteLine('held'); [Console]::In.ReadLine() | Out-Null; $f.Close()",
-        ],
-        { stdio: ["pipe", "pipe", "ignore"] },
-      );
-      const exited = new Promise<void>((resolve) => holder.once("exit", () => resolve()));
-      await new Promise<void>((resolve, reject) => {
-        holder.stdout.on("data", (chunk: Buffer) => {
-          if (chunk.toString().includes("held")) resolve();
-        });
-        void exited.then(() => reject(new Error("the holder stopped before it held the file")));
-      });
+      const release = await holdExclusively(file);
       const errors: unknown[] = [];
       const { sink, received } = idempotentSink();
       const source = new FileSource({
@@ -515,8 +496,7 @@ describe("FileSource, natively", () => {
       try {
         await source.poll(sink);
       } finally {
-        holder.stdin.end("\n");
-        await exited;
+        await release();
       }
       expect(received).toEqual([]);
       expect(errors).toHaveLength(1);

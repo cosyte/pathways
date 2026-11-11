@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdir, mkdtemp, rename, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -170,4 +171,34 @@ export function captureLogger(): { logger: Logger; events: LogEvent[]; lines: st
     },
   );
   return { logger, events, lines };
+}
+
+/**
+ * Windows only: has another program (PowerShell) open `path` sharing nothing, as some writers do, so
+ * this process can neither open, move nor delete it until the returned function lets it go. Linux
+ * and macOS have no share modes, so there is no equivalent there.
+ */
+export async function holdExclusively(path: string): Promise<() => Promise<void>> {
+  const holder = spawn(
+    "powershell.exe",
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      `$f = [System.IO.File]::Open('${path}', 'Open', 'ReadWrite', 'None'); ` +
+        "[Console]::Out.WriteLine('held'); [Console]::In.ReadLine() | Out-Null; $f.Close()",
+    ],
+    { stdio: ["pipe", "pipe", "ignore"] },
+  );
+  const exited = new Promise<void>((resolve) => holder.once("exit", () => resolve()));
+  await new Promise<void>((resolve, reject) => {
+    holder.stdout.on("data", (chunk: Buffer) => {
+      if (chunk.toString().includes("held")) resolve();
+    });
+    void exited.then(() => reject(new Error("the holder stopped before it held the file")));
+  });
+  return async () => {
+    holder.stdin.end("\n");
+    await exited;
+  };
 }

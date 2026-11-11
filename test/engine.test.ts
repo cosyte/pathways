@@ -29,6 +29,7 @@ import {
   cleanUp,
   dropFile,
   FHIR_PATIENT,
+  holdExclusively,
   LAB_TRANSFORM,
   makeProject,
   X12_270,
@@ -359,6 +360,28 @@ describe("Engine", () => {
       expect(warning).toMatchObject({ channel: "adt", code: "EACCES" });
       expect(JSON.stringify(warning)).not.toContain("TESTPATIENT");
     },
+  );
+
+  // Windows only: there a file another program holds open without sharing cannot be read. Linux
+  // and macOS have no share modes; the test above covers them with a mode.
+  it.skipIf(process.platform !== "win32")(
+    "leaves a file another program holds open where it is, and says so without naming it",
+    async () => {
+      const { root, engine, events } = await setUp();
+      const file = data(root, "inbox", "TESTPATIENT.hl7");
+      await dropFile(file, ADT_A01);
+      const release = await holdExclusively(file);
+      try {
+        await engine.tick();
+      } finally {
+        await release();
+      }
+      expect(await readdir(data(root, "inbox"))).toEqual([CLAIMED_DIR, "TESTPATIENT.hl7"]);
+      const warning = events.find((e) => e.event === "source-read-failed");
+      expect(warning).toMatchObject({ channel: "adt", code: expect.any(String) as unknown });
+      expect(JSON.stringify(warning)).not.toContain("TESTPATIENT");
+    },
+    30_000,
   );
 
   it("refuses to start a channel whose transform will not load, and stops the rest", async () => {
