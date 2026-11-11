@@ -167,6 +167,25 @@ describe("the next pass", () => {
     expect(nextPollAt(cron("0 0 30 2 *", "UTC"), AT, false)).toBe(Number.POSITIVE_INFINITY);
   });
 
+  it("runs once over a daylight-saving gap and once over a repeated hour in a named zone", () => {
+    const chicago = (expression: string) =>
+      ({ kind: "cron", expression, timezone: "America/Chicago" }) as const;
+    // 2026-03-08 in Chicago: 02:00 CST jumps to 03:00 CDT, so 02:30 never comes. The pass runs
+    // once, at 03:00 CDT (08:00Z), then at 02:30 CDT the day after.
+    const gap = chicago("30 2 * * *");
+    const beforeGap = Date.UTC(2026, 2, 7, 12, 0, 0);
+    const inGap = nextPollAt(gap, beforeGap, false);
+    expect(inGap).toBe(Date.UTC(2026, 2, 8, 8, 0, 0));
+    expect(nextPollAt(gap, inGap, false)).toBe(Date.UTC(2026, 2, 9, 7, 30, 0));
+    // 2026-11-01 in Chicago: 02:00 CDT falls back to 01:00 CST, so 01:30 comes twice. The pass
+    // runs once, at the first (06:30Z), not again at the second (07:30Z), then the day after.
+    const repeat = chicago("30 1 * * *");
+    const beforeRepeat = Date.UTC(2026, 9, 31, 12, 0, 0);
+    const first = nextPollAt(repeat, beforeRepeat, false);
+    expect(first).toBe(Date.UTC(2026, 10, 1, 6, 30, 0));
+    expect(nextPollAt(repeat, first, false)).toBe(Date.UTC(2026, 10, 2, 7, 30, 0));
+  });
+
   it("is the engine-wide interval with the default deadline when the channel sets no poll", () => {
     const bare = { poll: undefined } as unknown as ChannelConfig;
     expect(pollOf(bare, 1_500)).toEqual({

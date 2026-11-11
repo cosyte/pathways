@@ -445,8 +445,11 @@ the attempt as failed with the code `DELIVERY_TIMEOUT`: it is retried by the des
 | `module`    | its `timeout`, `30s` by default                                         |
 
 The second of grace lets an HTTP or MLLP destination's own timeout, with its own code, come first.
-A receiver may have the message when an attempt is cut off, so it may be sent again: each output
-carries a stable id, its message's id and its `seq`, which a receiver can use to drop a copy. See
+A receiver may have the message when an attempt is cut off, and a destination that does not honour
+the `signal` may still finish its send after the cut, so a message cut off at its deadline may
+arrive twice. The retry is not flagged as a possible duplicate (no `resend` on the outgoing message,
+no HTTP `resendHeader`). Each output carries a stable id, its message's id and its `seq`, so a
+receiver should drop a copy by that pair. See
 [Delivery and errors](./delivery-and-errors.md#drop-a-duplicate-at-the-receiver).
 
 #### File destination

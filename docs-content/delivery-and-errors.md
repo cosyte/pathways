@@ -86,8 +86,10 @@ Each attempt, connecting, sending and waiting for the receiver to confirm, is cu
 an HTTP destination's `timeout` and a second, twice an MLLP destination's `ackTimeout` and a second,
 and a file or module destination's `timeout` (30 seconds unless its block sets one). An attempt cut
 off is retried as any other failure, with the code `DELIVERY_TIMEOUT`, and the destination was handed
-an aborted `signal`; a receiver may have the message by then, which is what the stable id above is
-for. See
+an aborted `signal`. A delivery cut off at its deadline may still arrive: the receiver may have it
+by then, and a destination that does not honour the `signal` may finish its send after the cut. The
+retry is not flagged as a possible duplicate, so a receiver should drop duplicates by `messageId`
+and `seq`, as above. See
 [Every delivery has a deadline](./configuration-reference.md#every-delivery-has-a-deadline).
 
 ## Taking a message in
