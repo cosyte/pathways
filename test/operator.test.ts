@@ -28,6 +28,7 @@ import {
   captureLogger,
   cleanUp,
   dropFile,
+  dropFileWhileRunning,
   LAB_TRANSFORM,
   makeProject,
   type LogEvent,
@@ -248,13 +249,15 @@ describe("replayMessages", () => {
         }
         throw new Error("the running engine did not deliver in time");
       };
-      for (let i = 0; i < 5; i += 1) await dropFile(join(root, `data/inbox/${i}.hl7`), ADT_A01);
+      for (let i = 0; i < 5; i += 1) {
+        await dropFileWhileRunning(join(root, `data/inbox/${i}.hl7`), ADT_A01);
+      }
       await delivered(5);
 
       // Replays and new messages, side by side with the engine's own writes.
       for (let round = 0; round < 3; round += 1) {
         for (let i = 0; i < 5; i += 1) {
-          await dropFile(join(root, `data/inbox/r${round}-${i}.hl7`), ADT_A01);
+          await dropFileWhileRunning(join(root, `data/inbox/r${round}-${i}.hl7`), ADT_A01);
         }
         const store = new EncryptedStore(
           await Store.open(project.databaseFile),

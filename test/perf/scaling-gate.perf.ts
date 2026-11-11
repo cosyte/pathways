@@ -13,9 +13,9 @@
  * - `readHeader`: an MLLP source reads the header of every message it takes in, in the engine's own
  *   thread, before it stores the message: it parses the MSH segment and scans every later segment
  *   for another message's start.
- * - `decode` for a `json` channel: the worker reads every JSON body with a reviver that checks each
- *   number can be held exactly. That branch does all of its work before it returns, so the gate times
- *   it as a synchronous call; the first test below holds it to that.
+ * - `decode` for a `json` channel: the worker parses every JSON body, then reads its text once to
+ *   check each number can be held exactly. That branch does all of its work before it returns, so the
+ *   gate times it as a synchronous call; the first test below holds it to that.
  *
  * Each base phase is sized to take 10 ms or more on a GitHub-hosted runner (the contract refuses a
  * phase under 4 ms); the input count only lengthens a phase, it does not move a ratio. Each
@@ -86,6 +86,9 @@ const headerOptions: ScalingGateOptions<Uint8Array, HeaderReading> = {
   name: "@cosyte/pathways readHeader",
   parse: (payload) => readHeader(payload),
   weigh: (reading) => (reading.problem === undefined ? 1 : 0),
+  // 2,000 headers measured a clean base phase of 20.9 ms and 24 reports 16.5 ms on a runner, both
+  // over 10 ms. At 48 reports the self-check's quadratic pass took over a second, and its warmup did
+  // not settle inside its 5 s bound on a busy machine, so the size axis stays at 24.
   count: { n: 2_000, generate: (i) => bytesOf(adtMessage(i)) },
   size: {
     inputs: 24,
@@ -111,12 +114,17 @@ const jsonOptions: ScalingGateOptions<JsonInput, Promise<unknown>> = {
   name: "@cosyte/pathways decode, json",
   parse: decodeJson,
   weigh: () => 1,
-  count: { n: 2_000, generate: (i) => jsonInput(jsonRecord(i)) },
+  // Once the read checked numbers in one pass, 2,000 records measured a base phase of 3.8 ms, under
+  // the 4 ms floor, and 6,000 measured 11.1 ms on one runner: it runs at 12,000, for 10 ms or more
+  // on a slower one.
+  count: { n: 12_000, generate: (i) => jsonInput(jsonRecord(i)) },
   size: {
     // At 400 records against 1,600 the quadratic self-check measured a signal of 7.2, under the
     // ceiling of 8: the reviver's own cost per record is high enough that the hops need more
     // records to stand out: 1,000 against 4,000 measured 9.2, a margin of 1.15, so it runs at 1,600.
-    inputs: 3,
+    // Once the read checked numbers in one pass, 3 inputs measured a base phase of 7.0 ms on one
+    // runner and 3.9 ms on another, under the 4 ms floor: it runs at 12, for 10 ms or more.
+    inputs: 12,
     size: 1_600,
     generate: (i, records) => jsonInput(jsonRecords(i, records * RECORD_BYTES)),
   },

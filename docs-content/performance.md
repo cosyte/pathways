@@ -67,6 +67,20 @@ JSON read of the transform worker to a cost that grows no faster than their inpu
 base build against the head build with the bench suite, interleaved on one runner. The comparison
 is advisory: it reports and never fails a pull request.
 
+## How the engine keeps a message's cost down
+
+- **A body moves; it is not copied.** Encryption and decryption write into one buffer. A store
+  that copies what it stores (the SQL store, and any store under encryption) frees its own copy once
+  it is stored or read back; the body moves to the transform worker and its outputs move back; and
+  the file source and destination free a body once it is stored or written. A large payload the
+  engine only passes through is held about once in the engine's own thread, where it was held about
+  nine times.
+- **Each SQLite statement is prepared once** for the connection, and kept.
+- **A JSON body is read once.** Its numbers are checked for a value a JavaScript number cannot hold
+  in one pass over the text, rather than through a reviver on every value.
+- **Importing the package does not load `@cosyte/hl7`.** `defaultAckBuilder` loads it on its first
+  ACK.
+
 ## What these numbers are not
 
 - **Not a promise for a deployment.** Message sizes, transforms, the disk and the database decide what

@@ -40,9 +40,9 @@ const { MIB } = S;
  * Every channel the engine benchmarks run, each at the size real traffic has and at sizes well past
  * it. `group` is the reading job that measures it. `compare: true` puts a size in a pull request's
  * comparison, which runs every compared case 24 times in fresh processes inside a 600 second budget:
- * a pass is about half a second and each run takes a dozen passes, so it holds the one that says the
- * most, 100 small messages in a row, which carries the fixed cost of a pass as well. A reading
- * measures every size.
+ * a pass is about half a second and each run takes a dozen passes, so it holds the two that say the
+ * most: 100 small messages in a row, which carries the fixed cost of a pass as well, and 1 MiB of
+ * JSON records, where reading the body is a large part of the pass. A reading measures every size.
  */
 export const CHANNELS = [
   {
@@ -133,7 +133,7 @@ export const CHANNELS = [
     sizes: [
       { label: "1 record", count: 1, build: S.jsonRecord },
       { label: "100 records", count: 100, build: S.jsonRecord },
-      { label: "1 MiB", count: 1, build: (i) => S.jsonRecords(i, MIB) },
+      { label: "1 MiB", count: 1, build: (i) => S.jsonRecords(i, MIB), compare: true },
       { label: "8 MiB", count: 1, build: (i) => S.jsonRecords(i, 8 * MIB) },
     ],
   },

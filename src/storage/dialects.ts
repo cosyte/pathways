@@ -3,7 +3,15 @@ import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import SqliteDatabase from "better-sqlite3";
-import { MssqlDialect, MysqlDialect, PostgresDialect, SqliteDialect, type Dialect } from "kysely";
+import {
+  MssqlDialect,
+  MysqlDialect,
+  PostgresDialect,
+  SqliteDialect,
+  type Dialect,
+  type SqliteDatabase as KyselySqliteDatabase,
+  type SqliteStatement,
+} from "kysely";
 import type * as Mysql2Module from "mysql2";
 import type * as PgModule from "pg";
 import type * as TarnModule from "tarn";
@@ -147,7 +155,50 @@ async function sqliteDialect(file: string): Promise<Dialect> {
   // Freed space is overwritten with zeros, so a value rewritten in place (`pathways rekey`) or
   // deleted leaves none of its old bytes in the file.
   sqlite.pragma("secure_delete = ON");
-  return new SqliteDialect({ database: sqlite });
+  return new SqliteDialect({ database: cachedStatements(sqlite) });
+}
+
+/** How many prepared statements a SQLite connection keeps: more than the store's queries number. */
+const STATEMENTS_KEPT = 256;
+
+/**
+ * A SQLite connection that prepares each SQL text once and keeps the statement, for Kysely, which
+ * asks for a statement every time it runs a query. Preparing parses and plans the SQL, and cost as
+ * much as running the store's queries did. Statements are kept by their exact text, the most
+ * recently used `limit` of them; one still being read (a stream not yet finished) is never handed
+ * out twice, and the same text gets one of its own meanwhile. A kept statement is prepared again by
+ * SQLite itself when the schema changes under it.
+ *
+ * @example
+ * ```ts
+ * const dialect = new SqliteDialect({ database: cachedStatements(new SqliteDatabase(file)) });
+ * ```
+ */
+export function cachedStatements(
+  database: SqliteDatabase.Database,
+  limit: number = STATEMENTS_KEPT,
+): KyselySqliteDatabase {
+  const kept = new Map<string, SqliteDatabase.Statement>();
+  return {
+    close: () => {
+      kept.clear();
+      database.close();
+    },
+    prepare: (sql: string): SqliteStatement => {
+      const statement = kept.get(sql);
+      if (statement !== undefined) {
+        if (statement.busy) return database.prepare(sql);
+        // Most recently used last, so the first is the one to let go.
+        kept.delete(sql);
+        kept.set(sql, statement);
+        return statement;
+      }
+      const prepared = database.prepare(sql);
+      if (kept.size >= limit) kept.delete(kept.keys().next().value as string);
+      kept.set(sql, prepared);
+      return prepared;
+    },
+  };
 }
 
 /** TLS options as the drivers take them: verified always, with a CA and client pair when set. */

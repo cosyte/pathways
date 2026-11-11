@@ -21,6 +21,7 @@ import { ConfigError } from "../config/load.js";
 import type { DatabaseStorage, StorageKind } from "../config/schema.js";
 import type { Env } from "../connectors/endpoint.js";
 import { dialectFor, type DriverImport } from "./dialects.js";
+import { markCopiesBodies } from "./ownership.js";
 
 /**
  * Where a stored message stands. `cleared`: it failed, and an operator cleared it with
@@ -1166,7 +1167,11 @@ export class Store implements MessageStore, ContentStore {
     private readonly db: Kysely<Tables>,
     private readonly kind: StorageKind,
     private readonly now: () => Date,
-  ) {}
+  ) {
+    // Every driver copies a body it binds before the query resolves, and reads each body into a
+    // buffer of its own (a small one may be a slice of a shared buffer, which is never freed).
+    markCopiesBodies(this);
+  }
 
   /**
    * Opens the database `storage` names (a path is a SQLite file), connects once to check it can,

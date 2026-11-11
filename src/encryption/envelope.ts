@@ -1,5 +1,12 @@
-import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import {
+  createCipheriv,
+  createDecipheriv,
+  randomBytes,
+  type Cipheriv,
+  type Decipheriv,
+} from "node:crypto";
 
+import { release } from "../storage/ownership.js";
 import type { KeyProvider } from "./keys.js";
 
 /**
@@ -190,11 +197,42 @@ export async function encrypt(plaintext: Uint8Array, keys: KeyProvider): Promise
     const nonce = randomBytes(NONCE_BYTES);
     const cipher = createCipheriv(CIPHER, dataKey, nonce, { authTagLength: TAG_BYTES });
     cipher.setAAD(header);
-    const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-    return Buffer.concat([header, nonce, cipher.getAuthTag(), ciphertext]);
+    // One buffer for the whole value, the ciphertext written into it a chunk at a time.
+    const at = header.length + NONCE_BYTES + TAG_BYTES;
+    const out = Buffer.allocUnsafeSlow(at + plaintext.byteLength);
+    header.copy(out, 0);
+    nonce.copy(out, header.length);
+    stream(cipher, plaintext, out, at);
+    cipher.getAuthTag().copy(out, header.length + NONCE_BYTES);
+    return out;
   } finally {
     dataKey.fill(0);
   }
+}
+
+/** How much of a value a cipher reads at a time, so no stage of it holds a second whole copy. */
+const CHUNK_BYTES = 64 * 1024;
+
+/**
+ * Runs `input` through an AES-GCM cipher or decipher into `out` from `at`, a chunk at a time, and
+ * ends it. Each chunk the cipher hands back is copied in, overwritten with zeros (it can hold
+ * plaintext) and freed at once. GCM writes exactly as many bytes as it reads, so `out` is filled to
+ * its end; anything else is a broken cipher, and fails.
+ */
+function stream(cipher: Cipheriv | Decipheriv, input: Uint8Array, out: Buffer, at: number): void {
+  let written = at;
+  for (let from = 0; from < input.byteLength; from += CHUNK_BYTES) {
+    const chunk = cipher.update(
+      input.subarray(from, Math.min(from + CHUNK_BYTES, input.byteLength)),
+    );
+    written += chunk.copy(out, written);
+    chunk.fill(0);
+    release(chunk);
+  }
+  const last = cipher.final();
+  written += last.copy(out, written);
+  /* v8 ignore next -- GCM writes as many bytes as it reads */
+  if (written !== out.length) throw new Error("the cipher did not write the whole value");
 }
 
 /**
@@ -224,12 +262,14 @@ export async function decryptWithKeyId(
     });
     decipher.setAAD(envelope.header);
     decipher.setAuthTag(envelope.tag);
-    const head = decipher.update(envelope.ciphertext);
+    const plaintext = Buffer.allocUnsafeSlow(envelope.ciphertext.length);
     try {
-      return { plaintext: Buffer.concat([head, decipher.final()]), keyId };
+      stream(decipher, envelope.ciphertext, plaintext, 0);
+      return { plaintext, keyId };
     } catch {
       // Bytes from a value that failed its check never leave here, not even as a partial result.
-      head.fill(0);
+      plaintext.fill(0);
+      release(plaintext);
       throw new EncryptionError("ERR_PATHWAYS_INTEGRITY", keyId);
     }
   } finally {

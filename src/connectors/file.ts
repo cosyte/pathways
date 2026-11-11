@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { mkdir, open, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import { copiesBodies, markCopiesBodies, ownsBuffer, release } from "../storage/ownership.js";
 import type {
   DestinationConnector,
   MessageSink,
@@ -220,12 +221,17 @@ export class FileSource implements SourceConnector {
     const { dir, keepProcessed = false, onReadError } = this.options;
     let body: Uint8Array;
     try {
-      body = new Uint8Array(await readFile(file.path));
+      // A plain Uint8Array over a buffer of its own, as before, without copying a file Node already
+      // read into one (a small file comes back as a slice of Node's shared pool, and is copied).
+      const read = await readFile(file.path);
+      body = ownsBuffer(read) ? new Uint8Array(read.buffer) : new Uint8Array(read);
     } catch (error) {
       onReadError?.(error);
       return;
     }
     const id = await sink.receive(body, { idempotencyKey: `file:${file.name}`, resumed });
+    // A sink that copied the body keeps none of it, and this source is done with it.
+    if (copiesBodies(sink)) release(body);
     if (!keepProcessed) {
       await unlink(file.path);
       return;
@@ -261,6 +267,8 @@ export class FileDestination implements DestinationConnector {
   /** @param options The folder to write into and the extension of each file. */
   constructor(options: FileDestinationOptions) {
     this.options = options;
+    // The file is written before `deliver` resolves, and the body is not kept.
+    markCopiesBodies(this);
   }
 
   /** Writes one output as a file. */

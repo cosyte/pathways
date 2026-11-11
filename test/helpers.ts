@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import { mkdir, mkdtemp, rename, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -114,6 +115,20 @@ export async function dropFile(path: string, contents: string | Uint8Array): Pro
   await writeFile(path, contents);
   const past = new Date(Date.now() - 60_000);
   await utimes(path, past, past);
+}
+
+/**
+ * {@link dropFile} for a folder an engine is already reading: the file is written and backdated
+ * under a hidden name, which a file source skips, then renamed into place, so the engine never takes
+ * it in (and moves it away) before it is backdated.
+ */
+export async function dropFileWhileRunning(
+  path: string,
+  contents: string | Uint8Array,
+): Promise<void> {
+  const hidden = join(dirname(path), `.drop-${randomBytes(6).toString("hex")}`);
+  await dropFile(hidden, contents);
+  await rename(hidden, path);
 }
 
 /**
