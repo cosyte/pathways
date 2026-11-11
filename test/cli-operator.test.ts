@@ -1,7 +1,8 @@
-import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import SqliteDatabase from "better-sqlite3";
 
@@ -64,16 +65,20 @@ destinations:
 `;
 
 /**
- * A project whose database holds one message in each of four states: 1 delivered, 2 filtered,
- * 3 failed (its transform threw) and 4 retrying (destination 1 cannot write).
+ * Writes into `root` a project whose database holds one message in each of four states: 1 delivered,
+ * 2 filtered, 3 failed (its transform threw) and 4 retrying (destination 1 cannot write).
  */
-async function scenario(): Promise<string> {
-  const root = await makeProject({
+async function buildScenario(root: string): Promise<void> {
+  const files: Record<string, string> = {
     "test.key": `${generateKey()}\n`,
     "pathways.yaml": `${KEYS}defaults:\n  pollInterval: 20ms\n`,
     "channels/adt/channel.yaml": CHANNEL,
     "channels/adt/transform.ts": LAB_TRANSFORM,
-  });
+  };
+  for (const [path, contents] of Object.entries(files)) {
+    await mkdir(dirname(join(root, path)), { recursive: true });
+    await writeFile(join(root, path), contents);
+  }
   const pass = async (name: string, body: string): Promise<void> => {
     await dropFile(join(root, "data/inbox", name), body);
     expect((await runCli(["start", "--once", "-C", root])).code).toBe(EXIT.ok);
@@ -89,6 +94,29 @@ async function scenario(): Promise<string> {
     CHANNEL.replace("../../data/out-b", "../../data/out-b-blocked/inner"),
   );
   await pass("4.hl7", ADT_A01);
+}
+
+/**
+ * The scenario, built once for the file by three `pathways start --once` runs in `beforeAll`, outside
+ * every test's time limit. Building it in each test made each one start the engine three times, which
+ * on a loaded Windows runner under coverage took a test past its limit.
+ */
+let template: string | undefined;
+
+beforeAll(async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pathways-scenario-"));
+  template = dir;
+  await buildScenario(dir);
+});
+
+afterAll(async () => {
+  if (template !== undefined) await rm(template, { recursive: true, force: true });
+});
+
+/** A fresh copy of the scenario's project, its database among it, that a test may change freely. */
+async function scenario(): Promise<string> {
+  const root = await makeProject({});
+  await cp(template as string, root, { recursive: true });
   return root;
 }
 
