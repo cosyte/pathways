@@ -7,18 +7,23 @@ import { generateCcd, generateReferralNote } from "@cosyte/synth/ccda";
 import { generatePatient } from "@cosyte/synth/fhir";
 import { generateAdt, generateOru } from "@cosyte/synth/hl7";
 import { generate271, generate835, generate837P } from "@cosyte/synth/x12";
-import { parseX12, serializeX12, type X12Interchange } from "@cosyte/x12";
+import { parseX12, serializeX12 } from "@cosyte/x12";
 import { afterEach, describe, expect, expectTypeOf, it } from "vitest";
 
 import { FORMATS, type Format } from "../src/config/schema.js";
 import {
+  bytesOf,
   decode,
   encode,
+  FORMAT_REGISTRY,
+  formatTable,
+  type FormatModel,
   isWorkerSetup,
   loadFormat,
   loadTransform,
   runTransform,
   summarize,
+  transferable,
   type TransformFunction,
   type WorkerFormat,
 } from "../src/engine/worker-entry.js";
@@ -55,9 +60,25 @@ async function roundTrip(format: WorkerFormat, body: string): Promise<string> {
   return text(await encode(format, await decode(format, bytes(body))));
 }
 
+describe("the format registry", () => {
+  it("is where the formats, their extensions and their content types are read from", () => {
+    expect(FORMATS).toEqual(["hl7v2", "fhir", "x12", "ccda", "json", "text"]);
+    expect(FORMATS).toEqual(Object.keys(FORMAT_REGISTRY));
+    expect(formatTable("extension")).toEqual(
+      Object.fromEntries(FORMATS.map((format) => [format, FORMAT_REGISTRY[format].extension])),
+    );
+    expect(formatTable("contentType")).toEqual(
+      Object.fromEntries(FORMATS.map((format) => [format, FORMAT_REGISTRY[format].contentType])),
+    );
+    expect(Object.isFrozen(FORMAT_REGISTRY) && Object.isFrozen(FORMAT_REGISTRY.hl7v2)).toBe(true);
+    // The configuration's format is the registry's key: one list, held by the type system.
+    expectTypeOf<Format>().toEqualTypeOf<keyof typeof FORMAT_REGISTRY>();
+    expectTypeOf<FormatModel<"text">>().toEqualTypeOf<string>();
+  });
+});
+
 describe("decode and encode", () => {
   it("has a parser for every format the configuration accepts", async () => {
-    expectTypeOf<WorkerFormat>().toEqualTypeOf<Format>();
     for (const format of FORMATS) {
       await loadFormat(format);
       await expect(roundTrip(format, SAMPLES[format])).resolves.toBeTypeOf("string");
@@ -71,12 +92,12 @@ describe("decode and encode", () => {
     expect(isComplex(resource as never)).toBe(true);
     expect(resourceType(resource as never)).toBe("Patient");
 
-    const interchange = (await decode("x12", bytes(X12_270))) as X12Interchange;
+    const interchange = await decode("x12", bytes(X12_270));
     expect(interchange.groups[0]?.transactions[0]?.st.elements[1]).toBe("270");
 
     const document = await decode("ccda", bytes(CCDA_DOCUMENT));
     expect(document).toBeInstanceOf(CcdaDocument);
-    expect((document as CcdaDocument).getPatient()?.name?.family).toBe("TESTPATIENT");
+    expect(document.getPatient()?.name?.family).toBe("TESTPATIENT");
 
     expect(await decode("json", bytes(SAMPLES.json))).toEqual({ status: "ok", tries: [1, 2] });
     expect(await decode("text", bytes("plain"))).toBe("plain");
@@ -177,6 +198,8 @@ describe("decode and encode", () => {
     expect(text(await encode("json", 3))).toBe("3");
     expect(text(await encode("json", [1, { a: 2 }]))).toBe('[1,{"a":2}]');
     expect(text(await encode("json", Object.create(null) as object))).toBe("{}");
+    // A plain object whose toJSON gives nothing goes out as an empty body, as it always has.
+    expect(text(await encode("json", { toJSON: () => undefined }))).toBe("");
     for (const [format, output] of [
       ["hl7v2", { not: "a message" }],
       ["text", 42],
@@ -200,6 +223,36 @@ describe("decode and encode", () => {
     expect(text(await encode("json", message))).toBe(ADT_A01);
     expect(text(await encode("ccda", message))).toBe(ADT_A01);
     expect(text(await encode("hl7v2", document))).toBe(serializeCcda(document));
+  });
+
+  it("sends the bytes a transform returns as they are, in a copy of their own", async () => {
+    // Latin-1 bytes that are not UTF-8 (0xe9 is a lone e-acute), in the middle of a larger buffer.
+    const backing = new Uint8Array([0x00, 0x4d, 0x53, 0x48, 0xe9, 0x0d, 0x00]);
+    const returned = backing.subarray(1, 6);
+    for (const format of FORMATS) {
+      const sent = await encode(format, returned);
+      expect([...sent]).toEqual([0x4d, 0x53, 0x48, 0xe9, 0x0d]);
+      // A copy: moving it to the engine leaves the transform's own buffer as it was.
+      expect(sent.buffer).not.toBe(backing.buffer);
+      expect(transferable([sent])).toEqual([sent.buffer]);
+    }
+    const outputs = await runTransform(
+      () => [returned, Buffer.from(returned)],
+      "hl7v2",
+      bytes(ADT_A01),
+    );
+    expect(outputs.map((output) => [...output])).toEqual([
+      [0x4d, 0x53, 0x48, 0xe9, 0x0d],
+      [0x4d, 0x53, 0x48, 0xe9, 0x0d],
+    ]);
+  });
+
+  it("keeps the bytes a format's own writer returns, in whatever charset it wrote them", () => {
+    const latin1 = new Uint8Array([0x4d, 0xe9, 0x1c]);
+    const written = bytesOf(latin1);
+    expect([...written]).toEqual([0x4d, 0xe9, 0x1c]);
+    expect(written.buffer).not.toBe(latin1.buffer);
+    expect([...bytesOf("Mé")]).toEqual([0x4d, 0xc3, 0xa9]);
   });
 
   it("keeps a serializer's own refusal code", async () => {

@@ -19,9 +19,6 @@ import type * as Fhir from "@cosyte/fhir";
 import type * as Hl7 from "@cosyte/hl7";
 import type * as X12 from "@cosyte/x12";
 
-/** The formats this worker can parse. Kept equal to `FORMATS` in the config schema by a test. */
-export type WorkerFormat = "hl7v2" | "fhir" | "x12" | "ccda" | "json" | "text";
-
 /**
  * A user's transform, as loaded from its module's default export: the message, then the context.
  * The context is optional, so a transform written with one parameter fits.
@@ -156,6 +153,189 @@ const libraries = {
 };
 
 /**
+ * Any JSON value, as a `json` channel's transform receives it from `JSON.parse`.
+ *
+ * @example
+ * ```ts
+ * const value: JsonValue = { status: "ok", tries: [1, 2] };
+ * ```
+ */
+export type JsonValue =
+  string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+
+/**
+ * What a format's writer hands back: text, sent as UTF-8, or bytes, sent as they are. A format whose
+ * library writes another charset (Latin-1, with its own separators) or binary returns bytes, so
+ * nothing is encoded as UTF-8 on its way out.
+ */
+export type Written = string | Uint8Array;
+
+/** How a format writes its own library's model, on a channel of any format. */
+export interface ModelWriter {
+  /**
+   * Whether the model is told by its shape, which costs nothing, rather than by its class, which
+   * needs the library loaded. Shape writers are asked first, and class writers only for a value that
+   * is not plain JSON, the channel's own format first.
+   */
+  readonly byShape: boolean;
+  /** The model as the library writes it, or `undefined` when `value` is not one. */
+  readonly write: (value: object) => Promise<Written | undefined>;
+}
+
+/**
+ * One message format: how a body is read and written, and what the engine calls it outside the
+ * worker. {@link FORMAT_REGISTRY} holds one per format, and the rest is read from it: the formats a
+ * channel may declare, their file extensions and content types, the parser a worker loads, and the
+ * type a transform receives.
+ */
+export interface FormatEntry<Message> {
+  /** The file extension a file destination writes, without its dot. */
+  readonly extension: string;
+  /** The `Content-Type` an HTTP destination sends, unless its headers set one. */
+  readonly contentType: string;
+  /** Loads the library the format reads with, so the first message does not wait. Absent for none. */
+  readonly load?: () => Promise<unknown>;
+  /** Parses a stored body into what the transform receives; a throw is a parse failure. */
+  readonly decode: (body: Uint8Array) => Message | Promise<Message>;
+  /** Writes this format's model, on a channel of any format. */
+  readonly model?: ModelWriter;
+  /**
+   * Writes any other value a transform returns on a channel of this format, or gives `undefined` to
+   * refuse it. Asked after every model writer.
+   */
+  readonly value?: (output: unknown) => Written | undefined;
+}
+
+/** An entry, frozen, with the type its `decode` gives kept for {@link FormatModel}. */
+function defineFormat<Message>(entry: FormatEntry<Message>): FormatEntry<Message> {
+  return Object.freeze(entry);
+}
+
+/**
+ * Every message format, in the order the configuration lists them. A format is added here, as one
+ * entry, and nowhere else.
+ *
+ * - `hl7v2`: an `Hl7Message` from `@cosyte/hl7`;
+ * - `fhir`: a resource from `@cosyte/fhir`'s JSON reader (its `FhirComplex` model);
+ * - `x12`: an `X12Interchange` from `@cosyte/x12`;
+ * - `ccda`: a `CcdaDocument` from `@cosyte/ccda`;
+ * - `json`: the value `JSON.parse` returns;
+ * - `text`: the body as a string.
+ *
+ * @example
+ * ```ts
+ * FORMAT_REGISTRY.fhir.contentType; // "application/fhir+json"
+ * ```
+ */
+export const FORMAT_REGISTRY = Object.freeze({
+  hl7v2: defineFormat<Hl7.Hl7Message>({
+    extension: "hl7",
+    contentType: "application/hl7-v2",
+    load: libraries.hl7,
+    // The library reads the bytes itself, in the charset the message declares.
+    decode: async (body) =>
+      (await libraries.hl7()).parseHL7(Buffer.from(body.buffer, body.byteOffset, body.byteLength)),
+    model: {
+      byShape: false,
+      write: async (value) =>
+        value instanceof (await libraries.hl7()).Hl7Message ? value.toString() : undefined,
+    },
+  }),
+  fhir: defineFormat<Fhir.FhirComplex>({
+    extension: "json",
+    contentType: "application/fhir+json",
+    load: libraries.fhir,
+    decode: async (body) =>
+      (await libraries.fhir()).parseResource(strictUtf8.decode(body)).resource,
+    model: {
+      byShape: true,
+      write: async (value) =>
+        isFhirModel(value) ? (await libraries.fhir()).serializeResource(value) : undefined,
+    },
+  }),
+  x12: defineFormat<X12.X12Interchange>({
+    extension: "x12",
+    contentType: "application/edi-x12",
+    load: libraries.x12,
+    decode: async (body) => (await libraries.x12()).parseX12(strictUtf8.decode(body)),
+    model: {
+      byShape: true,
+      write: async (value) =>
+        isX12Model(value) ? (await libraries.x12()).serializeX12(value) : undefined,
+    },
+  }),
+  ccda: defineFormat<Ccda.CcdaDocument>({
+    extension: "xml",
+    contentType: "application/xml",
+    load: libraries.ccda,
+    decode: async (body) => (await libraries.ccda()).parseCcda(strictUtf8.decode(body)),
+    model: {
+      byShape: false,
+      write: async (value) => {
+        const library = await libraries.ccda();
+        return value instanceof library.CcdaDocument ? library.serializeCcda(value) : undefined;
+      },
+    },
+  }),
+  json: defineFormat<JsonValue>({
+    extension: "json",
+    contentType: "application/json",
+    decode: (body) => parseJson(strictUtf8.decode(body)) as JsonValue,
+    value: jsonValue,
+  }),
+  text: defineFormat<string>({
+    extension: "txt",
+    contentType: "text/plain",
+    decode: (body) => lenientUtf8.decode(body),
+  }),
+});
+
+/**
+ * A message format a channel can declare, and so a worker can parse: a key of
+ * {@link FORMAT_REGISTRY}.
+ */
+export type WorkerFormat = keyof typeof FORMAT_REGISTRY;
+
+/**
+ * What a transform receives on a channel of format `F`: the type its registry entry decodes to.
+ *
+ * @example
+ * ```ts
+ * type Claim = FormatModel<"x12">; // X12Interchange
+ * ```
+ */
+export type FormatModel<F extends WorkerFormat> =
+  (typeof FORMAT_REGISTRY)[F] extends FormatEntry<infer Message> ? Message : never;
+
+/**
+ * The formats, in the registry's order.
+ *
+ * @example
+ * ```ts
+ * FORMATS.includes("fhir"); // true
+ * ```
+ */
+export const FORMATS: readonly WorkerFormat[] = Object.freeze(
+  Object.keys(FORMAT_REGISTRY) as WorkerFormat[],
+);
+
+/**
+ * One field of every entry, by format: the file extensions, or the content types.
+ *
+ * @example
+ * ```ts
+ * formatTable("extension").ccda; // "xml"
+ * ```
+ */
+export function formatTable(
+  field: "extension" | "contentType",
+): Readonly<Record<WorkerFormat, string>> {
+  const table: Partial<Record<WorkerFormat, string>> = {};
+  for (const format of FORMATS) table[format] = FORMAT_REGISTRY[format][field];
+  return Object.freeze(table as Record<WorkerFormat, string>);
+}
+
+/**
  * Loads the parser a format reads with, so a channel's first message does not wait for it.
  * `json` and `text` need none.
  *
@@ -165,34 +345,13 @@ const libraries = {
  * ```
  */
 export async function loadFormat(format: WorkerFormat): Promise<void> {
-  switch (format) {
-    case "hl7v2":
-      await libraries.hl7();
-      return;
-    case "fhir":
-      await libraries.fhir();
-      return;
-    case "x12":
-      await libraries.x12();
-      return;
-    case "ccda":
-      await libraries.ccda();
-      return;
-    case "json":
-    case "text":
-      return;
-  }
+  const entry: FormatEntry<unknown> = FORMAT_REGISTRY[format];
+  await entry.load?.();
 }
 
 /**
- * Parses a stored body into what the transform receives for `format`:
- *
- * - `hl7v2`: an `Hl7Message` from `@cosyte/hl7`;
- * - `fhir`: a resource from `@cosyte/fhir`'s JSON reader (its `FhirComplex` model);
- * - `x12`: an `X12Interchange` from `@cosyte/x12`;
- * - `ccda`: a `CcdaDocument` from `@cosyte/ccda`;
- * - `json`: the value `JSON.parse` returns;
- * - `text`: the body as a string.
+ * Parses a stored body into what the transform receives for `format`, with its registry entry (see
+ * {@link FORMAT_REGISTRY} for what each gives).
  *
  * A library's parse failure keeps its stable `code` (`NO_MSH_SEGMENT`, `MALFORMED_JSON`,
  * `X12_NO_ISA_HEADER`, `NOT_WELL_FORMED_XML` and the rest). `json` refuses a body that is not JSON
@@ -205,23 +364,13 @@ export async function loadFormat(format: WorkerFormat): Promise<void> {
  * const resource = await decode("fhir", body); // a FHIR resource model
  * ```
  */
-export async function decode(format: WorkerFormat, body: Uint8Array): Promise<unknown> {
-  switch (format) {
-    case "hl7v2":
-      return (await libraries.hl7()).parseHL7(
-        Buffer.from(body.buffer, body.byteOffset, body.byteLength),
-      );
-    case "fhir":
-      return (await libraries.fhir()).parseResource(strictUtf8.decode(body)).resource;
-    case "x12":
-      return (await libraries.x12()).parseX12(strictUtf8.decode(body));
-    case "ccda":
-      return (await libraries.ccda()).parseCcda(strictUtf8.decode(body));
-    case "json":
-      return parseJson(strictUtf8.decode(body));
-    case "text":
-      return lenientUtf8.decode(body);
-  }
+export async function decode<F extends WorkerFormat>(
+  format: F,
+  body: Uint8Array,
+): Promise<FormatModel<F>> {
+  const entry = FORMAT_REGISTRY[format] as FormatEntry<FormatModel<F>>;
+  // Awaited here, so a parser that throws as it is called rejects like one that rejects.
+  return await entry.decode(body);
 }
 
 /**
@@ -411,32 +560,79 @@ function isX12Model(value: object): value is X12.X12Interchange {
 }
 
 /**
- * The text of a model from one of the `@cosyte/*` libraries, or `undefined` when `value` is not one.
- * A model serializes whatever the channel's format, so a transform can turn one format into another.
+ * What a `json` channel writes for a value that is no library's model: a plain object or array, a
+ * finite number or a boolean, with `JSON.stringify`.
  */
-async function serializeModel(format: WorkerFormat, value: object): Promise<string | undefined> {
-  if (isFhirModel(value)) return (await libraries.fhir()).serializeResource(value);
-  if (isX12Model(value)) return (await libraries.x12()).serializeX12(value);
-  // A JSON object is never a message or a document; only a class instance can be one, and checking
-  // costs nothing for a channel whose own library made it.
-  if (isPlain(value)) return undefined;
-  const asHl7 = async (): Promise<string | undefined> =>
-    value instanceof (await libraries.hl7()).Hl7Message ? value.toString() : undefined;
-  const asCcda = async (): Promise<string | undefined> => {
-    const library = await libraries.ccda();
-    return value instanceof library.CcdaDocument ? library.serializeCcda(value) : undefined;
-  };
-  return format === "ccda"
-    ? ((await asCcda()) ?? (await asHl7()))
-    : ((await asHl7()) ?? (await asCcda()));
+function jsonValue(output: unknown): Written | undefined {
+  const plain = typeof output === "object" && output !== null && isPlain(output);
+  if (
+    plain ||
+    typeof output === "boolean" ||
+    (typeof output === "number" && Number.isFinite(output))
+  ) {
+    // An object whose `toJSON` gives `undefined` has always gone out as an empty body.
+    const text = JSON.stringify(output) as unknown;
+    return typeof text === "string" ? text : "";
+  }
+  return undefined;
+}
+
+/** The model writers told by shape, in the registry's order. */
+const shapeWriters: ModelWriter[] = [];
+/** The model writers told by class, with their formats, in the registry's order. */
+const classWriters: (readonly [WorkerFormat, ModelWriter])[] = [];
+for (const format of FORMATS) {
+  const entry: FormatEntry<unknown> = FORMAT_REGISTRY[format];
+  if (entry.model === undefined) continue;
+  if (entry.model.byShape) shapeWriters.push(entry.model);
+  else classWriters.push([format, entry.model]);
 }
 
 /**
- * Serializes one transform output back to bytes, as UTF-8:
+ * A model from one of the `@cosyte/*` libraries as its library writes it, or `undefined` when
+ * `value` is not one. A model is written whatever the channel's format, so a transform can turn one
+ * format into another.
+ */
+async function writeModel(format: WorkerFormat, value: object): Promise<Written | undefined> {
+  for (const writer of shapeWriters) {
+    const written = await writer.write(value);
+    if (written !== undefined) return written;
+  }
+  // A JSON object is never a message or a document; only a class instance can be one, and checking
+  // costs nothing for a channel whose own library made it, so its own format is asked first.
+  if (isPlain(value)) return undefined;
+  const own = classWriters.filter(([owner]) => owner === format);
+  for (const [, writer] of [...own, ...classWriters.filter(([owner]) => owner !== format)]) {
+    const written = await writer.write(value);
+    if (written !== undefined) return written;
+  }
+  return undefined;
+}
+
+/**
+ * What a writer or a transform handed back, as bytes of its own: a string as UTF-8, and bytes copied
+ * as they are, in whatever charset they were written. A copy, because the outputs move to the engine
+ * with `postMessage`, which takes their buffers from whoever held them.
  *
- * - a string is sent as it is, whatever the format;
+ * @example
+ * ```ts
+ * bytesOf(new Uint8Array([0x4d, 0x41])); // the same two bytes, in a new buffer
+ * bytesOf("MA"); // 4d 41
+ * ```
+ */
+export function bytesOf(written: Written): Uint8Array {
+  return typeof written === "string" ? encoder.encode(written) : new Uint8Array(written);
+}
+
+/**
+ * Serializes one transform output back to bytes:
+ *
+ * - a string is sent as UTF-8, whatever the format;
+ * - a `Uint8Array` (a `Buffer` is one) is sent as its bytes, copied, whatever the format, so a
+ *   transform can send a body in any charset, or binary;
  * - a model from `@cosyte/hl7`, `@cosyte/fhir`, `@cosyte/x12` or `@cosyte/ccda` is written by its
  *   own library, whatever the channel's format, so a transform can return another format's model;
+ *   a library that writes bytes keeps them, and one that writes text is sent as UTF-8;
  * - on a `json` channel, any other JSON value (a plain object, an array, a finite number or a
  *   boolean) is written with `JSON.stringify`. A transform's own array still means several
  *   messages, so one JSON array goes out as `[list]`.
@@ -450,18 +646,14 @@ async function serializeModel(format: WorkerFormat, value: object): Promise<stri
  * ```
  */
 export async function encode(format: WorkerFormat, output: unknown): Promise<Uint8Array> {
-  if (typeof output === "string") return encoder.encode(output);
+  if (typeof output === "string" || output instanceof Uint8Array) return bytesOf(output);
   if (typeof output === "object" && output !== null) {
-    const text = await serializeModel(format, output);
-    if (text !== undefined) return encoder.encode(text);
-    if (format === "json" && isPlain(output)) return encoder.encode(JSON.stringify(output));
+    const written = await writeModel(format, output);
+    if (written !== undefined) return bytesOf(written);
   }
-  if (
-    format === "json" &&
-    (typeof output === "boolean" || (typeof output === "number" && Number.isFinite(output)))
-  ) {
-    return encoder.encode(JSON.stringify(output));
-  }
+  const entry: FormatEntry<unknown> = FORMAT_REGISTRY[format];
+  const written = entry.value?.(output);
+  if (written !== undefined) return bytesOf(written);
   throw new TypeError("the transform returned something that is neither a message nor a string");
 }
 

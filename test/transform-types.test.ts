@@ -98,6 +98,11 @@ describe("the transform types", () => {
     expectTypeOf<ReturnType<TransformFor<"hl7v2", "fhir">>>().toEqualTypeOf<
       TransformOutput<FhirResource> | Promise<TransformOutput<FhirResource>>
     >();
+    // Bytes go out as they are, on a channel of any format.
+    const asBytes = ((msg) =>
+      Buffer.from(msg.toString(), "latin1")) satisfies TransformFor<"hl7v2">;
+    expectTypeOf<Uint8Array>().toExtend<TransformOutput<Hl7Message>>();
+    expect(asBytes).toBeTypeOf("function");
   });
 
   it("refuse a transform that returns what its format cannot send, or reads what is not there", () => {

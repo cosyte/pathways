@@ -51,7 +51,7 @@ import type { SourceFacts } from "../transform.js";
 import { ChannelWorker, TransformLoadError, type TransformOutcome } from "./channel-worker.js";
 import type { EngineFence } from "./lease.js";
 import { channelStatus, type ChannelHealth, type EngineHealth } from "./health.js";
-import type { FailureSummary } from "./worker-entry.js";
+import { formatTable, type FailureSummary } from "./worker-entry.js";
 import { copyFacts, keepFacts, sourceFacts } from "./source-facts.js";
 
 /**
@@ -104,38 +104,25 @@ const STORAGE_CHECK_EVERY_MS = 1_000;
 const STORAGE_CHECK_TIMEOUT_MS = 5_000;
 
 /**
- * The file extension a file destination writes for each format.
+ * The file extension a file destination writes for each format, from the format registry.
  *
  * @example
  * ```ts
  * EXTENSIONS.fhir; // "json"
  * ```
  */
-export const EXTENSIONS: Readonly<Record<Format, string>> = {
-  hl7v2: "hl7",
-  fhir: "json",
-  x12: "x12",
-  ccda: "xml",
-  json: "json",
-  text: "txt",
-};
+export const EXTENSIONS: Readonly<Record<Format, string>> = formatTable("extension");
 
 /**
- * The `Content-Type` an HTTP destination sends for each format, unless its headers set one.
+ * The `Content-Type` an HTTP destination sends for each format, unless its headers set one, from
+ * the format registry.
  *
  * @example
  * ```ts
  * CONTENT_TYPES.fhir; // "application/fhir+json"
  * ```
  */
-export const CONTENT_TYPES: Readonly<Record<Format, string>> = {
-  hl7v2: "application/hl7-v2",
-  fhir: "application/fhir+json",
-  x12: "application/edi-x12",
-  ccda: "application/xml",
-  json: "application/json",
-  text: "text/plain",
-};
+export const CONTENT_TYPES: Readonly<Record<Format, string>> = formatTable("contentType");
 
 /**
  * How long to wait before attempt number `attempts + 1`, after `attempts` failures, with the default
