@@ -316,7 +316,7 @@ describe("retry settings read from the environment", () => {
       loadWith(files(reference, channel()), { RETRY_FIRST: "10m", RETRY_MAX: "5m" }),
     ).rejects.toMatchObject({
       problems: [
-        "pathways.yaml: defaults.retry: first (600000ms) is longer than max (300000ms); set first no longer than max",
+        "pathways.yaml: defaults.retry: first is longer than max (first read from the environment variable RETRY_FIRST, max from RETRY_MAX); set first no longer than max",
       ],
     });
     const project = await loadWith(files(reference, channel()), {
@@ -324,6 +324,63 @@ describe("retry settings read from the environment", () => {
       RETRY_MAX: "10s",
     });
     expect(project.settings.retry).toEqual({ ...DEFAULT_RETRY, firstMs: 2_000, maxMs: 10_000 });
+  });
+
+  /** The problems a load of `project` with `env` gives, none when it loads. */
+  const refusal = (project: Record<string, string>, env: Record<string, string>) =>
+    loadWith(project, env).then(
+      () => [],
+      (error: unknown) => (error instanceof ConfigError ? error.problems : [String(error)]),
+    );
+
+  it("never print first or max when either was read from a variable", async () => {
+    const problems = await refusal(
+      files(
+        "defaults:\n  retry: { first: { env: RETRY_FIRST }, max: { env: RETRY_MAX } }\n",
+        channel(),
+      ),
+      { RETRY_FIRST: "10m", RETRY_MAX: "5m" },
+    );
+    expect(problems).toHaveLength(1);
+    expect(problems.join("\n")).not.toMatch(/600000|300000|10m|5m/);
+  });
+
+  it("name a wider level's variable when only its first was read from one", async () => {
+    const problems = await refusal(
+      files(
+        "defaults:\n  retry: { first: { env: RETRY_FIRST }, max: 1h }\n",
+        channel("{ max: 5m }"),
+      ),
+      { RETRY_FIRST: "10m" },
+    );
+    expect(problems).toEqual([
+      "channels/text/channel.yaml: destinations.0.retry: first is longer than max (first read from the environment variable RETRY_FIRST); set first no longer than max",
+    ]);
+    expect(problems.join("\n")).not.toMatch(/600000|10m/);
+  });
+
+  it("name the variable a narrower max was read from", async () => {
+    const problems = await refusal(
+      files(
+        "defaults:\n  retry: { first: 10m, max: 1h }\n",
+        channel("", "", "retry: { max: { env: RETRY_MAX } }\n"),
+      ),
+      { RETRY_MAX: "5m" },
+    );
+    expect(problems).toEqual([
+      "channels/text/channel.yaml: retry: first is longer than max (max read from the environment variable RETRY_MAX); set first no longer than max",
+    ]);
+    expect(problems.join("\n")).not.toMatch(/300000|5m/);
+  });
+
+  it("print first and max when both are written in the files", async () => {
+    const problems = await refusal(
+      files("defaults:\n  retry: { first: 10m, max: 1h }\n", channel("{ max: 5m }")),
+      {},
+    );
+    expect(problems).toEqual([
+      "channels/text/channel.yaml: destinations.0.retry: first (600000ms) is longer than max (300000ms); set first no longer than max",
+    ]);
   });
 });
 

@@ -131,9 +131,12 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
   }
 
   const settings: Settings = mergeSettings(DEFAULT_SETTINGS, project.defaults ?? {});
-  problems.push(
-    ...retryProblems(show(projectFile), "defaults.retry", project.defaults?.retry, settings.retry),
-  );
+  const projectRetry: RetryLevel = {
+    key: "defaults.retry",
+    block: project.defaults?.retry,
+    fromEnv: projectEnv,
+  };
+  problems.push(...retryProblems(show(projectFile), [projectRetry], settings.retry));
   const databaseFile = resolve(projectRoot, project.storage?.sqlite?.file ?? DEFAULT_DATABASE_FILE);
   const storage = resolveStorage(project.storage, projectRoot, databaseFile);
   const hooks = (project.hooks ?? []).map((hook) => resolveHook(hook, projectRoot));
@@ -213,13 +216,21 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
     const destinations = channel.destinations.map((destination) =>
       resolveDestination(destination, channelDir, channelSettings),
     );
+    const channelRetry: RetryLevel = { key: "retry", block: channel.retry, fromEnv: channelEnv };
     const badRetry = [
-      ...retryProblems(show(file), "retry", channel.retry, channelSettings.retry),
+      ...retryProblems(show(file), [channelRetry, projectRetry], channelSettings.retry),
       ...destinations.flatMap((destination, index) =>
         retryProblems(
           show(file),
-          `destinations.${index}.retry`,
-          channel.destinations[index]?.retry,
+          [
+            {
+              key: `destinations.${index}.retry`,
+              block: channel.destinations[index]?.retry,
+              fromEnv: channelEnv,
+            },
+            channelRetry,
+            projectRetry,
+          ],
           destination.retry,
         ),
       ),
@@ -615,21 +626,46 @@ function mergeRetry(base: RetryPolicy, override: RetryYaml): RetryPolicy {
   };
 }
 
+/** One level's retry block, its dotted key, and the variables its keys were read from. */
+interface RetryLevel {
+  readonly key: string;
+  readonly block: RetryYaml | undefined;
+  readonly fromEnv: ReadonlyMap<string, string>;
+}
+
+/** The variable the `first` or `max` in force was read from: at the narrowest level that sets it. */
+function retryVariable(levels: readonly RetryLevel[], name: "first" | "max"): string | undefined {
+  const level = levels.find((candidate) => candidate.block?.[name] !== undefined);
+  return level?.fromEnv.get(`${level.key}.${name}`);
+}
+
 /**
- * A problem when the retry settings in force where `block` sets `first` or `max` wait longer at
+ * A problem when the retry settings in force where `levels[0]` sets `first` or `max` wait longer at
  * first than at most: checked where it is set, so a problem names the file and key at fault.
+ * `levels` runs from that level out to the widest. When either value in force was read from the
+ * environment, the problem names the variable and holds neither value.
  */
 function retryProblems(
   file: string,
-  key: string,
-  block: RetryYaml | undefined,
+  levels: readonly [RetryLevel, ...RetryLevel[]],
   policy: RetryPolicy | undefined,
 ): string[] {
+  const [{ key, block }] = levels;
   if (policy === undefined || (block?.first === undefined && block?.max === undefined)) return [];
   if (policy.firstMs <= policy.maxMs) return [];
-  return [
-    `${file}: ${key}: first (${String(policy.firstMs)}ms) is longer than max (${String(policy.maxMs)}ms); set first no longer than max`,
-  ];
+  const first = retryVariable(levels, "first");
+  const max = retryVariable(levels, "max");
+  const from = [
+    first === undefined ? undefined : `first read from the environment variable ${first}`,
+    max === undefined
+      ? undefined
+      : `max ${first === undefined ? "read from the environment variable" : "from"} ${max}`,
+  ].filter((part) => part !== undefined);
+  const what =
+    from.length === 0
+      ? `first (${String(policy.firstMs)}ms) is longer than max (${String(policy.maxMs)}ms)`
+      : `first is longer than max (${from.join(", ")})`;
+  return [`${file}: ${key}: ${what}; set first no longer than max`];
 }
 
 async function readYaml(

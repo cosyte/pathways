@@ -603,8 +603,22 @@ destinations:
   it("take a reference at every key that holds one value, but the documented exceptions", () => {
     // configuration-reference.md, "Settings from the environment": plaintext, a channel's name and
     // format are never read from the environment (encryption: none and auth: none are the short
-    // form of a block, and blocks are not scalars, so the walk passes over them).
-    const EXCEPTIONS = new Set(["plaintext", "name", "format"]);
+    // form of a block, and blocks are not scalars, so the walk passes over them). Matched by the
+    // whole path, so a new key that only shares one of these names is still checked.
+    const EXCEPTIONS: readonly string[] = [
+      "pathways.yaml.storage.postgres.plaintext",
+      "pathways.yaml.storage.mysql.plaintext",
+      "pathways.yaml.storage.sqlserver.plaintext",
+      "pathways.yaml.hooks.[].webhook.plaintext",
+      "pathways.yaml.health.plaintext",
+      "channel.yaml.name",
+      "channel.yaml.format",
+      "channel.yaml.source.http.plaintext",
+      "channel.yaml.source.mllp.plaintext",
+      "channel.yaml.destinations.[].http.plaintext",
+      "channel.yaml.destinations.[].mllp.plaintext",
+      "channel.yaml.hooks.[].webhook.plaintext",
+    ];
     type Node = Record<string, unknown>;
     const isNode = (value: unknown): value is Node =>
       typeof value === "object" && value !== null && !Array.isArray(value);
@@ -628,10 +642,12 @@ destinations:
       );
     };
     const missing: string[] = [];
+    const excepted: string[] = [];
     const walk = (node: Node, path: readonly string[]): void => {
       if (isReference(node) || branches(node).some(isReference)) return;
       if (isScalar(node)) {
-        if (!EXCEPTIONS.has(path.at(-1) ?? "")) missing.push(path.join("."));
+        const key = path.join(".");
+        (EXCEPTIONS.includes(key) ? excepted : missing).push(key);
         return;
       }
       const properties = node["properties"];
@@ -648,6 +664,8 @@ destinations:
     walk(schemas.project, ["pathways.yaml"]);
     walk(schemas.channel, ["channel.yaml"]);
     expect(missing).toEqual([]);
+    // Each exception is still a key, so the list cannot go stale.
+    expect([...new Set(excepted)].sort()).toEqual([...EXCEPTIONS].sort());
   });
 
   it("refuse plaintext read from the environment, as Zod does", () => {
