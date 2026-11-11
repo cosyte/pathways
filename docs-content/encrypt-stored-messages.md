@@ -100,15 +100,23 @@ key's id.
 
    `rekey` is safe to run while the engine runs: it replaces a value only if the engine has not changed
    it meanwhile, and counts any it skipped under "changed while rekey ran". It exits 0 once every value
-   is under the current key, and 1 while any is not; run it again until it exits 0.
+   is under the current key, and 1 while any is not; run it again until it exits 0. On SQLite it then
+   empties the write-ahead log into the database file; if another connection is still in the middle
+   of a read after five seconds, it exits 1 and says so, and you run it again.
 
-4. Remove the old key from the list: on SQLite, as soon as rekey exits 0; on a database server, only
-   once the server no longer keeps earlier versions of the rewritten rows, as below.
+4. Remove the old key from the list: on SQLite, once rekey exits 0; on a database server, only once
+   the server no longer keeps earlier versions of the rewritten rows, as below. On either, keep the
+   old key while any copy or backup of the database made before rekey may still be restored: it holds
+   every value under the old key, and restoring it once the key is gone loses every stored message in
+   it. Destroy those copies first, or keep the key until they have aged out.
 
-On SQLite, a rewritten value's old bytes are overwritten in the file. A database server keeps earlier
-row versions in its logs, free space and backups for a while, still under the old key, so on a server,
-retire the old key only once those no longer hold rows written under it. `rekey` says so on stderr
-when it finishes on a store that is not SQLite.
+On SQLite, `rekey` overwrites a rewritten value's old bytes in the database file, and when it
+finishes, empties the write-ahead log (`pathways.db-wal`), which still held them, into the file, so
+the live database's files hold none of them, even beside a running engine. A database server keeps
+earlier row versions in its logs, free space, replicas and backups for a while, still under the old
+key (a streaming or binary log replica holds the same versions as its primary), so on a server, retire
+the old key only once those no longer hold rows written under it. `rekey` says so on stderr when it
+finishes on a store that is not SQLite.
 
 ## Turn encryption on for an existing database
 

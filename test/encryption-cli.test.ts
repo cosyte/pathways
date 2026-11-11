@@ -1,6 +1,7 @@
 import { readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import SqliteDatabase from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { EXIT, run } from "../src/cli.js";
@@ -73,7 +74,11 @@ async function rawDatabase(root: string): Promise<string> {
 
 /** What rekey adds, on a store that is not SQLite, once every value is under the current key. */
 const REKEY_KEEPS_EARLIER_VERSIONS =
-  "pathways: every value is under the current key, but this store is not SQLite, so it may still hold earlier versions of the rewritten rows under the older keys (a database server keeps them in its logs, free space and backups). Keep each older key until it no longer does.\n";
+  "pathways: every value is under the current key, but this store is not SQLite, so it may still hold earlier versions of the rewritten rows under the older keys (a database server keeps them in its logs, free space, replicas and backups). Keep each older key until it no longer does.\n";
+
+/** What rekey adds on SQLite when a connection mid-read keeps the old bytes in the log. */
+const REKEY_LOG_HELD =
+  "pathways: every value is under the current key, but a connection still reading the database keeps the earlier versions in its write-ahead log; run rekey again once that read is done.\n";
 
 const ENV_KEYS =
   "encryption:\n  keys: [{ id: prod, env: PATHWAYS_SYNTHETIC_KEY }]\n  current: prod\n";
@@ -248,6 +253,67 @@ describe("pathways rekey", () => {
     expect((await runCli(["start", "--once", "-C", root])).code).toBe(EXIT.ok);
     expect(await readFile(join(root, "data/outbox/1-1.hl7"), "utf8")).toBe("out");
   });
+
+  /** The last bytes of each stored body's ciphertext, to search the database's files for. */
+  async function bodyTails(root: string): Promise<string[]> {
+    const store = await Store.open((await loadProject(root)).databaseFile);
+    const tails = [
+      ...(await store.storedContent("messages", 0, 10)),
+      ...(await store.storedContent("deliveries", 0, 10)),
+    ].map((row) => Buffer.from(row.body).subarray(-24).toString("latin1"));
+    await store.close();
+    return tails;
+  }
+
+  it("on SQLite, leaves no old bytes in the database, its log or its index while the engine holds it open", async () => {
+    const root = await rotated("new");
+    const oldValues = await bodyTails(root);
+    // A connection that stays open across rekey, as a running engine's does: the database stays in
+    // WAL mode with its -wal and -shm files, and no close checkpoints it for rekey.
+    const engine = await Store.open((await loadProject(root)).databaseFile);
+    try {
+      expect(await runCli(["rekey", "-C", root])).toMatchObject({
+        code: EXIT.ok,
+        out: report({ reencrypted: 4 }),
+        err: "",
+      });
+      const files = await readdir(join(root, ".pathways"));
+      expect(files).toEqual(expect.arrayContaining(["pathways.db-wal", "pathways.db-shm"]));
+      const raw = await rawDatabase(root);
+      expect(oldValues).toHaveLength(3);
+      expect(oldValues.filter((value) => raw.includes(value))).toEqual([]);
+      // The engine reads on under the new key.
+      expect(await engine.storedContent("messages", 0, 10)).toHaveLength(2);
+    } finally {
+      await engine.close();
+    }
+  });
+
+  it("on SQLite, exits 1 while a connection mid-read keeps the old bytes in the log, and 0 once it is done", async () => {
+    const root = await rotated("new");
+    const reader = new SqliteDatabase((await loadProject(root)).databaseFile);
+    // A read still under way holds its snapshot, from before rekey, so the log cannot be emptied.
+    const reading = reader.prepare("select id from messages").iterate();
+    reading.next();
+    try {
+      const first = await runCli(["rekey", "-C", root]);
+      expect(first).toMatchObject({
+        code: EXIT.failed,
+        out: report({ reencrypted: 4 }),
+        err: REKEY_LOG_HELD,
+      });
+      reading.return?.();
+      expect(await runCli(["rekey", "-C", root])).toMatchObject({
+        code: EXIT.ok,
+        out: report({ current: 4 }),
+        err: "",
+      });
+    } finally {
+      reading.return?.();
+      reader.close();
+    }
+    // The first rekey waits out a connection's busy timeout, five seconds, for the read to end.
+  }, 30_000);
 
   it("on a store other than SQLite, says the old key can go only once the store keeps no earlier row versions", async () => {
     const root = await rotated("new");
