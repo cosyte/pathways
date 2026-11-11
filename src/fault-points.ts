@@ -94,6 +94,7 @@ function freeze(point: FaultPoint): void {
  */
 declare const __PATHWAYS_FAULT_POINTS__: boolean | undefined;
 
+/* v8 ignore start -- the build's arm, a function that does nothing, never runs under test */
 /**
  * Marks a named point. Inert, a call that returns at once, unless {@link FAULT_POINT_ENV} armed it
  * in the source the tests run; in the published build, always inert.
@@ -104,7 +105,7 @@ declare const __PATHWAYS_FAULT_POINTS__: boolean | undefined;
  * ```
  */
 export const faultPoint: (point: FaultPoint) => void =
-  /* v8 ignore next 3 -- the build's branch: the tests run the source, where the name is undefined */
   typeof __PATHWAYS_FAULT_POINTS__ !== "undefined" && !__PATHWAYS_FAULT_POINTS__
     ? () => undefined
     : faultPoints(process.env[FAULT_POINT_ENV], freeze);
+/* v8 ignore stop */
