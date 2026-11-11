@@ -3,6 +3,7 @@ import { Worker } from "node:worker_threads";
 import { ownsBuffer } from "../storage/ownership.js";
 import type {
   FailureSummary,
+  MessageContext,
   TransformReply,
   TransformRequest,
   WorkerFormat,
@@ -66,7 +67,32 @@ export interface ChannelWorkerOptions {
   readonly format: WorkerFormat;
   readonly timeoutMs: number;
   readonly memoryMb: number;
+  /**
+   * The channel's configuration, resolved already: plain JSON values, which each message's context
+   * holds as `config`. Defaults to none.
+   */
+  readonly config?: Readonly<Record<string, unknown>>;
   readonly workerUrl?: URL;
+}
+
+/**
+ * The context of a message that is not stored, as the worker's `UNSTORED` holds it: kept here too,
+ * so this module loads nothing of the worker's at run time.
+ */
+const UNSTORED: MessageContext = { messageId: 0, attempt: 1, source: undefined, meta: {} };
+
+/** How {@link ChannelWorker.run} runs one message. */
+export interface RunOptions {
+  /**
+   * Moves a body over the whole of its own buffer to the worker instead of copying it; it reads as
+   * empty here once sent. Pass it only for a body nothing else holds.
+   */
+  readonly transfer?: boolean;
+  /**
+   * What the message's context is built from: its id, run, source facts and per-message map, plain
+   * data the worker copies. Defaults to that of a message that is not stored.
+   */
+  readonly context?: MessageContext;
 }
 
 /**
@@ -99,13 +125,15 @@ export class ChannelWorker {
   }
 
   /**
-   * Transforms one message. Calls are queued, so outputs come back in the order messages went in.
-   * With `transfer`, a body over the whole of its own buffer moves to the worker instead of being
-   * copied, and reads as empty here once sent: pass it only for a body nothing else holds.
+   * Transforms one message, with its context. Calls are queued, so outputs come back in the order
+   * messages went in. With `transfer`, a body over the whole of its own buffer moves to the worker
+   * instead of being copied, and reads as empty here once sent: pass it only for a body nothing
+   * else holds.
    */
-  run(body: Uint8Array, options: { readonly transfer?: boolean } = {}): Promise<TransformOutcome> {
+  run(body: Uint8Array, options: RunOptions = {}): Promise<TransformOutcome> {
     const transfer = options.transfer === true;
-    const result = this.queue.then(() => this.runOne(body, transfer));
+    const context = options.context ?? UNSTORED;
+    const result = this.queue.then(() => this.runOne(body, transfer, context));
     this.queue = result.catch(() => undefined);
     return result;
   }
@@ -120,7 +148,12 @@ export class ChannelWorker {
 
   private spawn(): Promise<Worker> {
     const { channel, transformFile, format, memoryMb } = this.options;
-    const setup: WorkerSetup = { pathwaysWorker: true, transformFile, format };
+    const setup: WorkerSetup = {
+      pathwaysWorker: true,
+      transformFile,
+      format,
+      config: this.options.config ?? {},
+    };
     const worker = new Worker(this.options.workerUrl ?? defaultWorkerUrl(), {
       workerData: setup,
       resourceLimits: { maxOldGenerationSizeMb: memoryMb },
@@ -165,7 +198,11 @@ export class ChannelWorker {
     });
   }
 
-  private async runOne(body: Uint8Array, transfer: boolean): Promise<TransformOutcome> {
+  private async runOne(
+    body: Uint8Array,
+    transfer: boolean,
+    context: MessageContext,
+  ): Promise<TransformOutcome> {
     await this.start();
     const worker = this.worker;
     /* v8 ignore next: start() either sets the worker or throws */
@@ -216,8 +253,9 @@ export class ChannelWorker {
       worker.on("message", onReply);
       worker.on("error", onError);
       worker.on("exit", onExit);
+      const { messageId, attempt, source, meta } = context;
       worker.postMessage(
-        { id, body } satisfies TransformRequest,
+        { id, body, messageId, attempt, source, meta } satisfies TransformRequest,
         transfer && ownsBuffer(body) ? [body.buffer as ArrayBuffer] : [],
       );
     });

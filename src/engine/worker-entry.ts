@@ -22,8 +22,11 @@ import type * as X12 from "@cosyte/x12";
 /** The formats this worker can parse. Kept equal to `FORMATS` in the config schema by a test. */
 export type WorkerFormat = "hl7v2" | "fhir" | "x12" | "ccda" | "json" | "text";
 
-/** A user's transform, as loaded from its module's default export. */
-export type TransformFunction = (message: unknown) => unknown;
+/**
+ * A user's transform, as loaded from its module's default export: the message, then the context.
+ * The context is optional, so a transform written with one parameter fits.
+ */
+export type TransformFunction = (message: unknown, ctx?: unknown) => unknown;
 
 /** What stage a failure happened in. */
 export type FailureKind =
@@ -42,8 +45,28 @@ export interface FailureSummary {
   readonly detail: string;
 }
 
-/** The engine's request: transform one message. */
-export interface TransformRequest {
+/**
+ * What the transform's context is built from for one message, as plain data: the stored message's
+ * id, which run this is, what its source knew (undefined when that is not known) and its per-message
+ * map. `src/transform.ts` holds the public shape the worker builds from it.
+ */
+export interface MessageContext {
+  readonly messageId: number;
+  readonly attempt: number;
+  readonly source: object | undefined;
+  readonly meta: Readonly<Record<string, string | number | boolean>>;
+}
+
+/** The context of a message that is not stored: one run under `pathways test`, or a direct call. */
+export const UNSTORED: MessageContext = Object.freeze({
+  messageId: 0,
+  attempt: 1,
+  source: undefined,
+  meta: Object.freeze({}),
+});
+
+/** The engine's request: transform one message, with what its context is built from beside it. */
+export interface TransformRequest extends MessageContext {
   readonly id: number;
   readonly body: Uint8Array;
 }
@@ -63,6 +86,11 @@ export interface WorkerSetup {
   readonly pathwaysWorker: true;
   readonly transformFile: string | undefined;
   readonly format: WorkerFormat;
+  /**
+   * The channel's configuration, resolved in the engine's process when it started: plain JSON
+   * values, frozen once here and shared by every message's context.
+   */
+  readonly config: Readonly<Record<string, unknown>>;
 }
 
 /**
@@ -71,7 +99,7 @@ export interface WorkerSetup {
  *
  * @example
  * ```ts
- * isWorkerSetup({ pathwaysWorker: true, transformFile: undefined, format: "text" }); // true
+ * isWorkerSetup({ pathwaysWorker: true, transformFile: undefined, format: "text", config: {} }); // true
  * ```
  */
 export function isWorkerSetup(data: unknown): data is WorkerSetup {
@@ -438,8 +466,50 @@ export async function encode(format: WorkerFormat, output: unknown): Promise<Uin
 }
 
 /**
- * Runs one message through `transform`: parse, call, serialize. `null` or `undefined` filters the
- * message out; an array sends several.
+ * Freezes `value` and every object and array inside it, and returns it. Only plain data reaches it:
+ * what the engine sent through `postMessage`, which copies, so nothing outside the worker is frozen.
+ *
+ * @example
+ * ```ts
+ * Object.isFrozen(freezeDeep({ a: { b: 1 } }).a); // true
+ * ```
+ */
+export function freezeDeep<T>(value: T): T {
+  if (typeof value === "object" && value !== null && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const inner of Object.values(value)) freezeDeep(inner);
+  }
+  return value;
+}
+
+/**
+ * The context a transform receives as its second argument for one message: a new frozen plain
+ * object, holding the message's id, its run, its source facts, its per-message map and the
+ * channel's configuration (frozen already, and shared by every message).
+ *
+ * @example
+ * ```ts
+ * const ctx = buildContext(UNSTORED, freezeDeep({ facility: "LAB" }));
+ * Object.isFrozen(ctx); // true
+ * ```
+ */
+export function buildContext(
+  message: MessageContext,
+  config: Readonly<Record<string, unknown>>,
+): Readonly<MessageContext & { readonly config: Readonly<Record<string, unknown>> }> {
+  return freezeDeep({
+    messageId: message.messageId,
+    attempt: message.attempt,
+    source: message.source,
+    meta: message.meta,
+    config: freezeDeep(config),
+  });
+}
+
+/**
+ * Runs one message through `transform`: parse, call with its context, serialize. `null` or
+ * `undefined` filters the message out; an array sends several. Without a context, the transform
+ * gets that of a message that is not stored, with no configuration.
  *
  * @example
  * ```ts
@@ -450,6 +520,7 @@ export async function runTransform(
   transform: TransformFunction,
   format: WorkerFormat,
   body: Uint8Array,
+  ctx: unknown = buildContext(UNSTORED, {}),
 ): Promise<Uint8Array[]> {
   let message: unknown;
   try {
@@ -459,7 +530,7 @@ export async function runTransform(
   }
   let result: unknown;
   try {
-    result = await transform(message);
+    result = await transform(message, ctx);
   } catch (error) {
     throw new StageError("transform", error);
   }
@@ -600,10 +671,12 @@ if (!isMainThread && parentPort !== null && isWorkerSetup(workerData)) {
   const parser = loadFormat(setup.format).catch((error: unknown) => {
     throw new StageError("load", error);
   });
+  // Frozen once: every message's context shares it.
+  const config = freezeDeep(setup.config);
   Promise.all([loadTransform(setup.transformFile), parser]).then(
     ([transform]) => {
       port.on("message", (request: TransformRequest) => {
-        runTransform(transform, setup.format, request.body).then(
+        runTransform(transform, setup.format, request.body, buildContext(request, config)).then(
           (outputs) =>
             port.postMessage(
               { id: request.id, ok: true, outputs } satisfies TransformReply,

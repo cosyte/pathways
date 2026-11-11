@@ -1,4 +1,5 @@
 import { parseDuration, type ProjectConfig } from "../config/schema.js";
+import type { Env } from "../connectors/endpoint.js";
 import { channelStatus } from "../engine/health.js";
 import { describeHolder } from "../engine/lease.js";
 import { EXIT } from "../exit.js";
@@ -53,6 +54,8 @@ export interface OperatorContext {
   readonly err: (text: string) => void;
   /** Epoch milliseconds now. */
   readonly now: () => number;
+  /** Where a replayed transform's configuration reads its variables. Defaults to `process.env`. */
+  readonly env?: Env;
 }
 
 /**
@@ -435,8 +438,8 @@ export async function replayCommand(
   ids: readonly number[],
   resend: boolean,
 ): Promise<number> {
-  const { project, store, audit } = context;
-  const results = await replayMessages(ids, { project, store, audit, resend });
+  const { project, store, audit, env } = context;
+  const results = await replayMessages(ids, { project, store, audit, resend, env });
   print(
     context,
     { results },
