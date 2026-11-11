@@ -13,20 +13,20 @@ importers:
   .:
     dependencies:
       '@cosyte/ccda':
-        specifier: ^0.1.1
-        version: 0.1.1
+        specifier: ^0.1.6
+        version: 0.1.6
       '@cosyte/fhir':
-        specifier: ^0.1.0
-        version: 0.1.0
+        specifier: ^0.1.9
+        version: 0.1.9(fast-check@4.10.2)
       '@cosyte/hl7':
-        specifier: ^0.1.0
-        version: 0.1.0
+        specifier: ^0.1.9
+        version: 0.1.9(fast-check@4.10.2)
       '@cosyte/mllp':
-        specifier: ^0.1.0
-        version: 0.1.0(@cosyte/hl7@0.1.0)
+        specifier: ^0.1.7
+        version: 0.1.7(@cosyte/hl7@0.1.9(fast-check@4.10.2))(fast-check@4.10.2)
       '@cosyte/x12':
-        specifier: ^0.1.1
-        version: 0.1.1
+        specifier: ^0.1.11
+        version: 0.1.11(fast-check@4.10.2)
       better-sqlite3:
         specifier: ^13.0.3
         version: 13.0.3
@@ -65,8 +65,8 @@ importers:
         specifier: ^0.1.8
         version: 0.1.8
       '@cosyte/synth':
-        specifier: ^0.1.0
-        version: 0.1.0(@cosyte/ccda@0.1.1)(@cosyte/fhir@0.1.0)(@cosyte/hl7@0.1.0)(@cosyte/x12@0.1.1)
+        specifier: ^0.1.5
+        version: 0.1.5(@cosyte/ccda@0.1.6)(@cosyte/fhir@0.1.9(fast-check@4.10.2))(@cosyte/hl7@0.1.9(fast-check@4.10.2))(@cosyte/x12@0.1.11(fast-check@4.10.2))
       '@cosyte/test-utils':
         specifier: ^0.1.4
         version: 0.1.4(fast-check@4.10.2)
@@ -293,8 +293,8 @@ packages:
     engines: {node: '>=22.15.0'}
     hasBin: true
 
-  '@cosyte/ccda@0.1.1':
-    resolution: {integrity: sha512-fuybRn++xRtfpa1YjaM6ztUUh9slHVI1JiNG98QJBvAs94F19jmu3ZxrMVKYbz1KTnoW8Lj5vHgHjuTdGvT5dg==}
+  '@cosyte/ccda@0.1.6':
+    resolution: {integrity: sha512-3ZheOAuUufIVWo5oTdLayb6ClJYV72lWcmg865cPD2IQyh/CtFVcKsb7s3jfbEVxOX7xMCp9DOv7g470vhkMRg==}
     engines: {node: '>=22.0.0'}
 
   '@cosyte/eslint-config@0.1.4':
@@ -304,21 +304,34 @@ packages:
       eslint: ^9.0.0 || ^10.0.0
       typescript: '>=5.0.0'
 
-  '@cosyte/fhir@0.1.0':
-    resolution: {integrity: sha512-N2bwMyjCGeBRi/5AZijJi+a2QX4KWW7+aWC+xzAJFmzRVmz4XpvI19tBJ4nNHHN9SaAvmw58YmlVcxm3iQj+HA==}
+  '@cosyte/fhir@0.1.9':
+    resolution: {integrity: sha512-wT5IEf2kYCCka1/a58DZOHjBzjvTJqUoFHq/TlCJ2+s8xGsOTAZvrsVguAewWNhm4du4G3u4MLvGWKO9ZAbfeA==}
     engines: {node: '>=22.0.0'}
+    peerDependencies:
+      fast-check: ^4.0.0
+    peerDependenciesMeta:
+      fast-check:
+        optional: true
 
-  '@cosyte/hl7@0.1.0':
-    resolution: {integrity: sha512-vscdMcPWyB+VsXzmRzzFNsYWtiNotl5wm+kO2OTvGFw2T94BmHPXfFpswSbyiqBH4DlKBIrgi4PJIzOU78v6pw==}
+  '@cosyte/hl7@0.1.9':
+    resolution: {integrity: sha512-MueP3lrL8Z5holw6F4djYeE+/2vE+qWlBxRCbiI6Z0UiOcnqbOSv5RY85+yQFdmpa6mUiFunTb7EmcDkuKhJag==}
     engines: {node: '>=22.0.0'}
+    peerDependencies:
+      fast-check: ^4.0.0
+    peerDependenciesMeta:
+      fast-check:
+        optional: true
 
-  '@cosyte/mllp@0.1.0':
-    resolution: {integrity: sha512-z6R33Rht2i2HClwTlii980VS31aRFEbM0lJ+zT5zS8oM1Pb6GAS1Vqtc2fHmf7f15BUr8keqY1aqJnpcnHXvyQ==}
+  '@cosyte/mllp@0.1.7':
+    resolution: {integrity: sha512-vl/0LWcigDGfnIzxQW7k0gJdl7944Sf2myz741uFB+BntgMjmLUB4UK2XgesjOuUWIG32P1pvbsnBHqgz3r3eA==}
     engines: {node: '>=22.0.0'}
     peerDependencies:
       '@cosyte/hl7': '>=0.0.0'
+      fast-check: ^4.0.0
     peerDependenciesMeta:
       '@cosyte/hl7':
+        optional: true
+      fast-check:
         optional: true
 
   '@cosyte/prettier-config@0.1.2':
@@ -334,17 +347,17 @@ packages:
     engines: {node: '>=22.14'}
     hasBin: true
 
-  '@cosyte/synth@0.1.0':
-    resolution: {integrity: sha512-X+0L9E77w+6naEWDNFPBemmLpANyf/S9UxH6kEqTEsva73NQq0llZBrpcF0TPbSk35FjvmutaqUoAOx6mor/Iw==}
+  '@cosyte/synth@0.1.5':
+    resolution: {integrity: sha512-TukqcmkF8nYsAKkM7oTYy44t3/UdIujnyPlev8eZARXaEENB75y2lfWINquft5YzW4OBFvdapJTaMVABSRqCgA==}
     engines: {node: '>=22.0.0'}
     peerDependencies:
-      '@cosyte/astm': '>=0.0.0'
-      '@cosyte/ccda': '>=0.0.0'
-      '@cosyte/deid': '>=0.0.0'
-      '@cosyte/fhir': '>=0.0.0'
-      '@cosyte/hl7': '>=0.0.0'
-      '@cosyte/ncpdp': '>=0.0.1'
-      '@cosyte/x12': '>=0.0.1'
+      '@cosyte/astm': ^0.1.0
+      '@cosyte/ccda': ^0.1.0
+      '@cosyte/deid': ^0.1.0
+      '@cosyte/fhir': ^0.1.0
+      '@cosyte/hl7': ^0.1.0
+      '@cosyte/ncpdp': ^0.1.0
+      '@cosyte/x12': ^0.1.0
     peerDependenciesMeta:
       '@cosyte/astm':
         optional: true
@@ -382,9 +395,14 @@ packages:
       vite: ^6.0.0 || ^7.0.0 || ^8.0.0
       vitest: ^4.0.0 || ^5.0.0
 
-  '@cosyte/x12@0.1.1':
-    resolution: {integrity: sha512-gyIBTuLIMTBS068EG86Y5tqXRatVdOwiBARC6oLSFKNkXjIVS+zC1ZpUa6kUtKaLtDWSZDhy6xMsfZSB8Gb4qg==}
+  '@cosyte/x12@0.1.11':
+    resolution: {integrity: sha512-V6se6OFnKSi/vcJoNxDcwAJhNvFay5ixZ5tZR5GhkhjaEfnaLjvHwB6i3TAPYk1nrVEuihJS91f+gls0/goTcQ==}
     engines: {node: '>=22.0.0'}
+    peerDependencies:
+      fast-check: ^4.0.0
+    peerDependenciesMeta:
+      fast-check:
+        optional: true
 
   '@es-joy/escodegen@5.0.1':
     resolution: {integrity: sha512-0sOnDSVMt7Zg5qmXz4ab1yOXrUi0QmSPqpm5d547puNdJxT0J+Xdip2F/5j07nuE1pW131AX5jFUvOIfZPYNRg==}
@@ -2848,7 +2866,7 @@ snapshots:
 
   '@cosyte/bench@0.1.2': {}
 
-  '@cosyte/ccda@0.1.1':
+  '@cosyte/ccda@0.1.6':
     dependencies:
       '@xmldom/xmldom': 0.9.12
 
@@ -2863,13 +2881,18 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  '@cosyte/fhir@0.1.0': {}
-
-  '@cosyte/hl7@0.1.0': {}
-
-  '@cosyte/mllp@0.1.0(@cosyte/hl7@0.1.0)':
+  '@cosyte/fhir@0.1.9(fast-check@4.10.2)':
     optionalDependencies:
-      '@cosyte/hl7': 0.1.0
+      fast-check: 4.10.2
+
+  '@cosyte/hl7@0.1.9(fast-check@4.10.2)':
+    optionalDependencies:
+      fast-check: 4.10.2
+
+  '@cosyte/mllp@0.1.7(@cosyte/hl7@0.1.9(fast-check@4.10.2))(fast-check@4.10.2)':
+    optionalDependencies:
+      '@cosyte/hl7': 0.1.9(fast-check@4.10.2)
+      fast-check: 4.10.2
 
   '@cosyte/prettier-config@0.1.2': {}
 
@@ -2905,12 +2928,12 @@ snapshots:
 
   '@cosyte/script-utils@0.1.8': {}
 
-  '@cosyte/synth@0.1.0(@cosyte/ccda@0.1.1)(@cosyte/fhir@0.1.0)(@cosyte/hl7@0.1.0)(@cosyte/x12@0.1.1)':
+  '@cosyte/synth@0.1.5(@cosyte/ccda@0.1.6)(@cosyte/fhir@0.1.9(fast-check@4.10.2))(@cosyte/hl7@0.1.9(fast-check@4.10.2))(@cosyte/x12@0.1.11(fast-check@4.10.2))':
     optionalDependencies:
-      '@cosyte/ccda': 0.1.1
-      '@cosyte/fhir': 0.1.0
-      '@cosyte/hl7': 0.1.0
-      '@cosyte/x12': 0.1.1
+      '@cosyte/ccda': 0.1.6
+      '@cosyte/fhir': 0.1.9(fast-check@4.10.2)
+      '@cosyte/hl7': 0.1.9(fast-check@4.10.2)
+      '@cosyte/x12': 0.1.11(fast-check@4.10.2)
 
   '@cosyte/test-utils@0.1.4(fast-check@4.10.2)':
     dependencies:
@@ -2928,7 +2951,9 @@ snapshots:
       vite: 8.3.6(@types/node@24.19.2)(esbuild@0.28.2)(tsx@4.23.15)(yaml@2.9.1)
       vitest: 5.1.0(@types/node@24.19.2)(@vitest/coverage-v8@5.1.0)(vite@8.3.6(@types/node@24.19.2)(esbuild@0.28.2)(tsx@4.23.15)(yaml@2.9.1))
 
-  '@cosyte/x12@0.1.1': {}
+  '@cosyte/x12@0.1.11(fast-check@4.10.2)':
+    optionalDependencies:
+      fast-check: 4.10.2
 
   '@es-joy/escodegen@5.0.1':
     dependencies:
