@@ -4661,7 +4661,8 @@ Builds a secret provider: a module's default export, named in `pathways.yaml` as
 `secrets: { vault: { module: ./vault.ts, options: {...} } }`. It returns a `SecretProvider` (or a
 promise of one) that `{ secret: { provider: vault, name } }` references are resolved through. It
 is built when the engine (or a command that opens the store) starts, asked for each secret, and
-stopped. Its own credentials come from `context.env`, or from a file its options name.
+stopped. Building it gets the provider's `timeout`, as each request does: a factory still waiting
+then fails the start. Its own credentials come from `context.env`, or from a file its options name.
 
 #### Type Parameters
 

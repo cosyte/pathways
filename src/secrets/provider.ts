@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readFileSync } from "node:fs";
 
 // The secret provider interface, and the two providers every project has: env and file. Nothing a
 // provider returns is ever written to a log or an error; errors here carry the secret's name and a
@@ -199,9 +199,11 @@ export function readEnvSecret(env: Env, ref: SecretRef): ResolvedSecret {
 /**
  * The built-in `file` provider, read now: the file at `ref.name`, an absolute path, with one line
  * break at its end dropped (as `echo` and most editors leave one), or one field of the JSON object it
- * holds. This is how a container platform's mounted secrets are read.
+ * holds. This is how a container platform's mounted secrets are read. A symbolic link is followed;
+ * a file larger than 1 MiB is refused unread.
  *
- * @throws {SecretError} saying the file could not be read, with the system's code, or holds nothing.
+ * @throws {SecretError} saying the file could not be read, with the system's code, is too large, or
+ *   holds nothing.
  *   Never the path, which may name a patient's folder in a careless setup, nor the value.
  * @example
  * ```ts
@@ -211,9 +213,16 @@ export function readEnvSecret(env: Env, ref: SecretRef): ResolvedSecret {
 export function readFileSecret(ref: SecretRef): ResolvedSecret {
   const what = "its file";
   noVersion(ref, what);
-  let text: string;
+  let text: string | undefined;
   try {
-    text = readFileSync(ref.name, "utf8");
+    // A symbolic link is followed, as a mounted Kubernetes secret needs. The size is checked on the
+    // open file, so a file swapped after the check is not the one read.
+    const fd = openSync(ref.name, "r");
+    try {
+      if (fstatSync(fd).size <= SECRET_FILE_LIMIT) text = readFileSync(fd, "utf8");
+    } finally {
+      closeSync(fd);
+    }
   } catch (error) {
     const code = (error as { code?: unknown }).code;
     throw new SecretError(
@@ -223,12 +232,22 @@ export function readFileSecret(ref: SecretRef): ResolvedSecret {
       `${what} could not be read${typeof code === "string" ? ` (${code})` : ""}`,
     );
   }
+  if (text === undefined) {
+    throw new SecretError(
+      "ERR_PATHWAYS_SECRET_UNREADABLE",
+      ref.name,
+      `${what} is larger than 1 MiB`,
+    );
+  }
   const value = text.replace(/\r?\n$/, "");
   if (value === "") {
     throw new SecretError("ERR_PATHWAYS_SECRET_NOT_FOUND", ref.name, `${what} is empty`);
   }
   return { value: pickField(value, ref.field, ref.name, what), version: LATEST };
 }
+
+/** The largest file the `file` provider reads, in bytes: 1 MiB, a Kubernetes secret's limit. */
+const SECRET_FILE_LIMIT = 1024 * 1024;
 
 /**
  * The built-in `env` provider as a {@link SecretProvider}.

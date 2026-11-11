@@ -35,6 +35,11 @@ destinations:
         Authorization: { file: /run/secrets/lab-authorization }
 ```
 
+Pathways follows a symbolic link, as a mounted Kubernetes secret is, and reads the file whole. It
+refuses an empty file, and a file larger than 1 MiB unread. It does not check the file's
+permissions: make it readable by the account Pathways runs as and no one else, mode `0400` or
+`0600`, as a container platform's mounted secrets are by default.
+
 A file that holds a JSON object can give one field of it:
 
 ```yaml title="channels/lab-out/channel.yaml"
@@ -89,8 +94,10 @@ destinations:
 ```
 
 At start, Pathways builds each provider a reference names, asks it once for each secret, and stops
-it. Each request gets the provider's `timeout` (10 seconds by default). A secret the provider cannot
-answer, answers after its time, or answers with an expiry that has passed stops the start, exit 3:
+it. Building the provider and each request get the provider's `timeout` (10 seconds by default): a
+module whose factory is still waiting, for a login that never answers say, stops the start, exit 1.
+A secret the provider cannot answer, answers after its time, or answers with an expiry that has
+passed stops the start, exit 3:
 
 ```text
 pathways: the configuration is invalid:
@@ -101,6 +108,11 @@ A problem names the file and key, the secret's name, and the provider's error by
 never holds a value, and never the error's own text, which a store may fill with anything. One log
 line per provider, `secrets-resolved`, gives the count it resolved. Values are read once, at start; a
 rotated secret is read at the next start.
+
+The operator commands read secrets the same way. Each one that opens the store resolves the store's
+connection URL and master keys, and those that write to the audit log (`messages`, `replay`,
+`clear`, `retention`, `migrate` and `lease release`) also resolve the headers of the engine-wide
+hooks in `pathways.yaml`, which receive each entry they write.
 
 `pathways validate` checks that every reference names a provider and that each provider's module
 exists. It loads no provider and reads no secret, so it runs in CI without them.

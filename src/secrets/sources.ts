@@ -58,10 +58,11 @@ export interface SecretUse {
 }
 
 /**
- * Which secrets to list: those opening the store reads (its connection URL and the master keys), or
+ * Which secrets to list: those opening the store reads (its connection URL and the master keys);
+ * those and the headers of `pathways.yaml`'s engine-wide hooks, which an operator command opens; or
  * every one the engine reads at start.
  */
-export type SecretScope = "store" | "all";
+export type SecretScope = "store" | "operator" | "all";
 
 /**
  * Every secret reference `project` holds, in `scope`, each with the file and key that wrote it. A
@@ -90,6 +91,7 @@ export function secretUses(
     }
   }
   if (scope === "store") return uses;
+  if (scope === "operator") return [...uses, ...hookUses(project.hooks, "pathways.yaml")];
   if (project.health?.auth.kind === "bearer") {
     uses.push({ source: project.health.auth, where: "pathways.yaml: health.auth" });
   }

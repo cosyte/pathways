@@ -181,17 +181,22 @@ export function customKeyProvider(
 
 /**
  * Builds a secret provider from its module's default export, a `SecretProviderFactory`. It must
- * return an object with `resolve`, and may have `stop`.
+ * return an object with `resolve`, and may have `stop`. The factory gets the provider's time limit,
+ * as each `resolve` does: a factory that waits on a login that never answers cannot hang the start.
  *
  * @throws {ExtensionLoadError} naming `where` when the module, its factory or what it returns is
- *   wrong.
+ *   wrong, or the factory runs past the time limit.
  * @example
  * ```ts
  * const vault = await customSecretProvider(config, context, "pathways.yaml: secrets.vault.module");
  * ```
  */
 export function customSecretProvider(
-  config: { readonly module: string; readonly options: ModuleOptions },
+  config: {
+    readonly module: string;
+    readonly options: ModuleOptions;
+    readonly timeoutMs?: number | undefined;
+  },
   context: ExtensionContext,
   where: string,
 ): Promise<SecretProvider> {
@@ -202,6 +207,7 @@ export function customSecretProvider(
     config.options,
     context,
     (value) => methodsMissing(value, "a secret provider", ["resolve"], ["stop"]),
+    config.timeoutMs,
   );
 }
 

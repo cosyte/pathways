@@ -898,7 +898,15 @@ async function operator(
   const project = await load(projectDir, io);
   if (project === undefined) return EXIT.config;
   // Extensions log to stderr, so stdout holds only the report.
-  const context = { env: io.env ?? process.env, logger: io.logger ?? pino(STDERR_LOG, stderr) };
+  const bare = { env: io.env ?? process.env, logger: io.logger ?? pino(STDERR_LOG, stderr) };
+  // The engine-wide hooks receive each audit entry this command writes, as `pathways start`'s do.
+  // status and audit write none, so they load no hooks.
+  const withHooks =
+    command !== "status" && command !== "audit" && !(command === "lease" && rest[0] === "status");
+  // Every secret the command reads, resolved once: the store and the hooks share the one result.
+  const secrets = await secretsOrExit(project, bare, withHooks ? "operator" : "store", io);
+  if (typeof secrets === "number") return secrets;
+  const context = { ...bare, secrets };
   const wrapped =
     command === "migrate"
       ? await openForMigrate(project, context, io)
@@ -908,14 +916,8 @@ async function operator(
   const audit = auditFor(store, io, (error) => {
     io.err(`pathways: an audit listener failed (${errorCode(error) ?? "no code"}).\n`);
   });
-  // The engine-wide hooks receive each audit entry this command writes, as `pathways start`'s do.
-  // status and audit write none, so they load no hooks.
   let hooks: HookSet | undefined;
-  if (
-    command !== "status" &&
-    command !== "audit" &&
-    !(command === "lease" && rest[0] === "status")
-  ) {
+  if (withHooks) {
     const opened = await hooksOrExit(project, context, io);
     if (typeof opened === "number") {
       await store.close();

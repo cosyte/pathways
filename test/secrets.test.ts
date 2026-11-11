@@ -1,4 +1,4 @@
-import { writeFile } from "node:fs/promises";
+import { symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -264,6 +264,18 @@ describe("the one resolver", () => {
     expect(problem(() => secrets.read({ file: root }, "f: k"))).toEqual([
       "f: k: its file could not be read (EISDIR)",
     ]);
+    // A file over 1 MiB is refused unread; one of exactly 1 MiB is read.
+    await writeFile(join(root, "large.txt"), "a".repeat(1024 * 1024 + 1));
+    expect(problem(() => secrets.read({ file: join(root, "large.txt") }, "f: k"))).toEqual([
+      "f: k: its file is larger than 1 MiB",
+    ]);
+    await writeFile(join(root, "limit.txt"), "a".repeat(1024 * 1024));
+    expect(secrets.read({ file: join(root, "limit.txt") }, "f: k")).toHaveLength(1024 * 1024);
+    // A symbolic link, as a mounted Kubernetes secret is, is followed.
+    if (process.platform !== "win32") {
+      await symlink(join(root, "token.txt"), join(root, "linked.txt"));
+      expect(secrets.read({ file: join(root, "linked.txt") }, "f: k")).toBe("synthetic-file-token");
+    }
     expect(
       problem(() =>
         secrets.read(
@@ -821,6 +833,79 @@ describe("pathways start with a secret provider", () => {
     expect(ran.err).toBe(
       "pathways: the configuration is invalid:\n  pathways.yaml: encryption.keys.0: the key synth: the secret keys/synth from the provider vault could not be resolved (SecretError ERR_PATHWAYS_SECRET_NOT_FOUND)\n",
     );
+  });
+
+  it("lets every operator command read an engine-wide webhook's header from the provider", async () => {
+    const ops = await receiver(status(200));
+    receivers.push(ops);
+    const key = generateKey();
+    const root = await vaultProject({ secrets: { "keys/synth": key, "ops/token": TOKEN } });
+    await writeFile(
+      join(root, "pathways.yaml"),
+      [
+        "encryption:",
+        "  keys:",
+        "    - { id: synth, secret: { provider: vault, name: keys/synth } }",
+        "  current: synth",
+        "secrets:",
+        `  vault: { module: ${JSON.stringify(VAULT)}, timeout: 300ms, options: ${JSON.stringify({ secrets: { "keys/synth": key, "ops/token": TOKEN } })} }`,
+        "hooks:",
+        "  - webhook:",
+        `      url: "${ops.url}"`,
+        "      plaintext: true",
+        "      headers:",
+        "        Authorization: { secret: { provider: vault, name: ops/token } }",
+        "",
+      ].join("\n"),
+    );
+    for (const argv of [
+      ["migrate"],
+      ["messages"],
+      ["messages", "show", "1"],
+      ["replay", "1"],
+      ["clear", "1"],
+      ["retention"],
+      ["lease", "release", "--force"],
+    ]) {
+      built.splice(0);
+      const ran = await pathways([...argv, "-C", root]);
+      expect(ran.err, argv.join(" ")).not.toMatch(/configuration is invalid|not resolved/);
+      expect(ran.code, argv.join(" ")).not.toBe(EXIT.config);
+      // One provider per command: the store and the hooks share what it resolved.
+      expect(built, argv.join(" ")).toHaveLength(1);
+      expect(ran.lines.join("") + ran.out + ran.err).not.toContain(TOKEN);
+    }
+    // The commands that wrote to the audit log sent each entry with the provider's header.
+    expect(ops.received.length).toBeGreaterThan(0);
+    expect(new Set(ops.received.map((request) => request.headers.authorization))).toEqual(
+      new Set([TOKEN]),
+    );
+  });
+
+  it("exits 1 within the provider's time limit when its factory never finishes", async () => {
+    const root = await makeProject({
+      "pathways.yaml": [
+        "encryption:",
+        "  keys: [{ id: synth, secret: { provider: vault, name: keys/synth } }]",
+        "  current: synth",
+        "secrets:",
+        "  vault: { module: ./vault.ts, timeout: 200ms }",
+        "",
+      ].join("\n"),
+      // A factory waiting on a login that never answers.
+      "vault.ts": "export default () => new Promise(() => undefined);\n",
+      "channels/adt/channel.yaml":
+        "source:\n  file: { dir: ./in }\ndestinations:\n  - file: { dir: ./out }\n",
+    });
+    const ran = await Promise.race([
+      pathways(["start", "--once", "-C", root]),
+      new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 3_000)),
+    ]);
+    expect(ran).toMatchObject({
+      code: EXIT.failed,
+      out: "",
+      err: "pathways: pathways.yaml: secrets.vault.module: the factory did not finish within 200 ms\n",
+    });
   });
 
   it("exits 1 naming the module's key when the provider's module is wrong", async () => {
