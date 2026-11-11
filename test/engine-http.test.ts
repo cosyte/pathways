@@ -33,6 +33,15 @@ import {
 const TOKEN = "synthetic-token-0123456789abcdef";
 const HEALTH_TOKEN = "synthetic-health-token-0123456789";
 const LAB_AUTH = "Bearer synthetic-lab-token-0123456789";
+/** Who answers, in a health report a test makes up. */
+const IDENTITY = {
+  version: "0.0.1",
+  schemaGeneration: 6,
+  node: "0000000000000000",
+  role: "single",
+  leaseEpoch: null,
+  draining: false,
+} as const;
 
 let certs: Certificates;
 beforeAll(() => {
@@ -406,7 +415,7 @@ describe("health", () => {
   });
 
   it("serves the report over HTTPS with a bearer token: 200, 503, 401 and 405", async () => {
-    let report: HealthReport = { status: "ok", storage: "ok", channels: {} };
+    let report: HealthReport = { ...IDENTITY, status: "ok", storage: "ok", channels: {} };
     const refused: number[] = [];
     const health = new HealthEndpoint({
       host: "127.0.0.1",
@@ -432,7 +441,7 @@ describe("health", () => {
     expect(head.status).toBe(200);
     expect(head.body).toBe("");
 
-    report = { status: "unavailable", storage: "unreachable", channels: {} };
+    report = { ...IDENTITY, status: "unavailable", storage: "unreachable", channels: {} };
     expect((await get()).status).toBe(503);
 
     expect((await get("GET", {})).status).toBe(401);
@@ -448,7 +457,7 @@ describe("health", () => {
       port: 0,
       tls: undefined,
       token: HEALTH_TOKEN,
-      report: () => Promise.resolve({ status: "ok", storage: "ok", channels: {} }),
+      report: () => Promise.resolve({ ...IDENTITY, status: "ok", storage: "ok", channels: {} }),
     });
     await health.start();
     closers.push(() => health.stop());
@@ -462,7 +471,7 @@ describe("health", () => {
   it("builds the configured endpoint, warning once when it runs without TLS or a token", async () => {
     const { logger, events } = captureLogger();
     const report = (): Promise<HealthReport> =>
-      Promise.resolve({ status: "ok", storage: "ok", channels: {} });
+      Promise.resolve({ ...IDENTITY, status: "ok", storage: "ok", channels: {} });
     const open = healthEndpointFor(
       { host: "127.0.0.1", port: 1, tls: undefined, plaintext: true, auth: { kind: "none" } },
       report,
