@@ -391,7 +391,7 @@ const CURRENT_SCHEMA = [
   `CREATE TABLE "kysely_migration" ("name" varchar(255) not null primary key, "timestamp" varchar(255) not null)`,
   `CREATE TABLE "kysely_migration_lock" ("id" varchar(255) not null primary key, "is_locked" integer default 0 not null)`,
   `CREATE TABLE "leases" ("name" text primary key, "owner" text not null, "host" text not null, "epoch" integer not null, "since" integer not null, "expires_at" integer not null)`,
-  `CREATE TABLE "messages" ("id" integer primary key autoincrement, "channel" text not null, "received_at" text not null, "body" blob not null, "status" text not null, "error" text, "updated_at" text not null, "dedup_key" text, "duplicate_of" integer, "size" integer, "generation" integer default 0 not null, "idempotency_key" text)`,
+  `CREATE TABLE "messages" ("id" integer primary key autoincrement, "channel" text not null, "received_at" text not null, "body" blob not null, "status" text not null, "error" text, "updated_at" text not null, "dedup_key" text, "duplicate_of" integer, "size" integer, "generation" integer default 0 not null, "idempotency_key" text, "content_hash" text, "content_dropped_at" text)`,
   `CREATE TABLE "schema_info" ("step" text primary key, "generation" integer not null, "tag" text not null, "min_engine" text not null, "applied_by" text not null, "applied_at" text not null)`,
   `CREATE TABLE sqlite_sequence(name,seq)`,
 ];
@@ -463,6 +463,7 @@ describe("Store on SQLite files the first slice made", () => {
       "0005-send-markers",
       "0006-leases",
       "0007-schema-info",
+      "0008-content-drop",
       "0009-channel-states",
     ]);
     db.close();

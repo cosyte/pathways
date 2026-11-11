@@ -1082,6 +1082,48 @@ export type StorageKind = (typeof STORAGE_KINDS)[number];
 /** What a `storage:` block names: one of the databases, or a custom store's module. */
 const STORAGE_BLOCK_KINDS = [...STORAGE_KINDS, "module"] as const;
 
+/**
+ * What storage keeps of a message's content: `keep` keeps its body and outputs until retention
+ * deletes the message; `dropAfterDelivery` deletes them in the transaction that records its last
+ * delivery, keeping its metadata.
+ *
+ * @example
+ * ```ts
+ * CONTENT_POLICIES.includes("dropAfterDelivery"); // true
+ * ```
+ */
+export const CONTENT_POLICIES = ["keep", "dropAfterDelivery"] as const;
+
+/**
+ * One of {@link CONTENT_POLICIES}.
+ *
+ * @example
+ * ```ts
+ * const content: ContentPolicy = "dropAfterDelivery";
+ * ```
+ */
+export type ContentPolicy = (typeof CONTENT_POLICIES)[number];
+
+/** `storage.content`, in `pathways.yaml` and in a channel. */
+const content = envable(
+  z.enum(CONTENT_POLICIES).meta({
+    description:
+      "What is kept of a message's content: keep (the default) keeps its body and outputs until retention deletes the message; dropAfterDelivery deletes them once every delivery is delivered, keeping ids, times, statuses, sizes and a hash. A channel overrides it.",
+  }),
+);
+
+/**
+ * Exactly one key of a `storage:` block's kinds, or none when it names `content` alone: then the
+ * database is the default, SQLite.
+ */
+function oneKindOrContent(kinds: readonly string[]) {
+  const one = oneKind(kinds);
+  return (value: Record<string, unknown>, ctx: z.RefinementCtx): void => {
+    const named = kinds.some((kind) => value[kind] !== undefined);
+    if (named || value["content"] === undefined) one(value, ctx);
+  };
+}
+
 /** A hook's time limit: a duration above zero. */
 const hookTimeout = duration(
   "How long one call to the hook may run: a duration above zero, such as 5s, or a number of milliseconds. Default 5s.",
@@ -1254,14 +1296,15 @@ const storage = restate(
         .optional(),
       module: modulePath.optional(),
       options: moduleOptions.optional(),
+      content: content.optional(),
     })
     .meta({
       description:
-        "Where messages are stored: exactly one of sqlite, postgres, mysql, sqlserver or module, or with kind, the one kind names. Default SQLite at .pathways/pathways.db.",
+        "Where messages are stored: exactly one of sqlite, postgres, mysql, sqlserver or module, or with kind, the one kind names, or none with content alone; and what is kept of their content. Default SQLite at .pathways/pathways.db.",
     })
     .superRefine((value, ctx) => {
       if (value.kind === undefined) {
-        oneKind(STORAGE_BLOCK_KINDS)(value, ctx);
+        oneKindOrContent(STORAGE_BLOCK_KINDS)(value, ctx);
       } else if (value.kind !== "sqlite" && value[value.kind] === undefined) {
         // The kind may come from the environment, so the problem names no kind.
         ctx.addIssue({
@@ -1275,7 +1318,13 @@ const storage = restate(
   (json) => {
     json["dependencies"] = { options: ["module"] };
     json.if = { required: ["kind"] };
-    json.else = { oneOf: exactlyOneOf(STORAGE_BLOCK_KINDS) };
+    // One kind, or `content` alone, which keeps the default database, SQLite.
+    json.else = {
+      oneOf: [
+        ...exactlyOneOf(STORAGE_BLOCK_KINDS),
+        { required: ["content"], not: { anyOf: exactlyOneOf(STORAGE_BLOCK_KINDS) } },
+      ],
+    };
   },
 );
 
@@ -1706,6 +1755,12 @@ export const channelSchema = restate(
       resendFlag: settingsShape.resendFlag,
       config: transformConfig.optional(),
       retry: settingsShape.retry,
+      storage: z
+        .strictObject({ content: content.optional() })
+        .meta({
+          description: "What is kept of this channel's messages: overrides pathways.yaml's.",
+        })
+        .optional(),
     })
     .meta({
       title: "channel.yaml",
@@ -1806,6 +1861,11 @@ export interface Settings {
   readonly retentionIntervalMs: number;
   /** How a failed delivery is retried. A destination can override it, key by key. */
   readonly retry: RetryPolicy;
+  /**
+   * What is kept of a message's content, from `storage.content` in `pathways.yaml` or the channel:
+   * `keep`, or `dropAfterDelivery` to delete the bodies once every delivery is delivered.
+   */
+  readonly content: ContentPolicy;
 }
 
 /**
@@ -1869,6 +1929,7 @@ export const DEFAULT_SETTINGS: Settings = {
   resendFlag: true,
   retentionIntervalMs: 3_600_000,
   retry: DEFAULT_RETRY,
+  content: "keep",
 };
 
 /**

@@ -29,6 +29,7 @@ import {
   projectSchema,
   type ChannelConfig,
   type ClientTlsFiles,
+  type ContentPolicy,
   type EncryptionConfig,
   type EndpointAuth,
   type HeaderValue,
@@ -137,7 +138,10 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
     }
   }
 
-  const settings: Settings = mergeSettings(DEFAULT_SETTINGS, project.defaults ?? {});
+  const settings: Settings = mergeSettings(DEFAULT_SETTINGS, {
+    ...project.defaults,
+    content: project.storage?.content,
+  });
   const projectRetry: RetryLevel = {
     key: "defaults.retry",
     block: project.defaults?.retry,
@@ -231,7 +235,10 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
       );
       continue;
     }
-    const channelSettings = mergeSettings(settings, channel);
+    const channelSettings = mergeSettings(settings, {
+      ...channel,
+      content: channel.storage?.content,
+    });
     const source = resolveSource(channel.source, channelDir, channelSettings);
     const destinations = channel.destinations.map(
       (destination): ChannelConfig["destinations"][number] => ({
@@ -661,6 +668,7 @@ function mergeSettings(
     retention?: number | undefined;
     resendFlag?: boolean | undefined;
     retentionInterval?: number | undefined;
+    content?: ContentPolicy | undefined;
     retry?: RetryYaml | undefined;
   },
 ): Settings {
@@ -673,6 +681,7 @@ function mergeSettings(
     retentionMs: override.retention ?? base.retentionMs,
     resendFlag: override.resendFlag ?? base.resendFlag,
     retentionIntervalMs: override.retentionInterval ?? base.retentionIntervalMs,
+    content: override.content ?? base.content,
     retry: override.retry === undefined ? base.retry : mergeRetry(base.retry, override.retry),
   };
 }

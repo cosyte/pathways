@@ -32,7 +32,7 @@ afterEach(cleanUp);
 const KEYS = "encryption:\n  keys: [{ id: test, file: ./test.key }]\n  current: test\n";
 const CHANNEL =
   "source:\n  file: { dir: ../../data/inbox, minAge: 0 }\ndestinations:\n  - file: { dir: ../../data/out }\n";
-const STEPS = 8;
+const STEPS = 9;
 
 interface Result {
   readonly code: number;
@@ -100,9 +100,10 @@ describe("pathways migrate", () => {
     expect(lines[1]).toBe(`Would apply ${STEPS} steps:`);
     expect(lines[2]).toMatch(/^ {2}1 +0001-messages-and-deliveries +expand$/);
     expect(lines[8]).toMatch(/^ {2}7 +0007-schema-info +expand$/);
-    expect(lines[9]).toMatch(/^ {2}8 +0009-channel-states +expand$/);
+    expect(lines[9]).toMatch(/^ {2}8 +0008-content-drop +expand$/);
+    expect(lines[10]).toMatch(/^ {2}9 +0009-channel-states +expand$/);
     // An empty database has no audit log to write the dry run to, and says so.
-    expect(lines[10]).toBe("Not written to the audit log: the database has none yet.");
+    expect(lines[11]).toBe("Not written to the audit log: the database has none yet.");
     expect(dry.audit).toEqual([]);
     // The dry run applied nothing, and opening the store for it applied nothing either.
     const fresh = await cli(["migrate", "--json", "-C", root]);
@@ -237,7 +238,7 @@ describe("pathways start --no-migrate", () => {
     // Back to the schema before schema_info, as the version before left it.
     const db = new SqliteDatabase(dbFile(root));
     db.exec(
-      "drop table schema_info; drop table channel_states; delete from kysely_migration where name in ('0007-schema-info', '0009-channel-states')",
+      "drop table schema_info; drop table channel_states; delete from kysely_migration where name in ('0007-schema-info', '0008-content-drop', '0009-channel-states'); alter table messages drop column content_hash; alter table messages drop column content_dropped_at",
     );
     db.close();
     expect((await cli(["start", "--once", "--no-migrate", "-C", root])).err).toBe(

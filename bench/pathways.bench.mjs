@@ -72,6 +72,29 @@ export const CHANNELS = [
     ],
   },
   {
+    // The same messages with `storage.content: dropAfterDelivery`: beside the two channels above,
+    // the cost of dropping each message's bodies in the transaction that records its delivery.
+    group: "hl7",
+    name: "HL7 v2 ADT^A01, content dropped after delivery",
+    format: "hl7v2",
+    transform: TRANSFORMS.hl7Address,
+    extension: "hl7",
+    content: "dropAfterDelivery",
+    sizes: [
+      { label: "1 message", count: 1, build: S.adtMessage },
+      { label: "100 messages", count: 100, build: S.adtMessage },
+    ],
+  },
+  {
+    group: "hl7",
+    name: "HL7 v2 ORU^R01, content dropped after delivery",
+    format: "hl7v2",
+    transform: TRANSFORMS.hl7Address,
+    extension: "hl7",
+    content: "dropAfterDelivery",
+    sizes: [{ label: "1 MiB", count: 1, build: (i) => S.oruMessage(i, MIB) }],
+  },
+  {
     group: "hl7",
     name: "HL7 v2 ORU^R01 with a base64 document",
     shape: "opaque",
@@ -176,6 +199,7 @@ function engineBenchmark(channel) {
           transform: channel.transform,
           bodies: bodiesOf(size),
           extension: channel.extension,
+          content: channel.content,
         });
         return {
           inputs: [project],

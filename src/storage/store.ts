@@ -164,6 +164,10 @@ interface MessagesTable {
   generation: Generated<number>;
   /** A hash of what names this one message to its source, so it is stored once. Since 0004. */
   idempotency_key: string | null;
+  /** The SHA-256 of the body as received, in hex, when the engine passed one. Since 0008. */
+  content_hash: string | null;
+  /** When the bodies were dropped after the last delivery; null while they are kept. Since 0008. */
+  content_dropped_at: string | null;
 }
 
 interface DeliveriesTable {
@@ -289,6 +293,11 @@ export interface StoreReceiveOptions {
    * changes the body on its way in, such as encryption, passes the original size along.
    */
   readonly size?: number | undefined;
+  /**
+   * A hash of the body as it arrived (the engine passes its SHA-256 in hex, for a channel that drops
+   * content after delivery), kept with the message's metadata after its body is dropped.
+   */
+  readonly contentHash?: string | undefined;
 }
 
 /**
@@ -336,6 +345,14 @@ export interface MessageSummary {
   readonly generation: number;
   /** The deliveries of the current generation, by status. */
   readonly deliveries: DeliveryTally;
+  /** The hash of the body as received, when one was stored with it: see {@link StoreReceiveOptions}. */
+  readonly contentHash?: string | undefined;
+  /**
+   * When the message's body and its deliveries' bodies were dropped, once its last delivery was
+   * delivered (`storage.content: dropAfterDelivery`). Undefined while they are kept. Such a
+   * message cannot be replayed or resent, and its content cannot be shown.
+   */
+  readonly contentDroppedAt?: string | undefined;
 }
 
 /**
@@ -548,14 +565,15 @@ export interface RequeueRequest {
 }
 
 /**
- * Why storage did not record a replay or a clear.
+ * Why storage did not record a replay or a clear. `content-dropped`: the message's content was
+ * dropped after delivery, so there is nothing to replay or resend.
  *
  * @example
  * ```ts
  * const retryable = (reason: RefusalReason): boolean => reason === "changed" || reason === "pending";
  * ```
  */
-export type RefusalReason = "not-found" | "changed" | "pending" | "not-failed";
+export type RefusalReason = "not-found" | "changed" | "pending" | "not-failed" | "content-dropped";
 
 /**
  * What a replay or a resend did, with the audit entry written in the same transaction.
@@ -579,7 +597,10 @@ export type RequeueResult =
     }
   | {
       readonly done: false;
-      readonly reason: Extract<RefusalReason, "not-found" | "changed" | "pending">;
+      readonly reason: Extract<
+        RefusalReason,
+        "not-found" | "changed" | "pending" | "content-dropped"
+      >;
       readonly entry: AuditEntry;
     };
 
@@ -763,7 +784,8 @@ export interface AuditQuery {
  * `scheduleRetry` and `failDelivery` clear it in the same write as their outcome. For the operator
  * commands: `requeue` and `clear` change nothing unless the message still stands where the caller
  * found it, and write their audit entry in the same transaction as their change; `expire` deletes
- * only done messages, with their deliveries, and never an audit entry.
+ * only done messages, with their deliveries, and never an audit entry. A message whose content was
+ * dropped (`markDeliveredAndDropContent`) is never replayed, resent or expired.
  *
  * The audit log has two methods, append and read, and no way to change or remove an entry.
  *
@@ -826,6 +848,16 @@ export interface MessageStore {
   /** Fenced by `epoch` when it is given. */
   markDelivered(deliveryId: number, epoch?: number): Promise<void>;
   /**
+   * {@link markDelivered}, and when that was the last delivery of the message's current generation
+   * still to be delivered, also drops the bodies of the message and of all its deliveries in the
+   * same transaction, keeping its metadata: ids, times, statuses, sizes, the content hash and the
+   * possible-duplicate flag. Keeps every body while any delivery of the current generation has
+   * failed or waits to be tried again. Resolves to whether it dropped them. Fenced by `epoch` when
+   * it is given. Optional: a channel with `storage.content: dropAfterDelivery` needs it, and the
+   * engine refuses to start such a channel on a store without it.
+   */
+  markDeliveredAndDropContent?(deliveryId: number, epoch?: number): Promise<boolean>;
+  /**
    * Marks a delivery `dry-run`: its output stays recorded, it was never sent, and its destination
    * moves on to the next. Clears the marker. Fenced by `epoch` when it is given. Optional: an engine
    * with a destination that runs dry refuses to start on a store without it.
@@ -878,11 +910,11 @@ export interface MessageStore {
   channels(): Promise<string[]>;
   /** One message, without its body, or `undefined` if there is none. Its `error` is raw: see there. */
   message(id: number): Promise<StoredMessage | undefined>;
-  /** One message's body as it arrived, or `undefined` if there is none. */
+  /** One message's body as it arrived, or `undefined` if there is none or it was dropped. */
   messageBody(id: number): Promise<Uint8Array | undefined>;
   /** A message's deliveries, every generation, oldest first, without bodies. */
   deliveries(messageId: number): Promise<StoredDelivery[]>;
-  /** The outputs of a message's current generation, in order; none when it has none. */
+  /** The outputs of a message's current generation, in order; none when it has none or they were dropped. */
   outputs(messageId: number): Promise<Uint8Array[]>;
   /** A page of messages, newest first, without bodies or errors. */
   listMessages(query: MessageQuery): Promise<Page<MessageSummary>>;
@@ -902,8 +934,8 @@ export interface MessageStore {
   clear(messageId: number, actor: string): Promise<ClearResult>;
   /**
    * Deletes a channel's messages that are done (delivered, dry-run, filtered or cleared) and whose
-   * last activity is before `cutoff` (ISO 8601), with their deliveries. With `dryRun`, counts them
-   * only.
+   * last activity is before `cutoff` (ISO 8601), with their deliveries, leaving those whose content
+   * was dropped. With `dryRun`, counts them only.
    */
   expire(channel: string, cutoff: string, dryRun: boolean): Promise<ExpireResult>;
   /** Appends entries to the audit log, stamped with the time and `actor`. */
@@ -952,7 +984,10 @@ export interface StoredContent {
  * ```
  */
 export interface ContentStore {
-  /** Up to `limit` rows of `table` with an id above `after`, oldest first, as stored. */
+  /**
+   * Up to `limit` rows of `table` with an id above `after`, oldest first, as stored, leaving out the
+   * rows of a message whose content was dropped: they hold none.
+   */
   storedContent(table: ContentTable, after: number, limit: number): Promise<StoredContent[]>;
   /**
    * Replaces a row's body and error with `next`, but only while the row still holds what `current`
@@ -1315,6 +1350,16 @@ export function migrations(kind: StorageKind): Record<string, SchemaStep> {
           .execute();
       },
     },
+    "0008-content-drop": {
+      tag: "expand",
+      // Expand only: two columns that may be null, which an older Pathways never reads, so it is
+      // safe while deliveries are in flight. To roll it back, stop every engine and drop the two
+      // columns; a message whose content was dropped then reads as one with an empty body.
+      async up(db: Kysely<unknown>): Promise<void> {
+        await db.schema.alterTable("messages").addColumn("content_hash", t.name).execute();
+        await db.schema.alterTable("messages").addColumn("content_dropped_at", t.time).execute();
+      },
+    },
     "0009-channel-states": {
       // Expand only: a new table, which an older Pathways never reads. A channel with no row runs,
       // so the table starts empty. To roll it back, stop every engine and drop the table; every
@@ -1422,11 +1467,14 @@ function stateIs(eb: MessagesBuilder, state: MessageState): Expression<SqlBool> 
 
 /**
  * Whether retention may delete the message: done (filtered, cleared, or transformed with every
- * delivery delivered, dry-run or cleared) and nothing about it happened since `cutoff`.
+ * delivery delivered, dry-run or cleared), nothing about it happened since `cutoff`, and its
+ * content was not dropped.
  */
 function expirable(eb: MessagesBuilder, cutoff: string): Expression<SqlBool> {
   return eb.and([
     eb("messages.updated_at", "<", cutoff),
+    // A message whose content was dropped keeps its metadata: retention leaves it.
+    eb("messages.content_dropped_at", "is", null),
     eb.or([
       eb("messages.status", "in", ["filtered", "cleared"]),
       eb.and([
@@ -1492,6 +1540,8 @@ type MessageRow = Pick<
   | "size"
   | "duplicate_of"
   | "generation"
+  | "content_hash"
+  | "content_dropped_at"
 >;
 
 /** The columns a message's summary is read from. */
@@ -1504,6 +1554,8 @@ const SUMMARY_COLUMNS = [
   "size",
   "duplicate_of",
   "generation",
+  "content_hash",
+  "content_dropped_at",
 ] as const;
 
 /** A nullable 64-bit column, read as a number. */
@@ -1719,7 +1771,7 @@ export class Store implements MessageStore, ContentStore {
     options: StoreReceiveOptions = {},
   ): Promise<ReceivedMessage> {
     const at = this.now().toISOString();
-    const { duplicateKey, idempotencyKey, resumed, failure, size } = options;
+    const { duplicateKey, idempotencyKey, resumed, failure, size, contentHash } = options;
     const insert = (db: Kysely<Tables>): Promise<number> =>
       this.insertMessage(db, {
         channel,
@@ -1732,6 +1784,8 @@ export class Store implements MessageStore, ContentStore {
         duplicate_of: null,
         size: size ?? body.byteLength,
         idempotency_key: idempotencyKey ?? null,
+        content_hash: contentHash ?? null,
+        content_dropped_at: null,
       });
     // A message handed in for the first time cannot have been stored: its key is only recorded.
     const lookUp = resumed === true ? idempotencyKey : undefined;
@@ -1795,12 +1849,13 @@ export class Store implements MessageStore, ContentStore {
     return { ...summary, error: row.error };
   }
 
-  /** The body of one message as it arrived, or `undefined` if there is none. */
+  /** The body of one message as it arrived, or `undefined` if there is none or it was dropped. */
   async messageBody(id: number): Promise<Uint8Array | undefined> {
     const row = await this.db
       .selectFrom("messages")
       .select("body")
       .where("id", "=", id)
+      .where("content_dropped_at", "is", null)
       .executeTakeFirst();
     return row?.body;
   }
@@ -1839,8 +1894,9 @@ export class Store implements MessageStore, ContentStore {
   }
 
   /**
-   * The outputs of a message's current generation, in order. Each destination was queued the same
-   * outputs, so they are read from the first destination's deliveries.
+   * The outputs of a message's current generation, in order, or none once they were dropped. Each
+   * destination was queued the same outputs, so they are read from the first destination's
+   * deliveries.
    */
   async outputs(messageId: number): Promise<Uint8Array[]> {
     const rows = await this.db
@@ -1849,6 +1905,7 @@ export class Store implements MessageStore, ContentStore {
       .select(["deliveries.destination", "deliveries.body"])
       .where("deliveries.message_id", "=", messageId)
       .whereRef("deliveries.generation", "=", "messages.generation")
+      .where("messages.content_dropped_at", "is", null)
       .orderBy("deliveries.destination")
       .orderBy("deliveries.seq")
       .execute();
@@ -2038,6 +2095,63 @@ export class Store implements MessageStore, ContentStore {
       .$if(epoch !== undefined, (q) => q.where(this.fence("pending", epoch)))
       .executeTakeFirst();
     fenced(epoch, updated);
+  }
+
+  /**
+   * Marks a delivery done and clears its marker, then, when no delivery of the message's current
+   * generation is left undelivered, drops the bodies of the message and of every one of its
+   * deliveries, all in one transaction: see {@link MessageStore.markDeliveredAndDropContent}. A body
+   * is emptied in place rather than its row deleted, so the metadata stays, and each delivery's last
+   * error text goes with it, since encryption at rest treats that as content too. Every delivery of
+   * an earlier generation is done by then: a replay or a resend is refused while one is pending,
+   * and clears those that failed.
+   */
+  async markDeliveredAndDropContent(deliveryId: number, epoch?: number): Promise<boolean> {
+    const at = this.now().toISOString();
+    return this.db.transaction().execute(async (tx) => {
+      // The update first: see receive() for why every transaction here writes before it reads.
+      const updated = await tx
+        .updateTable("deliveries")
+        .set({ status: "delivered", delivered_at: at, sending_at: null, sending_attempt: null })
+        .where("id", "=", deliveryId)
+        .$if(epoch !== undefined, (q) => q.where(this.fence("pending", epoch)))
+        .executeTakeFirst();
+      // Thrown inside the transaction, so nothing of it is kept.
+      fenced(epoch, updated);
+      const delivery = await tx
+        .selectFrom("deliveries")
+        .select("message_id")
+        .where("id", "=", deliveryId)
+        .executeTakeFirst();
+      if (delivery === undefined) return false;
+      const messageId = Number(delivery.message_id);
+      const dropped = await tx
+        .updateTable("messages")
+        .set({ body: EMPTY_BODY[this.kind], error: null, content_dropped_at: at })
+        .where("id", "=", messageId)
+        .where("status", "=", "transformed")
+        .where("content_dropped_at", "is", null)
+        .where((eb) =>
+          eb.not(
+            eb.exists(
+              eb
+                .selectFrom("deliveries")
+                .select("deliveries.id")
+                .whereRef("deliveries.message_id", "=", "messages.id")
+                .whereRef("deliveries.generation", "=", "messages.generation")
+                .where("deliveries.status", "<>", "delivered"),
+            ),
+          ),
+        )
+        .executeTakeFirst();
+      if (dropped.numUpdatedRows === 0n) return false;
+      await tx
+        .updateTable("deliveries")
+        .set({ body: EMPTY_BODY[this.kind], last_error: null })
+        .where("message_id", "=", messageId)
+        .execute();
+      return true;
+    });
   }
 
   /** Marks a delivery `dry-run`, recorded and never sent, and clears its marker. */
@@ -2242,7 +2356,10 @@ export class Store implements MessageStore, ContentStore {
     return counts;
   }
 
-  /** Up to `limit` rows of `table` with an id above `after`, oldest first, as stored. */
+  /**
+   * Up to `limit` rows of `table` with an id above `after`, oldest first, as stored. The rows of a
+   * message whose content was dropped hold none, so they are left out.
+   */
   async storedContent(table: ContentTable, after: number, limit: number): Promise<StoredContent[]> {
     const rows =
       table === "messages"
@@ -2250,6 +2367,7 @@ export class Store implements MessageStore, ContentStore {
             .selectFrom("messages")
             .select(["id", "body", "error"])
             .where("id", ">", after)
+            .where("content_dropped_at", "is", null)
             .orderBy("id")
             .$call((query) => this.take(query, limit))
             .execute()
@@ -2257,6 +2375,12 @@ export class Store implements MessageStore, ContentStore {
             .selectFrom("deliveries")
             .select(["id", "body", "last_error as error"])
             .where("id", ">", after)
+            .where("message_id", "not in", (eb) =>
+              eb
+                .selectFrom("messages")
+                .select("messages.id")
+                .where("messages.content_dropped_at", "is not", null),
+            )
             .orderBy("id")
             .$call((query) => this.take(query, limit))
             .execute();
@@ -2319,7 +2443,8 @@ export class Store implements MessageStore, ContentStore {
    * Records a replay or a resend. The guarded update of the message comes first, so on SQLite the
    * transaction holds the write lock before it reads anything, and on a server it holds the
    * message's row: nothing the engine writes can come between the checks and the inserts. The new
-   * deliveries take new ids, which puts them at the back of each destination's queue.
+   * deliveries take new ids, which puts them at the back of each destination's queue. A message
+   * whose content was dropped is refused: there is nothing to replay or resend.
    */
   async requeue(messageId: number, request: RequeueRequest, actor: string): Promise<RequeueResult> {
     const at = this.now().toISOString();
@@ -2339,13 +2464,15 @@ export class Store implements MessageStore, ContentStore {
           }))
           .where("id", "=", messageId)
           .where("status", "=", expected)
+          .where("content_dropped_at", "is", null)
           .executeTakeFirst();
         const message = await tx
           .selectFrom("messages")
-          .select(["channel", "generation"])
+          .select(["channel", "generation", "content_dropped_at"])
           .where("id", "=", messageId)
           .executeTakeFirst();
         if (message === undefined) throw new Refusal("not-found");
+        if (message.content_dropped_at !== null) throw new Refusal("content-dropped");
         if (moved.numUpdatedRows === 0n) throw new Refusal("changed");
         const pending = await tx
           .selectFrom("deliveries")
@@ -2381,7 +2508,10 @@ export class Store implements MessageStore, ContentStore {
       });
     } catch (error) {
       if (!(error instanceof Refusal)) throw error;
-      const reason = error.reason as Extract<RefusalReason, "not-found" | "changed" | "pending">;
+      const reason = error.reason as Extract<
+        RefusalReason,
+        "not-found" | "changed" | "pending" | "content-dropped"
+      >;
       const entry = await this.refusal(actor, mode, messageId, reason);
       return { done: false, reason, entry };
     }
@@ -2696,6 +2826,8 @@ export class Store implements MessageStore, ContentStore {
         duplicateOf: int64OrNull(row.duplicate_of),
         generation: row.generation,
         deliveries,
+        ...(row.content_hash === null ? {} : { contentHash: row.content_hash }),
+        ...(row.content_dropped_at === null ? {} : { contentDroppedAt: row.content_dropped_at }),
       };
     });
   }
@@ -2755,6 +2887,21 @@ export class Store implements MessageStore, ContentStore {
     }
   }
 }
+
+/** What a dropped body is emptied to: the column holds no nulls, and an empty value holds nothing. */
+const EMPTY = Buffer.alloc(0);
+
+/**
+ * An empty body, as each database takes one. On SQL Server it is a literal: tedious declares a
+ * bound empty buffer with a maximum length of 0, which the server refuses, and the refusal ends the
+ * transaction.
+ */
+const EMPTY_BODY: Readonly<Record<StorageKind, Uint8Array | RawBuilder<Uint8Array>>> = {
+  sqlite: EMPTY,
+  postgres: EMPTY,
+  mysql: EMPTY,
+  sqlserver: sql<Uint8Array>`0x`,
+};
 
 /**
  * A body as every driver binds it. mysql2 and Kysely's SQL Server driver recognise a `Buffer` as

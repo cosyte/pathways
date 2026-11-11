@@ -73,6 +73,11 @@ abstract class CodecStore implements MessageStore {
   readonly renewLease?: (name: string, epoch: number, ttlMs: number) => Promise<boolean>;
   readonly releaseLease?: (name: string, epoch?: number) => Promise<boolean>;
   readonly leaseHolder?: (name: string) => Promise<LeaseHolder | undefined>;
+  /**
+   * Marks a delivery done and drops the message's bodies after its last one: no body passes, so
+   * straight through, and present only when the store underneath has it.
+   */
+  readonly markDeliveredAndDropContent?: (deliveryId: number, epoch?: number) => Promise<boolean>;
   /** The channel state methods, straight through, present only when the store underneath has both. */
   readonly channelStates?: () => Promise<Record<string, ChannelRunState>>;
   readonly setChannelState?: (channel: string, state: ChannelRunState) => Promise<void>;
@@ -88,6 +93,10 @@ abstract class CodecStore implements MessageStore {
       this.renewLease = leases.renewLease;
       this.releaseLease = leases.releaseLease;
       this.leaseHolder = leases.leaseHolder;
+    }
+    if (typeof inner.markDeliveredAndDropContent === "function") {
+      const drop = inner.markDeliveredAndDropContent.bind(inner);
+      this.markDeliveredAndDropContent = (deliveryId, epoch) => drop(deliveryId, epoch);
     }
     const states = channelStateStore(inner);
     if (states !== undefined) {
@@ -230,7 +239,7 @@ abstract class CodecStore implements MessageStore {
     return { ...message, error: await this.#readText(message.error) };
   }
 
-  /** One message's body as it arrived, read back. */
+  /** One message's body as it arrived, read back; `undefined` once it was dropped. */
   async messageBody(id: number): Promise<Uint8Array | undefined> {
     const body = await this.#inner.messageBody(id);
     return body === undefined ? undefined : this.#read(body);

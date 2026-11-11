@@ -113,7 +113,8 @@ digit, and unique in the list. A key's value is 32 bytes in base64. See
 
 ### Storage
 
-Exactly one of these keys, or with `kind`, any of them:
+Exactly one of these keys, or with `kind`, any of them, or `content` alone to keep the default
+SQLite file:
 
 | Key         | Value                                                                                                     |
 | ----------- | --------------------------------------------------------------------------------------------------------- |
@@ -129,13 +130,21 @@ block for each deployment, such as SQLite in development and PostgreSQL in produ
 does not name are checked, not used. `kind: sqlite` needs no block of its own; any other kind needs
 its block. Without `kind`, the one block written is used.
 
+and, beside it:
+
+| Key       | Value                         | Default | Meaning                                                                                                                                                |
+| --------- | ----------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `content` | `keep` or `dropAfterDelivery` | `keep`  | what is kept of a message's content; a channel overrides it; see [Drop content after delivery](./set-message-retention.md#drop-content-after-delivery) |
+
 A `MessageStore` from a module keeps the marker the engine writes before each send: `markSending`
 stores the attempt and its start, `nextDelivery` returns it as `sending`, and `markDelivered`,
 `scheduleRetry` and `failDelivery` clear it in the same write as their outcome. That is how a resend
 after a crash is flagged; see
 [Delivery and errors](./delivery-and-errors.md#a-resend-after-a-crash-is-flagged). For a destination
 with `retry.rotate: true`, the engine asks `nextDelivery` for the oldest delivery due by now
-(`{ dueBy }`); a store that ignores the option keeps that destination in order.
+(`{ dueBy }`); a store that ignores the option keeps that destination in order. For a channel with
+`content: dropAfterDelivery`, it also implements the optional `markDeliveredAndDropContent`; on a
+store without it, `pathways start` refuses that channel.
 
 #### Database server
 
@@ -270,6 +279,7 @@ by key. See [Use the message context](./use-the-message-context.md).
 | `transform`                                                      | path to the transform module                            | none: messages pass through      |
 | `destinations`                                                   | a list of at least one [destination](#destinations)     | required                         |
 | `hooks`                                                          | a list of [hooks](#hooks)                               | none                             |
+| `storage`                                                        | `{ content: keep }` or `{ content: dropAfterDelivery }` | the project's `storage.content`  |
 | `config`                                                         | see [Transform configuration](#transform-configuration) | the project's, key by key        |
 | `timeout`, `memory`, `onStoreFailure`, `ackTimeout`, `retention` | see [Settings](#settings)                               | the project's                    |
 | `resendFlag`, `retry`                                            | see [Settings](#settings)                               | the project's                    |

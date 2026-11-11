@@ -320,12 +320,13 @@ prints each with its generation and its tag:
 
 ```text
 Schema generation 4, last changed by Pathways 0.0.1; this is Pathways 0.0.2.
-Applied 4 steps:
+Applied 5 steps:
   5  0005-send-markers    expand
   6  0006-leases          expand
   7  0007-schema-info     expand
-  8  0009-channel-states  expand
-Now generation 8.
+  8  0008-content-drop    expand
+  9  0009-channel-states  expand
+Now generation 9.
 ```
 
 Expand steps are always applied. Contract steps wait for `--contract`, and with it are still refused

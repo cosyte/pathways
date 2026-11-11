@@ -204,7 +204,7 @@ anything.
 ### Back to Pathways 0.0.1
 
 Pathways 0.0.1 does not read `schema_info`, and knows schema steps `0001` to `0004` only. The first
-version after it applies `0005-send-markers`, `0006-leases` and `0007-schema-info` together when it
+version after it applies `0005-send-markers`, `0006-leases`, `0007-schema-info`, `0008-content-drop` and `0009-channel-states` together when it
 opens a 0.0.1 database. Pathways 0.0.1 refuses a database that holds a step it does not know, so once
 a later version has opened the database (with `pathways start` or any command that opens it), 0.0.1
 stops with `the database schema could not be brought up to date`.

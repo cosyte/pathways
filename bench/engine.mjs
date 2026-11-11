@@ -95,9 +95,10 @@ export function workerOf(bin) {
 /**
  * Writes a project with one channel of `format`, whose inputs are `bodies`, and returns it.
  * `transform` is the TypeScript of the channel's transform, or undefined to pass each message
- * through as it was parsed.
+ * through as it was parsed. `content` is the project's `storage.content`, or undefined to keep the
+ * default.
  */
-export function makeProject({ format, transform, bodies, extension = "msg" }) {
+export function makeProject({ format, transform, bodies, extension = "msg", content }) {
   const root = mkdtempSync(join(tmpdir(), "pathways-bench-"));
   const channel = join(root, "channels", "bench");
   mkdirSync(channel, { recursive: true });
@@ -109,6 +110,7 @@ export function makeProject({ format, transform, bodies, extension = "msg" }) {
       "storage:",
       "  sqlite:",
       "    file: .pathways/pathways.db",
+      ...(content === undefined ? [] : [`  content: ${content}`]),
       "encryption:",
       "  keys:",
       "    - id: bench",

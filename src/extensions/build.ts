@@ -45,6 +45,7 @@ const STORE_METHOD_LIST = {
   renewLease: false,
   releaseLease: false,
   leaseHolder: false,
+  markDeliveredAndDropContent: false,
   channelStates: false,
   setChannelState: false,
   markDryRun: false,
