@@ -271,7 +271,9 @@ destinations:
       kind: "http",
       host: "127.0.0.1",
       port: 8443,
-      path: "/",
+      paths: ["/"],
+      methods: ["POST"],
+      response: { kind: "id" },
       maxBytes: 10 * 1_048_576,
       tls: {
         cert: join(root, "channels/adt/tls/server.crt"),
@@ -321,7 +323,7 @@ destinations:
     const dir = join(root, "channels/adt");
     expect(channel?.source).toMatchObject({
       host: "0.0.0.0",
-      path: "/hl7",
+      paths: ["/hl7"],
       maxBytes: 65_536,
       tls: { ca: join(dir, "clients.crt") },
       auth: { kind: "bearer", env: "ADT_TOKEN" },
@@ -349,6 +351,105 @@ destinations:
         plaintext: true,
       },
       { kind: "file", dir: join(dir, "out") },
+    ]);
+  });
+
+  it("reads an HTTP source's paths, methods and response", async () => {
+    const http = (extra: string): string =>
+      `source:\n  http: { port: 1, plaintext: true, ${extra} }\ndestinations:\n  - file: { dir: out }\n`;
+    const root = await makeProject({
+      "channels/a/channel.yaml": http('paths: [/adt/, "/lab results", /], methods: [POST, PUT]'),
+      "channels/b/channel.yaml": http("path: /hl7/, response: ack"),
+      "channels/c/channel.yaml": http(
+        'response: { status: 200, contentType: "text/plain; charset=utf-8", headers: { X-Receiver: pathways, X-Api-Key: { env: RECEIVER_KEY } }, body: OK }',
+      ),
+      "channels/d/channel.yaml": http("response: { status: 204 }"),
+    });
+    const sources = (await loadProject(root)).channels.map((channel) => channel.source);
+    expect(sources[0]).toMatchObject({
+      paths: ["/adt", "/lab results", "/"],
+      methods: ["POST", "PUT"],
+      response: { kind: "id" },
+    });
+    expect(sources[1]).toMatchObject({
+      paths: ["/hl7"],
+      methods: ["POST"],
+      response: { kind: "ack" },
+    });
+    expect(sources[2]).toMatchObject({
+      response: {
+        kind: "fixed",
+        status: 200,
+        contentType: "text/plain; charset=utf-8",
+        headers: { "X-Receiver": { value: "pathways" }, "X-Api-Key": { env: "RECEIVER_KEY" } },
+        body: "OK",
+      },
+    });
+    expect(sources[3]).toMatchObject({
+      response: { kind: "fixed", status: 204, contentType: undefined, headers: {}, body: "" },
+    });
+  });
+
+  it("names each broken rule of an HTTP source's paths, methods and response", async () => {
+    const http = (extra: string, format = ""): string =>
+      `${format}source:\n  http: { port: 1, plaintext: true, ${extra} }\ndestinations:\n  - file: { dir: out }\n`;
+    const problems = await problemsOf({
+      "channels/a/channel.yaml": http("path: /a, paths: [/b]"),
+      "channels/b/channel.yaml": http(
+        'paths: [/a/../b, "/a%20b", "/a?b", "/a#b", /a//b, /c, /c/, "/a\\\\b", /.]',
+      ),
+      "channels/c/channel.yaml": http("paths: [], methods: []"),
+      "channels/d/channel.yaml": http("methods: [POST, POST]"),
+      "channels/e/channel.yaml": http("methods: [GET]"),
+      "channels/f/channel.yaml": http("methods: [POST, PUT], response: ack"),
+      "channels/g/channel.yaml": http("response: ack", "format: fhir\n"),
+      "channels/h/channel.yaml": http("response: json"),
+      "channels/i/channel.yaml": http("response: { status: 302 }"),
+      "channels/j/channel.yaml": http("response: { status: 199 }"),
+      "channels/k/channel.yaml": http('response: { status: 200, contentType: "plain" }'),
+      "channels/l/channel.yaml": http('response: { status: 200, contentType: "text/plain\\n" }'),
+      "channels/m/channel.yaml": http("response: { status: 204, body: x }"),
+      "channels/n/channel.yaml": http("response: { status: 205, body: y }"),
+      "channels/o/channel.yaml": http(
+        'response: { status: 200, headers: { Content-Type: a/b, Date: x, Content-Length: "1", Set-Cookie: s, "x y": z, X-Bad: "a\\nb" } }',
+      ),
+      "channels/p/channel.yaml": http(`response: { status: 200, body: ${"x".repeat(4_097)} }`),
+      "channels/q/channel.yaml": http("paths: [x]"),
+    });
+    const at = (problem: string): string =>
+      problem.replace(/^channels\/(\w)\/channel\.yaml: /, "$1 ");
+    expect(problems.map(at)).toEqual([
+      "a source.http.paths: cannot be set alongside path; list every path in paths",
+      ...[0, 1, 2, 3, 4].map(
+        (index) =>
+          `b source.http.paths.${index}: not a path the source can match: no %, ?, #, \\, empty segment, . or .. segment, or control character`,
+      ),
+      "b source.http.paths.6: the same path twice",
+      ...[7, 8].map(
+        (index) =>
+          `b source.http.paths.${index}: not a path the source can match: no %, ?, #, \\, empty segment, . or .. segment, or control character`,
+      ),
+      "c source.http.paths: at least one path",
+      "c source.http.methods: at least one method",
+      "d source.http.methods: names a method twice",
+      'e source.http.methods.0: Invalid option: expected one of "POST"|"PUT"',
+      "f source.http.methods: response: ack takes POST only, as HL7 over HTTP does",
+      "g source.http.response: an HL7 ACK answers HL7 v2 only, and this channel's format is fhir; set format: hl7v2, or another response",
+      "h source.http.response: either ack, or { status, contentType, headers, body } for the same answer to every message",
+      "i source.http.response.status: a 2xx status",
+      "j source.http.response.status: a 2xx status",
+      "k source.http.response.contentType: a media type, such as text/plain",
+      "l source.http.response.contentType: a media type, such as text/plain",
+      "m source.http.response.body: a 204 answer carries no body",
+      "n source.http.response.body: a 205 answer carries no body",
+      "o source.http.response.headers.Content-Type: Pathways sets this header itself",
+      "o source.http.response.headers.Date: Pathways sets this header itself",
+      "o source.http.response.headers.Content-Length: Pathways sets this header itself",
+      "o source.http.response.headers.Set-Cookie: a credential never goes in the YAML; read it with { env: NAME }",
+      "o source.http.response.headers.x y: not a valid header name",
+      "o source.http.response.headers.X-Bad: not a valid header value",
+      "p source.http.response.body: Too big: expected string to have <=4096 characters",
+      "q source.http.paths.0: a path starting with /",
     ]);
   });
 

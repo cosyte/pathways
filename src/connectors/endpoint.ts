@@ -191,6 +191,47 @@ export function refuse(
   reply(response, status, { error: STATUS_CODES[status] }, { Connection: "close", ...headers });
 }
 
+/**
+ * Answers with a short plain-text body, for an endpoint whose callers read HL7 over HTTP: there,
+ * every answer that is not 2xx is plain text, never JSON and never HL7. The text is Pathways' own,
+ * never from a request or a message.
+ *
+ * @example
+ * ```ts
+ * replyText(response, 503, "the message could not be stored; send it again");
+ * ```
+ */
+export function replyText(
+  response: ServerResponse,
+  status: number,
+  text: string,
+  headers: OutgoingHttpHeaders = {},
+): void {
+  response.writeHead(status, {
+    "Content-Type": "text/plain; charset=utf-8",
+    "Content-Length": Buffer.byteLength(text),
+    "Cache-Control": "no-store",
+    ...headers,
+  });
+  response.end(text);
+}
+
+/**
+ * {@link refuse}, with the status's own name as a plain-text body.
+ *
+ * @example
+ * ```ts
+ * refuseText(response, 415);
+ * ```
+ */
+export function refuseText(
+  response: ServerResponse,
+  status: number,
+  headers: OutgoingHttpHeaders = {},
+): void {
+  replyText(response, status, String(STATUS_CODES[status]), { Connection: "close", ...headers });
+}
+
 /** Options for an {@link Endpoint}. */
 export interface EndpointOptions {
   readonly host: string;
@@ -204,6 +245,8 @@ export interface EndpointOptions {
   readonly onRefused?: (status: number) => void;
   /** How long `close` lets requests in flight finish, in milliseconds. */
   readonly closeGraceMs?: number;
+  /** True answers the endpoint's own refusals (401, 500) in plain text rather than JSON. */
+  readonly plainText?: boolean;
 }
 
 /** Handles one authenticated request. */
@@ -281,15 +324,16 @@ export class Endpoint {
   }
 
   private onRequest(request: IncomingMessage, response: ServerResponse): void {
-    const { token, onRefused } = this.options;
+    const { token, onRefused, plainText } = this.options;
+    const refusal = plainText === true ? refuseText : refuse;
     if (token !== undefined && !bearerMatches(request.headers.authorization, token)) {
-      refuse(response, 401, { "WWW-Authenticate": "Bearer" });
+      refusal(response, 401, { "WWW-Authenticate": "Bearer" });
       onRefused?.(401);
       return;
     }
     this.handler(request, response).catch(() => {
       if (response.headersSent) response.destroy();
-      else refuse(response, 500);
+      else refusal(response, 500);
     });
   }
 }

@@ -4,6 +4,7 @@ import { join, relative, resolve, sep } from "node:path";
 import { parse as parseYaml, YAMLParseError } from "yaml";
 import type { z } from "zod";
 
+import { normalisePath } from "../connectors/http-path.js";
 import {
   channelSchema,
   DEFAULT_DATABASE_CONNECT_TIMEOUT_MS,
@@ -29,6 +30,7 @@ import {
   type HeaderValue,
   type HookConfig,
   type HttpClientConfig,
+  type HttpSource,
   type ListenerConfig,
   type ModuleConnector,
   type OnStoreFailure,
@@ -345,7 +347,10 @@ function resolveSource(
     return {
       kind: "http",
       ...resolveListener(http, dir, DEFAULT_HTTP_TOKEN_ENV),
-      path: http.path ?? "/",
+      // The schema passed each path through the request rule, so it reads as a path here.
+      paths: (http.paths ?? [http.path ?? "/"]).map((path) => normalisePath(path) as string),
+      methods: http.methods ?? ["POST"],
+      response: resolveSourceResponse(http.response),
       maxBytes: http.maxBytes ?? DEFAULT_MAX_BYTES,
     };
   }
@@ -411,15 +416,37 @@ function resolveDestination(
   };
 }
 
-/** An HTTP client endpoint, resolved: headers marked as written or from the environment. */
-function resolveHttpClient(http: Omit<HttpClientYaml, "timeout">, dir: string): HttpClientConfig {
+/** An HTTP source's `response:`, resolved: headers marked as written or from the environment. */
+function resolveSourceResponse(
+  response: NonNullable<ChannelYaml["source"]["http"]>["response"],
+): HttpSource["response"] {
+  if (response === undefined) return { kind: "id" };
+  if (response === "ack") return { kind: "ack" };
+  return {
+    kind: "fixed",
+    status: response.status,
+    contentType: response.contentType,
+    headers: markHeaders(response.headers),
+    body: response.body ?? "",
+  };
+}
+
+/** Configured headers, each marked as written in the YAML or read from the environment. */
+function markHeaders(
+  configured: Readonly<Record<string, string | { readonly env: string }>> | undefined,
+): Record<string, HeaderValue> {
   const headers: Record<string, HeaderValue> = {};
-  for (const [name, value] of Object.entries(http.headers ?? {})) {
+  for (const [name, value] of Object.entries(configured ?? {})) {
     headers[name] = typeof value === "string" ? { value } : { env: value.env };
   }
+  return headers;
+}
+
+/** An HTTP client endpoint, resolved: headers marked as written or from the environment. */
+function resolveHttpClient(http: Omit<HttpClientYaml, "timeout">, dir: string): HttpClientConfig {
   return {
     url: http.url,
-    headers,
+    headers: markHeaders(http.headers),
     tls: http.tls === undefined ? undefined : resolveClientTls(http.tls, dir),
     plaintext: http.plaintext === true,
   };
