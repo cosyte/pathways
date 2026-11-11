@@ -29,8 +29,9 @@ byte for byte, whatever the format:
 - a message the transform filters out expects an empty file;
 - several outputs are joined by one newline (`\n`) into one expected file.
 
-Use synthetic messages only: [`@cosyte/synth`](https://docs.cosyte.com/synth) generates them, or
-write them by hand with values that are visibly invented.
+Use synthetic messages only: [`@cosyte/synth`](https://docs.cosyte.com/synth) generates them, as
+[Make sample messages](./make-sample-messages.md) shows, or write them by hand with values that are
+visibly invented.
 
 ## Run them
 
@@ -84,4 +85,5 @@ jobs:
 ## Related
 
 - [Write a channel and its tests](./write-a-channel.md), the tutorial.
+- [Make sample messages](./make-sample-messages.md) with a fixed seed.
 - [Command reference](./command-reference.md#pathways-test).

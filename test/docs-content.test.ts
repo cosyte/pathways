@@ -1,6 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage } from "node:http";
 import { createRequire } from "node:module";
 import { join } from "node:path";
@@ -335,6 +335,70 @@ describe("the tutorial: write a channel", () => {
       expect(cli(["messages", "--channel", "results-to-ehr"], dir).out).toMatch(
         /^2\s+results-to-ehr\s+filtered/m,
       );
+    },
+    SLOW,
+  );
+});
+
+describe("make sample messages with @cosyte/synth", () => {
+  const name = "make-sample-messages.md";
+
+  it("pins the minor of the synth package this repository installs", () => {
+    const pinned = /npm install --save-dev @cosyte\/synth@~(\d+)\.(\d+)\.(\d+)\n/.exec(page(name));
+    expect(pinned, "the page installs @cosyte/synth at a ~ range").not.toBeNull();
+    const installed = (
+      JSON.parse(readFileSync(join(ROOT, "node_modules/@cosyte/synth/package.json"), "utf8")) as {
+        version: string;
+      }
+    ).version.split(".");
+    const [, major, minor, patch] = pinned ?? [];
+    expect([major, minor]).toEqual(installed.slice(0, 2));
+    expect(Number(patch)).toBeLessThanOrEqual(Number(installed[2]));
+  });
+
+  it(
+    "runs as written against the installed synth package: generate, update once, then pass",
+    async () => {
+      const shown = outputs(name);
+      const dir = await starterProject();
+      // The package from this repository's own install, never a checkout beside it.
+      const synth = realpathSync(join(ROOT, "node_modules", "@cosyte", "synth"));
+      expect(synth.startsWith(join(ROOT, "node_modules"))).toBe(true);
+      await symlink(synth, join(dir, "node_modules", "@cosyte", "synth"), "dir");
+      await putTitled(dir, name, "scripts/make-samples.mjs");
+
+      const tests = join(dir, "channels/adt-to-lab/tests");
+      const generate = (): void => {
+        const run = spawnSync(process.execPath, ["scripts/make-samples.mjs"], {
+          cwd: dir,
+          encoding: "utf8",
+        });
+        expect(run.stderr).toBe("");
+        expect(run.status).toBe(0);
+      };
+      generate();
+      const first = await Promise.all(
+        ["synth-a01.hl7", "synth-a08.hl7"].map((file) => readFile(join(tests, file))),
+      );
+      generate();
+      for (const [index, file] of ["synth-a01.hl7", "synth-a08.hl7"].entries()) {
+        expect(await readFile(join(tests, file))).toEqual(first[index]);
+      }
+      expect(parseHL7(first[0] ?? Buffer.alloc(0)).is("ADT^A01")).toBe(true);
+      expect(parseHL7(first[1] ?? Buffer.alloc(0)).is("ADT^A08")).toBe(true);
+
+      const starterExpected = await readFile(join(tests, "a01.expected.hl7"));
+      const update = cli(["test", "adt-to-lab", "--update"], dir);
+      expect(update.code).toBe(0);
+      expect(update.out.trimEnd()).toBe(shown[0]);
+      expect(await readFile(join(tests, "a01.expected.hl7"))).toEqual(starterExpected);
+      const admission = await readFile(join(tests, "synth-a01.expected.hl7"));
+      expect(parseHL7(admission).get("MSH.5")).toBe("LAB");
+      expect(await readFile(join(tests, "synth-a08.expected.hl7"), "utf8")).toBe("");
+
+      const check = cli(["test", "adt-to-lab"], dir);
+      expect(check.code).toBe(0);
+      expect(check.out.trimEnd()).toBe(shown[1]);
     },
     SLOW,
   );

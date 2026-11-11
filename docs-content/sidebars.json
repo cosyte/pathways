@@ -11,6 +11,7 @@
         "configure-a-channel",
         "transform-and-filter-messages",
         "test-a-channel",
+        "make-sample-messages",
         "read-and-write-files",
         "send-and-receive-mllp",
         "send-and-receive-http",

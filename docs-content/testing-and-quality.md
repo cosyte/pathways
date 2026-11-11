@@ -36,6 +36,23 @@ what came out, and what did not.
 Every test message is synthetic, from `@cosyte/synth` or written by hand with values that are visibly
 invented.
 
+## What a pull request must meet
+
+The testing standard sets the floor for every Cosyte package: the tests and the coverage gate pass,
+the floor only rises, and a change's own code is held to 100%. Every line it changes has run under
+test and every mutant in those lines is killed, or an inline comment names why it cannot be. For
+Pathways, a pull request merges only when:
+
+- every test passes on Node.js 24 and 26, and the storage tests pass on all five databases;
+- coverage stays at or above its floor, which only rises: 99% of lines, branches and statements and
+  100% of functions today;
+- a change in behavior comes with a test that fails without it and passes with it;
+- the PHI scan, the docs checks and CodeQL find nothing.
+
+Two parts of the standard are not yet run on Pathways, and we say so rather than claim them: the
+coverage of a change's own lines is read in review, not by a gate, and there is no mutation run, so
+no mutation floor. Both join when Pathways adopts the standard's ratchet.
+
 ## How each one runs
 
 - **The test suite and the coverage gate** run on every pull request and on `main`, on Node.js 24 and 26. A floor that is not met fails the pull request.
@@ -44,6 +61,9 @@ invented.
 - **The image job** builds the Docker image and runs the starter project through it on every pull
   request.
 - **The PHI scan** runs on every commit (a pre-commit hook) and in CI.
+- **The docs checks** run on every pull request: every link and image inside these pages and every
+  page the sidebar names must resolve, and the API reference must match what the source's TSDoc
+  comments generate, with a summary on every export.
 
 ## Run them yourself
 
