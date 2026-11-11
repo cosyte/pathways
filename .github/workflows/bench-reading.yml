@@ -19,6 +19,17 @@ name: Bench reading
 # One reading job per group of channels, side by side, so the reading finishes inside a pull
 # request's wait. Jobs on different runners are not compared with each other; each reading names
 # the machine it ran on.
+#
+# The open-loop jobs (bench/open-loop/run.mjs) measure the paths production runs, from outside the
+# engine: the built `pathways start`, with its engine lease and the marker before each send on and
+# its fault points compiled out, in one process; an open-loop sender in another, sending MLLP, MLLP
+# over TLS or HTTPS at a fixed rate and timing each message from when it was due to its ACK, in
+# HdrHistogram (p50, p99, p99.9 and max, never a mean). Each case runs five times on one runner and
+# reports every run with the spread, in @cosyte/bench's results format; the capacity of a run is the
+# highest rate on a ladder that holds the rule in bench/open-loop/measure.mjs. `open loop (soak)`
+# runs one rate for an hour and reads the slope of the engine's resident set; `closed loop` is the
+# drain the first published figure came from (`pnpm bench`, Node 26), beside the built package's own
+# `pathways start --once` drain, for comparison. All advisory, like the rest of this workflow.
 
 on:
   workflow_dispatch: {}
@@ -131,6 +142,194 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: bench-profile
+          path: bench-results/
+          if-no-files-found: warn
+          retention-days: 30
+
+  open-loop:
+    name: open loop (${{ matrix.case }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        case: [mllp, mllps, https, channels, retry-backlog, startup-backlog]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Read ${{ matrix.case }}, five runs
+        env:
+          CASE: ${{ matrix.case }}
+          COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p bench-results
+          node bench/open-loop/run.mjs --target dist/index.mjs --case "${CASE}" --runs 5 \
+            --commit "${COMMIT}" --out "bench-results/open-loop-${CASE}.json" \
+            --summary "bench-results/open-loop-${CASE}.md"
+          pnpm exec cosyte-bench check "bench-results/open-loop-${CASE}.json"
+          cat "bench-results/open-loop-${CASE}.md" >> "${GITHUB_STEP_SUMMARY}"
+      - name: Keep the reading
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bench-open-loop-${{ matrix.case }}
+          path: bench-results/
+          if-no-files-found: warn
+          retention-days: 30
+
+  # The same ladder with PostgreSQL as the store, in a service container on the runner, pinned by
+  # digest to the image the databases workflow tests against.
+  open-loop-postgres:
+    name: open loop (postgres)
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    services:
+      postgres:
+        image: postgres@sha256:ff87138949ad9a46f32ff23bd6852b52ce024a13dffe9b4087be98292cdd3b4f
+        env:
+          POSTGRES_PASSWORD: Pathways-Bench-0000
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Read postgres, five runs
+        env:
+          COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          PATHWAYS_BENCH_POSTGRES_URL: postgres://postgres:Pathways-Bench-0000@127.0.0.1:5432/postgres
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p bench-results
+          node bench/open-loop/run.mjs --target dist/index.mjs --case postgres --runs 5 \
+            --commit "${COMMIT}" --out bench-results/open-loop-postgres.json \
+            --summary bench-results/open-loop-postgres.md
+          pnpm exec cosyte-bench check bench-results/open-loop-postgres.json
+          cat bench-results/open-loop-postgres.md >> "${GITHUB_STEP_SUMMARY}"
+      - name: Keep the reading
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bench-open-loop-postgres
+          path: bench-results/
+          if-no-files-found: warn
+          retention-days: 30
+
+  # One rate for an hour, MLLP over TLS: the latency over the hour and the slope of the engine's
+  # resident set once it has settled. One run: five hours of runner time per pull request is more
+  # than a reading is worth.
+  open-loop-soak:
+    name: open loop (soak)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: An hour at one rate
+        env:
+          COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p bench-results
+          node bench/open-loop/run.mjs --target dist/index.mjs --case soak --runs 1 --seconds 3600 \
+            --commit "${COMMIT}" --out bench-results/open-loop-soak.json \
+            --summary bench-results/open-loop-soak.md
+          pnpm exec cosyte-bench check bench-results/open-loop-soak.json
+          cat bench-results/open-loop-soak.md >> "${GITHUB_STEP_SUMMARY}"
+      - name: Keep the reading
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bench-open-loop-soak
+          path: bench-results/
+          if-no-files-found: warn
+          retention-days: 30
+
+  # The closed loop the first published figure came from, on a hosted runner: `pnpm bench`
+  # (scripts/bench.ts, 2,000 messages already in a folder, file to file through SQLite, encryption
+  # off then on) on Node 26 as that figure was, five times; and the built package's own drain,
+  # `pathways start --once` over the same 2,000 messages with the lease and the send marker on, five
+  # times. The disk under the database is named in the summary.
+  closed-loop:
+    name: closed loop
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "26"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: pnpm bench, five times, and the built drain, five runs
+        env:
+          COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p bench-results
+          disk="$(findmnt -no SOURCE,FSTYPE -T "$(node -p 'require("node:os").tmpdir()')" || echo unknown)"
+          fence="$(printf '\x60\x60\x60')"
+          {
+            echo "## Closed loop"
+            echo
+            echo "Node $(node --version), the system temporary folder on ${disk}, commit ${COMMIT}."
+            echo
+            echo "pnpm bench 2000, five times:"
+            echo
+            echo "${fence}text"
+            for n in 1 2 3 4 5; do
+              pnpm --silent bench 2000 | sed "s/^/run ${n}: /"
+            done
+            echo "${fence}"
+            echo
+          } > bench-results/closed-loop.md
+          node bench/open-loop/run.mjs --target dist/index.mjs --case drain --runs 5 \
+            --commit "${COMMIT}" --out bench-results/open-loop-drain.json \
+            --summary bench-results/open-loop-drain.md
+          pnpm exec cosyte-bench check bench-results/open-loop-drain.json
+          cat bench-results/closed-loop.md bench-results/open-loop-drain.md >> "${GITHUB_STEP_SUMMARY}"
+      - name: Keep the reading
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bench-closed-loop
           path: bench-results/
           if-no-files-found: warn
           retention-days: 30
