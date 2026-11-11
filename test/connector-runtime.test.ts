@@ -43,10 +43,13 @@ const text = (body: Uint8Array): string => new TextDecoder().decode(body);
  */
 class FakeClock {
   now = AT;
+  /** Every wait asked for, by how long, in order. */
+  readonly asked: number[] = [];
   private readonly waits = new Set<{ readonly at: number; readonly resolve: () => void }>();
 
   readonly wait: EngineWait = (ms, signal) =>
     new Promise<void>((resolve) => {
+      this.asked.push(ms);
       if (signal.aborted) {
         resolve();
         return;
@@ -724,6 +727,7 @@ describe("a deadline on every delivery", () => {
     clock.advance(1);
     await tick;
     expect(out.signals[0]?.aborted).toBe(true);
+    expect(out.signals[0]?.reason).toMatchObject({ name: "AbortError" });
     expect(named(events, "delivery-retry")).toEqual([
       expect.objectContaining({ channel: "slow", attempt: 1, code: "DELIVERY_TIMEOUT" }),
     ]);
@@ -735,6 +739,24 @@ describe("a deadline on every delivery", () => {
     await engine.tick();
     expect(out.sent).toEqual(["SYNTH-1"]);
     expect(named(events, "delivered")).toHaveLength(1);
+  });
+
+  // Each attempt's deadline is kept by one wait for the pass's deliveries, not a wait each, and the
+  // pass leaves none parked.
+  it("waits once for a pass's deliveries that each end in time, and leaves no wait parked", async () => {
+    const clock = new FakeClock();
+    const source = new FakePoll(clock);
+    const out = new Recorder();
+    const { engine } = await harness(
+      { quick: channelYaml() },
+      { quick: { source, destinations: [out] } },
+      clock,
+    );
+    source.inbox.push("SYNTH-1", "SYNTH-2", "SYNTH-3", "SYNTH-4", "SYNTH-5");
+    await engine.tick();
+    expect(out.sent).toEqual(["SYNTH-1", "SYNTH-2", "SYNTH-3", "SYNTH-4", "SYNTH-5"]);
+    expect(clock.asked.filter((ms) => ms === 30_000)).toHaveLength(1);
+    expect(clock.parked).toBe(0);
   });
 
   it("gives a file destination 30 seconds by default", async () => {
