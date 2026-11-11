@@ -16,14 +16,14 @@ import { cleanUp, dropFile, makeProject } from "./helpers.js";
 
 /**
  * `then` runs once, just before the next move whose destination passes `when`, and `after` just
- * after it. With `unsteady`, a file's id changes once it is in a folder inside `.claimed/`, as FAT and exFAT can
- * change one on a move.
+ * after it. With `unsteady`, a file's inode (`ino`) or device (`dev`) number changes once it is in a
+ * folder inside `.claimed/`, as FAT and exFAT can change a file's id on a move.
  */
 const race = vi.hoisted(() => ({
   when: undefined as ((to: string) => boolean) | undefined,
   then: (): void => undefined,
   after: (): void => undefined,
-  unsteady: false,
+  unsteady: undefined as "ino" | "dev" | undefined,
   fail: undefined as ((what: string, path: string) => boolean) | undefined,
 }));
 
@@ -64,11 +64,12 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       failing("lstat", args[0]);
       const stats = await actual.lstat(...args);
       // Only in a folder inside .claimed/, where a claim or the check's own file is moved to.
-      if (!race.unsteady || !/[\\/]\.claimed[\\/][^\\/]+[\\/]/.test(String(args[0]))) {
+      if (race.unsteady === undefined || !/[\\/]\.claimed[\\/][^\\/]+[\\/]/.test(String(args[0]))) {
         return stats;
       }
       // The file source reads ids with { bigint: true }.
-      return Object.assign(stats, { ino: BigInt(stats.ino) + 1n }) as typeof stats;
+      const part = race.unsteady;
+      return Object.assign(stats, { [part]: BigInt(stats[part]) + 1n }) as typeof stats;
     },
   };
 });
@@ -76,7 +77,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 afterEach(async () => {
   race.when = undefined;
   race.after = () => undefined;
-  race.unsteady = false;
+  race.unsteady = undefined;
   race.fail = undefined;
   await cleanUp();
 });
@@ -246,7 +247,12 @@ describe("FileSource moving a refused file back", () => {
       swapBefore(dir, outside, claims);
       race.after = () => swapBack(dir);
       expect(await pass(source)).toEqual([]);
-      expect(errors).toEqual([expect.objectContaining({ code: "ERR_PATHWAYS_FILE_HELD" })]);
+      expect(errors).toEqual([
+        expect.objectContaining({
+          code: "ERR_PATHWAYS_FILE_HELD",
+          message: "a refused file could not be moved back, and is held",
+        }),
+      ]);
       // The file in the source folder is the one that was there, and the outside one is held.
       expect(await readFile(join(dir, "sub", "x.hl7"), "utf8")).toBe("in");
       expect(await heldIn(dir)).toEqual(["outside"]);
@@ -393,29 +399,47 @@ describe("FileSource on a file system that changes a file's id when it moves", (
     const dir = join(await makeProject({}), "inbox");
     await dropFile(join(dir, "a.hl7"), "in");
     const { source, errors } = recursiveSource(dir);
-    race.unsteady = true;
+    race.unsteady = "ino";
     expect(await pass(source)).toEqual([]);
     expect(await pass(source)).toEqual([]);
-    expect(errors).toEqual([
-      expect.objectContaining({ code: "ERR_PATHWAYS_FILE_ID_UNSTEADY" }),
-      expect.objectContaining({ code: "ERR_PATHWAYS_FILE_ID_UNSTEADY" }),
-    ]);
+    const said = expect.objectContaining({
+      code: "ERR_PATHWAYS_FILE_ID_UNSTEADY",
+      message: "this file system changes a file's id when it moves",
+    }) as unknown;
+    expect(errors).toEqual([said, said]);
     expect(await readFile(join(dir, "a.hl7"), "utf8")).toBe("in");
     // The check leaves nothing behind.
     expect(await readdir(join(dir, CLAIMED_DIR))).toEqual(["adt"]);
     expect(await readdir(join(dir, CLAIMED_DIR, "adt"))).toEqual([]);
   });
 
+  it("says so by its device number too, and with no onReadError, still claims nothing", async () => {
+    const dir = join(await makeProject({}), "inbox");
+    await dropFile(join(dir, "a.hl7"), "in");
+    race.unsteady = "dev";
+    const { source, errors } = recursiveSource(dir);
+    expect(await pass(source)).toEqual([]);
+    expect(errors).toEqual([expect.objectContaining({ code: "ERR_PATHWAYS_FILE_ID_UNSTEADY" })]);
+    const quiet = new FileSource({ dir, channel: "adt", minAgeMs: 0 });
+    expect(await pass(quiet)).toEqual([]);
+    expect(await readFile(join(dir, "a.hl7"), "utf8")).toBe("in");
+  });
+
   it("checks once, on the first pass with a file to claim, and leaves nothing behind", async () => {
     const dir = join(await makeProject({}), "inbox");
     const { source, errors } = recursiveSource(dir);
+    // A pass with nothing to claim writes nothing: a check that would fail is never made.
+    race.fail = (what, path) => what === "writeFile" && path.includes("probe-");
     expect(await pass(source)).toEqual([]);
+    expect(errors).toEqual([]);
+    race.fail = undefined;
     expect(await readdir(join(dir, CLAIMED_DIR))).toEqual(["adt"]);
     await dropFile(join(dir, "a.hl7"), "in");
     expect(await pass(source)).toEqual(["in"]);
     expect(await readdir(join(dir, CLAIMED_DIR))).toEqual(["adt"]);
-    // Not asked again: an id that changes now fails the check after the move instead.
-    race.unsteady = true;
+    // Not asked again: an id that changes now fails the check after the move instead, by its
+    // device number as well as its inode number.
+    race.unsteady = "dev";
     await dropFile(join(dir, "b.hl7"), "in too");
     expect(await pass(source)).toEqual([]);
     expect(errors).toEqual([expect.objectContaining({ code: "ESTALE" })]);

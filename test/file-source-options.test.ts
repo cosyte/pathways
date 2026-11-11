@@ -786,6 +786,29 @@ describe("FileSource and a pattern run that times out", () => {
     expect(run).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps the count of a path the pass had no time for, so it is set aside after three timeouts all the same", async () => {
+    const dir = await inbox();
+    for (let index = 0; index < 7; index += 1)
+      await dropFile(join(dir, `slow-${index}.hl7`), "slow");
+    const said: number[] = [];
+    let passes = 0;
+    const source = sourceOn(dir, {
+      include: [{ glob: "*.hl7" }],
+      onReadError: () => said.push(passes),
+    });
+    let clock = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => clock);
+    vi.spyOn(Script.prototype, "runInContext").mockImplementation(() => {
+      clock += 100;
+      throw timedOut();
+    });
+    for (passes = 1; passes <= 12; passes += 1) expect(await pass(source)).toEqual([]);
+    // Five runs a pass at most. Each path times out three times in a row, whichever passes it waits
+    // through for want of time, then waits 1 pass, then 2: the same counts whatever the walk's order.
+    const perPass = Array.from({ length: 12 }, (_, at) => said.filter((p) => p === at + 1).length);
+    expect(perPass).toEqual([5, 5, 5, 4, 5, 2, 2, 3, 2, 2, 0, 0]);
+  });
+
   it("spends at most the pass's time on pattern runs, and runs the paths that waited longest first", async () => {
     const dir = await inbox();
     for (let index = 0; index < 20; index += 1) {
