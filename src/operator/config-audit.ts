@@ -15,27 +15,44 @@ const PROJECT = "";
 
 /**
  * The configuration's fingerprints: SHA-256 of `pathways.yaml`, and of each channel's
- * `channel.yaml` and transform, keyed by channel name (`""` for `pathways.yaml`). Hashes only:
- * nothing of the files' contents.
+ * `channel.yaml` and transform, keyed by channel name (`""` for `pathways.yaml`), and under `env`
+ * the settings each file reads from the environment, as `key=VARIABLE` pairs. Hashes and names
+ * only: nothing of the files' contents, and no value read from the environment.
  *
  * @example
  * ```ts
  * const prints = await configFingerprints(project);
- * prints.get("adt-to-lab"); // { yaml: "3f2a...", transform: "9c1e..." }
+ * prints.get("adt-to-lab"); // { yaml: "3f2a...", transform: "9c1e...", env: "source.mllp.port=ADT_PORT" }
  * ```
  */
 export async function configFingerprints(
   project: ProjectConfig,
 ): Promise<Map<string, Record<string, string>>> {
   const prints = new Map<string, Record<string, string>>();
-  prints.set(PROJECT, { yaml: await fingerprint(join(project.root, "pathways.yaml")) });
+  prints.set(PROJECT, {
+    yaml: await fingerprint(join(project.root, "pathways.yaml")),
+    ...variables(project, undefined),
+  });
   for (const channel of project.channels) {
     prints.set(channel.name, {
       yaml: await fingerprint(join(channel.dir, "channel.yaml")),
       transform: channel.transform === undefined ? NONE : await fingerprint(channel.transform),
+      ...variables(project, channel.name),
     });
   }
   return prints;
+}
+
+/**
+ * `{ env }`: the settings one file reads from the environment, as sorted `key=VARIABLE` pairs, or
+ * nothing when it reads none, so a project with no reference records what it always has.
+ */
+function variables(project: ProjectConfig, channel: string | undefined): { env?: string } {
+  const pairs = (project.environment ?? [])
+    .filter((reference) => reference.channel === channel)
+    .map((reference) => `${reference.key}=${reference.variable}`)
+    .sort();
+  return pairs.length === 0 ? {} : { env: pairs.join(",") };
 }
 
 /**
@@ -61,7 +78,11 @@ export async function recordConfigChanges(
     const before = known.get(key);
     let change: string | undefined;
     if (before === undefined || before["change"] === "removed") change = "added";
-    else if (Object.entries(prints).some(([name, hash]) => before[name] !== hash)) {
+    else if (
+      Object.entries(prints).some(([name, hash]) => before[name] !== hash) ||
+      // A fingerprint gone since: the file stopped reading settings from the environment.
+      Object.keys(before).some((name) => name !== "change" && !(name in prints))
+    ) {
       change = "changed";
     }
     if (change !== undefined) changes.push(configEntry(key, { ...prints, change }));
