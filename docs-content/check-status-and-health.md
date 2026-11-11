@@ -71,6 +71,11 @@ listen (its `source: "down"`; the engine keeps trying it). A destination that is
 channel `retrying`, and the answer stays 200, because restarting the engine would not bring the
 destination back. Point a restart policy at the status code, and an alert at the channels.
 
+A standby (`pathways start --standby`) answers 503 with `status: "standby"` and no channels until it
+takes the engine lease, so a readiness check routes nothing to it; point a liveness check at it only
+if a standby that answers at all counts as alive. See
+[a standby](./store-messages-in-a-database.md#a-standby).
+
 The body holds states and counts, never content. `pathways start --once` does not serve the endpoint.
 
 ## Logs

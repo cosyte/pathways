@@ -10,10 +10,11 @@ import type { ChannelContext, ExtensionContext } from "./types.js";
 // builder and a custom store, each from a module whose default export is checked before use.
 
 /**
- * Every method a {@link MessageStore} has, so a custom store is checked for each. The `satisfies`
- * fails the typecheck when the interface gains a method this does not list.
+ * Every method a {@link MessageStore} has, so a custom store is checked for each: true for those it
+ * must have, false for the lease methods, which it may leave out. The `satisfies` fails the
+ * typecheck when the interface gains a method this does not list.
  */
-const STORE_METHODS = Object.keys({
+const STORE_METHOD_LIST = {
   receive: true,
   nextToTransform: true,
   completeTransform: true,
@@ -39,7 +40,18 @@ const STORE_METHODS = Object.keys({
   appendAudit: true,
   auditEntries: true,
   close: true,
-} satisfies Record<keyof MessageStore, true>);
+  acquireLease: false,
+  renewLease: false,
+  releaseLease: false,
+  leaseHolder: false,
+} satisfies Record<keyof MessageStore, boolean>;
+
+const STORE_METHODS = Object.entries(STORE_METHOD_LIST)
+  .filter(([, required]) => required)
+  .map(([name]) => name);
+const STORE_OPTIONAL_METHODS = Object.entries(STORE_METHOD_LIST)
+  .filter(([, required]) => !required)
+  .map(([name]) => name);
 
 /**
  * Builds a custom source from its module's default export, a `SourceFactory`. It must return an
@@ -103,7 +115,8 @@ export function customDestination(
 
 /**
  * Builds a custom store from its module's default export, a `StoreFactory`. It must return an
- * object with every {@link MessageStore} method.
+ * object with every {@link MessageStore} method; the lease methods are optional, and each it has
+ * must be a method.
  *
  * @throws {ExtensionLoadError} naming `where` when the module, its factory or what it returns is
  *   wrong.
@@ -123,7 +136,7 @@ export function customStore(
     "a store factory",
     config.options,
     context,
-    (value) => methodsMissing(value, "a message store", STORE_METHODS),
+    (value) => methodsMissing(value, "a message store", STORE_METHODS, STORE_OPTIONAL_METHODS),
   );
 }
 

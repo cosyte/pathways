@@ -31,6 +31,7 @@ import { recordRetention, runRetention, type RetentionReport } from "../operator
 import { copiesBodies, markCopiesBodies, release } from "../storage/ownership.js";
 import type { MessageStore, ReceivedMessage } from "../storage/store.js";
 import { ChannelWorker, type TransformOutcome } from "./channel-worker.js";
+import type { EngineFence } from "./lease.js";
 import { channelStatus, type ChannelHealth, type HealthReport } from "./health.js";
 import type { FailureSummary } from "./worker-entry.js";
 
@@ -293,6 +294,12 @@ export interface EngineOptions {
    * operating system user; pass one to share it, and its listeners, with other callers.
    */
   readonly audit?: AuditLog;
+  /**
+   * The engine lease this engine holds, when its store has leases: checked before each message is
+   * taken in, transformed or sent, and its epoch carried by every write that records an outcome.
+   * Without one the engine runs unfenced, as with a store that has no lease methods.
+   */
+  readonly fence?: EngineFence;
 }
 
 interface RunningChannel {
@@ -322,6 +329,9 @@ interface RunningChannel {
  *   while the rest of the engine runs and the health endpoint answers 503.
  * - While it runs, retention deletes done messages past their channel's retention period, at
  *   start and then every `retentionInterval`, and records each run in the audit log.
+ * - Given a fence (the engine lease), it checks the lease before it takes, transforms or sends a
+ *   message, and every write of an outcome carries the lease's epoch: once the lease is lost, the
+ *   next check or write throws a `LeaseLostError` and nothing more is taken or sent.
  *
  * Logs carry ids, counts and error names only: never a message's content, and never a file name,
  * which can carry a patient's name.
@@ -422,6 +432,7 @@ export class Engine {
   /** One pass over every channel: take in, transform, deliver. */
   async tick(): Promise<void> {
     for (const channel of this.channels) {
+      this.options.fence?.check();
       if (channel.down !== undefined && channel.down.nextAt <= this.now()) {
         await this.startSource(channel);
       }
@@ -608,6 +619,12 @@ export class Engine {
     this.hooks?.emit(built);
   }
 
+  /** The epoch a write carries, as its last argument: none when the engine holds no lease. */
+  private epoch(): [] | [number] {
+    const epoch = this.options.fence?.epoch;
+    return epoch === undefined ? [] : [epoch];
+  }
+
   /** Now, or `inMs` from now, as an ISO 8601 time for an event. */
   private at(inMs = 0): string {
     return new Date(this.now() + inMs).toISOString();
@@ -621,6 +638,9 @@ export class Engine {
         const { duplicateKey, idempotencyKey, resumed, failure } = options;
         let received: ReceivedMessage;
         try {
+          // An engine that lost its lease takes nothing more in: the source answers as it does
+          // when a message cannot be stored, so the sender keeps it.
+          this.options.fence?.check();
           received = await store.receive(config.name, body, {
             // Storage keeps a hash of each key, so a sender's identifiers and a file's name are not
             // stored.
@@ -687,12 +707,18 @@ export class Engine {
     // the body moves to the worker rather than being copied, and the outputs are freed once stored.
     const owned = copiesBodies(store);
     for (;;) {
+      this.options.fence?.check();
       const next = await store.nextToTransform(config.name);
       if (next === undefined) return;
       const outcome: TransformOutcome = await worker.run(next.body, { transfer: owned });
       if (outcome.ok) {
         faultPoint("after-transform-before-complete");
-        await store.completeTransform(next.id, outcome.outputs, config.destinations.length);
+        await store.completeTransform(
+          next.id,
+          outcome.outputs,
+          config.destinations.length,
+          ...this.epoch(),
+        );
         if (owned) for (const output of outcome.outputs) release(output);
         const outputs = outcome.outputs.length;
         logger.info({
@@ -709,7 +735,7 @@ export class Engine {
             : { type: "transformed", ...base, outputs };
         });
       } else {
-        await store.failTransform(next.id, storedFailure(outcome.failure));
+        await store.failTransform(next.id, storedFailure(outcome.failure), ...this.epoch());
         const { kind, name, code, where } = outcome.failure;
         logger.warn({
           event: "transform-failed",
@@ -765,14 +791,20 @@ export class Engine {
             interruptedAttempt: interrupted,
           });
         }
+        // An engine that lost its lease, or was paused past it, sends nothing more.
+        this.options.fence?.check();
         // With `resendFlag: false` no marker is written, so a crash after this send goes unflagged;
         // the one cut off is still noted, so a delivery already found marked keeps its flag.
         if (config.settings.resendFlag || interrupted !== undefined) {
-          await store.markSending(delivery.id, {
-            attempt,
-            at: this.now(),
-            ...(interrupted === undefined ? {} : { interruptedAttempt: interrupted }),
-          });
+          await store.markSending(
+            delivery.id,
+            {
+              attempt,
+              at: this.now(),
+              ...(interrupted === undefined ? {} : { interruptedAttempt: interrupted }),
+            },
+            ...this.epoch(),
+          );
         }
         try {
           await destination.deliver({
@@ -783,7 +815,7 @@ export class Engine {
           });
         } catch (error) {
           if (error instanceof DeliveryRejected) {
-            await store.failDelivery(delivery.id, `rejected: ${error.reason}`);
+            await store.failDelivery(delivery.id, `rejected: ${error.reason}`, ...this.epoch());
             logger.warn({
               event: "delivery-rejected",
               channel: config.name,
@@ -808,6 +840,7 @@ export class Engine {
               attempts,
               this.now() + RETRY_MAX_MS,
               `delivery: ${error.code}`,
+              ...this.epoch(),
             );
             const { status, locationHost } = error;
             logger.warn({
@@ -838,6 +871,7 @@ export class Engine {
             attempts,
             this.now() + wait,
             `delivery: ${code ?? "error"}`,
+            ...this.epoch(),
           );
           logger.warn({
             event: "delivery-retry",
@@ -862,7 +896,7 @@ export class Engine {
         // Delivered: freed now when the store handed it over and the destination kept none of it.
         if (copiesBodies(store) && copiesBodies(destination)) release(delivery.body);
         faultPoint("after-send-before-record");
-        await store.markDelivered(delivery.id);
+        await store.markDelivered(delivery.id, ...this.epoch());
         logger.info({
           event: "delivered",
           channel: config.name,

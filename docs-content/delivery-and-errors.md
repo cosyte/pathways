@@ -50,8 +50,10 @@ What the flag does not cover:
   the connection drops before the answer, the receiver may already hold the message, but Pathways
   records that attempt as failed and retries it as usual. The flag covers a process that was cut off
   between the send and the record, not an attempt whose answer never came.
-- **Two engines on one database are not fenced yet.** If two engines read the same database, both
-  could find the same marked delivery and both send it. Run one engine per database.
+- **Two engines on one database are fenced by the engine lease.** A second engine is refused, and an
+  engine whose lease another has taken can no longer record an outcome: see
+  [one engine per database](./store-messages-in-a-database.md#one-engine-per-database). An engine
+  paused between a send and its record can still mean that delivery is sent once more, flagged.
 - **The marker is as durable as the database.** On SQLite it survives a process kill. Whether it
   survives a power loss depends on the database's sync setting (SQLite's `synchronous`), the same as
   for stored messages.

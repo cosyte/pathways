@@ -14,6 +14,7 @@ import {
   DEFAULT_HOST,
   DEFAULT_HTTP_TIMEOUT_MS,
   DEFAULT_HTTP_TOKEN_ENV,
+  DEFAULT_LEASE_TTL_MS,
   DEFAULT_MAX_BYTES,
   DEFAULT_MIN_AGE_MS,
   DEFAULT_POOL_IDLE_TIMEOUT_MS,
@@ -116,6 +117,15 @@ export async function loadProject(root: string): Promise<ProjectConfig> {
     project.health === undefined
       ? undefined
       : resolveListener(project.health, projectRoot, DEFAULT_HEALTH_TOKEN_ENV);
+  const lease = {
+    ttlMs: project.lease?.ttl ?? DEFAULT_LEASE_TTL_MS,
+    standby: project.lease?.standby ?? false,
+  };
+  if (lease.standby && storage.kind === "sqlite") {
+    problems.push(
+      `${show(projectFile)}: lease.standby: a standby needs a database server; on SQLite a second engine is refused`,
+    );
+  }
 
   const channelsDir = join(projectRoot, "channels");
   const channels: ChannelConfig[] = [];
@@ -205,6 +215,7 @@ export async function loadProject(root: string): Promise<ProjectConfig> {
     settings,
     hooks,
     health,
+    lease,
     encryption,
     channels,
   };

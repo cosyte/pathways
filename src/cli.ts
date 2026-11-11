@@ -11,7 +11,8 @@ import { ENCRYPTION_REQUIRED, type KeyProvider } from "./encryption/keys.js";
 import { rekey, rekeyComplete, type RekeyCounts } from "./encryption/rekey.js";
 import { TransformLoadError } from "./engine/channel-worker.js";
 import { Engine, errorCode } from "./engine/engine.js";
-import { healthEndpointFor, type HealthEndpoint } from "./engine/health.js";
+import { healthEndpointFor, type HealthEndpoint, type HealthReport } from "./engine/health.js";
+import { describeHolder, EngineLease, type LeaseLossReason } from "./engine/lease.js";
 import { EXIT } from "./exit.js";
 import { HookSet } from "./extensions/hooks.js";
 import { ExtensionLoadError } from "./extensions/load.js";
@@ -21,6 +22,8 @@ import {
   clearCommand,
   DEFAULT_LIMIT,
   isChannelName,
+  leaseReleaseCommand,
+  leaseStatusCommand,
   listCommand,
   parseAction,
   parseId,
@@ -36,7 +39,13 @@ import {
 import { recordConfigChanges } from "./operator/config-audit.js";
 import { InitError, initProject, STARTER_CHANNEL, STARTER_KEY_FILE } from "./starter/init.js";
 import { openRawStore, openStore, startingKeys, type OpenStoreContext } from "./storage/open.js";
-import { isContentStore, StorageError, type MessageStore } from "./storage/store.js";
+import {
+  isContentStore,
+  leaseStore,
+  LeaseLostError,
+  StorageError,
+  type MessageStore,
+} from "./storage/store.js";
 import { describeFailure, runChannelTests } from "./testing/run-tests.js";
 import { VERSION } from "./version.js";
 
@@ -71,7 +80,9 @@ Commands:
   start               Run every channel, and the health endpoint if
                       pathways.yaml configures one, until stopped. Needs
                       pathways.yaml's encryption: its keys, or none. Retention
-                      runs at start and then every retentionInterval
+                      runs at start and then every retentionInterval. Takes
+                      the engine lease first: a second engine on the same
+                      database is refused
   test [name...]      Run each channel's tests/ inputs through its transform
                       and compare the output with the saved .expected files
   validate            Check pathways.yaml and every channel.yaml as start
@@ -93,6 +104,11 @@ Commands:
   rekey               Re-encrypt every stored message under the current key
                       of pathways.yaml's encryption, so older keys can be
                       retired
+  lease status        Who holds the engine lease, since when, its epoch and
+                      the time it has left
+  lease release --force
+                      Free the engine lease of an engine whose host is gone,
+                      so the next start takes it at once. Audited
 
 The commands that read or change stored messages open the database as start
 does, so they need the same encryption keys.
@@ -101,9 +117,13 @@ Options:
   -C, --project <dir>   The project folder (default: the current folder)
       --once            start: take in, transform and deliver what is
                         waiting, then exit
+      --standby         start: hold no lease and open no source until the
+                        engine holding the lease stops, then take over.
+                        Needs a database server
+      --force           lease release: say the lease's host is gone
       --update          test: save the current outputs as the expected ones
-      --json            status, messages, replay, clear, retention, audit:
-                        print one JSON document instead of text
+      --json            status, messages, replay, clear, retention, audit,
+                        lease: print one JSON document instead of text
       --channel <name>  messages, audit: only this channel
       --status <state>  messages: only this state: received, queued, retrying,
                         delivered, filtered, failed or cleared
@@ -118,7 +138,8 @@ Options:
       --resend          replay: send the stored outputs again, untransformed
       --dry-run         retention: say what would be deleted, delete nothing
       --action <name>   audit: only this action: search, view, content-view,
-                        replay, resend, clear, retention or config
+                        replay, resend, clear, retention, config or
+                        lease-release
       --message <id>    audit: only entries about this message
       --encrypt-plaintext
                         rekey: also encrypt what was stored while encryption
@@ -133,8 +154,9 @@ each entry as an audit event.
 
 Exit codes: 0 done; 1 a test failed, the engine, a command or an extension
 module could not start or stopped on an error, init could not write the
-project, rekey left a value not under the current key, or a replay, resend or
-clear was refused or the message failed again; 2 the command line was not
+project, rekey left a value not under the current key, a replay, resend or
+clear was refused or the message failed again, another engine holds the lease,
+the engine lost its lease, or there was no lease to release; 2 the command line was not
 understood; 3 the configuration is invalid; 4 a message named does not exist.
 `;
 
@@ -150,7 +172,7 @@ type OptionName = Exclude<keyof Values, "help" | "version" | "project">;
 /** The options each command takes, beyond --project, --help and --version. */
 const OPTIONS: Readonly<Record<string, readonly OptionName[]>> = {
   init: [],
-  start: ["once"],
+  start: ["once", "standby"],
   test: ["update"],
   validate: [],
   status: ["json"],
@@ -160,6 +182,7 @@ const OPTIONS: Readonly<Record<string, readonly OptionName[]>> = {
   retention: ["json", "dry-run"],
   audit: ["json", "action", "message", "channel", "since", "until", "limit", "before"],
   rekey: ["encrypt-plaintext"],
+  lease: ["json", "force"],
 };
 
 /**
@@ -210,7 +233,8 @@ export async function run(argv: readonly string[], io: CliIo): Promise<number> {
       return init(rest[0] ?? projectDir, io);
     case "start":
       if (rest.length > 0) return usage(io);
-      return start(projectDir, values.once === true, io);
+      if (values.once === true && values.standby === true) return usage(io);
+      return start(projectDir, { once: values.once === true, standby: values.standby }, io);
     case "test":
       return test(projectDir, rest, values.update === true, io);
     case "validate":
@@ -372,9 +396,24 @@ function auditFor(store: MessageStore, io: CliIo, onListenerError: (error: unkno
   return audit;
 }
 
-async function start(projectDir: string, once: boolean, io: CliIo): Promise<number> {
+/** What a standby's health endpoint answers until it takes the lease: 503, and no counts. */
+const STANDBY_REPORT: HealthReport = { status: "standby", storage: "ok", channels: {} };
+
+/** How `pathways start` runs: one pass, or as a standby (`undefined` leaves it to pathways.yaml). */
+interface StartMode {
+  readonly once: boolean;
+  readonly standby: boolean | undefined;
+}
+
+async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<number> {
   const project = await load(projectDir, io);
   if (project === undefined) return EXIT.config;
+  const standby = mode.standby ?? (project.lease.standby && !mode.once);
+  const { once } = mode;
+  if (standby && project.storage.kind === "sqlite") {
+    io.err("pathways: a standby needs a database server; on SQLite a second engine is refused.\n");
+    return EXIT.config;
+  }
   const env = io.env ?? process.env;
   const logger = io.logger ?? pino({ redact: REDACT });
   // Master keys are read now, at startup, like every other secret: a missing one stops the start.
@@ -382,19 +421,175 @@ async function start(projectDir: string, once: boolean, io: CliIo): Promise<numb
   if (typeof opened === "number") return opened;
   const { store } = opened;
   if (!opened.encrypted) logger.warn({ event: "unencrypted-storage" });
+
+  // The engine lease, taken before any source opens. A store without lease methods runs as before.
+  const leases = leaseStore(store);
+  if (leases === undefined && standby) {
+    await store.close();
+    io.err("pathways: a standby needs a store with leases, and this custom store has none.\n");
+    return EXIT.failed;
+  }
+  if (leases === undefined) logger.warn({ event: "lease-unsupported" });
+  // Aborted by the caller's signal, or at once when the lease is lost.
+  const stopping = new AbortController();
+  const signal = AbortSignal.any([io.signal ?? new AbortController().signal, stopping.signal]);
+  const lease =
+    leases === undefined
+      ? undefined
+      : new EngineLease({
+          store: leases,
+          ttlMs: project.lease.ttlMs,
+          onLost: (reason) => {
+            logger.error({ event: "lease-lost", reason, epoch: lease?.epoch });
+            stopping.abort();
+          },
+        });
+
   const audit = auditFor(store, io, (error) => {
     logger.warn({ event: "audit-listener-failed", code: errorCode(error) });
   });
-  const engine = new Engine({ project, store, logger, env, audit });
+  const engine = new Engine({
+    project,
+    store,
+    logger,
+    env,
+    audit,
+    ...(lease === undefined ? {} : { fence: lease }),
+  });
+  let active = !standby;
   let health: HealthEndpoint | undefined;
-  try {
-    // A single pass does not serve health: it would hold the port a running engine needs.
-    if (project.health !== undefined && !once) {
-      health = healthEndpointFor(project.health, () => engine.health(), env, logger);
+  // A single pass does not serve health: it would hold the port a running engine needs.
+  if (project.health !== undefined && !once) {
+    try {
+      health = healthEndpointFor(
+        project.health,
+        () => (active ? engine.health() : Promise.resolve(STANDBY_REPORT)),
+        env,
+        logger,
+      );
+    } catch (error) {
+      await store.close();
+      /* v8 ignore next: healthEndpointFor throws only ConfigError */
+      if (!(error instanceof ConfigError)) throw error;
+      reportConfigError(error, io);
+      return EXIT.config;
     }
+  }
+
+  try {
+    if (lease !== undefined) {
+      const taken = await takeLease(lease, { standby, health, signal, logger, io });
+      if (taken !== true) return taken;
+    }
+    return await runEngine(engine, project, store, audit, io, {
+      once,
+      signal,
+      lease,
+      // A standby's endpoint is listening already.
+      health: standby ? undefined : health,
+      logger,
+      onActive: () => {
+        active = true;
+      },
+    });
+  } finally {
+    await health?.stop();
+    await lease?.release().catch((error: unknown) => {
+      logger.warn({ event: "lease-release-failed", code: errorCode(error) });
+    });
+    await store.close();
+  }
+}
+
+/** Starts the health endpoint, if there is one; says why and returns false when it cannot listen. */
+async function listenHealth(health: HealthEndpoint | undefined, io: CliIo): Promise<boolean> {
+  try {
+    await health?.start();
+    return true;
+  } catch (error) {
+    io.err(`pathways: the health endpoint could not listen (${String(errorCode(error))}).\n`);
+    return false;
+  }
+}
+
+/**
+ * Takes the engine lease: at once, or as a standby once the holder stops. Returns true when it is
+ * held, or the exit code, having said why not: another engine holds it (naming the holder: node,
+ * host, since, epoch and time left, never a URL), the database refused, or a standby was stopped.
+ */
+async function takeLease(
+  lease: EngineLease,
+  run: {
+    readonly standby: boolean;
+    readonly health: HealthEndpoint | undefined;
+    readonly signal: AbortSignal;
+    readonly logger: Logger;
+    readonly io: CliIo;
+  },
+): Promise<true | number> {
+  const { logger, io } = run;
+  try {
+    if (run.standby) {
+      // A standby serves health (standby, 503) and nothing else until it holds the lease.
+      if (!(await listenHealth(run.health, io))) return EXIT.failed;
+      logger.info({ event: "standby", node: lease.claimant.node });
+      const taken = await lease.waitFor(run.signal, (holder) => {
+        logger.info({ event: "standby-waiting", holder: holder.node, epoch: holder.epoch });
+      });
+      if (!taken) return EXIT.ok;
+    } else {
+      const claim = await lease.acquire();
+      if (!claim.acquired) {
+        io.err(
+          `pathways: another engine holds the engine lease on this database: ${describeHolder(claim.holder)}. ` +
+            "Stop it first, or start this one with --standby to take over when it stops.\n",
+        );
+        return EXIT.failed;
+      }
+    }
+  } catch (error) {
+    // The database refused the request or went away; its own text can name the server.
+    const code = errorCode(error);
+    io.err(
+      `pathways: the engine lease could not be taken${code === undefined ? "" : ` (${code})`}.\n`,
+    );
+    return EXIT.failed;
+  }
+  logger.info({ event: "lease-acquired", node: lease.claimant.node, epoch: lease.epoch });
+  return true;
+}
+
+/** Says the engine stopped on a lost lease, and returns the exit code for its supervisor. */
+function leaseLost(io: CliIo, reason: LeaseLossReason): number {
+  io.err(
+    `pathways: the engine lease was lost (${reason}); this engine stopped sending and taking in. Another engine may hold it now.\n`,
+  );
+  return EXIT.failed;
+}
+
+/**
+ * Starts the engine under a held lease (or none), records configuration changes, starts the health
+ * endpoint when it is not listening yet, and runs until `signal` aborts (or one pass). Returns the
+ * exit code, having said why on a failure; stops the engine before it returns.
+ */
+async function runEngine(
+  engine: Engine,
+  project: ProjectConfig,
+  store: MessageStore,
+  audit: AuditLog,
+  io: CliIo,
+  run: {
+    readonly once: boolean;
+    readonly signal: AbortSignal;
+    readonly lease: EngineLease | undefined;
+    readonly health: HealthEndpoint | undefined;
+    readonly logger: Logger;
+    readonly onActive: () => void;
+  },
+): Promise<number> {
+  try {
     await engine.start();
   } catch (error) {
-    await store.close();
     if (error instanceof ConfigError) {
       reportConfigError(error, io);
       return EXIT.config;
@@ -411,30 +606,29 @@ async function start(projectDir: string, once: boolean, io: CliIo): Promise<numb
     io.err(`pathways: channel ${error.channel}: ${detail}\n`);
     return EXIT.failed;
   }
+  run.onActive();
 
   try {
-    // After the engine has started, so its hooks receive these entries too.
-    await recordConfigChanges(project, store, audit);
-  } catch {
-    await engine.stop();
-    await store.close();
-    io.err("pathways: the audit log could not be written.\n");
-    return EXIT.failed;
-  }
-
-  try {
-    await health?.start();
+    try {
+      // After the engine has started, so its hooks receive these entries too.
+      await recordConfigChanges(project, store, audit);
+    } catch {
+      io.err("pathways: the audit log could not be written.\n");
+      return EXIT.failed;
+    }
+    if (!(await listenHealth(run.health, io))) return EXIT.failed;
+    if (run.once) await engine.tick();
+    else await engine.run(run.signal);
   } catch (error) {
-    await engine.stop();
-    await store.close();
-    io.err(`pathways: the health endpoint could not listen (${String(errorCode(error))}).\n`);
-    return EXIT.failed;
-  }
-
-  try {
-    if (once) await engine.tick();
-    else await engine.run(io.signal ?? new AbortController().signal);
-  } catch (error) {
+    if (error instanceof LeaseLostError) {
+      // A write the database refused under this engine's epoch: logged as such even when a late
+      // renewal was noticed first, since the refusal is what shows another engine took over.
+      if (run.lease?.lossReason === undefined) run.lease?.writeRefused();
+      else if (run.lease.lossReason !== "write-refused") {
+        run.logger.error({ event: "lease-lost", reason: "write-refused", epoch: run.lease.epoch });
+      }
+      return leaseLost(io, "write-refused");
+    }
     // A stored value that cannot be decrypted stops the engine, as any storage failure does, and is
     // never handed on garbled. Its message is fixed text and at most a key id.
     if (error instanceof EncryptionError) {
@@ -447,10 +641,10 @@ async function start(projectDir: string, once: boolean, io: CliIo): Promise<numb
     io.err(`pathways: the engine stopped on an error${code === undefined ? "" : ` (${code})`}.\n`);
     return EXIT.failed;
   } finally {
-    await health?.stop();
     await engine.stop();
-    await store.close();
   }
+  // The lease was lost between passes: the run ended at once, before the next check.
+  if (run.lease?.lossReason !== undefined) return leaseLost(io, run.lease.lossReason);
   return EXIT.ok;
 }
 
@@ -596,7 +790,11 @@ async function operator(
   // The engine-wide hooks receive each audit entry this command writes, as `pathways start`'s do.
   // status and audit write none, so they load no hooks.
   let hooks: HookSet | undefined;
-  if (command !== "status" && command !== "audit") {
+  if (
+    command !== "status" &&
+    command !== "audit" &&
+    !(command === "lease" && rest[0] === "status")
+  ) {
     const opened = await hooksOrExit(project, context, io);
     if (typeof opened === "number") {
       await store.close();
@@ -703,6 +901,19 @@ function parseOperator(
     case "retention":
       if (rest.length > 0) return usage(io);
       return (context) => retentionCommand(context, values["dry-run"] === true);
+    case "lease":
+      if (rest.length !== 1) return usage(io);
+      if (rest[0] === "status") {
+        return values.force === undefined ? leaseStatusCommand : usage(io);
+      }
+      if (rest[0] !== "release") return usage(io);
+      if (values.force !== true) {
+        return invalid(
+          io,
+          "lease release frees the lease of an engine whose host is gone; add --force to say it is.",
+        );
+      }
+      return leaseReleaseCommand;
     default: {
       // audit: OPTIONS lists exactly these commands.
       if (rest.length > 0) return usage(io);
@@ -766,6 +977,8 @@ function parseCli(argv: readonly string[]) {
       version: { type: "boolean", short: "v" },
       project: { type: "string", short: "C" },
       once: { type: "boolean" },
+      standby: { type: "boolean" },
+      force: { type: "boolean" },
       update: { type: "boolean" },
       json: { type: "boolean" },
       channel: { type: "string" },

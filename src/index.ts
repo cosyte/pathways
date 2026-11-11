@@ -91,6 +91,7 @@ export type {
   DeliveryStatus,
   DeliveryTally,
   ExpireResult,
+  LeaseStore,
   MessageQuery,
   MessageState,
   MessageStatus,
@@ -111,4 +112,11 @@ export type {
   StoredMessage,
   StoreReceiveOptions,
 } from "./storage/store.js";
+export {
+  ENGINE_LEASE,
+  LeaseLostError,
+  type LeaseClaim,
+  type LeaseClaimant,
+  type LeaseHolder,
+} from "./storage/lease.js";
 export type { AuditListener } from "./operator/audit.js";

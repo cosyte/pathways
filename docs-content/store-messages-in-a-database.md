@@ -75,11 +75,61 @@ server or the login.
 
 ## One engine per database
 
-Run one `pathways start` against a database. The engine reads each destination's queue in order and
-claims no rows, so a second engine on the same database would read the same queues and could send a
-message twice. The
-operator commands (`status`, `messages`, `replay`, `clear`, `retention`, `audit`, `rekey`) are safe to
-run beside a running engine.
+One engine runs against a database at a time. Before it opens a source, `pathways start` takes the
+engine lease: a row in the `leases` table with the holder's node id and host name and an epoch, a
+number that rises by one on every acquisition. The holder renews the lease every third of its time
+to live (`lease.ttl`, 15 seconds by default). Expiry is judged by the database's clock, in the same
+statement that takes or renews the lease, so a node whose clock has drifted cannot take a lease
+early or keep one late.
+
+A second `pathways start` on the same database is refused and exits 1, naming the holder and nothing
+else:
+
+```text
+pathways: another engine holds the engine lease on this database: node 3f9a1c2b7d4e5f60 on host engine-a, since 2026-11-11T04:00:00.000Z, epoch 3, 12.4s left. Stop it first, or start this one with --standby to take over when it stops.
+```
+
+Every write that records an engine's work (a transform's outputs or failure, the marker before a send,
+a delivery's outcome) carries the epoch the engine took the lease under, checked in the same
+statement. If another engine has taken the lease since, the write changes nothing, and the engine
+stops sending and taking in at once, logs `lease-lost`, and exits 1 for its supervisor to restart.
+It does the same when a renewal is refused or fails, or comes later than the lease lasts by the
+engine's own monotonic clock (the process was paused, say). The send itself cannot be fenced: an
+engine paused after handing a message to its destination and before recording it can mean one
+delivery is sent twice, the second flagged as a possible duplicate, which at-least-once delivery
+allows.
+
+The lease is a row, not a database lock. A session lock (PostgreSQL's advisory locks, SQL Server's
+`sp_getapplock`) belongs to one connection, and a pooled connection that is dropped and replaced
+loses it without the engine noticing; a row with an epoch is checked on every write, whichever
+connection makes it.
+
+When the engine stops cleanly it frees the lease, and the next start takes it at once. An engine
+that was killed holds it until it lapses: the next start after the time to live takes it. If the
+host of an engine is gone for good, `pathways lease release --force` frees its lease at once (and
+writes the release to the audit log); `pathways lease status` shows who holds it. Freeing the lease
+of an engine that is still running stops it at its next renewal.
+
+The operator commands (`status`, `messages`, `replay`, `clear`, `retention`, `audit`, `rekey`,
+`lease`) take no lease and are safe to run beside a running engine.
+
+### A standby
+
+On a database server, a second engine can wait as a standby: `pathways start --standby`, or
+`lease: { standby: true }` in `pathways.yaml`. A standby holds no lease, opens no listener, reads no
+folder and reads no message; its health endpoint answers 503 with `"status": "standby"`, so a load
+balancer's readiness check sends it nothing. It asks for the lease every third of the time to live,
+and once the engine holding it stops, it takes the lease and starts every channel. It takes over
+within the time to live plus one renewal interval plus its own start time: about 20 seconds plus the
+start with the default 15-second time to live.
+
+A standby is refused on SQLite: the database is one file on one host, so a second engine there is
+refused instead. A custom store without the lease methods runs one engine as before, with a
+`lease-unsupported` warning at start, and cannot run a standby.
+
+The `leases` table comes with migration `0006-leases`, which only adds the table: it is safe to run
+while deliveries are in flight, and an older Pathways never reads it. It has no rollback step; to
+remove it, stop every engine and drop the table.
 
 If the database becomes unreachable while the engine runs, the engine stops with exit code 1 and the
 driver's error code, for a supervisor (systemd, Docker, Kubernetes) to restart it. Nothing is lost: a
@@ -101,6 +151,14 @@ The factory receives `options` and a context with the project folder, the enviro
 ([`StoreFactory`](./api/README.md#storefactory)). Its store holds only encrypted bodies and error
 texts: Pathways wraps every store, its own and yours, in the same encryption layer. To be rekeyed, a
 store also implements [`ContentStore`](./api/README.md#contentstore).
+
+To take part in the engine lease, a store also implements the four optional lease methods,
+`acquireLease`, `renewLease`, `releaseLease` and `leaseHolder`, and honours the optional `epoch` the
+engine passes as the last argument of `completeTransform`, `failTransform`, `markSending`,
+`markDelivered`, `scheduleRetry` and `failDelivery`: given one, the write changes its row only while
+the `engine` lease still carries that epoch, judged in the same statement, and otherwise rejects with
+`LeaseLostError`. A store that has none of this needs no change: it runs one engine, unfenced, with a
+warning at start.
 
 ## Related
 

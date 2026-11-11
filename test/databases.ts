@@ -5,7 +5,7 @@ import { Kysely, sql } from "kysely";
 import type { DatabaseStorage, ServerStorage, StorageKind } from "../src/config/schema.js";
 import type { Env } from "../src/connectors/endpoint.js";
 import { dialectFor } from "../src/storage/dialects.js";
-import { Store, type StoreOptions } from "../src/storage/store.js";
+import { ENGINE_LEASE, Store, type StoreOptions } from "../src/storage/store.js";
 
 /**
  * One database the storage, engine and operator suites run on. SQLite always runs; each server runs
@@ -184,4 +184,23 @@ export async function dropDatabases(): Promise<void> {
 export async function closeAdmins(): Promise<void> {
   await Promise.all([...admins.values()].map((db) => db.destroy()));
   admins.clear();
+}
+
+/**
+ * Waits, on a store `open` opens, until the engine lease has lapsed by the database's clock, as it
+ * does a time to live after its holder was killed: then the next `pathways start` takes it. Rejects
+ * after `limitMs`.
+ */
+export async function leaseLapsed(open: () => Promise<Store>, limitMs = 30_000): Promise<void> {
+  const store = await open();
+  try {
+    for (const started = Date.now(); Date.now() - started < limitMs;) {
+      const holder = await store.leaseHolder(ENGINE_LEASE);
+      if (holder === undefined || holder.expiresInMs <= 0) return;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(holder.expiresInMs + 10, 250)));
+    }
+    throw new Error("the engine lease did not lapse in time");
+  } finally {
+    await store.close();
+  }
 }
