@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { lstatSync, mkdirSync, realpathSync, unlinkSync } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { posix, resolve } from "node:path";
 
 import type { ChannelCommand, ChannelCommandReport } from "./engine.js";
 
@@ -136,8 +136,8 @@ export function controlAddress(root: string, system: ControlSystem = {}): Contro
     system.tmpdir ?? tmpdir(),
   ];
   for (const base of bases) {
-    const dir = join(base, `pathways-${uid}`);
-    const path = join(dir, `${hash}.sock`);
+    const dir = posix.join(base, `pathways-${uid}`);
+    const path = posix.join(dir, `${hash}.sock`);
     if (Buffer.byteLength(path) <= limit) return { dir, path };
   }
   // Always short enough: 15 bytes, the uid, and 22 of name.
