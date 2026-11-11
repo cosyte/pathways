@@ -54,8 +54,8 @@ Each destination has its own queue, in the order the outputs were made.
 - Other destinations of the same channel, and other channels, keep going.
 
 Worth trying again means the receiver may take it later: a refused connection, a timeout, no ACK, an
-MLLP `AR`, an HTTP 5xx, 408, 425 or 429. A delivery the receiver rejects for good (an MLLP `AE`, a
-final HTTP 1xx, any other HTTP 4xx) is marked failed, and the destination moves on to the next
+MLLP `AR`, an HTTP 5xx, 408, 425 or 429. A delivery the receiver rejects for good (an MLLP `AE`, an
+HTTP 101, any other HTTP 4xx) is marked failed, and the destination moves on to the next
 output: sending the same message again cannot help.
 
 An HTTP redirect (a 3xx) is neither: it is never followed, since following one could send a message to

@@ -92,7 +92,7 @@ The answer decides what happens:
 | 2xx                                                    | delivered                                                         |
 | 408, 425, 429, 5xx, no answer in time, a network error | retried, with later outputs waiting behind it                     |
 | 3xx                                                    | held: retried every 5 minutes, never followed, with its own event |
-| a final 1xx, any other 4xx                             | failed for good; the destination moves on                         |
+| 101, any other 4xx                                     | failed for good; the destination moves on                         |
 
 A retry waits 1 second, then 2, 4, 8 and so on, up to 5 minutes. When a 429 or a 503 carries a
 `Retry-After` header, the retry waits as long as it asks if that is longer, still never more than 5

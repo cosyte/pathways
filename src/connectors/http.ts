@@ -6,11 +6,13 @@ import {
   type ServerResponse,
 } from "node:http";
 import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
+import type { Duplex } from "node:stream";
 
 import { Endpoint, refuse, reply } from "./endpoint.js";
 import { failureOf, transientError } from "./http-core.js";
 import { clientTlsOptions, type ClientTlsMaterial, type ServerTlsMaterial } from "./tls.js";
 import {
+  DeliveryRejected,
   type DestinationConnector,
   type MessageSink,
   type OutgoingMessage,
@@ -164,8 +166,9 @@ export interface HttpDestinationOptions {
  * POSTs each output to a URL. The server's certificate is always verified. The answer is read by
  * the shared status table (`classifyStatus`): a 2xx is delivered; a 408, 425, 429, 5xx, a network
  * error or a timeout throws a `RetryableError` with a `code`, and on a 429 or a 503 the wait its
- * Retry-After asks for; a 3xx throws a `RedirectHeld`, never followed; a final 1xx or any other 4xx
- * throws a `DeliveryRejected` whose reason is the status. The response body is read and dropped,
+ * Retry-After asks for; a 3xx throws a `RedirectHeld`, never followed; a 101 or any other 4xx throws
+ * a `DeliveryRejected` whose reason is the status. Node waits past any other 1xx for the final
+ * answer, so one with nothing after it ends as a timeout or a network error. The response body is read and dropped,
  * never logged.
  *
  * @example
@@ -217,6 +220,14 @@ export class HttpDestination implements DestinationConnector {
         const failure = failureOf(response, this.url, this.now());
         if (failure === undefined) resolve();
         else reject(failure);
+      });
+      // A 101 that names an upgrade comes here, never to `response`, and with no listener Node left
+      // the attempt unsettled past its time limit. We never ask to switch protocols, so it is a
+      // rejection, as the status table reads every 101, and the connection is dropped.
+      request.once("upgrade", (response: IncomingMessage, socket: Duplex) => {
+        clearTimeout(timer);
+        socket.destroy();
+        reject(new DeliveryRejected(`HTTP ${String(response.statusCode)}`));
       });
       request.on("error", (error: Error & { code?: unknown }) => {
         clearTimeout(timer);

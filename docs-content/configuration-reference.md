@@ -193,8 +193,9 @@ The URL may not hold a user name or password. A header whose name holds `auth`, 
 
 There is no key for retries: a 2xx is delivered; a 408, 425, 429, 5xx, a network error or no answer
 within `timeout` is retried, waiting longer when a 429 or a 503 asks with `Retry-After`, never more
-than 5 minutes; a 3xx is held, never followed, and retried every 5 minutes; a final 1xx or any other
-4xx fails the delivery for good. See [Send and receive over HTTP](./send-and-receive-http.md).
+than 5 minutes; a 3xx is held, never followed, and retried every 5 minutes; a 101 or any other 4xx
+fails the delivery for good. Any other 1xx is an interim answer: the attempt waits for the final
+answer after it, and is retried when none comes within `timeout` or the connection closes. See [Send and receive over HTTP](./send-and-receive-http.md).
 
 #### MLLP destination
 
