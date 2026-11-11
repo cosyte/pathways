@@ -790,6 +790,20 @@ describe.skipIf(windows)("FileSource and symbolic links", () => {
   });
 });
 
+// The link is a junction on Windows, which needs no privilege, so this runs there too; elsewhere a
+// symbolic link to the folder.
+describe("FileSource and a link to a folder", () => {
+  it("never follows it, on every system", async () => {
+    const dir = await inbox();
+    const outside = await makeProject({ "folder/b.hl7": "outside" });
+    await dropFile(join(dir, "a.hl7"), "inside");
+    await symlink(join(outside, "folder"), join(dir, "linked-folder"), "junction");
+    expect(await pass(sourceOn(dir, { recursive: true }))).toEqual(["inside"]);
+    expect((await readdir(dir)).sort()).toEqual([CLAIMED_DIR, "linked-folder"]);
+    expect(await readFile(join(outside, "folder", "b.hl7"), "utf8")).toBe("outside");
+  });
+});
+
 // A folder link here is a junction on Windows, which needs no privilege; elsewhere a symbolic link.
 describe("FileSource and a folder swapped for a link", () => {
   /**
