@@ -1,5 +1,5 @@
 import { chmod, copyFile, mkdir, readdir, readFile, stat, utimes } from "node:fs/promises";
-import { join, resolve, sep } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
@@ -137,6 +137,32 @@ describe("pathways init", () => {
       .split("\n")
       .filter((line) => line !== "" && !line.startsWith("#"));
     expect(ignored).toEqual(["/.pathways/", "/data/", "node_modules/"]);
+  });
+
+  // An editor with the YAML language server reads the modeline on a file's first line and checks the
+  // file against the schema it names, a path relative to the file. Once the project's dependencies
+  // are installed, node_modules/@cosyte/pathways is this package, so each path must land on the file
+  // package.json exports for that schema.
+  it("points each YAML file at its JSON Schema in node_modules, the file the package exports", async () => {
+    const target = await makeProject({});
+    await initProject(target);
+    const exported = (
+      JSON.parse(await readFile(join(import.meta.dirname, "..", "package.json"), "utf8")) as {
+        readonly exports: Record<string, unknown>;
+      }
+    ).exports;
+    const installed = join(target, "node_modules", "@cosyte", "pathways");
+    for (const [file, schema] of [
+      ["pathways.yaml", "./schema/project.json"],
+      [`${CHANNEL}/channel.yaml`, "./schema/channel.json"],
+    ] as const) {
+      const first = (await readFile(join(target, ...file.split("/")), "utf8")).split("\n")[0];
+      const modeline = /^# yaml-language-server: \$schema=(\S+)$/.exec(first ?? "");
+      expect(modeline, file).not.toBeNull();
+      const named = resolve(dirname(join(target, ...file.split("/"))), modeline?.[1] ?? "");
+      expect(typeof exported[schema], schema).toBe("string");
+      expect(named, file).toBe(resolve(installed, exported[schema] as string));
+    }
   });
 
   it("writes a project whose tests pass straight away", async () => {

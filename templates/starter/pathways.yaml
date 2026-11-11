@@ -1,3 +1,7 @@
+# yaml-language-server: $schema=./node_modules/@cosyte/pathways/schema/project.json
+# The line above points an editor with the YAML language server at the schema of this file,
+# for completion, hover text and checks as you type. "pathways validate" checks the rest.
+
 # Settings for the whole project. Every key but encryption is optional; the values below are the
 # defaults.
 

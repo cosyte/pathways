@@ -25,6 +25,7 @@ yarn.lock
 
 # Generated artifacts (also in .gitignore)
 dist/
+/schema/
 coverage/
 
 # Dependencies (also in .gitignore; prettier additionally skips node_modules by default)

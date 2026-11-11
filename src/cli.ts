@@ -7,7 +7,7 @@ import { ConfigError, loadProject } from "./config/load.js";
 import type { ProjectConfig } from "./config/schema.js";
 import type { Env } from "./connectors/endpoint.js";
 import { EncryptionError } from "./encryption/envelope.js";
-import type { KeyProvider } from "./encryption/keys.js";
+import { ENCRYPTION_REQUIRED, type KeyProvider } from "./encryption/keys.js";
 import { rekey, rekeyComplete, type RekeyCounts } from "./encryption/rekey.js";
 import { TransformLoadError } from "./engine/channel-worker.js";
 import { Engine, errorCode } from "./engine/engine.js";
@@ -74,6 +74,9 @@ Commands:
                       runs at start and then every retentionInterval
   test [name...]      Run each channel's tests/ inputs through its transform
                       and compare the output with the saved .expected files
+  validate            Check pathways.yaml and every channel.yaml as start
+                      does, with every file they name, without reading a
+                      secret or opening a connection: for a project's CI
   status [name...]    Each channel's counts, retrying deliveries and failed
                       messages, read from the database
   messages            List stored messages, newest first: ids, states, times,
@@ -149,6 +152,7 @@ const OPTIONS: Readonly<Record<string, readonly OptionName[]>> = {
   init: [],
   start: ["once"],
   test: ["update"],
+  validate: [],
   status: ["json"],
   messages: ["json", "channel", "status", "since", "until", "limit", "before", "content"],
   replay: ["json", "resend"],
@@ -209,6 +213,9 @@ export async function run(argv: readonly string[], io: CliIo): Promise<number> {
       return start(projectDir, values.once === true, io);
     case "test":
       return test(projectDir, rest, values.update === true, io);
+    case "validate":
+      if (rest.length > 0) return usage(io);
+      return validate(projectDir, io);
     case "rekey":
       if (rest.length > 0) return usage(io);
       return rekeyStore(projectDir, values["encrypt-plaintext"] === true, io);
@@ -444,6 +451,27 @@ async function start(projectDir: string, once: boolean, io: CliIo): Promise<numb
     await engine.stop();
     await store.close();
   }
+  return EXIT.ok;
+}
+
+/**
+ * `pathways validate`: the configuration checks `start` makes before it reads a secret, opens the
+ * store or listens, with the same messages and exit code. That is everything `loadProject` checks
+ * (the schema with its refinements, and every transform, module and hook file named), and that
+ * `pathways.yaml` sets `encryption`. Secrets, TLS files and connections are left to `start`, since a
+ * CI run seldom has them.
+ */
+async function validate(projectDir: string, io: CliIo): Promise<number> {
+  const project = await load(projectDir, io);
+  if (project === undefined) return EXIT.config;
+  if (project.encryption === undefined) {
+    reportConfigError(new ConfigError([ENCRYPTION_REQUIRED]), io);
+    return EXIT.config;
+  }
+  const names = project.channels.map((channel) => channel.name);
+  io.out(
+    `pathways: the configuration is valid: ${names.length} channel${names.length === 1 ? "" : "s"} (${names.join(", ")}).\n`,
+  );
   return EXIT.ok;
 }
 

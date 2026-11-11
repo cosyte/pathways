@@ -12,6 +12,7 @@ interface PackageJson {
   readonly engines: { readonly node: string };
   readonly bin: Record<string, string>;
   readonly files: readonly string[];
+  readonly exports: Record<string, unknown>;
 }
 
 const pkg = JSON.parse(readFileSync("package.json", "utf8")) as PackageJson;
@@ -52,6 +53,15 @@ describe("package facts that must agree", () => {
   // templates ship in the tarball beside dist.
   it("ships the starter project's templates", () => {
     expect(pkg.files).toContain("templates");
+  });
+
+  // tsup.config.ts writes the two JSON Schemas into schema/ at the package root once the entries are
+  // built, and the starter's modelines name them there, under node_modules. Each subpath is the
+  // file's own path, so a resolver that ignores `exports` (TypeScript's node10) finds it too.
+  it("exports the JSON Schemas of the two YAML files from where the build writes them", () => {
+    expect(pkg.exports["./schema/channel.json"]).toBe("./schema/channel.json");
+    expect(pkg.exports["./schema/project.json"]).toBe("./schema/project.json");
+    expect(pkg.files).toContain("schema");
   });
 
   // engines.node and the CI matrix describe the same promise: the lowest Node line CI tests is the

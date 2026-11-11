@@ -72,6 +72,19 @@ Runs each channel's `tests/` inputs through its transform and compares the outpu
 | ---------- | --------------------------------------------- |
 | `--update` | save the current outputs as the expected ones |
 
+## pathways validate
+
+```text
+pathways validate
+```
+
+Checks `pathways.yaml` and every `channel.yaml` as `start` does before it reads a secret, opens the
+database or listens: every key and the rules between keys, that the transform, module, hook and ACK
+builder files they name exist, and that `pathways.yaml` sets `encryption`. A problem is printed as
+`start` prints it, and the exit code is 3; a valid project prints how many channels it has and exits 0. It reads no secret, TLS file or database, so it runs in a project's CI without them; `start`
+still checks those when it runs. See
+[Check configuration in an editor and in CI](./check-configuration.md).
+
 ## pathways status
 
 ```text

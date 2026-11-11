@@ -9,6 +9,7 @@
       "label": "How-to guides",
       "items": [
         "configure-a-channel",
+        "check-configuration",
         "transform-and-filter-messages",
         "test-a-channel",
         "make-sample-messages",

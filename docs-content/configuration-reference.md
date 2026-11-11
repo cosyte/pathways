@@ -17,6 +17,13 @@ root for `pathways.yaml`, the channel's folder for `channel.yaml`. Secrets (toke
 headers, connection URLs, master keys) are never values in the YAML: each is named as `{ env: NAME }`
 or a file, and read when a command starts.
 
+**JSON Schemas.** The package ships a JSON Schema (draft-07) of each file, for editors and other
+tools: `@cosyte/pathways/schema/project.json` for `pathways.yaml` and
+`@cosyte/pathways/schema/channel.json` for `channel.yaml`, at
+`node_modules/@cosyte/pathways/schema/` once installed. Each checks a subset of what `pathways
+start` checks: whatever start accepts, the schema accepts, and `pathways validate` checks the rest.
+See [Check configuration in an editor and in CI](./check-configuration.md).
+
 **Value types.** A _duration_ is a whole number of milliseconds, or a string such as `500ms`, `5s`,
 `2m`, `1h` or `30d`. A _memory size_ is a whole number of megabytes, or a string such as `256MB`. A
 _byte size_ is a whole number of bytes, or a string such as `512B`, `64KB` or `10MB` (1 KB is 1,024

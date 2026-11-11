@@ -29,6 +29,40 @@ export const FORMATS = ["hl7v2", "fhir", "x12", "ccda", "json", "text"] as const
  */
 export type Format = (typeof FORMATS)[number];
 
+/** A JSON Schema object, as `z.toJSONSchema` writes it. */
+type JsonSchema = z.core.JSONSchema.BaseSchema;
+
+/**
+ * The cross-field rules a refinement holds, restated in JSON Schema for the schemas an editor reads,
+ * keyed by the Zod schema they belong to. `toJsonSchema` applies each through `z.toJSONSchema`'s
+ * `override`. A restatement may check less than its refinement, never more: whatever `pathways
+ * start` accepts, the JSON Schema accepts.
+ */
+const restatements = new Map<z.core.$ZodType, (json: JsonSchema) => void>();
+
+/** Records `rule` as the JSON Schema restatement of `schema`'s refinements, and returns `schema`. */
+function restate<T extends z.core.$ZodType>(schema: T, rule: (json: JsonSchema) => void): T {
+  restatements.set(schema, rule);
+  return schema;
+}
+
+/** JSON Schema for "exactly one of these keys is set". */
+const exactlyOneOf = (keys: readonly string[]): JsonSchema[] =>
+  keys.map((key) => ({ required: [key] }));
+
+/** JSON Schema for `plaintext: true`. */
+const PLAINTEXT_TRUE: JsonSchema = {
+  properties: { plaintext: { const: true } },
+  required: ["plaintext"],
+};
+
+/** JSON Schema for "TLS unless `plaintext: true`, and never both". */
+const TLS_OR_PLAINTEXT: JsonSchema = {
+  if: PLAINTEXT_TRUE,
+  then: { not: { required: ["tls"] } },
+  else: { required: ["tls"] },
+};
+
 const DURATION = /^(\d+)(ms|s|m|h|d)$/;
 const UNIT_MS = { ms: 1, s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 } as const;
 const SIZE = /^(\d+)MB$/;
@@ -53,7 +87,7 @@ export function parseDuration(text: string): number | undefined {
 }
 
 /** A duration in milliseconds, written as a number of milliseconds or as `500ms`, `5s`, `2m`, `1h`, `30d`. */
-const duration = z
+const durationValue = z
   .union([
     z.number().int().nonnegative(),
     z.string().regex(DURATION, 'a duration such as "500ms", "5s", "2m", "1h" or "30d"'),
@@ -64,10 +98,17 @@ const duration = z
     return parseDuration(value) ?? 0;
   });
 
+/** A duration, with the hover text an editor shows for the key that holds it. */
+const duration = (description: string) => durationValue.meta({ description });
+
 /** A size in megabytes, written as a number of megabytes or as `256MB`. */
 const megabytes = z
   .union([z.number().int().positive(), z.string().regex(SIZE, 'a size such as "256MB"')])
-  .transform((value) => (typeof value === "number" ? value : Number(SIZE.exec(value)?.[1])));
+  .transform((value) => (typeof value === "number" ? value : Number(SIZE.exec(value)?.[1])))
+  .meta({
+    description:
+      "The memory cap of each channel's transform worker: a size such as 256MB, or a number of megabytes. Default 256MB.",
+  });
 
 /** A size in bytes, written as a number of bytes or as `512B`, `64KB`, `10MB` (1 KB is 1,024 bytes). */
 const bytes = z
@@ -77,6 +118,10 @@ const bytes = z
     /* v8 ignore next -- the string matched BYTES above, so exec finds it again */
     const [, amount, unit] = BYTES.exec(value) ?? [];
     return Number(amount) * UNIT_BYTES[unit as keyof typeof UNIT_BYTES];
+  })
+  .meta({
+    description:
+      "The largest body accepted: a size such as 512B, 64KB or 10MB (1 KB is 1,024 bytes), or a number of bytes. Default 10MB.",
   });
 
 /**
@@ -88,18 +133,37 @@ export const ON_STORE_FAILURE = ["close", "AE", "AR"] as const;
 /** One of {@link ON_STORE_FAILURE}. */
 export type OnStoreFailure = (typeof ON_STORE_FAILURE)[number];
 
-const onStoreFailure = z.enum(ON_STORE_FAILURE);
+const onStoreFailure = z.enum(ON_STORE_FAILURE).meta({
+  description:
+    "What an MLLP source does when a message cannot be stored: close sends no ACK and closes the connection, so the sender sends again; AE and AR answer with that negative ACK. Default close.",
+});
 
 /** Settings an engine sets as defaults and a channel can override. */
 const settingsShape = {
-  timeout: duration.optional(),
+  timeout: duration(
+    "How long one message's transform may run before it is stopped and the message is marked failed: a duration such as 5s, or a number of milliseconds. Default 5s.",
+  ).optional(),
   memory: megabytes.optional(),
-  pollInterval: duration.optional(),
+  pollInterval: duration(
+    "How often the engine looks for new work: a duration such as 1s, or a number of milliseconds. Default 1s. Engine-wide.",
+  ).optional(),
   onStoreFailure: onStoreFailure.optional(),
-  ackTimeout: duration.optional(),
-  retention: duration.optional(),
-  resendFlag: z.boolean().optional(),
-  retentionInterval: duration.optional(),
+  ackTimeout: duration(
+    "How long an MLLP destination waits to connect, and then for each ACK: a duration such as 10s, or a number of milliseconds. Default 10s.",
+  ).optional(),
+  retention: duration(
+    "How long a delivered, filtered or cleared message is kept after its last activity before it is deleted: a duration such as 30d, or a number of milliseconds. Default 30d.",
+  ).optional(),
+  resendFlag: z
+    .boolean()
+    .meta({
+      description:
+        "Write a marker before each send, so a resend after a crash is flagged as a possible duplicate. false saves one write per attempt, and such a resend goes unflagged. Default true.",
+    })
+    .optional(),
+  retentionInterval: duration(
+    "How often a running engine runs retention: a duration such as 1h, or a number of milliseconds. Default 1h. Engine-wide.",
+  ).optional(),
 };
 
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -117,8 +181,13 @@ const MANAGED_HEADERS = new Set([
 ]);
 
 const path = z.string().min(1);
-const port = z.number().int().min(1).max(65_535);
+const port = z.number().int().min(1).max(65_535).meta({ description: "A port, 1 to 65535." });
 const host = z.string().min(1);
+/** `plaintext:`, the one way to run an endpoint without TLS. */
+const plaintext = z
+  .boolean()
+  .meta({ description: "true runs without TLS. Cannot be set alongside tls. Default false." })
+  .optional();
 
 /** A value read from an environment variable at startup: `{ env: NAME }`. */
 const fromEnv = z.strictObject({
@@ -126,32 +195,52 @@ const fromEnv = z.strictObject({
 });
 
 /** A listening endpoint's TLS: its certificate and key, and the CA its clients' certificates need. */
-const serverTls = z.strictObject({ cert: path, key: path, ca: path.optional() });
+const serverTls = z.strictObject({ cert: path, key: path, ca: path.optional() }).meta({
+  description:
+    "TLS: cert and key, paths to PEM files, and ca to require client certificates it signed (mutual TLS). Required unless plaintext: true.",
+});
 
 /** A connecting endpoint's TLS: the CA to trust, and a client certificate to present. */
-const clientTls = z
-  .strictObject({ ca: path.optional(), cert: path.optional(), key: path.optional() })
-  .superRefine((value, ctx) => {
-    if ((value.cert === undefined) !== (value.key === undefined)) {
-      ctx.addIssue({
-        code: "custom",
-        path: [value.cert === undefined ? "cert" : "key"],
-        message: "cert and key go together: set both, or neither",
-      });
-    }
-  });
+const clientTls = restate(
+  z
+    .strictObject({ ca: path.optional(), cert: path.optional(), key: path.optional() })
+    .meta({
+      description:
+        "TLS: ca to trust in place of Node.js's built-in roots, and cert and key, together, to present a client certificate. {} verifies the server against the built-in roots.",
+    })
+    .superRefine((value, ctx) => {
+      if ((value.cert === undefined) !== (value.key === undefined)) {
+        ctx.addIssue({
+          code: "custom",
+          path: [value.cert === undefined ? "cert" : "key"],
+          message: "cert and key go together: set both, or neither",
+        });
+      }
+    }),
+  (json) => {
+    json["dependencies"] = { cert: ["key"], key: ["cert"] };
+  },
+);
 
 /** How a listening endpoint authenticates a request. */
-const auth = z.union([z.literal("none"), z.strictObject({ bearer: fromEnv })], {
-  error: "either none, or { bearer: { env: NAME } } to read the token from an environment variable",
-});
+const auth = z
+  .union([z.literal("none"), z.strictObject({ bearer: fromEnv })], {
+    error:
+      "either none, or { bearer: { env: NAME } } to read the token from an environment variable",
+  })
+  .meta({
+    description:
+      "none, or { bearer: { env: NAME } } to read the token from an environment variable. Default: mutual TLS when tls.ca is set, otherwise a bearer token from the default variable.",
+  });
 
 /** What every listening endpoint (an HTTP source, the health endpoint) is configured with. */
 const listenerShape = {
   port,
-  host: host.optional(),
+  host: host
+    .meta({ description: "The address to listen on. Default 127.0.0.1, this machine only." })
+    .optional(),
   tls: serverTls.optional(),
-  plaintext: z.boolean().optional(),
+  plaintext,
   auth: auth.optional(),
 };
 
@@ -175,24 +264,63 @@ function tlsOrPlaintext(
 const LISTENER_TLS_REQUIRED =
   "required: set tls: { cert, key }, or plaintext: true to run without TLS";
 
-const httpSource = z
-  .strictObject({
-    ...listenerShape,
-    path: z.string().startsWith("/", "a path starting with /").optional(),
-    maxBytes: bytes.optional(),
-  })
-  .superRefine((value, ctx) => tlsOrPlaintext(value, ctx, LISTENER_TLS_REQUIRED));
+const httpSource = restate(
+  z
+    .strictObject({
+      ...listenerShape,
+      path: z
+        .string()
+        .regex(/^\//, "a path starting with /")
+        .meta({ description: "The path each message is POSTed to, starting with /. Default /." })
+        .optional(),
+      maxBytes: bytes.optional(),
+    })
+    .meta({ description: "Take each POST to path as one message, over HTTPS unless plaintext." })
+    .superRefine((value, ctx) => tlsOrPlaintext(value, ctx, LISTENER_TLS_REQUIRED)),
+  (json) => Object.assign(json, TLS_OR_PLAINTEXT),
+);
 
 /** What an HTTP client endpoint (an HTTP destination, a webhook hook) is configured with. */
 const httpClientShape = {
-  url: z.string().refine((value) => {
-    const url = URL.parse(value);
-    return url !== null && (url.protocol === "https:" || url.protocol === "http:");
-  }, "an https:// URL"),
-  headers: z.record(z.string(), z.union([z.string(), fromEnv])).optional(),
+  url: z
+    .string()
+    .refine((value) => {
+      const url = URL.parse(value);
+      return url !== null && (url.protocol === "https:" || url.protocol === "http:");
+    }, "an https:// URL")
+    .meta({
+      description:
+        "Where to POST: an https:// URL, or http:// with plaintext: true. No user name or password.",
+    }),
+  headers: z
+    .record(z.string(), z.union([z.string(), fromEnv]))
+    .meta({
+      description:
+        "Headers to send: a value, or { env: NAME } to read it from an environment variable at start. A header that carries a credential must use { env: NAME }.",
+    })
+    .optional(),
   tls: clientTls.optional(),
-  plaintext: z.boolean().optional(),
+  plaintext,
 };
+
+/**
+ * The JSON Schema restatement of {@link httpClientChecks}'s scheme rules: no `tls` with
+ * `plaintext: true`, `plaintext: true` with an `http:` url, and never with an `https:` one. The
+ * patterns match a scheme only at the very start, in either case, so a url `URL` would read
+ * differently is left to start rather than refused here. The credential and header rules are not
+ * restated.
+ */
+function restateHttpClient(json: JsonSchema): void {
+  const scheme = (pattern: string): JsonSchema => ({
+    properties: { url: { type: "string", pattern } },
+    required: ["url"],
+  });
+  json.allOf = [
+    { if: PLAINTEXT_TRUE, then: { not: { required: ["tls"] } } },
+    { if: scheme("^[Hh][Tt][Tt][Pp]:"), then: PLAINTEXT_TRUE },
+    { if: scheme("^[Hh][Tt][Tt][Pp][Ss]:"), then: { not: PLAINTEXT_TRUE } },
+  ];
+}
 
 /**
  * HTTPS unless `plaintext: true` with an `http://` url, no credentials in the url, and every header
@@ -254,58 +382,100 @@ function httpClientChecks(
   }
 }
 
-const httpDestination = z
-  .strictObject({
-    ...httpClientShape,
-    timeout: duration.optional(),
-    resendHeader: z.string().optional(),
-  })
-  .superRefine(httpClientChecks)
-  .superRefine((value, ctx) => {
-    const name = value.resendHeader;
-    if (name === undefined) return;
-    const at = ["resendHeader"];
-    const taken = Object.keys(value.headers ?? {}).some(
-      (header) => header.toLowerCase() === name.toLowerCase(),
-    );
-    if (!HEADER_NAME.test(name)) {
-      ctx.addIssue({ code: "custom", path: at, message: "not a valid header name" });
-    } else if (MANAGED_HEADERS.has(name.toLowerCase()) || name.toLowerCase() === "content-type") {
-      ctx.addIssue({ code: "custom", path: at, message: "Pathways sets this header itself" });
-    } else if (taken) {
-      ctx.addIssue({ code: "custom", path: at, message: "already set in headers" });
-    }
-  });
+const httpDestination = restate(
+  z
+    .strictObject({
+      ...httpClientShape,
+      timeout: duration(
+        "How long to wait for an answer before the attempt is retried: a duration such as 30s, or a number of milliseconds. Default 30s.",
+      ).optional(),
+      resendHeader: z
+        .string()
+        .meta({
+          description:
+            "A header sent only on a possible duplicate, a resend after an attempt was cut off, its value the number of attempts before. Default: none is sent.",
+        })
+        .optional(),
+    })
+    .meta({ description: "POST each output to url." })
+    .superRefine(httpClientChecks)
+    .superRefine((value, ctx) => {
+      const name = value.resendHeader;
+      if (name === undefined) return;
+      const at = ["resendHeader"];
+      const taken = Object.keys(value.headers ?? {}).some(
+        (header) => header.toLowerCase() === name.toLowerCase(),
+      );
+      if (!HEADER_NAME.test(name)) {
+        ctx.addIssue({ code: "custom", path: at, message: "not a valid header name" });
+      } else if (MANAGED_HEADERS.has(name.toLowerCase()) || name.toLowerCase() === "content-type") {
+        ctx.addIssue({ code: "custom", path: at, message: "Pathways sets this header itself" });
+      } else if (taken) {
+        ctx.addIssue({ code: "custom", path: at, message: "already set in headers" });
+      }
+    }),
+  (json) => {
+    restateHttpClient(json);
+    // The name rule alone: the reserved names and those headers sets are left to start.
+    const properties = json.properties as Record<string, JsonSchema>;
+    properties["resendHeader"] = { ...properties["resendHeader"], pattern: HEADER_NAME.source };
+  },
+);
 
 /** The built-in webhook hook: an HTTP client endpoint whose time limit is its hook entry's. */
-const webhook = z.strictObject(httpClientShape).superRefine(httpClientChecks);
+const webhook = restate(
+  z
+    .strictObject(httpClientShape)
+    .meta({ description: "The built-in webhook: POST each event to url as JSON." })
+    .superRefine(httpClientChecks),
+  restateHttpClient,
+);
 
-const mllpSource = z
-  .strictObject({
-    port,
-    host: host.optional(),
-    tls: serverTls.optional(),
-    plaintext: z.boolean().optional(),
-    onStoreFailure: onStoreFailure.optional(),
-    ackBuilder: path.optional(),
-  })
-  .superRefine((value, ctx) => tlsOrPlaintext(value, ctx, LISTENER_TLS_REQUIRED));
+const mllpSource = restate(
+  z
+    .strictObject({
+      port,
+      host: listenerShape.host,
+      tls: serverTls.optional(),
+      plaintext,
+      onStoreFailure: onStoreFailure.optional(),
+      ackBuilder: path
+        .meta({
+          description:
+            "A module whose default export builds each ACK, relative to this file. Default: the built-in ACK.",
+        })
+        .optional(),
+    })
+    .meta({
+      description:
+        "Listen for HL7 v2 over MLLP: each framed message is stored, then acknowledged. Needs format: hl7v2.",
+    })
+    .superRefine((value, ctx) => tlsOrPlaintext(value, ctx, LISTENER_TLS_REQUIRED)),
+  (json) => Object.assign(json, TLS_OR_PLAINTEXT),
+);
 
-const mllpDestination = z
-  .strictObject({
-    host,
-    port,
-    tls: clientTls.optional(),
-    plaintext: z.boolean().optional(),
-    ackTimeout: duration.optional(),
-  })
-  .superRefine((value, ctx) =>
-    tlsOrPlaintext(
-      value,
-      ctx,
-      "required: set tls: {} to verify the server against Node's built-in roots, tls: { ca } to trust your own CA, or plaintext: true to run without TLS",
+const mllpDestination = restate(
+  z
+    .strictObject({
+      host: host.meta({ description: "The address to connect to." }),
+      port,
+      tls: clientTls.optional(),
+      plaintext,
+      ackTimeout: settingsShape.ackTimeout,
+    })
+    .meta({
+      description:
+        "Send each output over MLLP and wait for its ACK. Needs format: hl7v2. TLS unless plaintext: true; tls: {} verifies the server against Node.js's built-in roots.",
+    })
+    .superRefine((value, ctx) =>
+      tlsOrPlaintext(
+        value,
+        ctx,
+        "required: set tls: {} to verify the server against Node's built-in roots, tls: { ca } to trust your own CA, or plaintext: true to run without TLS",
+      ),
     ),
-  );
+  (json) => Object.assign(json, TLS_OR_PLAINTEXT),
+);
 
 /**
  * A database server's connection URL, read from an environment variable at startup. It carries the
@@ -324,27 +494,47 @@ const urlFromEnv = z.strictObject(
 );
 
 /** A database server's connection pool. */
-const storagePool = z.strictObject({
-  max: z.number().int().min(1).max(1_000).optional(),
-  idleTimeout: duration.optional(),
-});
+const storagePool = z
+  .strictObject({
+    max: z
+      .number()
+      .int()
+      .min(1)
+      .max(1_000)
+      .meta({ description: "The most connections the pool opens, 1 to 1000. Default 10." })
+      .optional(),
+    idleTimeout: duration(
+      "How long an idle connection stays open: a duration such as 30s, or a number of milliseconds. Default 30s.",
+    ).optional(),
+  })
+  .meta({ description: "The connection pool." });
 
 /** A database server: PostgreSQL, MySQL or MariaDB, or SQL Server. */
-const serverStorage = z
-  .strictObject({
-    url: urlFromEnv.optional(),
-    tls: clientTls.optional(),
-    plaintext: z.boolean().optional(),
-    pool: storagePool.optional(),
-    connectTimeout: duration.optional(),
-  })
-  .superRefine((value, ctx) =>
-    tlsOrPlaintext(
-      value,
-      ctx,
-      "required: set tls: {} to verify the server against Node's built-in roots, tls: { ca } to trust your own CA, or plaintext: true to connect without TLS",
+const serverStorage = restate(
+  z
+    .strictObject({
+      url: urlFromEnv
+        .meta({
+          description:
+            "{ env: NAME }: the environment variable that holds the connection URL, read at start. Default { env: PATHWAYS_DATABASE_URL }.",
+        })
+        .optional(),
+      tls: clientTls.optional(),
+      plaintext,
+      pool: storagePool.optional(),
+      connectTimeout: duration(
+        "How long connecting may take: a duration such as 10s, or a number of milliseconds. Default 10s.",
+      ).optional(),
+    })
+    .superRefine((value, ctx) =>
+      tlsOrPlaintext(
+        value,
+        ctx,
+        "required: set tls: {} to verify the server against Node's built-in roots, tls: { ca } to trust your own CA, or plaintext: true to connect without TLS",
+      ),
     ),
-  );
+  (json) => Object.assign(json, TLS_OR_PLAINTEXT),
+);
 
 /** Exactly one key of a block that names one kind of connector. */
 function oneKind(kinds: readonly string[]) {
@@ -371,7 +561,26 @@ function optionsWithModule(
 }
 
 /** A custom module's options: any YAML mapping, handed to the module's factory as it is. */
-const moduleOptions = z.record(z.string(), z.unknown());
+const moduleOptions = z.record(z.string(), z.unknown()).meta({
+  description: "Any mapping, handed to the module's factory as it is. Only with module.",
+});
+
+/** `module:`, a custom connector, store or hook. */
+const modulePath = path.meta({
+  description:
+    "A module whose default export is the factory, relative to this file. options go with it.",
+});
+
+/**
+ * The JSON Schema restatement of a block that names exactly one kind ({@link oneKind}), and whose
+ * `options` go with `module` ({@link optionsWithModule}).
+ */
+const restateKinds =
+  (kinds: readonly string[]) =>
+  (json: JsonSchema): void => {
+    json.oneOf = exactlyOneOf(kinds);
+    json["dependencies"] = { options: ["module"] };
+  };
 
 const SOURCE_KINDS = ["file", "http", "mllp", "module"] as const;
 const DESTINATION_KINDS = ["file", "http", "mllp", "module"] as const;
@@ -402,31 +611,56 @@ export type StorageKind = (typeof STORAGE_KINDS)[number];
 const STORAGE_BLOCK_KINDS = [...STORAGE_KINDS, "module"] as const;
 
 /** A hook's time limit: a duration above zero. */
-const hookTimeout = duration.refine((value) => value > 0, 'a duration above zero, such as "5s"');
+const hookTimeout = duration(
+  "How long one call to the hook may run: a duration above zero, such as 5s, or a number of milliseconds. Default 5s.",
+).refine((value) => value > 0, 'a duration above zero, such as "5s"');
 
 /** One hook in a `hooks:` list, written out. */
-const hookObject = z
-  .strictObject({
-    module: path.optional(),
-    options: moduleOptions.optional(),
-    webhook: webhook.optional(),
-    events: z.array(z.enum(LIFECYCLE_EVENTS)).min(1, "at least one event").optional(),
-    timeout: hookTimeout.optional(),
-  })
-  .superRefine(oneKind(HOOK_KINDS))
-  .superRefine(optionsWithModule);
+const hookObject = restate(
+  z
+    .strictObject({
+      module: modulePath.optional(),
+      options: moduleOptions.optional(),
+      webhook: webhook.optional(),
+      events: z
+        .array(z.enum(LIFECYCLE_EVENTS))
+        .min(1, "at least one event")
+        .meta({ description: "The events the hook receives, at least one. Default: every event." })
+        .optional(),
+      timeout: hookTimeout.optional(),
+    })
+    .superRefine(oneKind(HOOK_KINDS))
+    .superRefine(optionsWithModule),
+  restateKinds(HOOK_KINDS),
+);
+
+/**
+ * A hook written out, as the YAML holds it before {@link hookObject} reads it. In the JSON Schema it
+ * stands for {@link hookObject}, which the pipe below hides from the input side.
+ */
+const hookMapping = restate(z.record(z.string(), z.unknown()), (json) => {
+  for (const key of Object.keys(json)) delete json[key];
+  const { $schema: _draft, ...hook } = toJsonSchema(hookObject);
+  Object.assign(json, hook);
+});
 
 /**
  * One hook in a `hooks:` list: a module path on its own, `{ module, options }`, or
  * `{ webhook: { url, headers } }`, each with optional `events` and `timeout`.
  */
 const hookEntry = z
-  .union([path.transform((module) => ({ module })), z.record(z.string(), z.unknown())], {
+  .union([path.transform((module) => ({ module })), hookMapping], {
     error: "a module path, { module: path, options }, or { webhook: { url } }",
   })
   .pipe(hookObject);
 
-const hooks = z.array(hookEntry).optional();
+const hooks = z
+  .array(hookEntry)
+  .meta({
+    description:
+      "Lifecycle hooks: each a module path, { module, options }, or { webhook: { url, headers } }, with optional events and timeout.",
+  })
+  .optional();
 
 /**
  * What a master key's id may hold: letters, digits, dots, hyphens and underscores, at most 64,
@@ -448,143 +682,301 @@ const keyId = z
   );
 
 /** One master key: its id, and where its value is read when the engine starts. Never the value. */
-const masterKey = z
-  .strictObject({
-    id: keyId,
-    env: fromEnv.shape.env.optional(),
-    file: path.optional(),
-  })
-  .superRefine((value, ctx) => {
-    if ((value.env === undefined) === (value.file === undefined)) {
-      ctx.addIssue({
-        code: "custom",
-        message: "name exactly one of: env, file; a key's value never goes in the YAML",
-      });
-    }
-  });
-
-/** `encryption: none`, or the master keys and which one encrypts new values. */
-const encryption = z.union(
-  [
-    z.literal("none"),
-    z
-      .strictObject({ keys: z.array(masterKey).min(1, "at least one key"), current: keyId })
-      .superRefine((value, ctx) => {
-        const seen = new Set<string>();
-        for (const [index, key] of value.keys.entries()) {
-          if (seen.has(key.id)) {
-            ctx.addIssue({
-              code: "custom",
-              path: ["keys", index, "id"],
-              message: "another key already has this id",
-            });
-          }
-          seen.add(key.id);
-        }
-        if (!seen.has(value.current)) {
-          ctx.addIssue({ code: "custom", path: ["current"], message: "names no key in keys" });
-        }
+const masterKey = restate(
+  z
+    .strictObject({
+      id: keyId.meta({
+        description:
+          "The key's id: letters, digits, dots, hyphens and underscores, at most 64, unique in the list. Never secret.",
       }),
-    // A user's KeyProvider: a module whose default export builds it, such as one over a cloud key
-    // service. It holds its own master keys and says which one is current.
-    z.strictObject({
-      provider: z.strictObject({ module: path, options: moduleOptions.optional() }),
+      env: fromEnv.shape.env
+        .meta({ description: "The environment variable the key is read from at start." })
+        .optional(),
+      file: path
+        .meta({ description: "The file the key is read from at start, relative to this file." })
+        .optional(),
+    })
+    .superRefine((value, ctx) => {
+      if ((value.env === undefined) === (value.file === undefined)) {
+        ctx.addIssue({
+          code: "custom",
+          message: "name exactly one of: env, file; a key's value never goes in the YAML",
+        });
+      }
     }),
-  ],
-  {
-    error:
-      "either none, { keys: [{ id, env: NAME } or { id, file: path }], current: id }, or { provider: { module: path, options } } to encrypt stored messages",
+  (json) => {
+    json.oneOf = exactlyOneOf(["env", "file"]);
   },
 );
 
-/** `pathways.yaml` at the project root. Every key is optional. */
-export const projectSchema = z.strictObject({
-  encryption: encryption.optional(),
-  storage: z
+/** `encryption: none`, or the master keys and which one encrypts new values. */
+const encryption = z
+  .union(
+    [
+      z.literal("none"),
+      z
+        .strictObject({ keys: z.array(masterKey).min(1, "at least one key"), current: keyId })
+        .superRefine((value, ctx) => {
+          const seen = new Set<string>();
+          for (const [index, key] of value.keys.entries()) {
+            if (seen.has(key.id)) {
+              ctx.addIssue({
+                code: "custom",
+                path: ["keys", index, "id"],
+                message: "another key already has this id",
+              });
+            }
+            seen.add(key.id);
+          }
+          if (!seen.has(value.current)) {
+            ctx.addIssue({ code: "custom", path: ["current"], message: "names no key in keys" });
+          }
+        }),
+      // A user's KeyProvider: a module whose default export builds it, such as one over a cloud key
+      // service. It holds its own master keys and says which one is current.
+      z.strictObject({
+        provider: z.strictObject({ module: path, options: moduleOptions.optional() }),
+      }),
+    ],
+    {
+      error:
+        "either none, { keys: [{ id, env: NAME } or { id, file: path }], current: id }, or { provider: { module: path, options } } to encrypt stored messages",
+    },
+  )
+  .meta({
+    description:
+      "How stored messages are encrypted: { keys: [{ id, env: NAME } or { id, file: path }], current: id }, { provider: { module, options } }, or none. pathways start needs it.",
+  });
+
+/** A `storage:` block: exactly one database, or a custom store's module. */
+const storage = restate(
+  z
     .strictObject({
-      sqlite: z.strictObject({ file: z.string().min(1) }).optional(),
-      postgres: serverStorage.optional(),
-      mysql: serverStorage.optional(),
-      sqlserver: serverStorage.optional(),
-      module: path.optional(),
+      sqlite: z
+        .strictObject({
+          file: z
+            .string()
+            .min(1)
+            .meta({ description: "The database file, relative to this file." }),
+        })
+        .meta({ description: "SQLite, bundled. Default { file: .pathways/pathways.db }." })
+        .optional(),
+      postgres: serverStorage.meta({ description: "PostgreSQL. Needs the pg driver." }).optional(),
+      mysql: serverStorage
+        .meta({ description: "MySQL or MariaDB. Needs the mysql2 driver." })
+        .optional(),
+      sqlserver: serverStorage
+        .meta({ description: "SQL Server. Needs the tedious and tarn drivers." })
+        .optional(),
+      module: modulePath.optional(),
       options: moduleOptions.optional(),
     })
+    .meta({
+      description:
+        "Where messages are stored: exactly one of sqlite, postgres, mysql, sqlserver or module. Default SQLite at .pathways/pathways.db.",
+    })
     .superRefine(oneKind(STORAGE_BLOCK_KINDS))
-    .superRefine(optionsWithModule)
-    .optional(),
-  hooks,
-  defaults: z.strictObject(settingsShape).optional(),
-  health: z
+    .superRefine(optionsWithModule),
+  restateKinds(STORAGE_BLOCK_KINDS),
+);
+
+/** The health endpoint: a listener. */
+const health = restate(
+  z
     .strictObject(listenerShape)
-    .superRefine((value, ctx) => tlsOrPlaintext(value, ctx, LISTENER_TLS_REQUIRED))
-    .optional(),
-});
+    .meta({
+      description:
+        "The health endpoint, served while the engine runs. Its token is read from PATHWAYS_HEALTH_TOKEN unless auth says otherwise.",
+    })
+    .superRefine((value, ctx) => tlsOrPlaintext(value, ctx, LISTENER_TLS_REQUIRED)),
+  (json) => Object.assign(json, TLS_OR_PLAINTEXT),
+);
+
+/** `pathways.yaml` at the project root. Every key is optional. */
+export const projectSchema = z
+  .strictObject({
+    encryption: encryption.optional(),
+    storage: storage.optional(),
+    hooks,
+    defaults: z
+      .strictObject(settingsShape)
+      .meta({ description: "Settings for every channel. A channel can override most of them." })
+      .optional(),
+    health: health.optional(),
+  })
+  .meta({
+    title: "pathways.yaml",
+    description:
+      "Settings for a whole Pathways project. This schema checks a subset of what pathways start checks: run pathways validate for the rest.",
+  });
+
+/** A channel's `source:` block: exactly one kind. */
+const source = restate(
+  z
+    .strictObject({
+      file: z
+        .strictObject({
+          dir: z.string().min(1).meta({
+            description: "The folder to read, relative to this file. Created if missing.",
+          }),
+          minAge: duration(
+            "How long a file must sit unchanged before it is read: a duration such as 1s, or a number of milliseconds. Default 1s.",
+          ).optional(),
+          keepProcessed: z
+            .boolean()
+            .meta({
+              description:
+                "Move each stored file into processed/ instead of deleting it. Those copies are plaintext. Default false.",
+            })
+            .optional(),
+        })
+        .meta({ description: "Read each file dropped into dir as one message." })
+        .optional(),
+      http: httpSource.optional(),
+      mllp: mllpSource.optional(),
+      module: modulePath.optional(),
+      options: moduleOptions.optional(),
+    })
+    .meta({
+      description: "Where messages come from: exactly one of file, http, mllp or module.",
+    })
+    .superRefine(oneKind(SOURCE_KINDS))
+    .superRefine(optionsWithModule),
+  restateKinds(SOURCE_KINDS),
+);
+
+/** One entry of a channel's `destinations:` list: exactly one kind. */
+const destination = restate(
+  z
+    .strictObject({
+      file: z
+        .strictObject({
+          dir: z.string().min(1).meta({
+            description: "The folder to write into, relative to this file. Created if missing.",
+          }),
+        })
+        .meta({ description: "Write each output into dir as a file of its own." })
+        .optional(),
+      http: httpDestination.optional(),
+      mllp: mllpDestination.optional(),
+      module: modulePath.optional(),
+      options: moduleOptions.optional(),
+    })
+    .meta({ description: "One destination: exactly one of file, http, mllp or module." })
+    .superRefine(oneKind(DESTINATION_KINDS))
+    .superRefine(optionsWithModule),
+  restateKinds(DESTINATION_KINDS),
+);
 
 /** `channels/<name>/channel.yaml`. */
-export const channelSchema = z
-  .strictObject({
-    name: z
-      .string()
-      .regex(
-        /^[a-z0-9][a-z0-9-]*$/,
-        "lowercase letters, digits and hyphens, starting with a letter or digit",
-      )
-      .optional(),
-    format: z.enum(FORMATS).optional(),
-    source: z
-      .strictObject({
-        file: z
-          .strictObject({
-            dir: z.string().min(1),
-            minAge: duration.optional(),
-            keepProcessed: z.boolean().optional(),
-          })
-          .optional(),
-        http: httpSource.optional(),
-        mllp: mllpSource.optional(),
-        module: path.optional(),
-        options: moduleOptions.optional(),
-      })
-      .superRefine(oneKind(SOURCE_KINDS))
-      .superRefine(optionsWithModule),
-    transform: z.string().min(1).optional(),
-    destinations: z
-      .array(
-        z
-          .strictObject({
-            file: z.strictObject({ dir: z.string().min(1) }).optional(),
-            http: httpDestination.optional(),
-            mllp: mllpDestination.optional(),
-            module: path.optional(),
-            options: moduleOptions.optional(),
-          })
-          .superRefine(oneKind(DESTINATION_KINDS))
-          .superRefine(optionsWithModule),
-      )
-      .min(1, "at least one destination"),
-    hooks,
-    // A channel overrides the transform limits, the MLLP defaults and retention; how often the
-    // engine polls, and how often it runs retention, are engine-wide.
-    timeout: settingsShape.timeout,
-    memory: settingsShape.memory,
-    onStoreFailure: settingsShape.onStoreFailure,
-    ackTimeout: settingsShape.ackTimeout,
-    retention: settingsShape.retention,
-    resendFlag: settingsShape.resendFlag,
-  })
-  .superRefine((channel, ctx) => {
-    // MLLP frames HL7 v2 and its ACKs are HL7 v2 messages, so an MLLP endpoint needs that format.
-    if ((channel.format ?? "hl7v2") === "hl7v2") return;
-    const message = `MLLP carries HL7 v2 only, and this channel's format is ${String(channel.format)}; set format: hl7v2, or use another connector`;
-    if (channel.source.mllp !== undefined) {
-      ctx.addIssue({ code: "custom", path: ["source", "mllp"], message });
-    }
-    for (const [index, destination] of channel.destinations.entries()) {
-      if (destination.mllp !== undefined) {
-        ctx.addIssue({ code: "custom", path: ["destinations", index, "mllp"], message });
+export const channelSchema = restate(
+  z
+    .strictObject({
+      name: z
+        .string()
+        .regex(
+          /^[a-z0-9][a-z0-9-]*$/,
+          "lowercase letters, digits and hyphens, starting with a letter or digit",
+        )
+        .meta({
+          description:
+            "The channel's name: lowercase letters, digits and hyphens. Must match its folder's name, the default.",
+        })
+        .optional(),
+      format: z
+        .enum(FORMATS)
+        .meta({
+          description:
+            "What the transform receives: hl7v2 (the default), fhir, x12, ccda, json, or text, the body unparsed. MLLP needs hl7v2.",
+        })
+        .optional(),
+      source,
+      transform: z
+        .string()
+        .min(1)
+        .meta({
+          description:
+            "The transform module, relative to this file. Default: none, each message passes through unchanged.",
+        })
+        .optional(),
+      destinations: z
+        .array(destination)
+        .min(1, "at least one destination")
+        .meta({ description: "Where each output goes: at least one destination." }),
+      hooks,
+      // A channel overrides the transform limits, the MLLP defaults and retention; how often the
+      // engine polls, and how often it runs retention, are engine-wide.
+      timeout: settingsShape.timeout,
+      memory: settingsShape.memory,
+      onStoreFailure: settingsShape.onStoreFailure,
+      ackTimeout: settingsShape.ackTimeout,
+      retention: settingsShape.retention,
+      resendFlag: settingsShape.resendFlag,
+    })
+    .meta({
+      title: "channel.yaml",
+      description:
+        "One Pathways channel: a source, an optional transform and its destinations. This schema checks a subset of what pathways start checks: run pathways validate for the rest.",
+    })
+    .superRefine((channel, ctx) => {
+      // MLLP frames HL7 v2 and its ACKs are HL7 v2 messages, so an MLLP endpoint needs that format.
+      if ((channel.format ?? "hl7v2") === "hl7v2") return;
+      const message = `MLLP carries HL7 v2 only, and this channel's format is ${String(channel.format)}; set format: hl7v2, or use another connector`;
+      if (channel.source.mllp !== undefined) {
+        ctx.addIssue({ code: "custom", path: ["source", "mllp"], message });
       }
-    }
+      for (const [index, destination] of channel.destinations.entries()) {
+        if (destination.mllp !== undefined) {
+          ctx.addIssue({ code: "custom", path: ["destinations", index, "mllp"], message });
+        }
+      }
+    }),
+  (json) => {
+    const noMllp: JsonSchema = { type: "object", not: { required: ["mllp"] } };
+    json.if = { properties: { format: { not: { const: "hl7v2" } } }, required: ["format"] };
+    json.then = {
+      properties: { source: noMllp, destinations: { type: "array", items: noMllp } },
+    };
+  },
+);
+
+/**
+ * The options every JSON Schema of the configuration is written with: draft-07, which the YAML
+ * language server and most validators read; the input side, so a duration is what an author writes
+ * (`5s` or a number); and `{}` for what JSON Schema cannot say. Each refinement's restatement is
+ * applied through `override`, found by the schema it belongs to or one it was copied from.
+ */
+function toJsonSchema(schema: z.core.$ZodType): JsonSchema {
+  return z.toJSONSchema(schema, {
+    io: "input",
+    target: "draft-07",
+    unrepresentable: "any",
+    override: ({ zodSchema, jsonSchema }) => {
+      // `.meta()` copies a schema, and the copy names the original as its parent.
+      let rule: ((json: JsonSchema) => void) | undefined;
+      for (let at: z.core.$ZodType | undefined = zodSchema; rule === undefined && at;) {
+        rule = restatements.get(at);
+        at = at._zod.parent;
+      }
+      rule?.(jsonSchema);
+    },
   });
+}
+
+/**
+ * The JSON Schemas of `channel.yaml` and `pathways.yaml`, draft-07, which the build writes to
+ * `schema/channel.json` and `schema/project.json`. Each checks a subset of what
+ * {@link channelSchema} and {@link projectSchema} check: whatever they accept, it accepts.
+ *
+ * @example
+ * ```ts
+ * const { channel } = configJsonSchemas();
+ * channel.$schema; // "http://json-schema.org/draft-07/schema#"
+ * ```
+ */
+export function configJsonSchemas(): { channel: JsonSchema; project: JsonSchema } {
+  return { channel: toJsonSchema(channelSchema), project: toJsonSchema(projectSchema) };
+}
 
 /** The settings in force for one channel, after the engine defaults and the channel's own. */
 export interface Settings {

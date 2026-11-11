@@ -13,6 +13,7 @@ import { parse as parseYaml } from "yaml";
 
 import {
   channelSchema,
+  configJsonSchemas,
   DEFAULT_SETTINGS,
   parseDuration,
   projectSchema,
@@ -823,6 +824,39 @@ describe("set message retention", () => {
       expect(dry.code).toBe(0);
       expect(dry.out.split("\n")[0]).toBe(outputs("set-message-retention.md")[0]?.split("\n")[0]);
       expect(cli(["audit"], dir).out).not.toMatch(/retention/);
+    },
+    SLOW,
+  );
+});
+
+describe("check configuration in an editor and in CI", () => {
+  const name = "check-configuration.md";
+
+  it("names the schema files the build writes, and they are the schemas the code makes", () => {
+    const made = configJsonSchemas();
+    for (const [kind, subpath] of [
+      ["project", "@cosyte/pathways/schema/project.json"],
+      ["channel", "@cosyte/pathways/schema/channel.json"],
+    ] as const) {
+      const installedPath = `node_modules/@cosyte/pathways/schema/${kind}.json`;
+      expect(page(name)).toContain(`| \`${subpath}\` | \`${installedPath}\` |`);
+      const built = join(ROOT, "schema", `${kind}.json`);
+      expect(JSON.parse(readFileSync(built, "utf8"))).toEqual(made[kind]);
+      // The modelines on the page name the same files the starter's do.
+      expect(page(name)).toContain(
+        `$schema=${kind === "project" ? "./" : "../../"}${installedPath}`,
+      );
+    }
+  });
+
+  it(
+    "prints what the page shows for the starter, and for it with the transform missing",
+    async () => {
+      const dir = await starterProject();
+      const [valid, invalid] = outputs(name);
+      expect(cli(["validate"], dir)).toEqual({ code: 0, out: `${valid ?? ""}\n`, err: "" });
+      await rm(join(dir, "channels", "adt-to-lab", "transform.ts"));
+      expect(cli(["validate"], dir)).toEqual({ code: 3, out: "", err: `${invalid ?? ""}\n` });
     },
     SLOW,
   );
