@@ -163,7 +163,9 @@ destination `ackTimeout`, and any destination `retry`.
 #### Retry
 
 A `retry:` block, in `defaults:`, a channel, or a destination. The narrowest that sets a key wins,
-key by key. See [Delivery and errors](./delivery-and-errors.md#set-retries-per-destination).
+key by key. Each key may be read from the environment, `none` included, as
+`limit: { env: RETRY_LIMIT, default: none }`; `first` is checked against `max` on the values read.
+See [Delivery and errors](./delivery-and-errors.md#set-retries-per-destination).
 
 | Key         | Type                                    | Default  | Meaning                                                                                  |
 | ----------- | --------------------------------------- | -------- | ---------------------------------------------------------------------------------------- |

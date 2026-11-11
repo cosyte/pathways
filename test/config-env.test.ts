@@ -600,6 +600,56 @@ destinations:
     expect(project({ storage: { sqlite: { file: "a.db" }, module: "./s.ts" } })).toBe(false);
   });
 
+  it("take a reference at every key that holds one value, but the documented exceptions", () => {
+    // configuration-reference.md, "Settings from the environment": plaintext, a channel's name and
+    // format are never read from the environment (encryption: none and auth: none are the short
+    // form of a block, and blocks are not scalars, so the walk passes over them).
+    const EXCEPTIONS = new Set(["plaintext", "name", "format"]);
+    type Node = Record<string, unknown>;
+    const isNode = (value: unknown): value is Node =>
+      typeof value === "object" && value !== null && !Array.isArray(value);
+    const branches = (node: Node): Node[] =>
+      [node["anyOf"], node["oneOf"], node["allOf"]].flatMap((list) =>
+        Array.isArray(list) ? list.filter(isNode) : [],
+      );
+    const isReference = (node: Node): boolean =>
+      isNode(node["properties"]) && "env" in node["properties"];
+    const isScalar = (node: Node): boolean => {
+      const options = branches(node);
+      if (options.length > 0) return options.every(isScalar);
+      const type = node["type"];
+      return (
+        "const" in node ||
+        "enum" in node ||
+        type === "string" ||
+        type === "number" ||
+        type === "integer" ||
+        type === "boolean"
+      );
+    };
+    const missing: string[] = [];
+    const walk = (node: Node, path: readonly string[]): void => {
+      if (isReference(node) || branches(node).some(isReference)) return;
+      if (isScalar(node)) {
+        if (!EXCEPTIONS.has(path.at(-1) ?? "")) missing.push(path.join("."));
+        return;
+      }
+      const properties = node["properties"];
+      if (isNode(properties)) {
+        for (const [key, child] of Object.entries(properties)) {
+          if (isNode(child)) walk(child, [...path, key]);
+        }
+      }
+      if (isNode(node["items"])) walk(node["items"], [...path, "[]"]);
+      if (isNode(node["additionalProperties"])) walk(node["additionalProperties"], [...path, "*"]);
+      // A union of a block and its short form (hooks: [./hook.ts], response: ack) walks the block.
+      for (const option of branches(node)) if (!isScalar(option)) walk(option, path);
+    };
+    walk(schemas.project, ["pathways.yaml"]);
+    walk(schemas.channel, ["channel.yaml"]);
+    expect(missing).toEqual([]);
+  });
+
   it("refuse plaintext read from the environment, as Zod does", () => {
     expect(project({ health: { port: 9090, plaintext: { env: "PLAIN" } } })).toBe(false);
     expect(

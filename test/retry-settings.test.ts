@@ -233,6 +233,100 @@ describe("retry settings in pathways.yaml, the channel and the destination", () 
   });
 });
 
+describe("retry settings read from the environment", () => {
+  /** Loads the project of `projectFiles` with `env` as its environment. */
+  const loadWith = async (projectFiles: Record<string, string>, env: Record<string, string>) =>
+    loadProject(await makeProject(projectFiles), { env });
+
+  it.each<[string, string, Partial<RetryPolicy>]>([
+    ["first", "750", { firstMs: 750 }],
+    ["max", "2m", { maxMs: 120_000 }],
+    ["factor", "1.5", { factor: 1.5 }],
+    ["jitter", "full", { jitter: "full" }],
+    ["limit", "7", { limit: 7 }],
+    ["maxAge", "1h", { maxAgeMs: 3_600_000 }],
+    ["onExhaust", "failed", { onExhaust: "failed" }],
+    ["rotate", "true", { rotate: true }],
+  ])("read %s from a variable, at each level", async (key, text, expected) => {
+    const variable = `RETRY_${key.toUpperCase()}`;
+    const reference = `{ ${key}: { env: ${variable} } }`;
+    const project = await loadWith(
+      files(`defaults:\n  retry: ${reference}\n`, channel(reference, "", `retry: ${reference}\n`)),
+      { [variable]: text },
+    );
+    const policy = { ...DEFAULT_RETRY, ...expected };
+    expect(project.settings.retry).toEqual(policy);
+    const [resolved] = project.channels;
+    expect(resolved?.settings.retry).toEqual(policy);
+    expect(resolved?.destinations[0]?.retry).toEqual(policy);
+    expect(project.environment?.map((r) => [r.channel, r.key, r.variable])).toEqual([
+      [undefined, `defaults.retry.${key}`, variable],
+      ["text", `destinations.0.retry.${key}`, variable],
+      ["text", `retry.${key}`, variable],
+    ]);
+  });
+
+  it("take none for a limit or an age from a variable, and a reference's default", async () => {
+    const project = await loadWith(
+      files(
+        "defaults:\n  retry: { limit: 5, maxAge: 1h }\n",
+        channel(
+          "{ limit: { env: RETRY_LIMIT }, maxAge: { env: RETRY_AGE } }",
+          "{ limit: { env: UNSET_LIMIT, default: 3 }, jitter: { env: UNSET_JITTER, default: full } }",
+        ),
+      ),
+      { RETRY_LIMIT: "none", RETRY_AGE: "none" },
+    );
+    const [resolved] = project.channels;
+    const base = { ...DEFAULT_RETRY, limit: 5, maxAgeMs: 3_600_000 };
+    expect(resolved?.destinations[0]?.retry).toEqual({
+      ...base,
+      limit: undefined,
+      maxAgeMs: undefined,
+    });
+    expect(resolved?.destinations[1]?.retry).toEqual({ ...base, limit: 3, jitter: "full" });
+  });
+
+  it("refuse a bad value naming the key and the variable, never the value", async () => {
+    const problems = await loadWith(
+      files(
+        "defaults:\n  retry: { limit: { env: RETRY_LIMIT }, jitter: { env: RETRY_JITTER } }\n",
+        channel(),
+      ),
+      { RETRY_LIMIT: "0", RETRY_JITTER: "TESTSECRET" },
+    ).then(
+      () => [],
+      (error: unknown) => (error instanceof ConfigError ? error.problems : [String(error)]),
+    );
+    expect(problems).toHaveLength(2);
+    // In the order the schema lists the keys.
+    expect(problems[0]).toMatch(
+      /^pathways\.yaml: defaults\.retry\.jitter: .* \(read from the environment variable RETRY_JITTER\)$/,
+    );
+    expect(problems[1]).toMatch(
+      /^pathways\.yaml: defaults\.retry\.limit: .* \(read from the environment variable RETRY_LIMIT\)$/,
+    );
+    expect(problems.join("\n")).not.toContain("TESTSECRET");
+  });
+
+  it("check a first wait from a variable against max, as the values resolve", async () => {
+    const reference =
+      "defaults:\n  retry: { first: { env: RETRY_FIRST }, max: { env: RETRY_MAX } }\n";
+    await expect(
+      loadWith(files(reference, channel()), { RETRY_FIRST: "10m", RETRY_MAX: "5m" }),
+    ).rejects.toMatchObject({
+      problems: [
+        "pathways.yaml: defaults.retry: first (600000ms) is longer than max (300000ms); set first no longer than max",
+      ],
+    });
+    const project = await loadWith(files(reference, channel()), {
+      RETRY_FIRST: "2s",
+      RETRY_MAX: "10s",
+    });
+    expect(project.settings.retry).toEqual({ ...DEFAULT_RETRY, firstMs: 2_000, maxMs: 10_000 });
+  });
+});
+
 /** One `key: value` line as a mapping, the value read as YAML would read it. */
 function parse(setting: string): Record<string, unknown> {
   const [key = "", raw = ""] = setting.split(": ");

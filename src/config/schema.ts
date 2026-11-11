@@ -219,58 +219,56 @@ const orNone = <T extends z.ZodType>(value: T) => z.union([z.literal("none"), va
 
 /**
  * A `retry:` block, in `defaults:`, a channel or a destination. Every key is optional; the narrowest
- * level that sets a key wins, key by key.
+ * level that sets a key wins, key by key. Each key may be read from the environment, `none` too.
  */
 const retryBlock = z
   .strictObject({
-    first: positiveDuration(
-      "How long the first retry waits: a duration of at least 1ms, such as 1s, or a number of milliseconds. Default 1s.",
+    first: envable(
+      positiveDuration(
+        "How long the first retry waits: a duration of at least 1ms, such as 1s, or a number of milliseconds. Default 1s.",
+      ),
     ).optional(),
-    max: positiveDuration(
-      "The longest wait between tries, whatever a server asks with Retry-After; a held redirect waits this long: a duration such as 5m, or a number of milliseconds. Default 5m.",
+    max: envable(
+      positiveDuration(
+        "The longest wait between tries, whatever a server asks with Retry-After; a held redirect waits this long: a duration such as 5m, or a number of milliseconds. Default 5m.",
+      ),
     ).optional(),
-    factor: z
-      .number()
-      .min(1)
-      .max(100)
-      .meta({
+    factor: envable(
+      z.number().min(1).max(100).meta({
         description:
           "How much longer each wait is than the one before, 1 to 100: 1 waits first every time. Default 2.",
-      })
-      .optional(),
-    jitter: z
-      .enum(RETRY_JITTER)
-      .meta({
+      }),
+    ).optional(),
+    jitter: envable(
+      z.enum(RETRY_JITTER).meta({
         description:
           "none waits the backoff exactly; full waits a random time between 0 and it, so several destinations or engines retrying one receiver spread out. Default none.",
-      })
-      .optional(),
-    limit: orNone(z.number().int().min(1).max(1_000_000))
-      .meta({
+      }),
+    ).optional(),
+    limit: envable(
+      orNone(z.number().int().min(1).max(1_000_000)).meta({
         description:
           "The most attempts a delivery gets, the first included, before onExhaust: a whole number of at least 1, or none for no limit. Default none.",
-      })
-      .optional(),
-    maxAge: orNone(positiveDuration("A duration of at least 1ms."))
-      .meta({
+      }),
+    ).optional(),
+    maxAge: envable(
+      orNone(positiveDuration("A duration of at least 1ms.")).meta({
         description:
           "How long after it was queued a delivery may still be retried before onExhaust: a duration such as 1h, a number of milliseconds, or none. Default none.",
-      })
-      .optional(),
-    onExhaust: z
-      .enum(RETRY_ON_EXHAUST)
-      .meta({
+      }),
+    ).optional(),
+    onExhaust: envable(
+      z.enum(RETRY_ON_EXHAUST).meta({
         description:
           "What happens at the limit or the age: failed marks the delivery failed, its body kept for a resend, and the destination moves on. Default failed.",
-      })
-      .optional(),
-    rotate: z
-      .boolean()
-      .meta({
+      }),
+    ).optional(),
+    rotate: envable(
+      z.boolean().meta({
         description:
           "true lets later deliveries go ahead of one waiting for a retry, which breaks the destination's order. Default false.",
-      })
-      .optional(),
+      }),
+    ).optional(),
   })
   .meta({
     description:
