@@ -191,7 +191,7 @@ describe("pathways start on SQLite", () => {
     const stop = new AbortController();
     const engine = runCli(["start", "-C", root], { signal: stop.signal });
     try {
-      // Idle once its message is delivered: then a renewal, not a write, finds the lease gone.
+      // Once its message is delivered, it is idle.
       await until(
         async () => (await readdir(join(root, "data/out")).catch(() => [])).length === 1,
         "the delivery",
@@ -205,12 +205,13 @@ describe("pathways start on SQLite", () => {
       }
       const ended = await engine.done;
       expect(ended.code).toBe(EXIT.failed);
-      // Refused, in the main; a renewal that met the test's own write on the file may fail first.
-      const reason = /lost \((renewal-refused|renewal-failed)\)/.exec(ended.err)?.[1];
+      // A renewal finds the lease gone and is refused, or meets the test's own write on the file and
+      // fails; or the record of the delivery, written just after its file appears, is refused.
+      const reason = /lost \((renewal-refused|renewal-failed|write-refused)\)/.exec(ended.err)?.[1];
       expect(ended.err).toBe(
         `pathways: the engine lease was lost (${String(reason)}); this engine stopped sending and taking in. Another engine may hold it now.\n`,
       );
-      expect(ended.events.find((e) => e.event === "lease-lost")).toMatchObject({
+      expect(ended.events.filter((e) => e.event === "lease-lost").at(-1)).toMatchObject({
         level: 50,
         reason,
         epoch: 1,
