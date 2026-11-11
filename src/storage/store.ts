@@ -15,7 +15,6 @@ import {
   type SqlBool,
   type Transaction,
 } from "kysely";
-import { Migrator, type Migration, type MigrationProvider } from "kysely/migration";
 
 import { ConfigError } from "../config/load.js";
 import type { DatabaseStorage, StorageKind } from "../config/schema.js";
@@ -30,6 +29,20 @@ import {
   type LeaseHolder,
 } from "./lease.js";
 import { markCopiesBodies } from "./ownership.js";
+import {
+  migrateSchema,
+  openSchema,
+  readSchema,
+  recordedSteps,
+  SchemaVersionError,
+  SCHEMA_INFO_STEP,
+  type MigrateOptions,
+  type MigrationReport,
+  type SchemaMode,
+  type SchemaState,
+  type SchemaStep,
+} from "./schema.js";
+import { VERSION } from "../version.js";
 
 export {
   ENGINE_LEASE,
@@ -434,6 +447,24 @@ export interface PendingDelivery {
 }
 
 /**
+ * What {@link MessageStore.nextDelivery} looks for. Without `dueBy` it returns the oldest pending
+ * delivery, due or not, which keeps a destination in order.
+ *
+ * @example
+ * ```ts
+ * const due = await store.nextDelivery("adt", 0, { dueBy: Date.now() });
+ * ```
+ */
+export interface NextDeliveryOptions {
+  /**
+   * Only a delivery due by this time, in epoch milliseconds: the oldest whose `nextAttemptAt` is at
+   * or before it, passing over any still waiting for a retry. The engine asks this for a destination
+   * with `retry.rotate: true`. A store that ignores it keeps that destination in order.
+   */
+  readonly dueBy?: number | undefined;
+}
+
+/**
  * Which messages {@link MessageStore.listMessages} returns: newest first, every filter optional.
  *
  * @example
@@ -574,6 +605,7 @@ export interface ExpireResult {
  * - `retention`: a retention run and what it deleted;
  * - `config`: a change to the configuration, seen when the engine started.
  * - `lease-release`: `pathways lease release --force` freed the engine lease.
+ * - `migrate`: `pathways migrate` applied schema steps, or said which it would apply.
  * - `verify`: `pathways verify` read a stored message's content, to run it through a candidate
  *   project's transform; written before the content is read.
  *
@@ -592,6 +624,7 @@ export const AUDIT_ACTIONS = [
   "retention",
   "config",
   "lease-release",
+  "migrate",
   "verify",
 ] as const;
 
@@ -747,7 +780,11 @@ export interface MessageStore {
   ): Promise<void>;
   /** Fenced by `epoch` when it is given. */
   failTransform(messageId: number, error: string, epoch?: number): Promise<void>;
-  nextDelivery(channel: string, destination: number): Promise<PendingDelivery | undefined>;
+  nextDelivery(
+    channel: string,
+    destination: number,
+    options?: NextDeliveryOptions,
+  ): Promise<PendingDelivery | undefined>;
   /**
    * Writes the marker before a delivery is handed to its destination, in one write: the attempt and
    * its start, and the attempt found cut off when `start.interruptedAttempt` is set. A delivery
@@ -1027,18 +1064,36 @@ const COLUMN_TYPES: Readonly<Record<StorageKind, ColumnTypes>> = {
 };
 
 /**
- * The schema's migrations, in the column types of `kind`. One portable set: each database runs the
- * same steps under the same names, so the migration table reads the same everywhere.
+ * The schema step that adds the audit log: a database without it has none to write to.
+ *
+ * @example
+ * ```ts
+ * const audited = state.applied.some((step) => step.name === AUDIT_LOG_STEP);
+ * ```
+ */
+export const AUDIT_LOG_STEP = "0003-operator-and-audit";
+
+/**
+ * The schema's steps, in the column types of `kind`, each tagged `expand` or `contract`. One
+ * portable set: each database runs the same steps under the same names, so the migration table
+ * reads the same everywhere.
+ *
+ * Every step carries a tag. An expand step only adds, so the Pathways before it runs on the schema
+ * after it, and it is applied at start. A contract step removes or changes what an older Pathways
+ * reads, names the oldest Pathways that runs once it is applied, and waits for
+ * `pathways migrate --contract`. A release's code runs on its schema both before and after its own
+ * contract steps.
  *
  * @example
  * ```ts
  * const provider = { getMigrations: () => Promise.resolve(migrations("postgres")) };
  * ```
  */
-export function migrations(kind: StorageKind): Record<string, Migration> {
+export function migrations(kind: StorageKind): Record<string, SchemaStep> {
   const t = COLUMN_TYPES[kind];
   return {
     "0001-messages-and-deliveries": {
+      tag: "expand",
       async up(db: Kysely<unknown>): Promise<void> {
         await db.schema
           .createTable("messages")
@@ -1079,6 +1134,7 @@ export function migrations(kind: StorageKind): Record<string, Migration> {
       },
     },
     "0002-possible-duplicates": {
+      tag: "expand",
       async up(db: Kysely<unknown>): Promise<void> {
         // One column per statement: SQLite adds only one column per ALTER TABLE.
         await db.schema.alterTable("messages").addColumn("dedup_key", t.name).execute();
@@ -1090,7 +1146,8 @@ export function migrations(kind: StorageKind): Record<string, Migration> {
           .execute();
       },
     },
-    "0003-operator-and-audit": {
+    [AUDIT_LOG_STEP]: {
+      tag: "expand",
       async up(db: Kysely<unknown>): Promise<void> {
         // Sizes are kept from now on; a message stored before has none, rather than a guess.
         await db.schema.alterTable("messages").addColumn("size", t.int64).execute();
@@ -1129,6 +1186,7 @@ export function migrations(kind: StorageKind): Record<string, Migration> {
       },
     },
     "0004-idempotency-keys": {
+      tag: "expand",
       async up(db: Kysely<unknown>): Promise<void> {
         await db.schema.alterTable("messages").addColumn("idempotency_key", t.name).execute();
         await db.schema
@@ -1139,6 +1197,7 @@ export function migrations(kind: StorageKind): Record<string, Migration> {
       },
     },
     "0005-send-markers": {
+      tag: "expand",
       // Expand only: three columns that may be null, which an older Pathways never reads.
       async up(db: Kysely<unknown>): Promise<void> {
         await db.schema.alterTable("deliveries").addColumn("sending_at", t.int64).execute();
@@ -1150,6 +1209,7 @@ export function migrations(kind: StorageKind): Record<string, Migration> {
       },
     },
     "0006-leases": {
+      tag: "expand",
       // Expand only: a new table, which an older Pathways never reads, and no change to a row of
       // the others, so it is safe while deliveries are in flight. Its first row is written by the
       // first engine that asks for the lease. To roll it back, stop every engine and drop the
@@ -1163,6 +1223,25 @@ export function migrations(kind: StorageKind): Record<string, Migration> {
           .addColumn("epoch", t.int64, (col) => col.notNull())
           .addColumn("since", t.int64, (col) => col.notNull())
           .addColumn("expires_at", t.int64, (col) => col.notNull())
+          .$call(t.table)
+          .execute();
+      },
+    },
+    [SCHEMA_INFO_STEP]: {
+      // Expand only: a new table, which an older Pathways never reads. One row per applied step,
+      // written in the step's own transaction: its generation, its tag, the oldest Pathways that
+      // runs on the schema once it is applied, and the Pathways that applied it. This step writes
+      // its own row and those of every step before it.
+      tag: "expand",
+      async up(db: Kysely<unknown>): Promise<void> {
+        await db.schema
+          .createTable("schema_info")
+          .addColumn("step", t.name, (col) => col.primaryKey())
+          .addColumn("generation", "integer", (col) => col.notNull())
+          .addColumn("tag", t.status, (col) => col.notNull())
+          .addColumn("min_engine", t.status, (col) => col.notNull())
+          .addColumn("applied_by", t.status, (col) => col.notNull())
+          .addColumn("applied_at", t.time, (col) => col.notNull())
           .$call(t.table)
           .execute();
       },
@@ -1363,6 +1442,13 @@ export interface StoreOptions {
   readonly env?: Env;
   /** Imports a driver package. Tests pass their own, to stand in for one that is not installed. */
   readonly importDriver?: DriverImport;
+  /**
+   * How the store treats its schema when it opens: `expand` (the default) applies the expand steps
+   * it lacks under the migration lock; `none` applies nothing and refuses a schema that lacks one
+   * (`pathways start --no-migrate`); `inspect` applies and refuses nothing (`pathways migrate`).
+   * Contract steps are applied only by {@link Store.migrate}.
+   */
+  readonly migrate?: SchemaMode;
 }
 
 /**
@@ -1466,15 +1552,61 @@ export class Store implements MessageStore, ContentStore {
       await db.destroy();
       throw new StorageError("open", error);
     }
-    const provider: MigrationProvider = {
-      getMigrations: () => Promise.resolve(migrations(config.kind)),
-    };
-    const { error } = await new Migrator({ db, provider }).migrateToLatest();
+    const now = options.now ?? (() => new Date());
+    const store = new Store(db, config.kind, now);
+    let error: unknown;
+    try {
+      ({ error } = await openSchema(
+        db as Kysely<unknown>,
+        config.kind,
+        store.steps(),
+        VERSION,
+        options.migrate ?? "expand",
+      ));
+    } catch (thrown) {
+      await db.destroy();
+      if (thrown instanceof SchemaVersionError) throw thrown;
+      throw new StorageError("schema", thrown);
+    }
     if (error !== undefined) {
       await db.destroy();
       throw new StorageError("schema", error);
     }
-    return new Store(db, config.kind, options.now ?? (() => new Date()));
+    return store;
+  }
+
+  /** This version's schema steps, as they run here: each records itself in `schema_info`. */
+  private steps(): Record<string, SchemaStep> {
+    return recordedSteps(migrations(this.kind), VERSION, this.now);
+  }
+
+  /**
+   * The database's schema as it stands, read against this version's steps: its generation, the
+   * oldest Pathways it allows, who last changed it, and the steps applied and still to apply.
+   *
+   * @example
+   * ```ts
+   * const { generation, pending } = await store.schema();
+   * ```
+   */
+  async schema(): Promise<SchemaState> {
+    return readSchema(this.db as Kysely<unknown>, this.steps());
+  }
+
+  /**
+   * Applies this version's pending expand steps, and with `contract` its pending contract steps,
+   * under the migration lock, as `pathways migrate` does. Contract steps wait while the schema
+   * changed within `rollbackWindowMs`. A schema a newer Pathways moved forward is left as it is.
+   *
+   * @throws {SchemaVersionError} when this version cannot run on the schema.
+   * @throws {SchemaStepError} when a step fails.
+   * @example
+   * ```ts
+   * const report = await store.migrate({ contract: true, dryRun: true });
+   * ```
+   */
+  async migrate(options: MigrateOptions = {}): Promise<MigrationReport> {
+    return migrateSchema(this.db as Kysely<unknown>, this.kind, this.steps(), VERSION, options);
   }
 
   /** Closes the database, and every pooled connection to it. */
@@ -1744,9 +1876,15 @@ export class Store implements MessageStore, ContentStore {
 
   /**
    * The oldest pending delivery for one destination of one channel. Later deliveries wait behind it,
-   * which is what keeps a destination's messages in order.
+   * which is what keeps a destination's messages in order. With `options.dueBy`, the oldest due by
+   * then, passing over any still waiting for a retry.
    */
-  async nextDelivery(channel: string, destination: number): Promise<PendingDelivery | undefined> {
+  async nextDelivery(
+    channel: string,
+    destination: number,
+    options: NextDeliveryOptions = {},
+  ): Promise<PendingDelivery | undefined> {
+    const { dueBy } = options;
     const row = await this.db
       .selectFrom("deliveries")
       .select([
@@ -1763,6 +1901,7 @@ export class Store implements MessageStore, ContentStore {
       .where("channel", "=", channel)
       .where("destination", "=", destination)
       .where("status", "=", "pending")
+      .$if(dueBy !== undefined, (q) => q.where("next_attempt_at", "<=", dueBy as number))
       .orderBy("id")
       .$call((query) => this.first(query))
       .executeTakeFirst();

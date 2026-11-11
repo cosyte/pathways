@@ -21,6 +21,7 @@ export const LIFECYCLE_EVENTS = [
   "delivery-retry",
   "delivery-redirected",
   "delivery-rejected",
+  "delivery-exhausted",
   "source-down",
   "source-up",
   "audit",
@@ -252,6 +253,27 @@ export interface DeliveryRejectedEvent extends DeliveryEventBase {
 }
 
 /**
+ * A delivery ran out of retries: it had its `retry.limit` of attempts, or its next attempt would come
+ * later than `retry.maxAge` after it was queued. It is marked failed, its body kept for an operator
+ * to resend, and the destination moves on to the next. Only a destination whose retry settings set
+ * a limit or an age sends this.
+ *
+ * @example
+ * ```ts
+ * if (event.type === "delivery-exhausted") page(`${event.channel}: gave up after ${event.attempt}`);
+ * ```
+ */
+export interface DeliveryExhaustedEvent extends DeliveryEventBase {
+  readonly type: "delivery-exhausted";
+  /** `limit` when it had its attempts, `maxAge` when it was too old to wait for another. */
+  readonly reason: "limit" | "maxAge";
+  /** The last error's name, such as `MllpDeliveryError`. */
+  readonly name: string;
+  /** The last error's code, such as `ECONNREFUSED` or `HTTP_503`. */
+  readonly code: string | undefined;
+}
+
+/**
  * A source could not start listening (its port is taken, say). The engine tries again after
  * `retryInMs` and reports this again on each failed try, counting up `attempt`.
  *
@@ -289,8 +311,9 @@ export interface SourceUpEvent extends LifecycleEventBase {
  * Every action the audit log records, as an {@link AuditEvent}'s `action`: `search` (messages
  * listed), `view` (one message's details, without content), `content-view`, `replay`, `resend`,
  * `clear`, `retention` (a run, with what it deleted), `config` (a configuration change seen when
- * the engine started), `lease-release` (the engine lease freed by force) and `verify` (a stored
- * message read by `pathways verify`). Kept equal to the audit log's own list by a test.
+ * the engine started), `lease-release` (the engine lease freed by force), `migrate` (schema steps
+ * applied by `pathways migrate`) and `verify` (a stored message read by `pathways verify`). Kept
+ * equal to the audit log's own list by a test.
  *
  * @example
  * ```ts
@@ -307,6 +330,7 @@ export type AuditEventAction =
   | "retention"
   | "config"
   | "lease-release"
+  | "migrate"
   | "verify";
 
 /**
@@ -370,6 +394,7 @@ export type LifecycleEvent =
   | DeliveryRetryEvent
   | DeliveryRedirectedEvent
   | DeliveryRejectedEvent
+  | DeliveryExhaustedEvent
   | SourceDownEvent
   | SourceUpEvent
   | AuditEvent;

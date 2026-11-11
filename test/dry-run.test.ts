@@ -46,7 +46,7 @@ async function listener(): Promise<{ port: number; connections: () => number }> 
   return { port: address.port, connections: () => connections };
 }
 
-async function start(argv: readonly string[]) {
+async function start(argv: readonly string[], env: Record<string, string> = {}) {
   const { logger, events, lines } = captureLogger();
   let err = "";
   const code = await run(argv, {
@@ -55,8 +55,8 @@ async function start(argv: readonly string[]) {
       err += text;
     },
     logger,
-    // Named by the HTTP destination below; never read when it runs dry.
-    env: {},
+    // Names the HTTP destination's token, which is never read when it runs dry.
+    env,
   });
   return { code, err, events, lines };
 }
@@ -149,6 +149,32 @@ describe("a destination that runs dry", () => {
     expect(result.events).toContainEqual(
       expect.objectContaining({ event: "dry-run", destinations: "all" }),
     );
+  });
+
+  it("takes an environment reference", async () => {
+    const root = await project(1, "    dryRun: { env: ADT_DRY_RUN, default: false }");
+    const dry = await loadProject(root, { env: { ADT_DRY_RUN: "true" } });
+    expect(dry.channels[0]?.destinations.map((d) => d.dryRun)).toEqual([true, undefined]);
+    const unset = await loadProject(root, { env: {} });
+    expect(unset.channels[0]?.destinations.map((d) => d.dryRun)).toEqual([undefined, undefined]);
+  });
+
+  it("warns at start that a backlog queued before dry run was turned on will be marked dry-run", async () => {
+    const target = await listener();
+    const root = await project(target.port, "");
+    const env = { SYNTHETIC_MISSING_TOKEN: "Bearer synthetic-token" };
+    // The listener drops every connection, so the HTTP delivery waits for a retry.
+    const sending = await start(["start", "--once", "-C", root], env);
+    expect(sending.code).toBe(EXIT.ok);
+    expect(target.connections()).toBe(1);
+    expect(sending.events.filter((e) => e.event === "dry-run-pending")).toEqual([]);
+
+    const dry = await start(["start", "--once", "--dry-run", "-C", root], env);
+    expect(dry.code).toBe(EXIT.ok);
+    expect(dry.events.filter((e) => e.event === "dry-run-pending")).toEqual([
+      expect.objectContaining({ level: 40, channel: "adt", destinations: [0, 1], pending: 1 }),
+    ]);
+    expect(target.connections()).toBe(1);
   });
 
   it("sends as before without it", async () => {

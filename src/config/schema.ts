@@ -190,6 +190,91 @@ const onStoreFailure = envable(
   }),
 );
 
+/**
+ * How a retry's backoff is spread: `none` waits the capped exponential exactly; `full` waits a random
+ * time between 0 and it, so retries from several destinations or engines do not arrive together.
+ */
+export const RETRY_JITTER = ["none", "full"] as const;
+
+/** One of {@link RETRY_JITTER}. */
+export type RetryJitter = (typeof RETRY_JITTER)[number];
+
+/**
+ * What happens to a delivery that reached its retry `limit` or `maxAge`: `failed` marks it failed,
+ * its body kept for an operator to resend, and the destination moves on.
+ */
+export const RETRY_ON_EXHAUST = ["failed"] as const;
+
+/** One of {@link RETRY_ON_EXHAUST}. */
+export type RetryOnExhaust = (typeof RETRY_ON_EXHAUST)[number];
+
+/** A duration of at least 1ms, with the hover text an editor shows for the key that holds it. */
+const positiveDuration = (description: string) =>
+  durationValue
+    .refine((value) => value >= 1, 'a duration of at least 1ms, such as "1s"')
+    .meta({ description });
+
+/** `none`, which lifts a limit a wider level set, or a value. */
+const orNone = <T extends z.ZodType>(value: T) => z.union([z.literal("none"), value]);
+
+/**
+ * A `retry:` block, in `defaults:`, a channel or a destination. Every key is optional; the narrowest
+ * level that sets a key wins, key by key. Each key may be read from the environment, `none` too.
+ */
+const retryBlock = z
+  .strictObject({
+    first: envable(
+      positiveDuration(
+        "How long the first retry waits: a duration of at least 1ms, such as 1s, or a number of milliseconds. Default 1s.",
+      ),
+    ).optional(),
+    max: envable(
+      positiveDuration(
+        "The longest wait between tries, whatever a server asks with Retry-After; a held redirect waits this long: a duration such as 5m, or a number of milliseconds. Default 5m.",
+      ),
+    ).optional(),
+    factor: envable(
+      z.number().min(1).max(100).meta({
+        description:
+          "How much longer each wait is than the one before, 1 to 100: 1 waits first every time. Default 2.",
+      }),
+    ).optional(),
+    jitter: envable(
+      z.enum(RETRY_JITTER).meta({
+        description:
+          "none waits the backoff exactly; full waits a random time between 0 and it, so several destinations or engines retrying one receiver spread out. Default none.",
+      }),
+    ).optional(),
+    limit: envable(
+      orNone(z.number().int().min(1).max(1_000_000)).meta({
+        description:
+          "The most attempts a delivery gets, the first included, before onExhaust: a whole number of at least 1, or none for no limit. Default none.",
+      }),
+    ).optional(),
+    maxAge: envable(
+      orNone(positiveDuration("A duration of at least 1ms.")).meta({
+        description:
+          "How long after it was queued a delivery may still be retried before onExhaust: a duration such as 1h, a number of milliseconds, or none. Default none.",
+      }),
+    ).optional(),
+    onExhaust: envable(
+      z.enum(RETRY_ON_EXHAUST).meta({
+        description:
+          "What happens at the limit or the age: failed marks the delivery failed, its body kept for a resend, and the destination moves on. Default failed.",
+      }),
+    ).optional(),
+    rotate: envable(
+      z.boolean().meta({
+        description:
+          "true lets later deliveries go ahead of one waiting for a retry, which breaks the destination's order. Default false.",
+      }),
+    ).optional(),
+  })
+  .meta({
+    description:
+      "How a failed delivery is retried. The narrowest of defaults, the channel and the destination wins, key by key. Default: 1s, doubling to 5m, no jitter, no limit and no age.",
+  });
+
 /** Settings an engine sets as defaults and a channel can override. */
 const settingsShape = {
   timeout: duration(
@@ -215,6 +300,7 @@ const settingsShape = {
   retentionInterval: duration(
     "How often a running engine runs retention: a duration such as 1h, or a number of milliseconds. Default 1h. Engine-wide.",
   ).optional(),
+  retry: retryBlock.optional(),
 };
 
 const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
@@ -1079,6 +1165,18 @@ const lease = z
       "The engine lease, which one engine per database holds, so a second is refused or waits as a standby.",
   });
 
+/** How `pathways migrate` treats contract steps. */
+const migrationsBlock = z
+  .strictObject({
+    rollbackWindow: duration(
+      "How long after the schema last changed pathways migrate --contract waits before it applies a contract step, so the Pathways version before can still be started again: a duration such as 7d, or a number of milliseconds. Default 0, no wait.",
+    ).optional(),
+  })
+  .meta({
+    description:
+      "Schema changes: expand steps are applied at start, contract steps by pathways migrate --contract.",
+  });
+
 /** `pathways.yaml` at the project root. Every key is optional. */
 export const projectSchema = z
   .strictObject({
@@ -1091,6 +1189,7 @@ export const projectSchema = z
       .optional(),
     health: health.optional(),
     lease: lease.optional(),
+    migrations: migrationsBlock.optional(),
   })
   .meta({
     title: "pathways.yaml",
@@ -1148,15 +1247,18 @@ const destination = restate(
       mllp: mllpDestination.optional(),
       module: modulePath.optional(),
       options: moduleOptions.optional(),
-      dryRun: z
-        .boolean()
-        .meta({
+      retry: settingsShape.retry,
+      dryRun: envable(
+        z.boolean().meta({
           description:
             "Run dry: transform and record each output, mark its delivery dry-run, and never send it or open a connection. Default false.",
-        })
-        .optional(),
+        }),
+      ).optional(),
     })
-    .meta({ description: "One destination: exactly one of file, http, mllp or module." })
+    .meta({
+      description:
+        "One destination: exactly one of file, http, mllp or module, its own retry settings, and dryRun.",
+    })
     .superRefine(oneKind(DESTINATION_KINDS))
     .superRefine(optionsWithModule),
   restateKinds(DESTINATION_KINDS),
@@ -1204,6 +1306,7 @@ export const channelSchema = restate(
       ackTimeout: settingsShape.ackTimeout,
       retention: settingsShape.retention,
       resendFlag: settingsShape.resendFlag,
+      retry: settingsShape.retry,
     })
     .meta({
       title: "channel.yaml",
@@ -1302,7 +1405,59 @@ export interface Settings {
   readonly resendFlag: boolean;
   /** How often `pathways start` runs retention, in milliseconds. Engine-wide. */
   readonly retentionIntervalMs: number;
+  /** How a failed delivery is retried. A destination can override it, key by key. */
+  readonly retry: RetryPolicy;
 }
+
+/**
+ * How a failed delivery is retried, resolved: attempt `n + 1` waits `firstMs * factor ** (n - 1)`,
+ * capped at `maxMs`, or a random time between 0 and that with `jitter: "full"`.
+ *
+ * @example
+ * ```ts
+ * const policy: RetryPolicy = { ...DEFAULT_RETRY, limit: 10, jitter: "full" };
+ * ```
+ */
+export interface RetryPolicy {
+  /** How long the first retry waits, in milliseconds. */
+  readonly firstMs: number;
+  /** The longest wait, in milliseconds, whatever a server asks; a held redirect waits this long. */
+  readonly maxMs: number;
+  /** How much longer each wait is than the one before. */
+  readonly factor: number;
+  readonly jitter: RetryJitter;
+  /** The most attempts a delivery gets, the first included, or `undefined` for no limit. */
+  readonly limit: number | undefined;
+  /**
+   * How long after it was queued a delivery may still be retried, in milliseconds, or `undefined`
+   * for no limit.
+   */
+  readonly maxAgeMs: number | undefined;
+  /** What happens to a delivery at its limit or age. */
+  readonly onExhaust: RetryOnExhaust;
+  /** Whether later deliveries go ahead of one waiting for a retry, breaking the order. */
+  readonly rotate: boolean;
+}
+
+/**
+ * The retry settings when nothing sets them: 1 second, doubling to 5 minutes, no jitter, and no
+ * limit on attempts or age, so a delivery is retried until it succeeds or someone acts.
+ *
+ * @example
+ * ```ts
+ * DEFAULT_RETRY.firstMs; // 1000
+ * ```
+ */
+export const DEFAULT_RETRY: RetryPolicy = {
+  firstMs: 1_000,
+  maxMs: 300_000,
+  factor: 2,
+  jitter: "none",
+  limit: undefined,
+  maxAgeMs: undefined,
+  onExhaust: "failed",
+  rotate: false,
+};
 
 /** The defaults when neither `pathways.yaml` nor a channel sets a value. */
 export const DEFAULT_SETTINGS: Settings = {
@@ -1314,6 +1469,7 @@ export const DEFAULT_SETTINGS: Settings = {
   retentionMs: 30 * 86_400_000,
   resendFlag: true,
   retentionIntervalMs: 3_600_000,
+  retry: DEFAULT_RETRY,
 };
 
 /**
@@ -1636,12 +1792,20 @@ export type HookConfig =
   | (HookSettings & { readonly kind: "webhook"; readonly webhook: HttpClientConfig });
 
 /**
- * One destination of a channel, resolved: its kind's block, and `dryRun: true` when the channel
- * sets it, so the destination records each output and sends none.
+ * One destination, resolved. `retry` is set when the destination's block has a `retry:` of its own:
+ * that block over the channel's settings, key by key. Without it, the channel's `settings.retry`
+ * applies. `dryRun` is `true` when the destination runs dry: each output is recorded, its delivery
+ * marked `dry-run`, and nothing is sent.
+ *
+ * @example
+ * ```ts
+ * const destination: DestinationConfig = { kind: "file", dir: "/srv/project/out", dryRun: true };
+ * ```
  */
 export type DestinationConfig = (
   FileDestination | HttpDestination | MllpDestination | ModuleConnector
 ) & {
+  readonly retry?: RetryPolicy;
   /** True when the destination runs dry: each output recorded, marked `dry-run`, never sent. */
   readonly dryRun?: boolean | undefined;
 };
@@ -1745,6 +1909,22 @@ export interface LeaseConfig {
   readonly standby: boolean;
 }
 
+/**
+ * How `pathways migrate` treats contract steps, from `pathways.yaml`'s `migrations` block.
+ *
+ * @example
+ * ```ts
+ * const migrations: MigrationsConfig = { rollbackWindowMs: 7 * 86_400_000 };
+ * ```
+ */
+export interface MigrationsConfig {
+  /**
+   * How long after the schema last changed `pathways migrate --contract` waits before it applies a
+   * contract step, in milliseconds; 0 for no wait.
+   */
+  readonly rollbackWindowMs: number;
+}
+
 /** A whole project: the engine settings and every channel under `channels/`. */
 export interface ProjectConfig {
   readonly root: string;
@@ -1762,6 +1942,8 @@ export interface ProjectConfig {
   readonly health: HealthConfig | undefined;
   /** The engine lease's time to live, and whether to start as a standby. */
   readonly lease: LeaseConfig;
+  /** How `pathways migrate` treats contract steps. */
+  readonly migrations: MigrationsConfig;
   /**
    * How stored messages are encrypted, or undefined when `pathways.yaml` does not say. `pathways
    * start` refuses to run without it; `pathways test` stores nothing and does not need it.

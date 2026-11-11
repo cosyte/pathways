@@ -15,7 +15,7 @@ Every command runs on the project in the current folder, or the one `-C <dir>` (
 names. `pathways --help` prints the usage, and `pathways --version` the version.
 
 The commands that read or change stored messages (`start`, `status`, `messages`, `replay`, `clear`,
-`retention`, `audit`, `rekey`, and `verify` unless it is given `--samples`) open the database as `start` does, so they need the same
+`retention`, `audit`, `rekey`, `lease`, and `verify` unless it is given `--samples`) open the database as `start` does, so they need the same
 `pathways.yaml`, encryption keys and environment. None of them prints a value you typed back to you:
 an argument can hold a path or a value from a message, and standard error often ends up in a log.
 
@@ -36,7 +36,7 @@ Pathways. Nothing is written if the folder is not empty.
 ## pathways start
 
 ```text
-pathways start [--once | --standby] [--dry-run]
+pathways start [--once | --standby] [--no-migrate] [--dry-run]
 ```
 
 Runs every channel, and the health endpoint if `pathways.yaml` configures one, until it receives
@@ -59,11 +59,17 @@ It first takes the engine lease, so a second engine on the same database is refu
 naming the holder. An engine that loses its lease stops sending and taking in at once and exits 1.
 See [one engine per database](./store-messages-in-a-database.md#one-engine-per-database).
 
-| Option      | Meaning                                                                                                                                                                                            |
-| ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--once`    | take in, transform and deliver what is waiting, then exit; no health endpoint, no retention                                                                                                        |
-| `--standby` | hold no lease and open no source until the engine holding the lease stops, then take over; health answers 503 `standby` until then. Needs a database server, not SQLite                            |
-| `--dry-run` | run every destination dry, as `dryRun: true` does for one: each output is transformed and recorded, its delivery marked `dry-run`, and nothing is sent; no destination's connection is ever opened |
+Before that, it reads the database's schema: it applies the expand steps it has and the database
+lacks, runs on a schema a newer Pathways moved forward with expand steps, and refuses, naming both
+versions, a schema a newer Pathways contracted past this one. See
+[schema changes](./store-messages-in-a-database.md#schema-changes-expand-and-contract).
+
+| Option         | Meaning                                                                                                                                                                                                                                                                                                   |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--once`       | take in, transform and deliver what is waiting, then exit; no health endpoint, no retention                                                                                                                                                                                                               |
+| `--standby`    | hold no lease and open no source until the engine holding the lease stops, then take over; health answers 503 `standby` until then. Needs a database server, not SQLite                                                                                                                                   |
+| `--no-migrate` | apply no schema step; refuse, naming both versions, a database that lacks an expand step this version needs. For a database `pathways migrate` keeps up to date                                                                                                                                           |
+| `--dry-run`    | run every destination dry, as `dryRun: true` does for one: each output is transformed and recorded, its delivery marked `dry-run`, and nothing is sent; no destination's connection is ever opened. Every pending delivery of a destination that runs dry is marked `dry-run`, those queued before it too |
 
 ## pathways test
 
@@ -93,17 +99,23 @@ an upgrade or a changed transform would send differently. See
 For each channel and destination it prints how many inputs were the same, different, or failed, and
 for each one that was not the same, where it first differs or why it failed:
 
-| Where                                             | Format                                                                                                                                         |
-| ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `PID[1]-5.2`                                      | HL7 v2: the segment and its occurrence, the field, then the repetition (`[n]`), component and subcomponent where either side has more than one |
-| `/name/0/family`                                  | FHIR and JSON: a JSON pointer, which names the keys on its path                                                                                |
-| `byte offset 118`                                 | any other format, or when the outputs read as the same value written differently                                                               |
-| `2 outputs from the transform, 1 output recorded` | the number of outputs differs                                                                                                                  |
+| Where                                             | Format                                                                                                                                              |
+| ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PID[1]-5.2`                                      | HL7 v2: the segment and its occurrence, the field, then the repetition (`[n]`), component and subcomponent where either side has more than one      |
+| `/name/0/family`                                  | FHIR and JSON: a JSON pointer, which names the keys on its path. For `json`, a key can be data the message carries, such as a medical record number |
+| `byte offset 118`                                 | any other format, or when the outputs read as the same value written differently                                                                    |
+| `2 outputs from the transform, 1 output recorded` | the number of outputs differs                                                                                                                       |
 
 It never prints a value. Stored messages are read through encryption at rest, decrypted in memory
 only, and each one is written to the audit log (`verify`) before its content is read; nothing is
 written to the message or delivery tables. A message with no recorded outputs (received, failed or
 cleared) is skipped. Two outputs are the same only when they are the same bytes.
+
+It opens the database as `start --no-migrate` does: it applies no schema step, and refuses, naming
+both versions, a database that lacks a step the candidate's Pathways needs. The candidate's
+transforms run with this process's environment, as the engine's do, and what they write to the
+console goes to its output. It builds no destination, so it sends no message; `pathways.yaml`'s
+engine-wide hooks receive its audit entries, as they do every command's.
 
 | Option             | Meaning                                                                                                                           |
 | ------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
@@ -203,8 +215,8 @@ pathways audit [--action <name>] [--message <id>] [--channel <name>] [--since <t
 ```
 
 Reads the audit log, newest first. `--action` takes `search`, `view`, `content-view`, `replay`,
-`resend`, `clear`, `retention`, `config`, `lease-release` or `verify`; `--message` takes a message id;
-the other options are as for `messages`.
+`resend`, `clear`, `retention`, `config`, `lease-release`, `migrate` or `verify`; `--message` takes
+a message id; the other options are as for `messages`.
 
 ## pathways rekey
 
@@ -235,15 +247,46 @@ host is gone, so the next start takes it at once instead of after it lapses, and
 to the audit log (`lease-release`); it exits 1 when the lease is already free. An engine still
 running under a lease freed this way stops at its next renewal.
 
+## pathways migrate
+
+```text
+pathways migrate [--contract] [--dry-run] [--json]
+```
+
+Applies the schema steps this version has and the database lacks, under the migration lock, and
+prints each with its generation and its tag:
+
+```text
+Schema generation 4, last changed by Pathways 0.0.1; this is Pathways 0.0.2.
+Applied 3 steps:
+  5  0005-send-markers  expand
+  6  0006-leases        expand
+  7  0007-schema-info   expand
+Now generation 7.
+```
+
+Expand steps are always applied. Contract steps wait for `--contract`, and with it are still refused
+while the schema changed within `migrations.rollbackWindow`. A schema a newer Pathways moved forward is
+left as it is. It needs no encryption keys, and a custom store, which keeps its own schema, is
+refused. It does not see which versions other engines on the database run, so stop or upgrade them
+before `--contract`. Every run is written to the audit log (`migrate`), a dry run and a refusal too,
+once the database has an audit log; a dry run on an empty database says it has none yet. It exits 1
+when it refuses or a step fails. See [upgrade Pathways](./upgrade-pathways.md).
+
+| Option       | Meaning                                                                                |
+| ------------ | -------------------------------------------------------------------------------------- |
+| `--contract` | apply contract steps too, unless the schema changed within `migrations.rollbackWindow` |
+| `--dry-run`  | say which steps would be applied; apply none                                           |
+
 ## Exit codes
 
-| Code | Meaning                                                                                                                                                                                                                                                                                                                                                                               |
-| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0    | done                                                                                                                                                                                                                                                                                                                                                                                  |
-| 1    | a test failed; the engine, a command or an extension module could not start or stopped on an error; `init` could not write; `rekey` left a value not under the current key; a replay, resend or clear was refused, or the message failed again; another engine holds the lease, the engine lost its lease, or there was no lease to release; `verify` found a difference or a failure |
-| 2    | the command line was not understood; nothing was done                                                                                                                                                                                                                                                                                                                                 |
-| 3    | the configuration is invalid; nothing was done                                                                                                                                                                                                                                                                                                                                        |
-| 4    | a message named does not exist; any others named were still acted on                                                                                                                                                                                                                                                                                                                  |
+| Code | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0    | done                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| 1    | a test failed; the engine, a command or an extension module could not start or stopped on an error; `init` could not write; `rekey` left a value not under the current key; a replay, resend or clear was refused, or the message failed again; another engine holds the lease, the engine lost its lease, or there was no lease to release; the database schema is one this version will not run on or migrate; `verify` found a difference or a failure |
+| 2    | the command line was not understood; nothing was done                                                                                                                                                                                                                                                                                                                                                                                                     |
+| 3    | the configuration is invalid; nothing was done                                                                                                                                                                                                                                                                                                                                                                                                            |
+| 4    | a message named does not exist; any others named were still acted on                                                                                                                                                                                                                                                                                                                                                                                      |
 
 ## Related
 

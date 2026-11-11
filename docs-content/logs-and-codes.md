@@ -16,21 +16,22 @@ text or a source file's name. Commands whose standard output is their report (`s
 
 ### Messages
 
-| Event                 | Level | Fields                                                                                 | Meaning                                                                                                 |
-| --------------------- | ----- | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `received`            | info  | `channel`, `message`, `bytes`, `failed`                                                | a message is stored; `failed` when the source stored it as failed                                       |
-| `already-stored`      | info  | `channel`, `message`                                                                   | a source handed in again a message it had stored before a stop                                          |
-| `possible-duplicate`  | warn  | `channel`, `message`, `duplicateOf`                                                    | same sender and control ID as an earlier message                                                        |
-| `possible-duplicate`  | warn  | `channel`, `message`, `delivery`, `destination`, `reason`, `interruptedAttempt`        | a delivery was found cut off after its send (`reason` `send-interrupted`), and is sent again, flagged   |
-| `receive-failed`      | error | `channel`, `code`                                                                      | a message could not be stored, and was not acknowledged                                                 |
-| `transformed`         | info  | `channel`, `message`, `outputs`                                                        | the transform returned outputs                                                                          |
-| `filtered`            | info  | `channel`, `message`, `outputs`                                                        | the transform returned none                                                                             |
-| `transform-failed`    | warn  | `channel`, `message`, `kind`, `name`, `code`, `where`                                  | the message is marked failed; `kind` is the stage                                                       |
-| `delivered`           | info  | `channel`, `destination`, `delivery`, `resend`                                         | a destination accepted an output; `resend` only on a flagged resend                                     |
-| `dry-run`             | info  | `channel`, `destination`, `delivery`                                                   | a destination that runs dry recorded an output and sent nothing                                         |
-| `delivery-retry`      | warn  | `channel`, `destination`, `delivery`, `attempt`, `retryInMs`, `code`                   | it is tried again after `retryInMs`                                                                     |
-| `delivery-redirected` | warn  | `channel`, `destination`, `delivery`, `attempt`, `retryInMs`, `status`, `locationHost` | an HTTP destination answered a 3xx; held, never followed, and tried again after `retryInMs` (5 minutes) |
-| `delivery-rejected`   | warn  | `channel`, `destination`, `delivery`, `reason`                                         | the destination rejected it for good                                                                    |
+| Event                 | Level | Fields                                                                                 | Meaning                                                                                                                         |
+| --------------------- | ----- | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `received`            | info  | `channel`, `message`, `bytes`, `failed`                                                | a message is stored; `failed` when the source stored it as failed                                                               |
+| `already-stored`      | info  | `channel`, `message`                                                                   | a source handed in again a message it had stored before a stop                                                                  |
+| `possible-duplicate`  | warn  | `channel`, `message`, `duplicateOf`                                                    | same sender and control ID as an earlier message                                                                                |
+| `possible-duplicate`  | warn  | `channel`, `message`, `delivery`, `destination`, `reason`, `interruptedAttempt`        | a delivery was found cut off after its send (`reason` `send-interrupted`), and is sent again, flagged                           |
+| `receive-failed`      | error | `channel`, `code`                                                                      | a message could not be stored, and was not acknowledged                                                                         |
+| `transformed`         | info  | `channel`, `message`, `outputs`                                                        | the transform returned outputs                                                                                                  |
+| `filtered`            | info  | `channel`, `message`, `outputs`                                                        | the transform returned none                                                                                                     |
+| `transform-failed`    | warn  | `channel`, `message`, `kind`, `name`, `code`, `where`                                  | the message is marked failed; `kind` is the stage                                                                               |
+| `delivered`           | info  | `channel`, `destination`, `delivery`, `resend`                                         | a destination accepted an output; `resend` only on a flagged resend                                                             |
+| `dry-run`             | info  | `channel`, `destination`, `delivery`                                                   | a destination that runs dry recorded an output and sent nothing                                                                 |
+| `delivery-retry`      | warn  | `channel`, `destination`, `delivery`, `attempt`, `retryInMs`, `code`                   | it is tried again after `retryInMs`                                                                                             |
+| `delivery-redirected` | warn  | `channel`, `destination`, `delivery`, `attempt`, `retryInMs`, `status`, `locationHost` | an HTTP destination answered a 3xx; held, never followed, and tried again after `retryInMs` (`retry.max`, 5 minutes by default) |
+| `delivery-rejected`   | warn  | `channel`, `destination`, `delivery`, `reason`                                         | the destination rejected it for good                                                                                            |
+| `delivery-exhausted`  | warn  | `channel`, `destination`, `delivery`, `attempt`, `reason`, `code`                      | out of retries (`reason` `limit` or `maxAge`): marked failed, its body kept for a resend                                        |
 
 A `transform-failed` line's `kind` is `load`, `parse`, `transform`, `output`, `timeout`, `memory` or
 `crash`. `where` is `file:line:column` in the transform, when it threw.
@@ -54,21 +55,22 @@ A `transform-failed` line's `kind` is `load`, `parse`, `transform`, `output`, `t
 
 ### Configuration and storage
 
-| Event                  | Meaning                                                                                        |
-| ---------------------- | ---------------------------------------------------------------------------------------------- |
-| `plaintext`            | an endpoint runs without TLS (`endpoint` says which); logged at every start                    |
-| `unauthenticated`      | a listening endpoint has neither a token nor `tls.ca`                                          |
-| `plaintext-copies`     | a file source keeps plaintext copies (`keepProcessed: true`)                                   |
-| `unencrypted-storage`  | `encryption: none`                                                                             |
-| `dry-run`              | `pathways start --dry-run`: every destination runs dry (`destinations` is `all`)               |
-| `retention`            | a retention run, with the `messages` and `deliveries` it deleted                               |
-| `retention-failed`     | a retention run failed, by `code`; the next run tries again                                    |
-| `lease-acquired`       | the engine took the engine lease, with its `node` and `epoch`                                  |
-| `lease-lost`           | the engine lost its lease, with the `reason` and `epoch`; it stops and exits 1                 |
-| `lease-unsupported`    | a custom store has no lease methods: the engine runs unfenced, and a second one is not refused |
-| `lease-release-failed` | the lease could not be freed at a stop, by `code`; it lapses instead                           |
-| `standby`              | started as a standby, with its `node`                                                          |
-| `standby-waiting`      | a standby is waiting for the lease another engine holds (`holder`, `epoch`)                    |
+| Event                  | Meaning                                                                                                                                                                                |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `plaintext`            | an endpoint runs without TLS (`endpoint` says which); logged at every start                                                                                                            |
+| `unauthenticated`      | a listening endpoint has neither a token nor `tls.ca`                                                                                                                                  |
+| `plaintext-copies`     | a file source keeps plaintext copies (`keepProcessed: true`)                                                                                                                           |
+| `unencrypted-storage`  | `encryption: none`                                                                                                                                                                     |
+| `dry-run`              | `pathways start --dry-run`: every destination runs dry (`destinations` is `all`)                                                                                                       |
+| `dry-run-pending`      | a channel with a destination that runs dry (`destinations`, by index) has `pending` deliveries at start, of every destination; each of a dry destination is marked `dry-run`, not sent |
+| `retention`            | a retention run, with the `messages` and `deliveries` it deleted                                                                                                                       |
+| `retention-failed`     | a retention run failed, by `code`; the next run tries again                                                                                                                            |
+| `lease-acquired`       | the engine took the engine lease, with its `node` and `epoch`                                                                                                                          |
+| `lease-lost`           | the engine lost its lease, with the `reason` and `epoch`; it stops and exits 1                                                                                                         |
+| `lease-unsupported`    | a custom store has no lease methods: the engine runs unfenced, and a second one is not refused                                                                                         |
+| `lease-release-failed` | the lease could not be freed at a stop, by `code`; it lapses instead                                                                                                                   |
+| `standby`              | started as a standby, with its `node`                                                                                                                                                  |
+| `standby-waiting`      | a standby is waiting for the lease another engine holds (`holder`, `epoch`)                                                                                                            |
 
 ### Hooks and the audit log
 
@@ -97,7 +99,10 @@ keeps the operating system's code, such as `ECONNREFUSED` or `ENOTFOUND`.
 | `ETIMEDOUT`               | HTTP      | no answer within `timeout`                    |
 
 A `delivery-retry` line's `retryInMs` is the backoff, or the wait a 429's or a 503's `Retry-After`
-asked for when that is longer, up to 5 minutes. A `delivery-redirected` line's `locationHost` is the
+asked for when that is longer, up to the destination's `retry.max`, 5 minutes by default. A
+`delivery-exhausted` line comes only from a destination whose retry settings set a `limit` or a
+`maxAge`; see
+[Delivery and errors](./delivery-and-errors.md#set-retries-per-destination). A `delivery-redirected` line's `locationHost` is the
 host (and port, when it names one) of the 3xx answer's `Location`, never its path or query, and is
 absent when there is no `Location` or it names no host.
 

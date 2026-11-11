@@ -1,7 +1,7 @@
 import { join } from "node:path";
 
 import { Ajv } from "ajv";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { parse as parseYaml } from "yaml";
 
 import { EXIT, run } from "../src/cli.js";
@@ -519,6 +519,36 @@ hooks:
     ]);
   });
 
+  it("--print reads process.env when given no environment, and keeps a URL with no query string", async () => {
+    const dir = await makeProject({
+      ...files,
+      "channels/lab/channel.yaml": `
+source:
+  file: { dir: ./inbox }
+destinations:
+  - http: { url: { env: LAB_URL } }
+`,
+    });
+    vi.stubEnv("ADT_PORT", "2576");
+    vi.stubEnv("LAB_URL", "https://lab.example.test/in");
+    try {
+      let out = "";
+      let err = "";
+      const code = await run(["validate", "--print", "-C", dir], {
+        out: (text) => (out += text),
+        err: (text) => (err += text),
+        logger: captureLogger().logger,
+      });
+      expect({ code, err }).toEqual({ code: EXIT.ok, err: "" });
+      const lab = (JSON.parse(out) as ProjectConfig).channels.find(
+        (channel) => channel.name === "lab",
+      );
+      expect(lab?.destinations).toMatchObject([{ url: "https://lab.example.test/in" }]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("fails as start does when a variable is unset, naming it", async () => {
     const dir = await makeProject(files);
     expect(await runCli(["validate", "-C", dir], {})).toEqual({
@@ -598,6 +628,74 @@ destinations:
     expect(project({ health: { port: { env: "9X" }, plaintext: true } })).toBe(false);
     expect(project({ health: { port: { env: "P", fallback: 1 }, plaintext: true } })).toBe(false);
     expect(project({ storage: { sqlite: { file: "a.db" }, module: "./s.ts" } })).toBe(false);
+  });
+
+  it("take a reference at every key that holds one value, but the documented exceptions", () => {
+    // configuration-reference.md, "Settings from the environment": plaintext, a channel's name and
+    // format are never read from the environment (encryption: none and auth: none are the short
+    // form of a block, and blocks are not scalars, so the walk passes over them). Matched by the
+    // whole path, so a new key that only shares one of these names is still checked.
+    const EXCEPTIONS: readonly string[] = [
+      "pathways.yaml.storage.postgres.plaintext",
+      "pathways.yaml.storage.mysql.plaintext",
+      "pathways.yaml.storage.sqlserver.plaintext",
+      "pathways.yaml.hooks.[].webhook.plaintext",
+      "pathways.yaml.health.plaintext",
+      "channel.yaml.name",
+      "channel.yaml.format",
+      "channel.yaml.source.http.plaintext",
+      "channel.yaml.source.mllp.plaintext",
+      "channel.yaml.destinations.[].http.plaintext",
+      "channel.yaml.destinations.[].mllp.plaintext",
+      "channel.yaml.hooks.[].webhook.plaintext",
+    ];
+    type Node = Record<string, unknown>;
+    const isNode = (value: unknown): value is Node =>
+      typeof value === "object" && value !== null && !Array.isArray(value);
+    const branches = (node: Node): Node[] =>
+      [node["anyOf"], node["oneOf"], node["allOf"]].flatMap((list) =>
+        Array.isArray(list) ? list.filter(isNode) : [],
+      );
+    const isReference = (node: Node): boolean =>
+      isNode(node["properties"]) && "env" in node["properties"];
+    const isScalar = (node: Node): boolean => {
+      const options = branches(node);
+      if (options.length > 0) return options.every(isScalar);
+      const type = node["type"];
+      return (
+        "const" in node ||
+        "enum" in node ||
+        type === "string" ||
+        type === "number" ||
+        type === "integer" ||
+        type === "boolean"
+      );
+    };
+    const missing: string[] = [];
+    const excepted: string[] = [];
+    const walk = (node: Node, path: readonly string[]): void => {
+      if (isReference(node) || branches(node).some(isReference)) return;
+      if (isScalar(node)) {
+        const key = path.join(".");
+        (EXCEPTIONS.includes(key) ? excepted : missing).push(key);
+        return;
+      }
+      const properties = node["properties"];
+      if (isNode(properties)) {
+        for (const [key, child] of Object.entries(properties)) {
+          if (isNode(child)) walk(child, [...path, key]);
+        }
+      }
+      if (isNode(node["items"])) walk(node["items"], [...path, "[]"]);
+      if (isNode(node["additionalProperties"])) walk(node["additionalProperties"], [...path, "*"]);
+      // A union of a block and its short form (hooks: [./hook.ts], response: ack) walks the block.
+      for (const option of branches(node)) if (!isScalar(option)) walk(option, path);
+    };
+    walk(schemas.project, ["pathways.yaml"]);
+    walk(schemas.channel, ["channel.yaml"]);
+    expect(missing).toEqual([]);
+    // Each exception is still a key, so the list cannot go stale.
+    expect([...new Set(excepted)].sort()).toEqual([...EXCEPTIONS].sort());
   });
 
   it("refuse plaintext read from the environment, as Zod does", () => {

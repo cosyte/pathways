@@ -12,6 +12,7 @@ import type {
   MessageStatus,
   MessageStore,
   MessageSummary,
+  NextDeliveryOptions,
   Page,
   PendingDelivery,
   SendStart,
@@ -152,8 +153,12 @@ abstract class CodecStore implements MessageStore {
   }
 
   /** The oldest pending delivery for one destination, its body read back. */
-  async nextDelivery(channel: string, destination: number): Promise<PendingDelivery | undefined> {
-    const next = await this.#inner.nextDelivery(channel, destination);
+  async nextDelivery(
+    channel: string,
+    destination: number,
+    options?: NextDeliveryOptions,
+  ): Promise<PendingDelivery | undefined> {
+    const next = await this.#inner.nextDelivery(channel, destination, options);
     return next === undefined ? undefined : { ...next, body: await this.#read(next.body) };
   }
 

@@ -266,6 +266,28 @@ describe("pathways verify, on stored messages", () => {
     noContent(broken);
   });
 
+  it("applies no schema step: a database an older Pathways left is refused and left as it is", async () => {
+    const root = await stored();
+    // Back to the schema before schema_info, as the version before left it.
+    const db = new SqliteDatabase(join(root, ".pathways/pathways.db"));
+    db.exec("drop table schema_info; delete from kysely_migration where name = '0007-schema-info'");
+    db.close();
+    const result = await runCli(["verify", "-C", root]);
+    expect(result).toMatchObject({ code: EXIT.failed, out: "" });
+    expect(result.err).toMatch(
+      /^pathways: the database schema is generation 6, .*\. Run pathways migrate first: verify applies no schema step\.\n$/,
+    );
+    const after = new SqliteDatabase(join(root, ".pathways/pathways.db"), { readonly: true });
+    try {
+      const table = after
+        .prepare("select name from sqlite_master where type = 'table' and name = 'schema_info'")
+        .all();
+      expect(table).toEqual([]);
+    } finally {
+      after.close();
+    }
+  });
+
   it("refuses arguments it cannot use", async () => {
     const root = await stored();
     for (const argv of [
