@@ -124,6 +124,23 @@ class TestDestination implements DestinationConnector {
   }
 }
 
+/**
+ * Holds every channel state write on `store` until `open` is called, as a slow database server
+ * would, then lets each through.
+ */
+function gatedStateWrites(store: Store): { open: () => void } {
+  let open: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  const write = store.setChannelState.bind(store);
+  vi.spyOn(store, "setChannelState").mockImplementation(async (channel, state) => {
+    await gate;
+    await write(channel, state);
+  });
+  return { open: () => open() };
+}
+
 interface Setup {
   readonly root: string;
   readonly project: ProjectConfig;
@@ -473,6 +490,126 @@ for (const database of TEST_DATABASES) {
       });
       await pass;
       expect(destination.delivered).toHaveLength(1);
+    });
+
+    it("takes a stop in hand before storing it, so no delivery starts while the write runs", async () => {
+      const { store, destination, engineOn } = await setUp(database);
+      const { engine, source } = await engineOn(store);
+      const stored = gatedStateWrites(store);
+      destination.plan.push("wait");
+      await source.sink?.receive(body());
+      await source.sink?.receive(body());
+      const sent = destination.sent();
+      const pass = engine.tick();
+      await sent;
+      const stopping = engine.command("stop", "adt", { ...actor, deadlineMs: 5_000 });
+      expect(engine.channelStates()).toEqual({ adt: "stopped" });
+      destination.release();
+      await pass;
+      // The pass ended after the delivery in hand, while the stop was still being stored.
+      expect(destination.sends).toBe(1);
+      stored.open();
+      expect(await stopping).toEqual({
+        channel: "adt",
+        state: "stopped",
+        drained: true,
+        left: { toTransform: 0, toDeliver: 1 },
+      });
+      expect(await store.channelStates()).toEqual({ adt: "stopped" });
+    });
+
+    it("does not let a pass put back a state that is still being stored", async () => {
+      const { store, engineOn } = await setUp(database);
+      const { engine, source } = await engineOn(store);
+      const stored = gatedStateWrites(store);
+      const pausing = engine.command("pause", "adt", actor);
+      // The pass reads no row for the channel yet, and must not take that as running.
+      await engine.tick();
+      expect(engine.channelStates()).toEqual({ adt: "paused" });
+      expect(source.polls).toBe(0);
+      expect(source.starts).toBe(1);
+      stored.open();
+      expect(await pausing).toEqual({ channel: "adt", state: "paused" });
+      await engine.tick();
+      expect(engine.channelStates()).toEqual({ adt: "paused" });
+      expect(source.polls).toBe(0);
+    });
+
+    it("puts the state back and says so when it cannot be stored", async () => {
+      const { store, engineOn } = await setUp(database);
+      const { logger, events } = captureLogger();
+      const { engine, source } = await engineOn(store, logger);
+      const failing = (): Error => Object.assign(new Error("TESTPATIENT"), { code: "ETEST" });
+      vi.spyOn(store, "setChannelState")
+        .mockRejectedValueOnce(failing())
+        .mockRejectedValueOnce(failing());
+
+      expect(await engine.command("pause", "adt", actor)).toEqual({
+        channel: "adt",
+        state: "running",
+        refused: "state-not-stored",
+      });
+      // Closed at once, then opened again when the write failed.
+      expect(source.stops).toBe(1);
+      expect(source.starts).toBe(2);
+      expect(await engine.command("stop", "adt", actor)).toEqual({
+        channel: "adt",
+        state: "running",
+        refused: "state-not-stored",
+      });
+      expect(engine.channelStates()).toEqual({ adt: "running" });
+      await engine.tick();
+      expect(source.polls).toBe(1);
+      expect(await store.channelStates()).toEqual({});
+
+      expect(events.filter((e) => e.event === "channel-state-unstored")).toEqual([
+        expect.objectContaining({ channel: "adt", state: "paused", code: "ETEST" }),
+        expect.objectContaining({ channel: "adt", state: "stopped", code: "ETEST" }),
+      ]);
+      expect(JSON.stringify(events)).not.toContain("TESTPATIENT");
+      const entries = await store.auditEntries({ limit: 10 });
+      expect(entries.items.map((entry) => [entry.action, entry.outcome])).toEqual([
+        ["channel-stop", "refused"],
+        ["channel-pause", "refused"],
+      ]);
+      expect(entries.items[1]?.detail).toEqual({ state: "running", reason: "state-not-stored" });
+    });
+
+    it("keeps a later command's state when an earlier one's write fails", async () => {
+      const { store, engineOn } = await setUp(database);
+      const { engine, source } = await engineOn(store);
+      let open: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => {
+        open = resolve;
+      });
+      const write = store.setChannelState.bind(store);
+      vi.spyOn(store, "setChannelState")
+        .mockImplementationOnce(async () => {
+          await gate;
+          throw Object.assign(new Error("TESTPATIENT"), { code: "ETEST" });
+        })
+        .mockImplementation(write);
+      const pausing = engine.command("pause", "adt", actor);
+      const resuming = engine.command("resume", "adt", actor);
+      open();
+      expect(await pausing).toEqual({
+        channel: "adt",
+        state: "running",
+        refused: "state-not-stored",
+      });
+      expect(await resuming).toEqual({ channel: "adt", state: "running" });
+      expect(engine.channelStates()).toEqual({ adt: "running" });
+      expect(source.starts).toBe(2);
+      expect(await store.channelStates()).toEqual({});
+    });
+
+    it("stores the state even when the source will not close, and says the source failed", async () => {
+      const { store, engineOn } = await setUp(database);
+      const { engine, source } = await engineOn(store);
+      vi.spyOn(source, "stop").mockRejectedValueOnce(new Error("TESTPATIENT"));
+      await expect(engine.command("pause", "adt", actor)).rejects.toThrow("TESTPATIENT");
+      expect(engine.channelStates()).toEqual({ adt: "paused" });
+      expect(await store.channelStates()).toEqual({ adt: "paused" });
     });
 
     it("ends a pass between transforms when stopped", async () => {

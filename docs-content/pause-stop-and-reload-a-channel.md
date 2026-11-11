@@ -89,6 +89,13 @@ table), so the engine starts it paused or stopped after a restart, and does not 
 Every engine on the same database reads the states at the top of each pass, so a command given to
 one engine reaches a standby that takes over, or another engine on the database, within one pass.
 
+The engine that takes a command changes the channel first and stores the new state after, so a
+stop takes hold at the next message however slow the database is. When the database does not store
+it, the engine puts the channel back as storage still has it, logs `channel-state-unstored`,
+records the command as refused, and `pathways channel` says so and exits 1: try it again. A halt
+whose state was not stored has still cut off the delivery in flight, which stays pending and is sent
+again, flagged as a possible duplicate.
+
 ## The control socket
 
 `pathways start` listens on a control socket, and `pathways channel` asks through it. On Linux and

@@ -447,6 +447,14 @@ interface RunningChannel {
   down: { readonly attempts: number; readonly nextAt: number } | undefined;
   /** What an operator set it to: a paused or stopped channel's source is closed. */
   state: ChannelRunState;
+  /** The state storage last held, as far as this engine knows: what a failed write goes back to. */
+  stored: ChannelRunState;
+  /** This engine's state writes under way: a pass applies no state it read meanwhile. */
+  writing: number;
+  /** Counts this engine's state changes, so a pass can tell its read is older than one of them. */
+  changes: number;
+  /** The state writes, one after another, so storage ends on the last state set here. */
+  writes: Promise<unknown>;
   /** Whether its listening source was started and not closed since. */
   open: boolean;
   /** Set while its source polls, so a pause can wait for the poll under way. */
@@ -479,8 +487,11 @@ export type ChannelCommand = "pause" | "resume" | "stop" | "halt" | "reload";
  * - `left`: messages still to transform and deliveries still to send, which run after a resume.
  * - `refused`: why nothing was done: `no-such-channel`, `draining` (a stop is under way, for a
  *   reload), `invalid-config`, `not-configured` (the channel is gone from the configuration),
- *   `needs-restart` (with `changed`: the settings a reload cannot apply, such as `source`), or
- *   `transform-load-failed` (with `failure`: the error's name, never its text).
+ *   `needs-restart` (with `changed`: the settings a reload cannot apply, such as `source`),
+ *   `transform-load-failed` (with `failure`: the error's name, never its text), or
+ *   `state-not-stored` (a pause, resume, stop or halt the database did not store: the channel was
+ *   put back to the state storage holds, given in `state`; a halt's cut-off delivery stays
+ *   pending).
  *
  * @example
  * ```ts
@@ -498,7 +509,8 @@ export interface ChannelCommandReport {
     | "invalid-config"
     | "not-configured"
     | "needs-restart"
-    | "transform-load-failed";
+    | "transform-load-failed"
+    | "state-not-stored";
   readonly changed?: readonly string[];
   readonly failure?: string;
 }
@@ -631,6 +643,10 @@ export class Engine {
           hooks,
           down: undefined,
           state: stored?.[config.name] ?? "running",
+          stored: stored?.[config.name] ?? "running",
+          writing: 0,
+          changes: 0,
+          writes: Promise.resolve(),
           open: false,
           polling: undefined,
           busy: undefined,
@@ -709,12 +725,10 @@ export class Engine {
     let report: ChannelCommandReport;
     switch (command) {
       case "pause":
-        await this.setState(channel, "paused");
-        report = { channel: name, state: channel.state };
-        break;
       case "resume":
-        await this.setState(channel, "running");
-        report = { channel: name, state: channel.state };
+        report = (await this.setState(channel, command === "pause" ? "paused" : "running"))
+          ? { channel: name, state: channel.state }
+          : { channel: name, state: channel.state, refused: "state-not-stored" };
         break;
       case "stop":
       case "halt":
@@ -953,8 +967,12 @@ export class Engine {
     return channelStateStore(this.options.store)?.channelStates();
   }
 
-  /** Brings each channel to its stored state. A store that cannot be read leaves them as they are. */
+  /**
+   * Brings each channel to its stored state. A store that cannot be read leaves them as they are,
+   * and so does a read that a state change of this engine's own overtook: the change wins.
+   */
   private async syncStates(): Promise<void> {
+    const changes = new Map(this.channels.map((channel) => [channel, channel.changes]));
     let stored: Record<string, ChannelRunState> | undefined;
     try {
       stored = await this.readStates();
@@ -964,14 +982,53 @@ export class Engine {
     }
     if (stored === undefined) return;
     for (const channel of this.channels) {
-      await this.applyState(channel, stored[channel.config.name] ?? "running");
+      if (channel.writing > 0 || changes.get(channel) !== channel.changes) continue;
+      const state = stored[channel.config.name] ?? "running";
+      channel.stored = state;
+      await this.applyState(channel, state);
     }
   }
 
-  /** Stores a channel's new state, when the store keeps states, then applies it here. */
-  private async setState(channel: RunningChannel, state: ChannelRunState): Promise<void> {
-    await channelStateStore(this.options.store)?.setChannelState(channel.config.name, state);
-    await this.applyState(channel, state);
+  /**
+   * Sets a channel's state here, then stores it when the store keeps states, and says whether it
+   * was stored. The channel takes the state before the write starts, so the pass under way sees a
+   * stop at its next message however slow the database is. When the write fails, the channel goes
+   * back to the state storage still holds, the failure is logged by its code, and the caller tells
+   * the operator: a state never stays set here while storage, and every other engine, says
+   * otherwise.
+   */
+  private async setState(channel: RunningChannel, state: ChannelRunState): Promise<boolean> {
+    const states = channelStateStore(this.options.store);
+    const name = channel.config.name;
+    channel.changes += 1;
+    // applyState sets channel.state before its first await, so the change holds from here on.
+    const applied = this.applyState(channel, state);
+    if (states === undefined) {
+      await applied;
+      channel.stored = state;
+      return true;
+    }
+    channel.writing += 1;
+    const write = channel.writes.then(() => states.setChannelState(name, state));
+    channel.writes = settled(write);
+    const [apply, written] = await Promise.allSettled([applied, write]);
+    channel.writing -= 1;
+    if (written.status === "fulfilled") channel.stored = state;
+    else {
+      this.options.logger.error({
+        event: "channel-state-unstored",
+        channel: name,
+        state,
+        code: errorCode(written.reason),
+      });
+      // Back to what storage holds, unless a later command has set the channel since.
+      if (channel.state === state && channel.writing === 0) {
+        channel.changes += 1;
+        await this.applyState(channel, channel.stored);
+      }
+    }
+    if (apply.status === "rejected") throw apply.reason;
+    return written.status === "fulfilled";
   }
 
   /** Opens or closes the channel's source to match `state`. */
@@ -1006,10 +1063,15 @@ export class Engine {
     const { config } = channel;
     channel.draining = true;
     try {
-      await this.setState(channel, "stopped");
+      // The channel is stopped here before the write starts, and a halt cuts off the delivery in
+      // flight at once: a cut-off delivery stays pending, so even a failed write loses nothing.
+      const storing = this.setState(channel, "stopped");
       if (how === "halt") {
         channel.halt.abort();
         channel.halt = new AbortController();
+      }
+      if (!(await storing)) {
+        return { channel: config.name, state: channel.state, refused: "state-not-stored" };
       }
       const busy = channel.busy;
       let drained = true;

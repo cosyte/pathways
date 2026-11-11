@@ -902,6 +902,8 @@ const CHANNEL_REFUSALS: Readonly<Record<NonNullable<ChannelCommandReport["refuse
   "not-configured": "that channel is no longer in the configuration; the running one was kept",
   "needs-restart": "these settings take effect only when the engine is restarted",
   "transform-load-failed": "the new transform did not load, so the running one was kept",
+  "state-not-stored":
+    "the database did not store the new state, so the channel was put back as it was; try again",
 };
 
 /**
