@@ -73,7 +73,10 @@ a repeat without dropping it.
 A pass that runs past its deadline (5 minutes unless `poll` sets `deadline`) is cut off: `signal`
 aborts, and every later `sink.receive` of that pass rejects with the code `POLL_DEADLINE` before it
 stores anything, so the source keeps the message. Pass `signal` to a listing or a query that can
-hang. The engine starts no pass of the source while the last `poll` call has not returned.
+hang. The engine starts no pass of the source while the last `poll` call has not returned. The
+signal also aborts when `pathways start` stops. A `poll` that rejects once its signal has aborted
+(an `AbortError` from a client it handed the signal to) is part of the cut, not an error; one that
+rejects before ends the run with its error.
 
 ### Say when the connection drops
 
