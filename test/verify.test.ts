@@ -271,7 +271,9 @@ describe("pathways verify, on stored messages", () => {
     const root = await stored();
     // Back to the schema before schema_info, as the version before left it.
     const db = new SqliteDatabase(join(root, ".pathways/pathways.db"));
-    db.exec("drop table schema_info; delete from kysely_migration where name = '0007-schema-info'");
+    db.exec(
+      "drop table schema_info; drop table channel_states; delete from kysely_migration where name in ('0007-schema-info', '0008-channel-states')",
+    );
     db.close();
     const result = await runCli(["verify", "-C", root]);
     expect(result).toMatchObject({ code: EXIT.failed, out: "" });
