@@ -126,7 +126,12 @@ interface ConnectionState {
   tail: Promise<void>;
   /** Set once this source closes the connection: nothing queued behind is stored or answered. */
   closed: boolean;
+  /** What the transform reads in `ctx.source` about each message on this connection. */
+  readonly facts: Readonly<Record<string, string>>;
 }
+
+/** The most TLS peers a source remembers for connections that have sent nothing yet. */
+const MAX_WAITING_PEERS = 1_024;
 
 /**
  * Listens for HL7 v2 messages over MLLP, over TLS when it is given TLS material. Each message is
@@ -155,6 +160,11 @@ export class MllpSource implements SourceConnector {
   private server: MllpServer | undefined;
   private readonly states = new WeakMap<Connection, ConnectionState>();
   private readonly pending = new Set<Promise<void>>();
+  /**
+   * The common name in each TLS client certificate, by connection id, from the moment the
+   * connection opens until its first message: the connection's state takes it from there.
+   */
+  private readonly peers = new Map<string, string>();
   private stopping = false;
 
   /** @param options Where to listen, TLS, and how to answer. */
@@ -194,6 +204,18 @@ export class MllpSource implements SourceConnector {
     server.on("tlsClientError", (event: { readonly code: string | null }) => {
       this.report("warn", "mllp-tls-refused", { code: event.code });
     });
+    server.on(
+      "connection",
+      (event: {
+        readonly connectionId: string;
+        readonly peerCertificate: { readonly subjectCN: string | null } | null;
+      }) => {
+        const subject = event.peerCertificate?.subjectCN;
+        if (typeof subject !== "string") return;
+        // A connection that never sends a message would leave its entry; the oldest go first.
+        remember(this.peers, event.connectionId, subject, MAX_WAITING_PEERS);
+      },
+    );
     server.on("securityWarning", (warning: { readonly code: string }) => {
       this.report("warn", "mllp-security-warning", { code: warning.code });
     });
@@ -210,6 +232,7 @@ export class MllpSource implements SourceConnector {
    */
   async stop(): Promise<void> {
     this.stopping = true;
+    this.peers.clear();
     await Promise.all(this.pending);
     const server = this.server;
     this.server = undefined;
@@ -220,7 +243,18 @@ export class MllpSource implements SourceConnector {
     if (this.stopping) return;
     let state = this.states.get(conn);
     if (state === undefined) {
-      state = { tail: Promise.resolve(), closed: false };
+      const { remoteAddress } = conn.getStats();
+      const subject = this.peers.get(meta.connectionId);
+      this.peers.delete(meta.connectionId);
+      state = {
+        tail: Promise.resolve(),
+        closed: false,
+        facts: {
+          /* v8 ignore next: a connection that delivered a message has the address it came from */
+          ...(remoteAddress === null ? {} : { remoteAddress }),
+          ...(subject === undefined ? {} : { tlsPeerSubject: subject }),
+        },
+      };
       this.states.set(conn, state);
     }
     const current = state;
@@ -250,7 +284,7 @@ export class MllpSource implements SourceConnector {
         messageId = await sink.receive(
           payload,
           problem === undefined
-            ? { duplicateKey: reading.duplicateKey }
+            ? { duplicateKey: reading.duplicateKey, source: state.facts }
             : { failure: `inbound: ${problem}` },
         );
       } catch (error) {
@@ -317,6 +351,24 @@ export class MllpSource implements SourceConnector {
   ): void {
     this.options.onEvent?.({ ...fields, level, event });
   }
+}
+
+/**
+ * Sets `key` in `map`, first dropping the oldest entries until it holds fewer than `max`, so the
+ * map never holds more than `max`.
+ *
+ * @example
+ * ```ts
+ * const peers = new Map([["a", "lab"]]);
+ * remember(peers, "b", "ehr", 1); // peers is now { b: "ehr" }
+ * ```
+ */
+export function remember<K, V>(map: Map<K, V>, key: K, value: V, max: number): void {
+  for (const oldest of map.keys()) {
+    if (map.size < max) break;
+    map.delete(oldest);
+  }
+  map.set(key, value);
 }
 
 function close(conn: Connection, state: ConnectionState): void {

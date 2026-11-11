@@ -1,3 +1,5 @@
+import type { JsonValue } from "../transform.js";
+
 /**
  * The connector interfaces. Pathways' own connectors implement these, and so can yours: a source
  * brings messages in, a destination sends them out, and the engine does everything in between
@@ -13,6 +15,7 @@
  * await sink.receive(body, { failure: "inbound: NO_MSH_SEGMENT" });
  * await sink.receive(body, { idempotencyKey: `queue|${deliveryTag}` });
  * await sink.receive(body, { idempotencyKey: `queue|${deliveryTag}`, resumed: true });
+ * await sink.receive(body, { source: { queue: "inbound", deliveryTag } });
  * ```
  */
 export interface ReceiveOptions {
@@ -44,6 +47,15 @@ export interface ReceiveOptions {
    * these messages are looked up, so a message handed in for the first time costs no lookup.
    */
   readonly resumed?: boolean | undefined;
+  /**
+   * What the source knows about the message, which the channel's transform reads as
+   * `ctx.source.facts`: a map of plain JSON values (strings, finite numbers, booleans, null, lists
+   * and maps). Anything else is refused with the code `INVALID_SOURCE_FACTS` before the message is
+   * stored. It is never logged, sent to a hook or stored: the engine holds it in memory until the
+   * message is transformed, so a message taken in before the engine restarts is transformed
+   * without it.
+   */
+  readonly source?: Readonly<Record<string, JsonValue>> | undefined;
 }
 
 /**

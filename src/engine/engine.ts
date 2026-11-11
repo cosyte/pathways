@@ -4,6 +4,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { Logger } from "pino";
 
 import type { ChannelConfig, Format, ProjectConfig } from "../config/schema.js";
+import { resolveTransformConfig } from "../config/transform-config.js";
 import {
   listenerSecurity,
   listenerWarnings,
@@ -30,10 +31,12 @@ import { AuditLog, auditEvent } from "../operator/audit.js";
 import { recordRetention, runRetention, type RetentionReport } from "../operator/retention.js";
 import { copiesBodies, markCopiesBodies, release } from "../storage/ownership.js";
 import type { MessageStore, ReceivedMessage } from "../storage/store.js";
+import type { SourceFacts } from "../transform.js";
 import { ChannelWorker, type TransformOutcome } from "./channel-worker.js";
 import type { EngineFence } from "./lease.js";
 import { channelStatus, type ChannelHealth, type HealthReport } from "./health.js";
 import type { FailureSummary } from "./worker-entry.js";
+import { isJsonMap, SourceFactsError, sourceFacts } from "./source-facts.js";
 
 /** The first retry waits this long; each later one waits twice as long as the one before. */
 export const RETRY_FIRST_MS = 1_000;
@@ -192,6 +195,7 @@ export async function connectorsFor(
               }
             : response,
         maxBytes: source.maxBytes,
+        contextHeaders: source.contextHeaders,
         tls,
         token,
         onRefused: (status) => {
@@ -322,6 +326,11 @@ interface RunningChannel {
   readonly hooks: HookSet;
   /** Set while the channel's source cannot listen: how often it has failed and when to try next. */
   down: { readonly attempts: number; readonly nextAt: number } | undefined;
+  /**
+   * What the source knew about each message it took in that waits for its transform, by message id:
+   * in memory only, and dropped once the message is transformed.
+   */
+  readonly facts: Map<number, SourceFacts>;
 }
 
 /**
@@ -391,8 +400,9 @@ export class Engine {
 
   /**
    * Starts the hooks and every channel. Rejects, having stopped any it started, if a transform will
-   * not load, a connector's TLS files or secrets cannot be had (a `ConfigError`), or an extension
-   * module is wrong (an `ExtensionLoadError`). A source that cannot listen does not stop the start:
+   * not load, its configuration names an environment variable that is not set, a connector's TLS
+   * files or secrets cannot be had (each a `ConfigError`), or an extension module is wrong (an
+   * `ExtensionLoadError`). A source that cannot listen does not stop the start:
    * it is logged, reported on the health endpoint, and tried again.
    */
   async start(): Promise<void> {
@@ -413,6 +423,8 @@ export class Engine {
           format: config.format,
           timeoutMs: config.settings.timeoutMs,
           memoryMb: config.settings.memoryMb,
+          // Read here, in the engine's process, so a worker never sees the environment.
+          config: resolveTransformConfig(project.config, config, env),
         });
         const hooks = await HookSet.open(config.hooks, {
           file: `channels/${config.name}/channel.yaml`,
@@ -429,7 +441,14 @@ export class Engine {
           await hooks.stop();
           throw error;
         }
-        const channel: RunningChannel = { config, worker, connectors, hooks, down: undefined };
+        const channel: RunningChannel = {
+          config,
+          worker,
+          connectors,
+          hooks,
+          down: undefined,
+          facts: new Map(),
+        };
         this.channels.push(channel);
         this.warnInsecure(config);
         await worker.start();
@@ -647,9 +666,13 @@ export class Engine {
     const { store, logger } = this.options;
     const sink: MessageSink = {
       receive: async (body, options = {}) => {
-        const { duplicateKey, idempotencyKey, resumed, failure } = options;
+        const { duplicateKey, idempotencyKey, resumed, failure, source } = options;
         let received: ReceivedMessage;
+        const receivedAt = this.at();
         try {
+          // Checked before anything is stored, so a source that passes what a transform cannot
+          // be handed learns it at once, and the sender keeps the message.
+          if (source !== undefined && !isJsonMap(source)) throw new SourceFactsError();
           // An engine that lost its lease takes nothing more in: the source answers as it does
           // when a message cannot be stored, so the sender keeps it.
           this.options.fence?.check();
@@ -679,6 +702,12 @@ export class Engine {
           // Handed in again after a stop between storing and acknowledging: stored once already.
           logger.info({ event: "already-stored", channel: config.name, message: received.id });
           return received.id;
+        }
+        if (failure === undefined) {
+          channel.facts.set(
+            received.id,
+            sourceFacts(config.source.kind, source, body.byteLength, receivedAt),
+          );
         }
         logger.info({
           event: "received",
@@ -722,7 +751,13 @@ export class Engine {
       this.options.fence?.check();
       const next = await store.nextToTransform(config.name);
       if (next === undefined) return;
-      const outcome: TransformOutcome = await worker.run(next.body, { transfer: owned });
+      const source = channel.facts.get(next.id);
+      channel.facts.delete(next.id);
+      const outcome: TransformOutcome = await worker.run(next.body, {
+        transfer: owned,
+        // Every message the engine transforms is on its first run: a replay runs elsewhere.
+        context: { messageId: next.id, attempt: 1, source, meta: {} },
+      });
       if (outcome.ok) {
         faultPoint("after-transform-before-complete");
         await store.completeTransform(

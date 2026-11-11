@@ -120,7 +120,13 @@ describe("an HTTP source answering with an HL7 ACK", () => {
     expect(ack.get("MSH.3")).toBe("LAB");
     expect(ack.get("MSH.5")).toBe("SYNTH");
     expect(sink.received).toEqual([
-      { body: ADT_A01, options: { duplicateKey: "SYNTH|TESTFAC\u0000MSG00001" } },
+      {
+        body: ADT_A01,
+        options: {
+          duplicateKey: "SYNTH|TESTFAC\u0000MSG00001",
+          source: { method: "POST", path: "/hl7", remoteAddress: "127.0.0.1", headers: {} },
+        },
+      },
     ]);
   });
 

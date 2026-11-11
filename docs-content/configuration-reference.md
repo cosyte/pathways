@@ -31,14 +31,15 @@ bytes). An _env reference_ is `{ env: NAME }`, a variable name of letters, digit
 
 ## pathways.yaml
 
-| Key          | Type                                    | Default                         |
-| ------------ | --------------------------------------- | ------------------------------- |
-| `encryption` | see [Encryption](#encryption)           | none: `start` refuses           |
-| `storage`    | see [Storage](#storage)                 | SQLite, `.pathways/pathways.db` |
-| `defaults`   | see [Settings](#settings)               | the defaults below              |
-| `hooks`      | a list of [hooks](#hooks)               | none                            |
-| `health`     | see [Health endpoint](#health-endpoint) | no health endpoint              |
-| `lease`      | see [Engine lease](#engine-lease)       | a 15s lease, no standby         |
+| Key          | Type                                                    | Default                         |
+| ------------ | ------------------------------------------------------- | ------------------------------- |
+| `encryption` | see [Encryption](#encryption)                           | none: `start` refuses           |
+| `storage`    | see [Storage](#storage)                                 | SQLite, `.pathways/pathways.db` |
+| `defaults`   | see [Settings](#settings)                               | the defaults below              |
+| `hooks`      | a list of [hooks](#hooks)                               | none                            |
+| `health`     | see [Health endpoint](#health-endpoint)                 | no health endpoint              |
+| `lease`      | see [Engine lease](#engine-lease)                       | a 15s lease, no standby         |
+| `config`     | see [Transform configuration](#transform-configuration) | none                            |
 
 ### Encryption
 
@@ -141,17 +142,26 @@ The lease one engine per database holds, so a second is refused or waits as a st
 | `ttl`     | duration, at least `1s` | `15s`   | how long the lease lasts unless renewed; the holder renews it every third of this                           |
 | `standby` | boolean                 | `false` | start as a standby, as `pathways start --standby` does; needs a database server, and is refused with SQLite |
 
+### Transform configuration
+
+What every channel's transform reads as `ctx.config`: a mapping of names to any YAML value (a
+string, a finite number, a boolean, null, a list or a mapping). A mapping whose one key is `env`,
+`{ env: NAME }`, is read from that environment variable when the engine starts; a variable that is
+not set stops the start with its name, never a value. A channel's own `config` replaces this one key
+by key. See [Use the message context](./use-the-message-context.md).
+
 ## channel.yaml
 
-| Key                                                              | Type                                                | Default                          |
-| ---------------------------------------------------------------- | --------------------------------------------------- | -------------------------------- |
-| `name`                                                           | lowercase letters, digits and hyphens               | the folder's name; must match it |
-| `format`                                                         | `hl7v2`, `fhir`, `x12`, `ccda`, `json` or `text`    | `hl7v2`                          |
-| `source`                                                         | exactly one [source](#sources)                      | required                         |
-| `transform`                                                      | path to the transform module                        | none: messages pass through      |
-| `destinations`                                                   | a list of at least one [destination](#destinations) | required                         |
-| `hooks`                                                          | a list of [hooks](#hooks)                           | none                             |
-| `timeout`, `memory`, `onStoreFailure`, `ackTimeout`, `retention` | see [Settings](#settings)                           | the project's                    |
+| Key                                                              | Type                                                    | Default                          |
+| ---------------------------------------------------------------- | ------------------------------------------------------- | -------------------------------- |
+| `name`                                                           | lowercase letters, digits and hyphens                   | the folder's name; must match it |
+| `format`                                                         | `hl7v2`, `fhir`, `x12`, `ccda`, `json` or `text`        | `hl7v2`                          |
+| `source`                                                         | exactly one [source](#sources)                          | required                         |
+| `transform`                                                      | path to the transform module                            | none: messages pass through      |
+| `destinations`                                                   | a list of at least one [destination](#destinations)     | required                         |
+| `hooks`                                                          | a list of [hooks](#hooks)                               | none                             |
+| `config`                                                         | see [Transform configuration](#transform-configuration) | the project's, key by key        |
+| `timeout`, `memory`, `onStoreFailure`, `ackTimeout`, `retention` | see [Settings](#settings)                               | the project's                    |
 
 A channel with an MLLP source or destination must have the format `hl7v2`.
 
@@ -171,19 +181,22 @@ Exactly one of `file`, `http`, `mllp` or `module`.
 
 A [listener](#listener), and:
 
-| Key        | Type                                               | Default         |
-| ---------- | -------------------------------------------------- | --------------- |
-| `path`     | starting with `/`                                  | `/`             |
-| `paths`    | a list of paths, in place of `path`                | `[path]`        |
-| `methods`  | a list of `POST` and `PUT`                         | `[POST]`        |
-| `response` | `ack`, or `{ status, contentType, headers, body }` | 202 with the id |
-| `maxBytes` | byte size                                          | `10MB`          |
+| Key              | Type                                               | Default         |
+| ---------------- | -------------------------------------------------- | --------------- |
+| `path`           | starting with `/`                                  | `/`             |
+| `paths`          | a list of paths, in place of `path`                | `[path]`        |
+| `methods`        | a list of `POST` and `PUT`                         | `[POST]`        |
+| `response`       | `ack`, or `{ status, contentType, headers, body }` | 202 with the id |
+| `maxBytes`       | byte size                                          | `10MB`          |
+| `contextHeaders` | a list of header names                             | none            |
 
 Its token is read from `PATHWAYS_HTTP_TOKEN` when `auth` is not set. `response: ack` needs the format
 `hl7v2` and takes POST alone. A fixed `response` has a 2xx `status`, an optional `contentType`,
 `headers` by the [HTTP destination](#http-destination)'s rules, and a `body` of at most 4,096
 characters. See [Send and receive over HTTP](./send-and-receive-http.md#answer-with-an-hl7-ack) for
-how a path is matched and how each response answers.
+how a path is matched and how each response answers. `contextHeaders` names the request headers the
+transform reads in `ctx.source.headers`; `Authorization`, `Proxy-Authorization` and `Cookie` are
+refused there, and never passed.
 
 #### MLLP source
 

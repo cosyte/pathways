@@ -229,7 +229,13 @@ export class FileSource implements SourceConnector {
       onReadError?.(error);
       return;
     }
-    const id = await sink.receive(body, { idempotencyKey: `file:${file.name}`, resumed });
+    // The name as it was dropped, which the transform reads in ctx.source and nothing logs.
+    const original = CLAIM_NAME.exec(file.name)?.[1] ?? file.name;
+    const id = await sink.receive(body, {
+      idempotencyKey: `file:${file.name}`,
+      resumed,
+      source: { name: original },
+    });
     // A sink that copied the body keeps none of it, and this source is done with it.
     if (copiesBodies(sink)) release(body);
     if (!keepProcessed) {
@@ -238,7 +244,6 @@ export class FileSource implements SourceConnector {
     }
     const processed = join(dir, PROCESSED_DIR);
     await mkdir(processed, { recursive: true });
-    const original = CLAIM_NAME.exec(file.name)?.[1] ?? file.name;
     await rename(file.path, join(processed, fitted(`${String(id)}-`, original)));
   }
 }

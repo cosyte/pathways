@@ -50,8 +50,10 @@ describe("loadProject", () => {
         destinations: [{ kind: "file", dir: join(root, "channels/adt/outbox") }],
         settings: DEFAULT_SETTINGS,
         hooks: [],
+        config: {},
       },
     ]);
+    expect(project.config).toEqual({});
   });
 
   it("applies engine defaults from pathways.yaml, then each channel's own", async () => {
@@ -190,6 +192,7 @@ destinations:
       methods: ["POST"],
       response: { kind: "id" },
       maxBytes: 10 * 1_048_576,
+      contextHeaders: [],
       tls: {
         cert: join(root, "channels/adt/tls/server.crt"),
         key: join(root, "channels/adt/tls/server.key"),

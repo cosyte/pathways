@@ -37,6 +37,7 @@ import {
   type ServerTlsFiles,
   type Settings,
   type StorageConfig,
+  type TransformConfigBlock,
 } from "./schema.js";
 
 type ChannelYaml = z.infer<typeof channelSchema>;
@@ -201,6 +202,8 @@ export async function loadProject(root: string): Promise<ProjectConfig> {
       destinations,
       settings: channelSettings,
       hooks: channelHooks,
+      // The schema checked each value is JSON.
+      config: (channel.config ?? {}) as TransformConfigBlock,
     });
   }
 
@@ -219,6 +222,7 @@ export async function loadProject(root: string): Promise<ProjectConfig> {
     health,
     lease,
     encryption,
+    config: (project.config ?? {}) as TransformConfigBlock,
     channels,
   };
 }
@@ -350,6 +354,7 @@ function resolveSource(
       methods: http.methods ?? ["POST"],
       response: resolveSourceResponse(http.response),
       maxBytes: http.maxBytes ?? DEFAULT_MAX_BYTES,
+      contextHeaders: (http.contextHeaders ?? []).map((name) => name.toLowerCase()),
     };
   }
   // The schema lets exactly one kind through, so a source that is not HTTP is a file source.

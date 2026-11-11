@@ -758,7 +758,12 @@ async function test(
   }
   const channels =
     names.length === 0 ? project.channels : project.channels.filter((c) => names.includes(c.name));
-  const summary = await runChannelTests(channels, { update, out: (line) => io.out(`${line}\n`) });
+  const summary = await runChannelTests(channels, {
+    update,
+    out: (line) => io.out(`${line}\n`),
+    project,
+    env: io.env ?? process.env,
+  });
   const parts = [`${summary.passed} passed`, `${summary.failed} failed`];
   if (summary.updated > 0) parts.push(`${summary.updated} updated`);
   io.out(`${parts.join(", ")}\n`);
@@ -820,6 +825,7 @@ async function operator(
       out: io.out,
       err: io.err,
       now: Date.now,
+      env: context.env,
     });
   } catch (error) {
     // A stored value that cannot be decrypted: never shown garbled. Fixed text and at most a key id.

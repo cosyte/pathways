@@ -1,4 +1,6 @@
 import type { ChannelConfig, ProjectConfig } from "../config/schema.js";
+import { transformConfigFor } from "../config/transform-config.js";
+import type { Env } from "../connectors/endpoint.js";
 import { EncryptionError } from "../encryption/envelope.js";
 import { ChannelWorker, TransformLoadError } from "../engine/channel-worker.js";
 import { storedFailure } from "../engine/engine.js";
@@ -96,12 +98,14 @@ export interface ReplayContext {
   readonly audit: AuditLog;
   /** Re-send the stored outputs instead of transforming again. */
   readonly resend: boolean;
+  /** Where the transform's configuration reads its environment variables. Defaults to `process.env`. */
+  readonly env?: Env | undefined;
 }
 
 /**
  * Replays messages, one after another, in the order given: runs each through its channel's
  * transform as it is on disk now, in the same kind of worker the engine runs (with the channel's
- * timeout and memory cap), and queues the outputs as fresh deliveries at the back of each
+ * timeout and memory cap, and its configuration as it is now), and queues the outputs as fresh deliveries at the back of each
  * destination's queue. With `resend`, queues the outputs stored from the last transform instead.
  *
  * It is safe beside a running engine on the same database: it never touches a message the engine
@@ -158,7 +162,7 @@ export async function replayMessages(
       outputs = message.status === "transformed" ? await store.outputs(id) : [];
       if (outputs.length === 0) return refuse(id, channel.name, "no-output");
     } else {
-      const worker = await workerFor(channel, workers);
+      const worker = await workerFor(project, channel, workers, context.env ?? process.env);
       if (!(worker instanceof ChannelWorker)) {
         return refuse(id, channel.name, "transform-load", describeFailure(worker, channel));
       }
@@ -167,7 +171,11 @@ export async function replayMessages(
         await audit.record({ action: mode, outcome: "not-found", messageId: id });
         return { id, outcome: "not-found" };
       }
-      const outcome = await worker.run(body);
+      // The run after this message's generation: the first transform was run 1. What its source
+      // knew is not stored, so a replay runs without it.
+      const outcome = await worker.run(body, {
+        context: { messageId: id, attempt: message.generation + 2, source: undefined, meta: {} },
+      });
       outputs = outcome.ok ? outcome.outputs : [];
       failure = outcome.ok ? undefined : outcome.failure;
     }
@@ -254,19 +262,30 @@ export async function clearMessages(
   return results;
 }
 
-/** The channel's worker, started once per run; or why its transform would not load. */
+/**
+ * The channel's worker, started once per run; or why its transform would not load, or its
+ * configuration could not be resolved.
+ */
 async function workerFor(
+  project: ProjectConfig,
   channel: ChannelConfig,
   workers: Map<string, ChannelWorker | FailureSummary>,
+  env: Env,
 ): Promise<ChannelWorker | FailureSummary> {
   const known = workers.get(channel.name);
   if (known !== undefined) return known;
+  const config = transformConfigFor(project, channel, env);
+  if (!("resolved" in config)) {
+    workers.set(channel.name, config);
+    return config;
+  }
   const worker = new ChannelWorker({
     channel: channel.name,
     transformFile: channel.transform,
     format: channel.format,
     timeoutMs: channel.settings.timeoutMs,
     memoryMb: channel.settings.memoryMb,
+    config: config.resolved,
   });
   try {
     await worker.start();
