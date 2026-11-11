@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -286,6 +287,21 @@ describe("pathways verify, on stored messages", () => {
     } finally {
       after.close();
     }
+  });
+
+  it("creates no database file where there is none", async () => {
+    const root = await makeProject({
+      "test.key": `${generateKey()}\n`,
+      "pathways.yaml": KEYS,
+      "channels/adt/channel.yaml": CHANNEL,
+      "channels/adt/transform.ts": TRANSFORM,
+    });
+    const result = await runCli(["verify", "-C", root]);
+    expect(result).toMatchObject({ code: EXIT.failed, out: "" });
+    expect(result.err).toBe(
+      "pathways: there is no database to verify against; give --samples to verify synthetic inputs.\n",
+    );
+    expect(existsSync(join(root, ".pathways/pathways.db"))).toBe(false);
   });
 
   it("refuses arguments it cannot use", async () => {

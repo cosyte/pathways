@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { stderr } from "node:process";
 import { parseArgs } from "node:util";
 
@@ -1066,6 +1067,18 @@ async function operator(
 
   const project = await load(projectDir, io);
   if (project === undefined) return EXIT.config;
+  // verify reads what a running engine stored, so where SQLite has no file there is nothing to read,
+  // and opening it would leave an empty database behind.
+  if (
+    command === "verify" &&
+    project.storage.kind === "sqlite" &&
+    !existsSync(project.storage.file)
+  ) {
+    io.err(
+      "pathways: there is no database to verify against; give --samples to verify synthetic inputs.\n",
+    );
+    return EXIT.failed;
+  }
   // Extensions log to stderr, so stdout holds only the report.
   const bare = { env: io.env ?? process.env, logger: io.logger ?? pino(STDERR_LOG, stderr) };
   // The engine-wide hooks receive each audit entry this command writes, as `pathways start`'s do.
