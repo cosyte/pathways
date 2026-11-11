@@ -15,7 +15,8 @@ name: Docker
 #   of linux/amd64 and linux/arm64 built alone (arm64 under QEMU) and run on a starter project on
 #   SQLite; the check that the version is not published yet; both built together with the SBOM and
 #   provenance the release attaches and pushed by digest alone; both platforms pulled back by
-#   digest with their attestations checked; and only then the version tag put on that digest. It
+#   digest with their attestations checked; and only then, once the tag is looked up again and
+#   found absent, the version tag put on that digest. It
 #   has no login and does not sign. test/package.test.ts holds its steps equal to the release's.
 # - `project-image` builds a starter project's own image from its Dockerfile (templates/starter/),
 #   FROM this image by digest, through a registry that lives for the job on the runner's loopback.
@@ -395,6 +396,13 @@ jobs:
       # Last, and only on the checked digest. With one source index and no annotations, imagetools
       # copies the index byte for byte; the dry run proves the digest is unchanged before the tag is
       # written, and the read back after it proves the tag names the checked digest.
+      #
+      # Just before the tag is written, the tag is looked up once more, and only a tag the registry
+      # says it does not have is written. "denied" does not count here: the earlier checks take it
+      # as "not published" because GHCR gives it while the package does not exist, but by this step
+      # the push by digest above has created the package and the pull has read from it, so a
+      # "denied" now cannot mean "no package" and could hide a version that is there. A version tag
+      # that exists, "denied", and any other answer stop the run before the tag is written.
       - name: Tag the verified digest with the version
         if: steps.absent.outputs.absent == 'true'
         env:
@@ -406,6 +414,14 @@ jobs:
           planned="sha256:$(printf '%s' "$(cat "$RUNNER_TEMP/planned.json")" | sha256sum | cut -d ' ' -f 1)"
           echo "tagging $ref as $IMAGE:$VERSION, which would name $planned"
           test "$planned" = "$DIGEST"
+          if docker buildx imagetools inspect "$IMAGE:$VERSION" > "$RUNNER_TEMP/before-tag.txt" 2>&1; then
+            echo "::error::$IMAGE:$VERSION already exists; a version tag is never replaced"
+            exit 1
+          elif ! grep -qiE 'not found|manifest unknown|name unknown' "$RUNNER_TEMP/before-tag.txt"; then
+            cat "$RUNNER_TEMP/before-tag.txt"
+            echo "::error::could not tell whether $IMAGE:$VERSION exists; not tagging"
+            exit 1
+          fi
           docker buildx imagetools create --tag "$IMAGE:$VERSION" "$ref"
           docker buildx imagetools inspect "$IMAGE:$VERSION" --raw > "$RUNNER_TEMP/tagged.json"
           tagged="sha256:$(printf '%s' "$(cat "$RUNNER_TEMP/tagged.json")" | sha256sum | cut -d ' ' -f 1)"
