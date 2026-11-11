@@ -22,6 +22,9 @@ name: Bench reading
 
 on:
   workflow_dispatch: {}
+  # Temporary: takes the first reading from this branch before the workflow is on main.
+  push:
+    branches: [perf/benchmark-audit]
   pull_request:
     branches: [main]
     paths:
