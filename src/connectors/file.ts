@@ -177,6 +177,10 @@ const TEST_SCRIPT = new Script("glob === undefined ? expression.test(path) : mat
  * in its context, which is slower.
  */
 function matcher(pattern: PathPattern): (rel: string) => boolean {
+  // Node loads its glob matcher on the first call. Loaded inside a timed run, a slow host could
+  // stop the load part way and leave every later glob failing, so it loads here, untimed, on a
+  // fixed pattern that costs nothing.
+  if ("glob" in pattern) posix.matchesGlob("", "*");
   const context =
     "glob" in pattern
       ? {
