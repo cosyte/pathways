@@ -21,6 +21,7 @@ export const LIFECYCLE_EVENTS = [
   "delivery-retry",
   "delivery-redirected",
   "delivery-rejected",
+  "delivery-exhausted",
   "source-down",
   "source-up",
   "audit",
@@ -252,6 +253,27 @@ export interface DeliveryRejectedEvent extends DeliveryEventBase {
 }
 
 /**
+ * A delivery ran out of retries: it had its `retry.limit` of attempts, or its next attempt would come
+ * later than `retry.maxAge` after it was queued. It is marked failed, its body kept for an operator
+ * to resend, and the destination moves on to the next. Only a destination whose retry settings set
+ * a limit or an age sends this.
+ *
+ * @example
+ * ```ts
+ * if (event.type === "delivery-exhausted") page(`${event.channel}: gave up after ${event.attempt}`);
+ * ```
+ */
+export interface DeliveryExhaustedEvent extends DeliveryEventBase {
+  readonly type: "delivery-exhausted";
+  /** `limit` when it had its attempts, `maxAge` when it was too old to wait for another. */
+  readonly reason: "limit" | "maxAge";
+  /** The last error's name, such as `MllpDeliveryError`. */
+  readonly name: string;
+  /** The last error's code, such as `ECONNREFUSED` or `HTTP_503`. */
+  readonly code: string | undefined;
+}
+
+/**
  * A source could not start listening (its port is taken, say). The engine tries again after
  * `retryInMs` and reports this again on each failed try, counting up `attempt`.
  *
@@ -377,6 +399,7 @@ export type LifecycleEvent =
   | DeliveryRetryEvent
   | DeliveryRedirectedEvent
   | DeliveryRejectedEvent
+  | DeliveryExhaustedEvent
   | SourceDownEvent
   | SourceUpEvent
   | AuditEvent;

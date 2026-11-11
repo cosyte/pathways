@@ -630,6 +630,74 @@ destinations:
     expect(project({ storage: { sqlite: { file: "a.db" }, module: "./s.ts" } })).toBe(false);
   });
 
+  it("take a reference at every key that holds one value, but the documented exceptions", () => {
+    // configuration-reference.md, "Settings from the environment": plaintext, a channel's name and
+    // format are never read from the environment (encryption: none and auth: none are the short
+    // form of a block, and blocks are not scalars, so the walk passes over them). Matched by the
+    // whole path, so a new key that only shares one of these names is still checked.
+    const EXCEPTIONS: readonly string[] = [
+      "pathways.yaml.storage.postgres.plaintext",
+      "pathways.yaml.storage.mysql.plaintext",
+      "pathways.yaml.storage.sqlserver.plaintext",
+      "pathways.yaml.hooks.[].webhook.plaintext",
+      "pathways.yaml.health.plaintext",
+      "channel.yaml.name",
+      "channel.yaml.format",
+      "channel.yaml.source.http.plaintext",
+      "channel.yaml.source.mllp.plaintext",
+      "channel.yaml.destinations.[].http.plaintext",
+      "channel.yaml.destinations.[].mllp.plaintext",
+      "channel.yaml.hooks.[].webhook.plaintext",
+    ];
+    type Node = Record<string, unknown>;
+    const isNode = (value: unknown): value is Node =>
+      typeof value === "object" && value !== null && !Array.isArray(value);
+    const branches = (node: Node): Node[] =>
+      [node["anyOf"], node["oneOf"], node["allOf"]].flatMap((list) =>
+        Array.isArray(list) ? list.filter(isNode) : [],
+      );
+    const isReference = (node: Node): boolean =>
+      isNode(node["properties"]) && "env" in node["properties"];
+    const isScalar = (node: Node): boolean => {
+      const options = branches(node);
+      if (options.length > 0) return options.every(isScalar);
+      const type = node["type"];
+      return (
+        "const" in node ||
+        "enum" in node ||
+        type === "string" ||
+        type === "number" ||
+        type === "integer" ||
+        type === "boolean"
+      );
+    };
+    const missing: string[] = [];
+    const excepted: string[] = [];
+    const walk = (node: Node, path: readonly string[]): void => {
+      if (isReference(node) || branches(node).some(isReference)) return;
+      if (isScalar(node)) {
+        const key = path.join(".");
+        (EXCEPTIONS.includes(key) ? excepted : missing).push(key);
+        return;
+      }
+      const properties = node["properties"];
+      if (isNode(properties)) {
+        for (const [key, child] of Object.entries(properties)) {
+          if (isNode(child)) walk(child, [...path, key]);
+        }
+      }
+      if (isNode(node["items"])) walk(node["items"], [...path, "[]"]);
+      if (isNode(node["additionalProperties"])) walk(node["additionalProperties"], [...path, "*"]);
+      // A union of a block and its short form (hooks: [./hook.ts], response: ack) walks the block.
+      for (const option of branches(node)) if (!isScalar(option)) walk(option, path);
+    };
+    walk(schemas.project, ["pathways.yaml"]);
+    walk(schemas.channel, ["channel.yaml"]);
+    expect(missing).toEqual([]);
+    // Each exception is still a key, so the list cannot go stale.
+    expect([...new Set(excepted)].sort()).toEqual([...EXCEPTIONS].sort());
+  });
+
   it("refuse plaintext read from the environment, as Zod does", () => {
     expect(project({ health: { port: 9090, plaintext: { env: "PLAIN" } } })).toBe(false);
     expect(

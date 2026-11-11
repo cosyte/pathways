@@ -138,6 +138,25 @@ for (const database of TEST_DATABASES) {
       await store.close();
     });
 
+    it("passes over a delivery waiting for a retry only when asked for one due by a time", async () => {
+      const { store } = await openStore(database);
+      const { id } = await store.receive("a", bytes("in"));
+      await store.completeTransform(id, [bytes("1"), bytes("2")], 1);
+      const first = await store.nextDelivery("a", 0);
+      const later = Date.parse("2026-11-07T12:00:05.000Z");
+      await store.scheduleRetry(first?.id ?? -1, 1, later, "delivery: ECONNRESET");
+      // In order: the one waiting comes first, due or not.
+      expect((await store.nextDelivery("a", 0))?.seq).toBe(0);
+      expect((await store.nextDelivery("a", 0, {}))?.seq).toBe(0);
+      // Due by a time before its retry: the one behind it, which is due at once.
+      expect((await store.nextDelivery("a", 0, { dueBy: later - 1 }))?.seq).toBe(1);
+      // Due by its retry's time: it again, the oldest due.
+      expect((await store.nextDelivery("a", 0, { dueBy: later }))?.seq).toBe(0);
+      await store.markDelivered((await store.nextDelivery("a", 0, { dueBy: 0 }))?.id ?? -1);
+      expect(await store.nextDelivery("a", 0, { dueBy: later - 1 })).toBeUndefined();
+      await store.close();
+    });
+
     it("keeps everything across a restart, and opens an existing database without migrating it twice", async () => {
       const { store, reopen } = await openStore(database);
       const { id } = await store.receive("a", bytes("kept"));
