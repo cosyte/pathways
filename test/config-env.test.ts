@@ -1,7 +1,7 @@
 import { join } from "node:path";
 
 import { Ajv } from "ajv";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { parse as parseYaml } from "yaml";
 
 import { EXIT, run } from "../src/cli.js";
@@ -517,6 +517,36 @@ hooks:
     expect(lab?.hooks).toMatchObject([
       { webhook: { url: "https://hooks.example.test/in?(hidden)" } },
     ]);
+  });
+
+  it("--print reads process.env when given no environment, and keeps a URL with no query string", async () => {
+    const dir = await makeProject({
+      ...files,
+      "channels/lab/channel.yaml": `
+source:
+  file: { dir: ./inbox }
+destinations:
+  - http: { url: { env: LAB_URL } }
+`,
+    });
+    vi.stubEnv("ADT_PORT", "2576");
+    vi.stubEnv("LAB_URL", "https://lab.example.test/in");
+    try {
+      let out = "";
+      let err = "";
+      const code = await run(["validate", "--print", "-C", dir], {
+        out: (text) => (out += text),
+        err: (text) => (err += text),
+        logger: captureLogger().logger,
+      });
+      expect({ code, err }).toEqual({ code: EXIT.ok, err: "" });
+      const lab = (JSON.parse(out) as ProjectConfig).channels.find(
+        (channel) => channel.name === "lab",
+      );
+      expect(lab?.destinations).toMatchObject([{ url: "https://lab.example.test/in" }]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("fails as start does when a variable is unset, naming it", async () => {
