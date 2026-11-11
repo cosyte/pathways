@@ -138,6 +138,93 @@ const onStoreFailure = z.enum(ON_STORE_FAILURE).meta({
     "What an MLLP source does when a message cannot be stored: close sends no ACK and closes the connection, so the sender sends again; AE and AR answer with that negative ACK. Default close.",
 });
 
+/**
+ * How a retry's backoff is spread: `none` waits the capped exponential exactly; `full` waits a random
+ * time between 0 and it, so retries from several destinations or engines do not arrive together.
+ */
+export const RETRY_JITTER = ["none", "full"] as const;
+
+/** One of {@link RETRY_JITTER}. */
+export type RetryJitter = (typeof RETRY_JITTER)[number];
+
+/**
+ * What happens to a delivery that reached its retry `limit` or `maxAge`: `failed` marks it failed,
+ * its body kept for an operator to resend, and the destination moves on.
+ */
+export const RETRY_ON_EXHAUST = ["failed"] as const;
+
+/** One of {@link RETRY_ON_EXHAUST}. */
+export type RetryOnExhaust = (typeof RETRY_ON_EXHAUST)[number];
+
+/** A duration of at least 1ms, with the hover text an editor shows for the key that holds it. */
+const positiveDuration = (description: string) =>
+  durationValue
+    .refine((value) => value >= 1, 'a duration of at least 1ms, such as "1s"')
+    .meta({ description });
+
+/** `none`, which lifts a limit a wider level set, or a value. */
+const orNone = <T extends z.ZodType>(value: T) => z.union([z.literal("none"), value]);
+
+/**
+ * A `retry:` block, in `defaults:`, a channel or a destination. Every key is optional; the narrowest
+ * level that sets a key wins, key by key.
+ */
+const retryBlock = z
+  .strictObject({
+    first: positiveDuration(
+      "How long the first retry waits: a duration of at least 1ms, such as 1s, or a number of milliseconds. Default 1s.",
+    ).optional(),
+    max: positiveDuration(
+      "The longest wait between tries, whatever a server asks with Retry-After; a held redirect waits this long: a duration such as 5m, or a number of milliseconds. Default 5m.",
+    ).optional(),
+    factor: z
+      .number()
+      .min(1)
+      .max(100)
+      .meta({
+        description:
+          "How much longer each wait is than the one before, 1 to 100: 1 waits first every time. Default 2.",
+      })
+      .optional(),
+    jitter: z
+      .enum(RETRY_JITTER)
+      .meta({
+        description:
+          "none waits the backoff exactly; full waits a random time between 0 and it, so several destinations or engines retrying one receiver spread out. Default none.",
+      })
+      .optional(),
+    limit: orNone(z.number().int().min(1).max(1_000_000))
+      .meta({
+        description:
+          "The most attempts a delivery gets, the first included, before onExhaust: a whole number of at least 1, or none for no limit. Default none.",
+      })
+      .optional(),
+    maxAge: orNone(positiveDuration("A duration of at least 1ms."))
+      .meta({
+        description:
+          "How long after it was queued a delivery may still be retried before onExhaust: a duration such as 1h, a number of milliseconds, or none. Default none.",
+      })
+      .optional(),
+    onExhaust: z
+      .enum(RETRY_ON_EXHAUST)
+      .meta({
+        description:
+          "What happens at the limit or the age: failed marks the delivery failed, its body kept for a resend, and the destination moves on. Default failed.",
+      })
+      .optional(),
+    rotate: z
+      .boolean()
+      .meta({
+        description:
+          "true lets later deliveries go ahead of one waiting for a retry, which breaks the destination's order. Default false.",
+      })
+      .optional(),
+  })
+  .meta({
+    description:
+      "How a failed delivery is retried. The narrowest of defaults, the channel and the destination wins, key by key. Default: 1s, doubling to 5m, no jitter, no limit and no age.",
+  });
+
 /** Settings an engine sets as defaults and a channel can override. */
 const settingsShape = {
   timeout: duration(
@@ -164,6 +251,7 @@ const settingsShape = {
   retentionInterval: duration(
     "How often a running engine runs retention: a duration such as 1h, or a number of milliseconds. Default 1h. Engine-wide.",
   ).optional(),
+  retry: retryBlock.optional(),
 };
 
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -883,8 +971,12 @@ const destination = restate(
       mllp: mllpDestination.optional(),
       module: modulePath.optional(),
       options: moduleOptions.optional(),
+      retry: settingsShape.retry,
     })
-    .meta({ description: "One destination: exactly one of file, http, mllp or module." })
+    .meta({
+      description:
+        "One destination: exactly one of file, http, mllp or module, and its own retry settings.",
+    })
     .superRefine(oneKind(DESTINATION_KINDS))
     .superRefine(optionsWithModule),
   restateKinds(DESTINATION_KINDS),
@@ -934,6 +1026,7 @@ export const channelSchema = restate(
       ackTimeout: settingsShape.ackTimeout,
       retention: settingsShape.retention,
       resendFlag: settingsShape.resendFlag,
+      retry: settingsShape.retry,
     })
     .meta({
       title: "channel.yaml",
@@ -1025,7 +1118,59 @@ export interface Settings {
   readonly resendFlag: boolean;
   /** How often `pathways start` runs retention, in milliseconds. Engine-wide. */
   readonly retentionIntervalMs: number;
+  /** How a failed delivery is retried. A destination can override it, key by key. */
+  readonly retry: RetryPolicy;
 }
+
+/**
+ * How a failed delivery is retried, resolved: attempt `n + 1` waits `firstMs * factor ** (n - 1)`,
+ * capped at `maxMs`, or a random time between 0 and that with `jitter: "full"`.
+ *
+ * @example
+ * ```ts
+ * const policy: RetryPolicy = { ...DEFAULT_RETRY, limit: 10, jitter: "full" };
+ * ```
+ */
+export interface RetryPolicy {
+  /** How long the first retry waits, in milliseconds. */
+  readonly firstMs: number;
+  /** The longest wait, in milliseconds, whatever a server asks; a held redirect waits this long. */
+  readonly maxMs: number;
+  /** How much longer each wait is than the one before. */
+  readonly factor: number;
+  readonly jitter: RetryJitter;
+  /** The most attempts a delivery gets, the first included, or `undefined` for no limit. */
+  readonly limit: number | undefined;
+  /**
+   * How long after it was queued a delivery may still be retried, in milliseconds, or `undefined`
+   * for no limit.
+   */
+  readonly maxAgeMs: number | undefined;
+  /** What happens to a delivery at its limit or age. */
+  readonly onExhaust: RetryOnExhaust;
+  /** Whether later deliveries go ahead of one waiting for a retry, breaking the order. */
+  readonly rotate: boolean;
+}
+
+/**
+ * The retry settings when nothing sets them: 1 second, doubling to 5 minutes, no jitter, and no
+ * limit on attempts or age, so a delivery is retried until it succeeds or someone acts.
+ *
+ * @example
+ * ```ts
+ * DEFAULT_RETRY.firstMs; // 1000
+ * ```
+ */
+export const DEFAULT_RETRY: RetryPolicy = {
+  firstMs: 1_000,
+  maxMs: 300_000,
+  factor: 2,
+  jitter: "none",
+  limit: undefined,
+  maxAgeMs: undefined,
+  onExhaust: "failed",
+  rotate: false,
+};
 
 /** The defaults when neither `pathways.yaml` nor a channel sets a value. */
 export const DEFAULT_SETTINGS: Settings = {
@@ -1037,6 +1182,7 @@ export const DEFAULT_SETTINGS: Settings = {
   retentionMs: 30 * 86_400_000,
   resendFlag: true,
   retentionIntervalMs: 3_600_000,
+  retry: DEFAULT_RETRY,
 };
 
 /**
@@ -1340,6 +1486,20 @@ export type HookConfig =
     })
   | (HookSettings & { readonly kind: "webhook"; readonly webhook: HttpClientConfig });
 
+/**
+ * One destination, resolved. `retry` is set when the destination's block has a `retry:` of its own:
+ * that block over the channel's settings, key by key. Without it, the channel's `settings.retry`
+ * applies.
+ *
+ * @example
+ * ```ts
+ * const destination: DestinationConfig = { kind: "file", dir: "/srv/project/out" };
+ * ```
+ */
+export type DestinationConfig = (
+  FileDestination | HttpDestination | MllpDestination | ModuleConnector
+) & { readonly retry?: RetryPolicy };
+
 /** One channel, loaded, validated and resolved. */
 export interface ChannelConfig {
   readonly name: string;
@@ -1349,9 +1509,7 @@ export interface ChannelConfig {
   readonly source: FileSource | HttpSource | MllpSource | ModuleConnector;
   /** The transform module, or `undefined` to pass each message through unchanged. */
   readonly transform: string | undefined;
-  readonly destinations: readonly (
-    FileDestination | HttpDestination | MllpDestination | ModuleConnector
-  )[];
+  readonly destinations: readonly DestinationConfig[];
   readonly settings: Settings;
   /** The channel's own hooks, which receive its events beside the engine-wide ones. */
   readonly hooks: readonly HookConfig[];

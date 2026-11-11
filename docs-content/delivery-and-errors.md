@@ -2,7 +2,7 @@
 id: delivery-and-errors
 title: How delivery and errors work
 sidebar_label: Delivery and errors
-description: "Why a message is stored before it is acknowledged, how order and retries work per destination, what fails a message, and what replay does."
+description: "Why a message is stored before it is acknowledged, how order and retries work per destination, how to set retries, what fails a message, and what replay does."
 ---
 
 # How delivery and errors work
@@ -96,9 +96,10 @@ Each destination has its own queue, in the order the outputs were made.
 
 - When a delivery fails in a way worth trying again, the destination retries it after 1 second, then
   2, 4, 8 and so on, up to 5 minutes between tries, **for as long as it takes**: until it succeeds or
-  someone acts. Later outputs for that destination wait behind it, so they arrive in order.
+  someone acts. Later outputs for that destination wait behind it, so they arrive in order. Those
+  are the defaults: [each is a setting](#set-retries-per-destination).
 - When an HTTP 429 or 503 carries a `Retry-After` header, the retry waits as long as the server asks
-  if that is longer, still never more than 5 minutes. The time of the next attempt is stored, so a
+  if that is longer, still never more than 5 minutes (`retry.max`). The time of the next attempt is stored, so a
   restart keeps the wait.
 - Other destinations of the same channel, and other channels, keep going.
 
@@ -115,6 +116,64 @@ the destination's URL.
 Retrying forever, in order, is the choice that loses nothing and reorders nothing. Its cost is that a
 destination that is down for a day holds a day of messages, and an operator has to see that; the
 health endpoint shows the channel `retrying`, and a hook can page on `delivery-retry`.
+
+## Set retries per destination
+
+Each of those numbers is a setting: in `defaults:` in `pathways.yaml`, at the top level of a
+`channel.yaml`, or in one destination's block. The narrowest that sets a key wins, key by key, so a
+destination that sets only `limit` keeps its channel's waits.
+
+```yaml title="channels/adt-to-lab/channel.yaml"
+source:
+  mllp: { port: 2575, plaintext: true }
+retry:
+  max: 1m
+destinations:
+  - mllp: { host: lab.example.test, port: 2575, plaintext: true }
+    retry: { first: 500ms, limit: 20, jitter: full }
+  - file: { dir: ./archive }
+```
+
+| Key         | Default  | What it does                                                                                 |
+| ----------- | -------- | -------------------------------------------------------------------------------------------- |
+| `first`     | `1s`     | the first retry's wait                                                                       |
+| `max`       | `5m`     | the longest wait, whatever a `Retry-After` asks; a held redirect waits this long             |
+| `factor`    | `2`      | how much longer each wait is than the one before; `1` waits `first` every time               |
+| `jitter`    | `none`   | `full` waits a random time between 0 and the wait, so retries spread out                     |
+| `limit`     | `none`   | the most attempts a delivery gets, the first included                                        |
+| `maxAge`    | `none`   | how long after it was queued a delivery may still be retried                                 |
+| `onExhaust` | `failed` | what happens at the limit or the age                                                         |
+| `rotate`    | `false`  | `true` lets later deliveries go ahead of one waiting for a retry, **which breaks the order** |
+
+The defaults are the behaviour described above: 1 second, doubling to 5 minutes, for as long as it
+takes, in order.
+
+**Jitter.** With `jitter: none` every destination that failed at the same moment retries at the same
+moment, and keeps doing so. When several destinations send to one receiver, or several engines run,
+set `jitter: full`: each wait is then a random time between 0 and the wait it would have been, so a
+receiver that comes back is not met by every retry at once.
+
+**Running out.** With a `limit` or a `maxAge`, a delivery that fails its last allowed attempt, or
+whose next attempt would come later than `maxAge` after it was queued, is marked failed, and the
+destination moves on to the next output. Nothing is dropped:
+
+- the delivery keeps its body, so `pathways replay <id> --resend` sends it again once the receiver
+  is fixed;
+- its stored error names why, such as `exhausted (limit, 20 attempts): delivery: ECONNREFUSED`;
+- the engine logs `delivery-exhausted` and sends hooks a `delivery-exhausted` event, with the reason
+  `limit` or `maxAge`;
+- the channel shows `failed` on the health endpoint and in `pathways status` once nothing of it is
+  retrying.
+
+A delivery's age counts from when it was queued: its message's transform, or the replay or resend
+that queued it again. Time spent waiting behind an earlier delivery counts. `limit: none` and
+`maxAge: none` lift a limit a wider level set. `onExhaust` has one value, `failed`, today.
+
+**Rotate.** With `rotate: true`, a delivery waiting for a retry steps aside: later outputs for that
+destination are sent while it waits, and it is tried again when its wait is over. The receiver then
+gets them out of order, which for HL7 v2 can leave it with an older picture of a patient than the
+newest message. Use it only for a receiver that does not depend on order. A delivery whose wait is
+over at once, with full jitter, is tried once a pass, so it does not hold the engine in a loop.
 
 ## Replay
 
