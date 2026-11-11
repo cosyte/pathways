@@ -23,8 +23,10 @@ npm install
 file. It writes:
 
 ```text
+.dockerignore
 .gitignore
 .pathways/dev.key
+Dockerfile
 channels/adt-to-lab/channel.yaml
 channels/adt-to-lab/tests/a01.expected.hl7
 channels/adt-to-lab/tests/a01.hl7
@@ -39,6 +41,8 @@ pathways.yaml
   `.pathways/`), and the key that encrypts them.
 - `.pathways/dev.key` is a development key that `init` generated for this project alone. The
   `.gitignore` keeps `.pathways/` out of git, with the database beside it.
+- `Dockerfile` and `.dockerignore` build the project's own image on the Pathways image, with the
+  channels inside: see [Deploy the image](./deploy-the-image.md).
 - `channels/adt-to-lab/` is one channel: it reads HL7 v2 files from `data/adt-to-lab/in`, keeps only
   admissions (`ADT^A01`), sets the receiving application to `LAB`, and writes them to
   `data/adt-to-lab/out`.

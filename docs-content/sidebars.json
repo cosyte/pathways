@@ -31,7 +31,8 @@
         "search-messages-by-metadata",
         "set-message-retention",
         "upgrade-pathways",
-        "run-in-docker"
+        "run-in-docker",
+        "deploy-the-image"
       ]
     },
     {

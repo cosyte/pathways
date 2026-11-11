@@ -1,0 +1,7 @@
+# Only what the Dockerfile copies goes into the build, so the development key, the message database,
+# the message folders, node_modules and any .env file never reach the image or the build cache.
+*
+!package.json
+!package-lock.json
+!pathways.yaml
+!channels/
