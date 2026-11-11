@@ -877,9 +877,14 @@ describe("check status and health", () => {
     async () => {
       const dir = await starterProject();
       const port = await freePort();
-      await addToProjectYaml(dir, `health:\n  port: ${port}\n  plaintext: true\n  auth: none\n`);
+      const probePort = await freePort();
+      await addToProjectYaml(
+        dir,
+        `health:\n  port: ${port}\n  plaintext: true\n  auth: none\nprobes:\n  port: ${probePort}\n  plaintext: true\n`,
+      );
       const engine = startEngine(dir);
       let body: unknown;
+      let ready = "";
       try {
         for (let tries = 0; tries < 100 && body === undefined; tries += 1) {
           try {
@@ -889,6 +894,13 @@ describe("check status and health", () => {
             await new Promise((done) => setTimeout(done, 100));
           }
         }
+        // The probe listener the page shows, asked as the page says: one word, no token.
+        for (let tries = 0; tries < 100 && ready !== "ready\n"; tries += 1) {
+          ready = await (await fetch(`http://127.0.0.1:${probePort}/readyz`)).text();
+          if (ready !== "ready\n") await new Promise((done) => setTimeout(done, 100));
+        }
+        expect(await (await fetch(`http://127.0.0.1:${probePort}/livez`)).text()).toBe("live\n");
+        expect(cli(["probe", "--ready"], dir)).toMatchObject({ code: 0, out: "ready\n" });
       } finally {
         const code = await engine.stop();
         // Windows: ended at once, so its exit code says nothing (test/engine-stop.test.ts).
@@ -899,6 +911,8 @@ describe("check status and health", () => {
           "",
       ) as { channels: Record<string, Record<string, Record<string, number>>> };
       expect(body).toMatchObject({ status: "ok", storage: "ok" });
+      expect(ready).toBe("ready\n");
+      expect(Object.keys(body as object)).toEqual(Object.keys(shown));
       const channel = (body as typeof shown).channels["adt-to-lab"];
       const pictured = shown.channels["adt-to-lab"];
       expect(Object.keys(channel ?? {}).sort()).toEqual(Object.keys(pictured ?? {}).sort());

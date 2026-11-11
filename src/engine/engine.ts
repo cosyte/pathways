@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import { setTimeout as sleep } from "node:timers/promises";
 
 import type { Logger } from "pino";
@@ -44,7 +45,7 @@ import {
 } from "../storage/store.js";
 import { ChannelWorker, TransformLoadError, type TransformOutcome } from "./channel-worker.js";
 import type { EngineFence } from "./lease.js";
-import { channelStatus, type ChannelHealth, type HealthReport } from "./health.js";
+import { channelStatus, type ChannelHealth, type EngineHealth } from "./health.js";
 import type { FailureSummary } from "./worker-entry.js";
 
 /**
@@ -57,6 +58,44 @@ export const RETRY_FIRST_MS = DEFAULT_RETRY.firstMs;
  * long. `retry.max` sets it per project, channel or destination.
  */
 export const RETRY_MAX_MS = DEFAULT_RETRY.maxMs;
+
+/** Liveness allows this long past the poll interval and the longest single step before it says stalled. */
+export const LIVE_GRACE_MS = 60_000;
+
+/**
+ * How long the engine loop may go without a step before liveness answers `stalled`: 60 seconds,
+ * plus the poll interval, plus the longest time limit one step can take. A step is a message taken
+ * in by a polled source, one transform, one delivery attempt, a channel's turn in a pass, or one
+ * channel of a retention run. The longest step is the longest of each channel's transform timeout, each HTTP
+ * destination's timeout, and twice each MLLP destination's ACK timeout (one to connect, one for the
+ * ACK) plus a second. A custom destination has no time limit of its own: one that never returns
+ * stalls the engine, and liveness says so. Nor has one channel's retention delete: one that takes
+ * longer than the bound (a very large backlog past its retention period) makes liveness say stalled
+ * until it is done.
+ *
+ * @example
+ * ```ts
+ * livenessBoundMs(project); // 95000 with a 1s poll interval and HTTP destinations at 30s
+ * ```
+ */
+export function livenessBoundMs(project: ProjectConfig): number {
+  let longest = 0;
+  for (const channel of project.channels) {
+    longest = Math.max(longest, channel.settings.timeoutMs);
+    for (const destination of channel.destinations) {
+      if (destination.kind === "http") longest = Math.max(longest, destination.timeoutMs);
+      if (destination.kind === "mllp") {
+        longest = Math.max(longest, 2 * destination.ackTimeoutMs + 1_000);
+      }
+    }
+  }
+  return LIVE_GRACE_MS + project.settings.pollIntervalMs + longest;
+}
+
+/** Readiness reads storage at most this often; a probe in between is told the last answer. */
+const STORAGE_CHECK_EVERY_MS = 1_000;
+/** A storage read for readiness that takes longer than this counts as storage unreachable. */
+const STORAGE_CHECK_TIMEOUT_MS = 5_000;
 
 /**
  * The file extension a file destination writes for each format.
@@ -372,6 +411,8 @@ export interface EngineOptions {
   readonly logger: Logger;
   /** Epoch milliseconds now. Tests pass their own clock. */
   readonly now?: () => number;
+  /** A monotonic clock in milliseconds, for liveness. Defaults to `performance.now`. */
+  readonly monotonic?: () => number;
   /** Builds a channel's connectors; by default, from its configuration. */
   readonly connectors?: (channel: ChannelConfig) => ChannelConnectors | Promise<ChannelConnectors>;
   /** Where tokens and secret headers are read from. Defaults to `process.env`. */
@@ -514,7 +555,12 @@ export class Engine {
   readonly audit: AuditLog;
   private readonly options: EngineOptions;
   private readonly now: () => number;
+  private readonly monotonic: () => number;
   private readonly channels: RunningChannel[] = [];
+  /** When the engine loop last made a step, by the monotonic clock, while {@link run} runs. */
+  private steppedAt: number | undefined;
+  /** The last storage check for readiness: when it started and what it found. */
+  private storageCheck: { readonly at: number; readonly reachable: Promise<boolean> } | undefined;
   /** The engine-wide hooks, from `pathways.yaml`, once started. */
   private hooks: HookSet | undefined;
 
@@ -522,6 +568,7 @@ export class Engine {
   constructor(options: EngineOptions) {
     this.options = options;
     this.now = options.now ?? Date.now;
+    this.monotonic = options.monotonic ?? (() => performance.now());
     this.audit =
       options.audit ??
       new AuditLog(options.store, {
@@ -613,6 +660,7 @@ export class Engine {
   async tick(): Promise<void> {
     await this.syncStates();
     for (const channel of this.channels) {
+      this.step();
       this.options.fence?.check();
       if (channel.state === "stopped") continue;
       const pass = this.pass(channel);
@@ -692,14 +740,68 @@ export class Engine {
   async run(signal: AbortSignal): Promise<void> {
     const { pollIntervalMs, retentionIntervalMs } = this.options.project.settings;
     let retentionAt = this.now();
-    while (!signal.aborted) {
-      await this.tick();
-      if (this.now() >= retentionAt) {
-        await this.retention();
-        retentionAt = this.now() + retentionIntervalMs;
+    this.steppedAt = this.monotonic();
+    try {
+      while (!signal.aborted) {
+        await this.tick();
+        this.step();
+        if (this.now() >= retentionAt) {
+          await this.retention();
+          this.step();
+          retentionAt = this.now() + retentionIntervalMs;
+        }
+        await sleep(pollIntervalMs, undefined, { signal }).catch(() => undefined);
       }
-      await sleep(pollIntervalMs, undefined, { signal }).catch(() => undefined);
+    } finally {
+      this.steppedAt = undefined;
     }
+  }
+
+  /**
+   * Liveness: false only while {@link run} runs and its loop has made no step for longer than
+   * {@link livenessBoundMs}. Never false because a source cannot listen or a destination is down:
+   * those are retried by the loop, which keeps stepping, and a restart would not fix them.
+   */
+  live(): boolean {
+    if (this.steppedAt === undefined) return true;
+    return this.monotonic() - this.steppedAt <= livenessBoundMs(this.options.project);
+  }
+
+  /**
+   * Readiness, as far as the engine knows: false while a source cannot listen, or when storage
+   * cannot be read. Storage is read at most once a second however often this is asked, and a read
+   * that takes over 5 seconds counts as unreachable.
+   */
+  async ready(): Promise<boolean> {
+    if (this.channels.some((channel) => channel.down !== undefined)) return false;
+    const now = this.monotonic();
+    if (this.storageCheck === undefined || now - this.storageCheck.at >= STORAGE_CHECK_EVERY_MS) {
+      this.storageCheck = { at: now, reachable: this.readStorage() };
+    }
+    return this.storageCheck.reachable;
+  }
+
+  /** One cheap read: message 0, which no store numbers, by its key. True when it answers in time. */
+  private async readStorage(): Promise<boolean> {
+    let timer: NodeJS.Timeout | undefined;
+    const timedOut = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), STORAGE_CHECK_TIMEOUT_MS);
+      timer.unref();
+    });
+    const read = this.options.store.message(0).then(
+      () => true,
+      () => false,
+    );
+    try {
+      return await Promise.race([read, timedOut]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Notes that the engine loop made a step, for liveness. */
+  private step(): void {
+    if (this.steppedAt !== undefined) this.steppedAt = this.monotonic();
   }
 
   /**
@@ -709,7 +811,14 @@ export class Engine {
   async retention(): Promise<RetentionReport | undefined> {
     const { store, project, logger } = this.options;
     try {
-      const report = await runRetention(store, project, { now: this.now(), dryRun: false });
+      // Each channel deleted is a step: a run over many channels is not a stall.
+      const report = await runRetention(store, project, {
+        now: this.now(),
+        dryRun: false,
+        onChannel: () => {
+          this.step();
+        },
+      });
       await recordRetention(this.audit, report);
       logger.info({
         event: "retention",
@@ -751,7 +860,7 @@ export class Engine {
    * Each channel's status and counts, for the health endpoint. Its `status` is `unavailable` only
    * when storage cannot be read or a source cannot listen. Holds counts and states, never content.
    */
-  async health(): Promise<HealthReport> {
+  async health(): Promise<EngineHealth> {
     const { project, store } = this.options;
     const states = this.channelStates();
     const down = new Set(
@@ -759,7 +868,7 @@ export class Engine {
     );
     const source = (name: string): "up" | "down" => (down.has(name) ? "down" : "up");
     const channels: Record<string, ChannelHealth> = {};
-    let storage: HealthReport["storage"] = "ok";
+    let storage: EngineHealth["storage"] = "ok";
     try {
       for (const { name } of project.channels) {
         const [messages, counts, retrying] = await Promise.all([
@@ -1069,6 +1178,7 @@ export class Engine {
           throw error;
         }
         faultPoint("after-store-before-ack");
+        this.step();
         if (received.alreadyStored === true) {
           // Handed in again after a stop between storing and acknowledging: stored once already.
           logger.info({ event: "already-stored", channel: config.name, message: received.id });
@@ -1116,6 +1226,7 @@ export class Engine {
       if (channel.state === "stopped") return;
       const { config, worker } = channel;
       this.options.fence?.check();
+      this.step();
       const next = await store.nextToTransform(config.name);
       if (next === undefined) return;
       const outcome: TransformOutcome = await worker.run(next.body, { transfer: owned });
@@ -1189,6 +1300,7 @@ export class Engine {
       const tried = new Set<number>();
       for (;;) {
         if (channel.state === "stopped") return;
+        this.step();
         const delivery = await (policy.rotate
           ? store.nextDelivery(config.name, index, { dueBy: this.now() })
           : store.nextDelivery(config.name, index));
