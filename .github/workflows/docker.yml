@@ -4,8 +4,8 @@ name: Docker
 # `pathways init` inside the image: `--version`, `pathways test`, `pathways start --once`, the
 # default command as the nonroot user stopped by `docker stop`, and the debug target's shell. Those
 # store messages in SQLite, the default. `pathways start --once` then runs again on PostgreSQL,
-# MySQL and SQL Server, service containers here, through the drivers the image carries: pg, mysql2,
-# and tedious with tarn.
+# MySQL, MariaDB and SQL Server, service containers here, through the drivers the image carries: pg,
+# mysql2 (for MySQL and MariaDB), and tedious with tarn.
 #
 # It pushes and publishes nothing: where the image is published is not decided yet.
 #
@@ -34,7 +34,7 @@ jobs:
     timeout-minutes: 20
     # The same images and digests as databases.yml, which says how to move them. They live for one
     # job on the runner's loopback, hold synthetic messages only, and run without TLS, under a
-    # throwaway password that is not a secret. MariaDB is left out: it uses MySQL's driver, mysql2.
+    # throwaway password that is not a secret.
     services:
       # postgres:17 (PostgreSQL 17.11), pinned 2026-11-07.
       postgres:
@@ -59,6 +59,19 @@ jobs:
           - 3306:3306
         options: >-
           --health-cmd "mysqladmin ping --host 127.0.0.1 --silent"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+      # mariadb:11 (MariaDB 11.8.9), pinned 2026-11-07.
+      mariadb:
+        image: mariadb@sha256:c4124d1afa875e47f2892edf26b482fa54f796e2f342d3717a04ca091a22a9bd
+        env:
+          MARIADB_ROOT_PASSWORD: Pathways-CI-0000
+          MARIADB_DATABASE: pathways
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 30
@@ -162,8 +175,8 @@ jobs:
 
       # Each server gets a starter project of its own whose pathways.yaml stores messages there, in
       # a database of its own. The image reaches the service containers on the runner's loopback,
-      # so it runs on the host's network.
-      - name: pathways start --once delivers the A01 through PostgreSQL, MySQL and SQL Server
+      # so it runs on the host's network. MariaDB is named by the storage kind `mysql`.
+      - name: pathways start --once delivers the A01 through PostgreSQL, MySQL, MariaDB and SQL Server
         env:
           SQLSERVER_CONTAINER: ${{ job.services.sqlserver.id }}
         run: |
@@ -172,11 +185,14 @@ jobs:
           declare -A urls=(
             [postgres]="postgres://postgres:Pathways-CI-0000@127.0.0.1:5432/pathways"
             [mysql]="mysql://root:Pathways-CI-0000@127.0.0.1:3306/pathways"
+            [mariadb]="mysql://root:Pathways-CI-0000@127.0.0.1:3307/pathways"
             [sqlserver]="sqlserver://sa:Pathways-CI-0000@127.0.0.1:1433/pathways"
           )
-          for kind in postgres mysql sqlserver; do
-            echo "::group::$kind"
-            project="$RUNNER_TEMP/$kind"
+          declare -A kinds=([postgres]=postgres [mysql]=mysql [mariadb]=mysql [sqlserver]=sqlserver)
+          for server in postgres mysql mariadb sqlserver; do
+            echo "::group::$server"
+            kind="${kinds[$server]}"
+            project="$RUNNER_TEMP/$server"
             mkdir "$project"
             docker run --rm --user "$(id -u):$(id -g)" --volume "$project:/project" "$IMAGE" init /project
             # The server in place of SQLite, with the starter's development key.
@@ -187,14 +203,14 @@ jobs:
             cp "$project/channels/adt-to-lab/tests/a01.hl7" "$project/channels/adt-to-lab/tests/a08.hl7" "$inbox/"
             touch -d '1 minute ago' "$inbox/a01.hl7" "$inbox/a08.hl7"
             run=(docker run --rm --network host --user "$(id -u):$(id -g)"
-              --env "PATHWAYS_DATABASE_URL=${urls[$kind]}" --volume "$project:/project" "$IMAGE")
+              --env "PATHWAYS_DATABASE_URL=${urls[$server]}" --volume "$project:/project" "$IMAGE")
             "${run[@]}" start --once
             cmp "$project/data/adt-to-lab/out/1-1.hl7" "$project/channels/adt-to-lab/tests/a01.expected.hl7"
             test -z "$(find "$inbox" -type f)"
             # Stored on the server: no SQLite file, and the status command reads both messages back.
             test ! -e "$project/.pathways/pathways.db"
             counts="$("${run[@]}" status --json | jq -c '.channels["adt-to-lab"] | [.messages.transformed, .messages.filtered, .deliveries.delivered]')"
-            echo "$kind: transformed, filtered, delivered: $counts"
+            echo "$server: transformed, filtered, delivered: $counts"
             test "$counts" = "[1,1,1]"
             echo "::endgroup::"
           done

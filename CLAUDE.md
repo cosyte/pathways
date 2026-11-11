@@ -23,8 +23,8 @@ pnpm check:no-emdash && pnpm check:no-internal-refs && pnpm check:claude-card
 ```
 
 Inside the umbrella, where `.git` is a file, set `SKIP_INSTALL_SIMPLE_GIT_HOOKS=1` before
-`pnpm attw`, or the hook installer's error lands in its JSON (#1). The storage suites also run on
-each database server whose URL is set: `.github/workflows/databases.yml` has the images and URLs.
+`pnpm attw`, or the hook installer's error lands in its JSON (#1). The storage and engine suites
+also run on each server whose URL is set: `.github/workflows/databases.yml`, one job per server.
 Before and after a change that could move throughput, run `pnpm bench`; both numbers go in the PR.
 
 ## Hazard

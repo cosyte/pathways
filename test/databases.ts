@@ -5,13 +5,14 @@ import { Kysely, sql } from "kysely";
 import type { DatabaseStorage, ServerStorage, StorageKind } from "../src/config/schema.js";
 import type { Env } from "../src/connectors/endpoint.js";
 import { dialectFor } from "../src/storage/dialects.js";
+import { Store, type StoreOptions } from "../src/storage/store.js";
 
 /**
- * One database the storage suites run on. SQLite always runs; each server runs when its URL is in
- * the environment. The URL is an administrator's (it creates and drops a database per test) and
- * names a database that exists: `postgres`, `mysql` or `master`. CI's `databases` job sets all four;
- * locally, start the servers `.github/workflows/databases.yml` names (docker will do) and export
- * the same variables.
+ * One database the storage, engine and operator suites run on. SQLite always runs; each server runs
+ * when its URL is in the environment. The URL is an administrator's (it creates and drops a
+ * database per test) and names a database that exists: `postgres`, `mysql` or `master`. CI's
+ * `databases` workflow runs one job per server, each with that server's URL; locally, start the
+ * servers `.github/workflows/databases.yml` names (docker will do) and export the same variables.
  */
 export interface TestDatabase {
   /** The name a test reports: the storage kind, or `mariadb` for MariaDB on the `mysql` kind. */
@@ -31,14 +32,37 @@ export const TEST_DATABASES: readonly TestDatabase[] = [
 ];
 
 /**
- * Whether `database` can run here: SQLite always, a server when its URL is set. With
- * `PATHWAYS_TEST_ALL_DATABASES=1`, as CI's `databases` job sets it, a server without a URL fails the
- * file instead of skipping, so a renamed variable can never pass by running nothing.
+ * The servers this run must reach, by label: every server with `PATHWAYS_TEST_ALL_DATABASES=1`, and
+ * those `PATHWAYS_TEST_DATABASES` lists, comma separated, as each job of CI's `databases` workflow
+ * names its own. A label that names no server fails the run, so a typo can never pass by running
+ * nothing.
  */
-export function available(database: TestDatabase): boolean {
-  if (database.urlEnv === undefined || (process.env[database.urlEnv] ?? "") !== "") return true;
-  if (process.env["PATHWAYS_TEST_ALL_DATABASES"] === "1") {
-    throw new Error(`PATHWAYS_TEST_ALL_DATABASES is set, and ${database.urlEnv} is not`);
+export function requiredServers(env: NodeJS.ProcessEnv = process.env): readonly string[] {
+  const servers = TEST_DATABASES.filter((database) => database.urlEnv !== undefined);
+  if (env["PATHWAYS_TEST_ALL_DATABASES"] === "1") return servers.map((database) => database.label);
+  const listed = (env["PATHWAYS_TEST_DATABASES"] ?? "")
+    .split(",")
+    .map((label) => label.trim())
+    .filter((label) => label !== "");
+  for (const label of listed) {
+    if (!servers.some((database) => database.label === label)) {
+      throw new Error(
+        `PATHWAYS_TEST_DATABASES names ${label}, which is not a server the suites know`,
+      );
+    }
+  }
+  return listed;
+}
+
+/**
+ * Whether `database` can run here: SQLite always, a server when its URL is set. A server the run
+ * must reach ({@link requiredServers}) and whose URL is not set fails the file instead of skipping,
+ * so a renamed variable can never pass by running nothing.
+ */
+export function available(database: TestDatabase, env: NodeJS.ProcessEnv = process.env): boolean {
+  if (database.urlEnv === undefined || (env[database.urlEnv] ?? "") !== "") return true;
+  if (requiredServers(env).includes(database.label)) {
+    throw new Error(`${database.label} must run here, and ${database.urlEnv} is not set`);
   }
   return false;
 }
@@ -107,6 +131,30 @@ export async function freshDatabase(database: TestDatabase): Promise<FreshDataba
   const url = adminUrl(database);
   url.pathname = `/${name}`;
   return { storage: serverStorage(kind), env: { [URL_ENV]: url.href }, url: url.href };
+}
+
+/**
+ * A store for one test on a database of its own: SQLite in `file`, which the test makes fresh, or a
+ * fresh database on `database`'s server. Each call to `open` opens that same database again, as a
+ * restart does; the caller closes each store it opens.
+ */
+export interface TestStorage {
+  /** The storage block a project names it by, and the environment that block reads its URL from. */
+  readonly storage: DatabaseStorage;
+  readonly env: Env;
+  /** The server database's URL; undefined for SQLite. */
+  readonly url: string | undefined;
+  readonly open: (options?: Omit<StoreOptions, "env">) => Promise<Store>;
+}
+
+/** Makes {@link TestStorage} on `database`, with SQLite's file at `file`. */
+export async function testStorage(database: TestDatabase, file: string): Promise<TestStorage> {
+  if (database.kind === "sqlite") {
+    const storage: DatabaseStorage = { kind: "sqlite", file };
+    return { storage, env: {}, url: undefined, open: (options) => Store.open(file, options) };
+  }
+  const { storage, env, url } = await freshDatabase(database);
+  return { storage, env, url, open: (options) => Store.open(storage, { ...options, env }) };
 }
 
 /** Drops every database {@link freshDatabase} made since the last call. Run it after each test. */
