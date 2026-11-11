@@ -43,10 +43,13 @@ const text = (body: Uint8Array): string => new TextDecoder().decode(body);
  */
 class FakeClock {
   now = AT;
+  /** Every wait asked for, by how long, in order. */
+  readonly asked: number[] = [];
   private readonly waits = new Set<{ readonly at: number; readonly resolve: () => void }>();
 
   readonly wait: EngineWait = (ms, signal) =>
     new Promise<void>((resolve) => {
+      this.asked.push(ms);
       if (signal.aborted) {
         resolve();
         return;
@@ -510,6 +513,17 @@ describe("a pass's deadline", () => {
       "returns a sleep given the signal",
       (signal: AbortSignal): Promise<void> => sleep(3_600_000, undefined, { signal }),
     ],
+    [
+      "rejects with the sink's refusal of a message after the cut",
+      (signal: AbortSignal, sink: MessageSink): Promise<void> =>
+        new Promise<void>((resolve, reject) => {
+          signal.addEventListener("abort", () => {
+            sink.receive(bytes("SYNTH-LATE")).then(() => {
+              resolve();
+            }, reject);
+          });
+        }),
+    ],
   ])("ends a run cleanly when a cut pass's poll %s", async (_name, hold) => {
     const out = new Recorder();
     let polls = 0;
@@ -518,10 +532,10 @@ describe("a pass's deadline", () => {
         polls += 1;
         return sink
           .receive(bytes(`SYNTH-${String(polls)}`))
-          .then(() => hold(signal as AbortSignal));
+          .then(() => hold(signal as AbortSignal, sink));
       },
     };
-    const { engine } = await harness(
+    const { engine, events } = await harness(
       { aborting: channelYaml() },
       { aborting: { source: aborting, destinations: [out] } },
       undefined,
@@ -534,6 +548,46 @@ describe("a pass's deadline", () => {
     stop.abort();
     await expect(running).resolves.toBeUndefined();
     expect(out.sent).toEqual(["SYNTH-1"]);
+    expect(named(events, "poll-failed-after-cut")).toEqual([]);
+  });
+
+  // A rejection after the cut that is not the cut's own (no AbortError, no POLL_DEADLINE) is not
+  // swallowed: the run still ends cleanly, and a warning names the error's code, never its text.
+  it("logs a cut pass's poll that rejects with an error of its own, by its code", async () => {
+    const out = new Recorder();
+    let polls = 0;
+    const failing: SourceConnector = {
+      poll: (sink, signal) => {
+        polls += 1;
+        return sink.receive(bytes(`SYNTH-${String(polls)}`)).then(
+          () =>
+            new Promise<void>((_resolve, reject) => {
+              signal?.addEventListener("abort", () => {
+                reject(
+                  Object.assign(new Error("SYNTH-SECRET client text"), { code: "SYNTH_RESET" }),
+                );
+              });
+            }),
+        );
+      },
+    };
+    const { engine, events } = await harness(
+      { failing: channelYaml() },
+      { failing: { source: failing, destinations: [out] } },
+      undefined,
+    );
+    const stop = new AbortController();
+    const running = engine.run(stop.signal);
+    await eventually(() => polls === 1);
+    await sleep(20);
+    stop.abort();
+    await expect(running).resolves.toBeUndefined();
+    expect(out.sent).toEqual(["SYNTH-1"]);
+    await eventually(() => named(events, "poll-failed-after-cut").length === 1);
+    expect(named(events, "poll-failed-after-cut")).toEqual([
+      expect.objectContaining({ level: 40, channel: "failing", code: "SYNTH_RESET" }),
+    ]);
+    expect(JSON.stringify(events)).not.toContain("SYNTH-SECRET");
   });
 });
 
@@ -673,6 +727,7 @@ describe("a deadline on every delivery", () => {
     clock.advance(1);
     await tick;
     expect(out.signals[0]?.aborted).toBe(true);
+    expect(out.signals[0]?.reason).toMatchObject({ name: "AbortError" });
     expect(named(events, "delivery-retry")).toEqual([
       expect.objectContaining({ channel: "slow", attempt: 1, code: "DELIVERY_TIMEOUT" }),
     ]);
@@ -684,6 +739,24 @@ describe("a deadline on every delivery", () => {
     await engine.tick();
     expect(out.sent).toEqual(["SYNTH-1"]);
     expect(named(events, "delivered")).toHaveLength(1);
+  });
+
+  // Each attempt's deadline is kept by one wait for the pass's deliveries, not a wait each, and the
+  // pass leaves none parked.
+  it("waits once for a pass's deliveries that each end in time, and leaves no wait parked", async () => {
+    const clock = new FakeClock();
+    const source = new FakePoll(clock);
+    const out = new Recorder();
+    const { engine } = await harness(
+      { quick: channelYaml() },
+      { quick: { source, destinations: [out] } },
+      clock,
+    );
+    source.inbox.push("SYNTH-1", "SYNTH-2", "SYNTH-3", "SYNTH-4", "SYNTH-5");
+    await engine.tick();
+    expect(out.sent).toEqual(["SYNTH-1", "SYNTH-2", "SYNTH-3", "SYNTH-4", "SYNTH-5"]);
+    expect(clock.asked.filter((ms) => ms === 30_000)).toHaveLength(1);
+    expect(clock.parked).toBe(0);
   });
 
   it("gives a file destination 30 seconds by default", async () => {
