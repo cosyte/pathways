@@ -554,6 +554,58 @@ describe("FileSource and a folder swapped for a link", () => {
 });
 
 describe("a file source built from channel.yaml", () => {
+  it("reads each of its options from the environment, as every setting can be", async () => {
+    const root = await makeProject({
+      "channels/adt/channel.yaml": [
+        "source:",
+        "  file:",
+        "    dir: in",
+        "    include: [{ env: GLOB }, { regex: { env: REGEX } }]",
+        "    recursive: { env: RECURSIVE }",
+        "    ignoreDot: { env: IGNORE_DOT }",
+        "    minSize: { env: MIN_SIZE }",
+        "    maxSize: { env: MAX_SIZE }",
+        "    maxPerPoll: { env: MAX_PER_POLL }",
+        "    sortBy: { env: SORT_BY }",
+        "    stable: { env: STABLE }",
+        "    doneFile: { env: DONE_FILE }",
+        "    errorDir: { env: ERROR_DIR }",
+        "    readTries: { env: READ_TRIES, default: 5 }",
+        "destinations:",
+        "  - file: { dir: out }",
+        "",
+      ].join("\n"),
+    });
+    const env = {
+      GLOB: "**/*.hl7",
+      REGEX: "^ADT_",
+      RECURSIVE: "true",
+      IGNORE_DOT: "false",
+      MIN_SIZE: "0",
+      MAX_SIZE: "2KB",
+      MAX_PER_POLL: "7",
+      SORT_BY: "mtime",
+      STABLE: "true",
+      DONE_FILE: ".done",
+      ERROR_DIR: "errors",
+    };
+    const [config] = (await loadProject(root, { env })).channels;
+    expect(config?.source).toMatchObject({
+      kind: "file",
+      include: [{ glob: "**/*.hl7" }, { regex: "^ADT_" }],
+      recursive: true,
+      ignoreDot: false,
+      minSize: 0,
+      maxSize: 2_048,
+      maxPerPoll: 7,
+      sortBy: "mtime",
+      stable: true,
+      doneFile: ".done",
+      errorDir: join(root, "channels", "adt", "errors"),
+      readTries: 5,
+    });
+  });
+
   it("takes the options the channel names, and logs a file set aside without naming it", async () => {
     const root = await makeProject({
       "channels/adt/channel.yaml": [
