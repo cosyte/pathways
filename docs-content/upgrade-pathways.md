@@ -22,9 +22,11 @@ Pathways records each step and locks while it applies them.
 
 ## Upgrade
 
-1. Install the new version where the engine runs (`npm install @cosyte/pathways@<version>`, or the new
+1. Upgrading from Pathways 0.0.1? Take a backup of the database first: 0.0.1 cannot run on a
+   database a later version has opened (see [Roll back](#back-to-pathways-001)).
+2. Install the new version where the engine runs (`npm install @cosyte/pathways@<version>`, or the new
    image).
-2. See what it would change, from the project folder:
+3. See what it would change, from the project folder:
 
    ```bash
    npx pathways migrate --dry-run
@@ -33,7 +35,7 @@ Pathways records each step and locks while it applies them.
    It prints the database's schema generation, the Pathways that last changed it, and each step the
    new version would apply, with its generation and tag. It applies nothing.
 
-3. Apply the expand steps. Either start the new version, which applies them itself before it takes the
+4. Apply the expand steps. Either start the new version, which applies them itself before it takes the
    engine lease, or apply them from one place first and start every engine with `--no-migrate`:
 
    ```bash
@@ -45,13 +47,27 @@ Pathways records each step and locks while it applies them.
    naming both versions. When several engines start at once without it, each step is still applied
    once, under the migration lock.
 
-4. Check the engine: `pathways status`, and the health endpoint if you run one.
+5. Check the engine: `pathways status`, and the health endpoint if you run one.
 
 ## Roll back
 
-Until you contract, the schema holds only expand steps, so the version before still runs on it: stop
-the new version and start the old one on the same database. The old version sees steps it does not
-know, checks that the schema still allows it, and runs without migrating anything.
+### Back to a version that reads schema_info
+
+When the version you go back to reads `schema_info` (the version that added it, or a later one), the
+way back stays open until you contract: the schema holds only expand steps, so the version before
+still runs on it. Stop the new version and start the old one on the same database. The old version
+sees steps it does not know, checks that the schema still allows it, and runs without migrating
+anything.
+
+### Back to Pathways 0.0.1
+
+Pathways 0.0.1 does not read `schema_info`. It refuses a database that holds a step it does not
+know, so once this version or a later one has opened the database (with `pathways start` or any
+command that opens it), 0.0.1 stops with `the database schema could not be brought up to date`.
+Before your first upgrade from 0.0.1, take a backup of the database. To go back, stop every engine
+and restore that backup (messages stored after it are not in it), or remove by hand the
+`0007-schema-info` row from Kysely's `kysely_migration` table and drop the `schema_info` table, then
+start 0.0.1.
 
 ## Contract
 

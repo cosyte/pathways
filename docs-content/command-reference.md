@@ -218,9 +218,10 @@ Now generation 7.
 Expand steps are always applied. Contract steps wait for `--contract`, and with it are still refused
 while the schema changed within `migrations.rollbackWindow`. A schema a newer Pathways moved forward is
 left as it is. It needs no encryption keys, and a custom store, which keeps its own schema, is
-refused. Every run is written to the audit log (`migrate`), a dry run and a refusal too, once the
-database has an audit log; a dry run on an empty database says it has none yet. It exits 1 when it
-refuses or a step fails. See [upgrade Pathways](./upgrade-pathways.md).
+refused. It does not see which versions other engines on the database run, so stop or upgrade them
+before `--contract`. Every run is written to the audit log (`migrate`), a dry run and a refusal too,
+once the database has an audit log; a dry run on an empty database says it has none yet. It exits 1
+when it refuses or a step fails. See [upgrade Pathways](./upgrade-pathways.md).
 
 | Option       | Meaning                                                                                |
 | ------------ | -------------------------------------------------------------------------------------- |

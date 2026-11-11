@@ -135,7 +135,9 @@ Options:
       --no-migrate      start: apply no schema step; refuse a database that
                         lacks one this version needs
       --contract        migrate: apply contract steps too, unless the schema
-                        changed within migrations.rollbackWindow
+                        changed within migrations.rollbackWindow. It does
+                        not see which versions other engines run: stop or
+                        upgrade them first
       --force           lease release: say the lease's host is gone
       --update          test: save the current outputs as the expected ones
       --json            status, messages, replay, clear, retention, audit,

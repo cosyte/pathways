@@ -199,6 +199,14 @@ describe("pathways migrate", () => {
     expect((await cli(["status", "--contract", "-C", root])).code).toBe(EXIT.usage);
   });
 
+  it("says in the help that --contract does not see which versions other engines run", async () => {
+    const { code, out } = await cli(["--help"]);
+    expect(code).toBe(EXIT.ok);
+    expect(out.replace(/\s+/g, " ")).toContain(
+      "--contract migrate: apply contract steps too, unless the schema changed within migrations.rollbackWindow. It does not see which versions other engines run: stop or upgrade them first",
+    );
+  });
+
   it("says why a database will not open for it", async () => {
     const root = await project("storage:\n  sqlite: { file: ./a-file/pathways.db }\n");
     await dropFile(join(root, "a-file"), "");

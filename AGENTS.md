@@ -61,7 +61,10 @@ without:
 
 A release's code runs on its schema both before and after its own contract steps: code stops reading
 a column in one release, and a contract step in a later one drops it. A step that has shipped is
-never edited; a change is a new step, numbered after the last. Each step records itself in
+never edited; a change is a new step, numbered after the last. Start applies expand steps that come
+after a contract step it skipped, so an expand step never depends on an earlier contract step (it
+does not re-add a dropped column or reuse a dropped index's name), and a later release's code still
+runs when an earlier release's contract steps were never applied. Each step records itself in
 `schema_info`; `test/schema-versions.test.ts` and `test/schema-steps.test.ts` hold the gate to this on
 every database.
 
