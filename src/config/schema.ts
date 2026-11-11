@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { normalisePath } from "../connectors/http-path.js";
 import { LIFECYCLE_EVENTS, type LifecycleEventType } from "../extensions/events.js";
 
 /**
@@ -264,21 +265,181 @@ function tlsOrPlaintext(
 const LISTENER_TLS_REQUIRED =
   "required: set tls: { cert, key }, or plaintext: true to run without TLS";
 
+/** A path an HTTP source listens on. */
+const listenPath = z.string().regex(/^\//, "a path starting with /");
+
+/** The methods an HTTP source can take a message by. */
+const HTTP_SOURCE_METHODS = ["POST", "PUT"] as const;
+
+/** The largest fixed body an HTTP source's `response:` may give, in characters. */
+const MAX_RESPONSE_BODY = 4_096;
+
+/** A media type, `type/subtype`, with any parameters after a `;`. */
+const MEDIA_TYPE = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+\/[!#$%&'*+.^_`|~0-9A-Za-z-]+\s*(;.*)?$/;
+
+/** Headers an HTTP source's fixed response cannot set: Node and Pathways set them, or `contentType` does. */
+const MANAGED_RESPONSE_HEADERS = new Set([...MANAGED_HEADERS, "content-type", "date"]);
+
+/** How an HTTP source answers a stored message: HL7 over HTTP's ACK, or a fixed answer. */
+const httpSourceResponse = z
+  .union(
+    [
+      z.literal("ack"),
+      z.strictObject({
+        status: z
+          .number()
+          .int()
+          .min(200, "a 2xx status")
+          .max(299, "a 2xx status")
+          .meta({ description: "The status, 200 to 299." }),
+        contentType: z
+          .string()
+          .meta({ description: "The Content-Type sent, such as text/plain. Default: none." })
+          .optional(),
+        headers: z
+          .record(z.string(), z.union([z.string(), fromEnv]))
+          .meta({
+            description:
+              "Headers sent with every answer: a value, or { env: NAME } to read it at start. Nothing is copied from the request.",
+          })
+          .optional(),
+        body: z
+          .string()
+          .max(MAX_RESPONSE_BODY)
+          .meta({
+            description: `The body sent with every answer, at most ${MAX_RESPONSE_BODY} characters. Never the message. Default: empty.`,
+          })
+          .optional(),
+      }),
+    ],
+    {
+      error:
+        "either ack, or { status, contentType, headers, body } for the same answer to every message",
+    },
+  )
+  .meta({
+    description:
+      "How a stored message is answered: ack for an HL7 ACK as HL7 over HTTP sets it (needs format: hl7v2), or { status, contentType, headers, body }. Default: 202 with the message id as JSON.",
+  });
+
 const httpSource = restate(
   z
     .strictObject({
       ...listenerShape,
-      path: z
-        .string()
-        .regex(/^\//, "a path starting with /")
-        .meta({ description: "The path each message is POSTed to, starting with /. Default /." })
+      path: listenPath
+        .meta({
+          description:
+            "The one path messages are sent to, starting with /. Default /. Use paths for several.",
+        })
         .optional(),
+      paths: z
+        .array(listenPath)
+        .min(1, "at least one path")
+        .meta({
+          description:
+            "The paths messages are sent to, each starting with /, in place of path. One trailing / is ignored.",
+        })
+        .optional(),
+      methods: z
+        .array(z.enum(HTTP_SOURCE_METHODS))
+        .min(1, "at least one method")
+        .meta({
+          description: "The methods that take a message: POST, PUT or both. Default [POST].",
+        })
+        .optional(),
+      response: httpSourceResponse.optional(),
       maxBytes: bytes.optional(),
     })
-    .meta({ description: "Take each POST to path as one message, over HTTPS unless plaintext." })
-    .superRefine((value, ctx) => tlsOrPlaintext(value, ctx, LISTENER_TLS_REQUIRED)),
-  (json) => Object.assign(json, TLS_OR_PLAINTEXT),
+    .meta({
+      description:
+        "Take each request to path (or paths) as one message, over HTTPS unless plaintext.",
+    })
+    .superRefine((value, ctx) => tlsOrPlaintext(value, ctx, LISTENER_TLS_REQUIRED))
+    .superRefine(httpSourceChecks),
+  (json) => Object.assign(json, TLS_OR_PLAINTEXT, { not: { required: ["path", "paths"] } }),
 );
+
+/**
+ * An HTTP source's paths, methods and response: `path` or `paths`, never both; each path one the
+ * request rule ({@link normalisePath}) reads as itself or with one trailing `/` dropped, holding no
+ * `%`, `?` or `#`, and none twice; no method twice, and POST alone in `ack` mode; a fixed response
+ * with headers by the HTTP client's rules.
+ */
+function httpSourceChecks(
+  value: {
+    readonly path?: string | undefined;
+    readonly paths?: readonly string[] | undefined;
+    readonly methods?: readonly string[] | undefined;
+    readonly response?: z.output<typeof httpSourceResponse> | undefined;
+  },
+  ctx: z.RefinementCtx,
+): void {
+  if (value.path !== undefined && value.paths !== undefined) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["paths"],
+      message: "cannot be set alongside path; list every path in paths",
+    });
+  }
+  const written: [string, readonly (string | number)[]][] =
+    value.paths === undefined
+      ? value.path === undefined
+        ? []
+        : [[value.path, ["path"]]]
+      : value.paths.map((path, index) => [path, ["paths", index]]);
+  const seen = new Set<string>();
+  for (const [path, at] of written) {
+    // A path that does not start with / was named already, by its own rule.
+    if (!path.startsWith("/")) continue;
+    const normal = /[%?#]/.test(path) ? undefined : normalisePath(path);
+    if (normal === undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: [...at],
+        message:
+          "not a path the source can match: no %, ?, #, \\, empty segment, . or .. segment, or control character",
+      });
+    } else if (seen.has(normal)) {
+      ctx.addIssue({ code: "custom", path: [...at], message: "the same path twice" });
+    }
+    if (normal !== undefined) seen.add(normal);
+  }
+  const methods = value.methods ?? [];
+  if (new Set(methods).size !== methods.length) {
+    ctx.addIssue({ code: "custom", path: ["methods"], message: "names a method twice" });
+  }
+  const response = value.response;
+  if (response === "ack") {
+    if (methods.some((method) => method !== "POST")) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["methods"],
+        message: "response: ack takes POST only, as HL7 over HTTP does",
+      });
+    }
+    return;
+  }
+  if (response === undefined) return;
+  const { contentType, status } = response;
+  if (
+    contentType !== undefined &&
+    (!MEDIA_TYPE.test(contentType) || !HEADER_VALUE.test(contentType))
+  ) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["response", "contentType"],
+      message: "a media type, such as text/plain",
+    });
+  }
+  if ((status === 204 || status === 205) && (response.body ?? "") !== "") {
+    ctx.addIssue({
+      code: "custom",
+      path: ["response", "body"],
+      message: `a ${status} answer carries no body`,
+    });
+  }
+  headerChecks(response.headers, MANAGED_RESPONSE_HEADERS, ["response", "headers"], ctx);
+}
 
 /** What an HTTP client endpoint (an HTTP destination, a webhook hook) is configured with. */
 const httpClientShape = {
@@ -364,11 +525,24 @@ function httpClientChecks(
       message: "applies only to an http:// url",
     });
   }
-  for (const [name, header] of Object.entries(value.headers ?? {})) {
-    const at = ["headers", name];
+  headerChecks(value.headers, MANAGED_HEADERS, ["headers"], ctx);
+}
+
+/**
+ * Configured headers, by the HTTP client's rules: a valid name, none Pathways sets itself
+ * (`managed`), a credential only from `{ env: NAME }`, and a value a header can carry.
+ */
+function headerChecks(
+  headers: Readonly<Record<string, string | { readonly env: string }>> | undefined,
+  managed: ReadonlySet<string>,
+  where: readonly string[],
+  ctx: z.RefinementCtx,
+): void {
+  for (const [name, header] of Object.entries(headers ?? {})) {
+    const at = [...where, name];
     if (!HEADER_NAME.test(name)) {
       ctx.addIssue({ code: "custom", path: at, message: "not a valid header name" });
-    } else if (MANAGED_HEADERS.has(name.toLowerCase())) {
+    } else if (managed.has(name.toLowerCase())) {
       ctx.addIssue({ code: "custom", path: at, message: "Pathways sets this header itself" });
     } else if (typeof header === "string" && SECRET_HEADER.test(name)) {
       ctx.addIssue({
@@ -969,6 +1143,13 @@ export const channelSchema = restate(
       // MLLP frames HL7 v2 and its ACKs are HL7 v2 messages, so an MLLP endpoint needs that format.
       if ((channel.format ?? "hl7v2") === "hl7v2") return;
       const message = `MLLP carries HL7 v2 only, and this channel's format is ${String(channel.format)}; set format: hl7v2, or use another connector`;
+      if (channel.source.http?.response === "ack") {
+        ctx.addIssue({
+          code: "custom",
+          path: ["source", "http", "response"],
+          message: `an HL7 ACK answers HL7 v2 only, and this channel's format is ${String(channel.format)}; set format: hl7v2, or another response`,
+        });
+      }
       if (channel.source.mllp !== undefined) {
         ctx.addIssue({ code: "custom", path: ["source", "mllp"], message });
       }
@@ -1226,10 +1407,28 @@ export interface ListenerConfig {
   readonly auth: EndpointAuth;
 }
 
-/** An HTTP source: each POST to `path` is one message. */
+/**
+ * How an HTTP source answers a stored message: `id` (202 with the id as JSON, the default), `ack`
+ * (HL7 over HTTP's ACK), or `fixed`, the same configured answer to every message.
+ */
+export type HttpSourceResponseConfig =
+  | { readonly kind: "id" }
+  | { readonly kind: "ack" }
+  | {
+      readonly kind: "fixed";
+      readonly status: number;
+      readonly contentType: string | undefined;
+      readonly headers: Readonly<Record<string, HeaderValue>>;
+      readonly body: string;
+    };
+
+/** An HTTP source: each request to one of `paths`, by one of `methods`, is one message. */
 export interface HttpSource extends ListenerConfig {
   readonly kind: "http";
-  readonly path: string;
+  /** Each path as the request rule reads it: one trailing `/` dropped, except from `/`. */
+  readonly paths: readonly string[];
+  readonly methods: readonly ("POST" | "PUT")[];
+  readonly response: HttpSourceResponseConfig;
   readonly maxBytes: number;
 }
 

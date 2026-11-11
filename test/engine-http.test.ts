@@ -142,6 +142,70 @@ describe("an HTTP channel in the engine", () => {
     }
   });
 
+  it("in ack mode stores the message, then answers with its ACK, and logs an unreadable one", async () => {
+    const port = await freePort();
+    const tls = `tls: { cert: ${certs.files.serverCert}, key: ${certs.files.serverKey} }`;
+    const { store, events, lines } = await setUp(200, {
+      source: `http: { port: ${port}, paths: [/adt, /hl7], response: ack, ${tls} }`,
+    });
+    const hl7 = (path: string, body: string): ReturnType<typeof send> =>
+      send(port, {
+        path,
+        headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/hl7-v2" },
+        body,
+        ca: certs.ca,
+      });
+    const stored = await hl7("/hl7/", ADT_A01);
+    expect(stored.status).toBe(200);
+    expect(stored.headers["content-type"]).toBe("application/hl7-v2; charset=utf-8");
+    expect(stored.body).toContain("MSA|AA|MSG00001");
+    expect(await store.message(1)).toMatchObject({ status: "received" });
+
+    const unreadable = await hl7("/adt", "PID|1||TEST000001\r");
+    expect(unreadable.status).toBe(200);
+    expect(unreadable.body).toContain("MSA|AE|");
+    expect(await store.message(2)).toMatchObject({ status: "failed" });
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "http-unreadable",
+        channel: "adt",
+        message: 2,
+        problem: "NO_MSH_SEGMENT",
+      }),
+    );
+    expect(lines.join("")).not.toContain("TEST000001");
+  });
+
+  it("answers with the configured response, its secret header read from the environment", async () => {
+    const port = await freePort();
+    const tls = `tls: { cert: ${certs.files.serverCert}, key: ${certs.files.serverKey} }`;
+    const response =
+      "response: { status: 200, contentType: text/plain, headers: { X-Receiver-Key: { env: RECEIVER_KEY } }, body: OK }";
+    const { lab } = await setUp(200, {
+      source: `http: { port: ${port}, path: /adt, methods: [PUT], ${response}, ${tls} }`,
+      env: { PATHWAYS_HTTP_TOKEN: TOKEN, LAB_AUTH, RECEIVER_KEY: "synthetic-receiver-key" },
+    });
+    const answer = await send(port, {
+      method: "PUT",
+      path: "/adt",
+      headers: { Authorization: `Bearer ${TOKEN}` },
+      body: ADT_A01,
+      ca: certs.ca,
+    });
+    expect(answer.status).toBe(200);
+    expect(answer.headers["x-receiver-key"]).toBe("synthetic-receiver-key");
+    expect(answer.body).toBe("OK");
+    expect(lab.received).toEqual([]);
+    await expect(
+      setUp(200, {
+        source: `http: { port: ${await freePort()}, ${response}, ${tls} }`,
+        env: { PATHWAYS_HTTP_TOKEN: TOKEN, LAB_AUTH },
+      }),
+    ).rejects.toThrow(
+      "channels/adt/channel.yaml: source.http.response.headers.X-Receiver-Key: the environment variable RECEIVER_KEY is not set",
+    );
+  });
+
   it("logs a refused request with its status only", async () => {
     const { port, events, lines } = await setUp(200);
     expect((await post(port, ADT_A01, "synthetic-wrong-token-000000")).status).toBe(401);
