@@ -5,6 +5,7 @@ import type { Env } from "../connectors/endpoint.js";
 import { EncryptedStore, UnencryptedStore } from "../encryption/encrypted-store.js";
 import { keysToStart, type KeyProvider } from "../encryption/keys.js";
 import { customKeyProvider, customStore } from "../extensions/build.js";
+import { resolveSecrets, type Secrets } from "../secrets/resolve.js";
 import type { SchemaMode } from "./schema.js";
 import { Store, type MessageStore } from "./store.js";
 
@@ -21,6 +22,11 @@ export interface OpenStoreContext {
   readonly env: Env;
   readonly logger: Logger;
   /**
+   * The secrets a start resolved. Without them, the connection URL's and master keys' references
+   * to a provider `secrets:` names are resolved here.
+   */
+  readonly secrets?: Secrets | undefined;
+  /**
    * How a built-in store treats its schema when it opens (`StoreOptions.migrate`): `expand` by
    * default. A custom store keeps its own schema and ignores it.
    */
@@ -28,9 +34,27 @@ export interface OpenStoreContext {
 }
 
 /**
+ * The secrets opening the store reads: `context.secrets`, or the connection URL's and the master
+ * keys' resolved now.
+ *
+ * @throws {ConfigError} when a secret a provider holds cannot be had.
+ * @throws {ExtensionLoadError} when a provider's module, factory or result is wrong.
+ * @example
+ * ```ts
+ * const secrets = await storeSecrets(project, { env: process.env, logger });
+ * ```
+ */
+export async function storeSecrets(
+  project: ProjectConfig,
+  context: OpenStoreContext,
+): Promise<Secrets> {
+  return context.secrets ?? (await resolveSecrets(project, context, "store"));
+}
+
+/**
  * The key provider `pathways.yaml`'s `encryption` names, ready to use: the built-in one over master
- * keys read now from their files or environment variables, or a custom one a module builds
- * (`encryption: { provider: { module, options } }`). `undefined` for `encryption: none`.
+ * keys read now from their files, environment variables or secret providers, or a custom one a
+ * module builds (`encryption: { provider: { module, options } }`). `undefined` for `encryption: none`.
  *
  * @throws {ConfigError} when `encryption` is not set, or a master key cannot be read.
  * @throws {ExtensionLoadError} when a custom provider's module, factory or result is wrong.
@@ -44,7 +68,10 @@ export async function startingKeys(
   context: OpenStoreContext,
 ): Promise<KeyProvider | undefined> {
   const { encryption } = project;
-  if (encryption?.kind !== "provider") return keysToStart(encryption, context.env);
+  if (encryption?.kind !== "provider") {
+    if (encryption?.kind !== "keys") return keysToStart(encryption, context.env);
+    return keysToStart(encryption, await storeSecrets(project, context));
+  }
   return customKeyProvider(
     encryption,
     {
@@ -75,7 +102,8 @@ export async function openRawStore(
 ): Promise<MessageStore> {
   const { storage } = project;
   if (storage.kind !== "module") {
-    const { env, migrate } = context;
+    const { migrate } = context;
+    const env = storage.kind === "sqlite" ? context.env : await storeSecrets(project, context);
     return Store.open(storage, migrate === undefined ? { env } : { env, migrate });
   }
   return customStore(

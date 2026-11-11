@@ -20,6 +20,7 @@
         "work-with-formats",
         "store-messages-in-a-database",
         "encrypt-stored-messages",
+        "read-secrets",
         "secure-endpoints",
         "read-the-audit-log",
         "add-lifecycle-hooks",

@@ -57,6 +57,8 @@ import {
 } from "./operator/commands.js";
 import { recordConfigChanges } from "./operator/config-audit.js";
 import { InitError, initProject, STARTER_CHANNEL, STARTER_KEY_FILE } from "./starter/init.js";
+import { resolveSecrets, type Secrets } from "./secrets/resolve.js";
+import type { SecretScope } from "./secrets/sources.js";
 import { openRawStore, openStore, startingKeys, type OpenStoreContext } from "./storage/open.js";
 import { SchemaVersionError } from "./storage/schema.js";
 import {
@@ -383,6 +385,32 @@ function reportConfigError(error: ConfigError, io: CliIo): void {
 }
 
 /**
+ * The secrets `scope` reads that a provider `secrets:` names holds, resolved now, or, when they
+ * cannot be had, the exit code, having said why: `config` for a secret, named by file and key and
+ * never by value; `failed` for a provider's module, named by file and key.
+ */
+async function secretsOrExit(
+  project: ProjectConfig,
+  context: OpenStoreContext & { readonly signal?: AbortSignal | undefined },
+  scope: SecretScope,
+  io: CliIo,
+): Promise<Secrets | number> {
+  if (context.secrets !== undefined) return context.secrets;
+  try {
+    return await resolveSecrets(project, context, scope);
+  } catch (error) {
+    if (error instanceof ExtensionLoadError) {
+      io.err(`pathways: ${error.message}\n`);
+      return EXIT.failed;
+    }
+    /* v8 ignore next: the rest throw only ConfigError */
+    if (!(error instanceof ConfigError)) throw error;
+    reportConfigError(error, io);
+    return EXIT.config;
+  }
+}
+
+/**
  * The key provider `pathways.yaml` names, read or loaded now (`undefined` for `encryption: none`), or,
  * when it cannot be had, the exit code, having said why.
  */
@@ -448,9 +476,12 @@ const STORAGE_REFUSALS: Readonly<Record<StorageError["reason"], string>> = {
  */
 async function openWrapped(
   project: ProjectConfig,
-  context: OpenStoreContext,
+  given: OpenStoreContext,
   io: CliIo,
 ): Promise<{ readonly store: MessageStore; readonly encrypted: boolean } | number> {
+  const secrets = await secretsOrExit(project, given, "store", io);
+  if (typeof secrets === "number") return secrets;
+  const context = { ...given, secrets };
   const keys = await keysOrExit(project, context, io);
   if (typeof keys === "number") return keys;
   const { storage } = project;
@@ -497,10 +528,12 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
   }
   const env = io.env ?? process.env;
   const logger = io.logger ?? pino({ redact: REDACT });
-  // Master keys are read now, at startup, like every other secret: a missing one stops the start.
+  // Every secret is read now, at startup, master keys among them: a missing one stops the start.
+  const secrets = await secretsOrExit(project, { env, logger, signal: io.signal }, "all", io);
+  if (typeof secrets === "number") return secrets;
   const context: OpenStoreContext = mode.noMigrate
-    ? { env, logger, migrate: "none" }
-    : { env, logger };
+    ? { env, logger, secrets, migrate: "none" }
+    : { env, logger, secrets };
   const opened = await openWrapped(project, context, io);
   if (typeof opened === "number") return opened;
   const { store } = opened;
@@ -553,6 +586,7 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
     store,
     logger,
     env,
+    secrets,
     audit,
     ...(lease === undefined ? {} : { fence: lease }),
   });
@@ -575,7 +609,7 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
   if (!once) {
     try {
       if (project.health !== undefined) {
-        health = healthEndpointFor(project.health, report, env, logger, probes);
+        health = healthEndpointFor(project.health, report, secrets, logger, probes);
       }
       if (project.probes !== undefined) probeListener = probeEndpointFor(project.probes, probes);
     } catch (error) {
@@ -885,7 +919,7 @@ function maskQuery(url: string): string {
 
 /** What `rekey` says when `pathways.yaml` names no keys. */
 const REKEY_NEEDS_KEYS =
-  "pathways.yaml: encryption: rekey needs encryption: { keys: [{ id, env: NAME } or { id, file: path }], current: id } or { provider: { module: path } }";
+  "pathways.yaml: encryption: rekey needs encryption: { keys: [{ id, env: NAME }, { id, file: path } or { id, secret: { provider, name } }], current: id } or { provider: { module: path } }";
 
 /** What `rekey` says about a custom store that cannot list and replace what it holds. */
 const REKEY_NEEDS_CONTENT_STORE =
@@ -903,7 +937,10 @@ async function rekeyStore(
     return EXIT.config;
   }
   // An extension's log lines go to stderr here, so stdout holds only the counts.
-  const context = { env: io.env ?? process.env, logger: io.logger ?? pino(STDERR_LOG, stderr) };
+  const bare = { env: io.env ?? process.env, logger: io.logger ?? pino(STDERR_LOG, stderr) };
+  const secrets = await secretsOrExit(project, bare, "store", io);
+  if (typeof secrets === "number") return secrets;
+  const context = { ...bare, secrets };
   const keys = await keysOrExit(project, context, io);
   if (typeof keys === "number") return keys;
   /* v8 ignore next: every encryption but none has keys */
@@ -999,7 +1036,15 @@ async function operator(
   const project = await load(projectDir, io);
   if (project === undefined) return EXIT.config;
   // Extensions log to stderr, so stdout holds only the report.
-  const context = { env: io.env ?? process.env, logger: io.logger ?? pino(STDERR_LOG, stderr) };
+  const bare = { env: io.env ?? process.env, logger: io.logger ?? pino(STDERR_LOG, stderr) };
+  // The engine-wide hooks receive each audit entry this command writes, as `pathways start`'s do.
+  // status and audit write none, so they load no hooks.
+  const withHooks =
+    command !== "status" && command !== "audit" && !(command === "lease" && rest[0] === "status");
+  // Every secret the command reads, resolved once: the store and the hooks share the one result.
+  const secrets = await secretsOrExit(project, bare, withHooks ? "operator" : "store", io);
+  if (typeof secrets === "number") return secrets;
+  const context = { ...bare, secrets };
   const wrapped =
     command === "migrate"
       ? await openForMigrate(project, context, io)
@@ -1009,14 +1054,8 @@ async function operator(
   const audit = auditFor(store, io, (error) => {
     io.err(`pathways: an audit listener failed (${errorCode(error) ?? "no code"}).\n`);
   });
-  // The engine-wide hooks receive each audit entry this command writes, as `pathways start`'s do.
-  // status and audit write none, so they load no hooks.
   let hooks: HookSet | undefined;
-  if (
-    command !== "status" &&
-    command !== "audit" &&
-    !(command === "lease" && rest[0] === "status")
-  ) {
+  if (withHooks) {
     const opened = await hooksOrExit(project, context, io);
     if (typeof opened === "number") {
       await store.close();

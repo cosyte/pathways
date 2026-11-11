@@ -14,9 +14,9 @@ A project is configured by two kinds of YAML file, each checked in full before a
 
 Unknown keys are refused. Relative paths are resolved against the file that holds them: the project
 root for `pathways.yaml`, the channel's folder for `channel.yaml`. Secrets (tokens, credential
-headers, connection URLs, master keys) are never values in the YAML: each is named as `{ env: NAME }`
-or a file, and read when a command starts. Any other setting may be written as a value or read from
-the environment: see [Settings from the environment](#settings-from-the-environment).
+headers, connection URLs, master keys) are never values in the YAML: each is a
+[secret reference](#secrets), read when a command starts. Any other setting may be written as a
+value or read from the environment: see [Settings from the environment](#settings-from-the-environment).
 
 **JSON Schemas.** The package ships a JSON Schema (draft-07) of each file, for editors and other
 tools: `@cosyte/pathways/schema/project.json` for `pathways.yaml` and
@@ -28,7 +28,9 @@ See [Check configuration in an editor and in CI](./check-configuration.md).
 **Value types.** A _duration_ is a whole number of milliseconds, or a string such as `500ms`, `5s`,
 `2m`, `1h` or `30d`. A _memory size_ is a whole number of megabytes, or a string such as `256MB`. A
 _byte size_ is a whole number of bytes, or a string such as `512B`, `64KB` or `10MB` (1 KB is 1,024
-bytes). An _env reference_ is `{ env: NAME }`, a variable name of letters, digits and underscores.
+bytes). A _secret reference_ is `{ env: NAME }` (a variable name of letters, digits and
+underscores), `{ file: path }`, or `{ secret: { provider, name, field, version } }`; see
+[Secrets](#secrets).
 
 ## Settings from the environment
 
@@ -66,7 +68,8 @@ health:
   there is no `PATHWAYS_*` prefix scan and no `${VAR}` text substitution, so the YAML stays the one
   place a setting is named.
 - Secrets keep their own meaning of `{ env: NAME }`: a token, a credential header, a connection URL
-  or a master key stays a reference, read when a command starts and never printed. `plaintext`,
+  or a master key is a [secret reference](#secrets), read when a command starts and never printed,
+  and it takes no `default`. `plaintext`,
   `encryption: none`, `auth: none`, a channel's `name` and `format`, and a block (`tls`, `options`)
   are not read from the environment: turning TLS, encryption or authentication off stays in the
   file, where the audit sees it. Nor are the names in an HTTP source's `contextHeaders`: which
@@ -83,6 +86,7 @@ health:
 | Key          | Type                                                    | Default                         |
 | ------------ | ------------------------------------------------------- | ------------------------------- |
 | `encryption` | see [Encryption](#encryption)                           | none: `start` refuses           |
+| `secrets`    | see [Secrets](#secrets)                                 | `env` and `file` only           |
 | `storage`    | see [Storage](#storage)                                 | SQLite, `.pathways/pathways.db` |
 | `defaults`   | see [Settings](#settings)                               | the defaults below              |
 | `hooks`      | a list of [hooks](#hooks)                               | none                            |
@@ -97,11 +101,11 @@ health:
 One of three forms. `pathways start` and every command that reads stored messages need it; `pathways
 test` does not.
 
-| Form                                | Meaning                                                                                                      |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `none`                              | store messages unencrypted; logged at every start                                                            |
-| `{ keys: [...], current: id }`      | master keys, each `{ id, env: NAME }` or `{ id, file: path }`; `current` names the one that wraps new values |
-| `{ provider: { module, options } }` | a module whose default export builds a `KeyProvider`                                                         |
+| Form                                | Meaning                                                                                                                                                              |
+| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `none`                              | store messages unencrypted; logged at every start                                                                                                                    |
+| `{ keys: [...], current: id }`      | master keys, each `id` with a secret reference (`{ id, env: NAME }`, `{ id, file: path }` or `{ id, secret: {...} }`); `current` names the one that wraps new values |
+| `{ provider: { module, options } }` | a module whose default export builds a `KeyProvider`                                                                                                                 |
 
 A key's `id` is 1 to 64 letters, digits, dots, hyphens and underscores, starting with a letter or
 digit, and unique in the list. A key's value is 32 bytes in base64. See
@@ -137,7 +141,7 @@ with `retry.rotate: true`, the engine asks `nextDelivery` for the oldest deliver
 
 | Key                | Type               | Default                          |
 | ------------------ | ------------------ | -------------------------------- |
-| `url`              | env reference      | `{ env: PATHWAYS_DATABASE_URL }` |
+| `url`              | secret reference   | `{ env: PATHWAYS_DATABASE_URL }` |
 | `tls`              | [client TLS](#tls) | required unless `plaintext`      |
 | `plaintext`        | boolean            | `false`                          |
 | `pool.max`         | 1 to 1,000         | `10`                             |
@@ -340,17 +344,17 @@ destinations:
 
 #### HTTP destination
 
-| Key            | Type                                               | Default                  |
-| -------------- | -------------------------------------------------- | ------------------------ |
-| `url`          | an `https://` URL, or `http://` with `plaintext`   | required                 |
-| `headers`      | a mapping of names to a string or an env reference | none                     |
-| `tls`          | [client TLS](#tls)                                 | Node.js's built-in roots |
-| `plaintext`    | boolean, only with an `http://` URL                | `false`                  |
-| `timeout`      | duration                                           | `30s`                    |
-| `resendHeader` | a header name                                      | none                     |
+| Key            | Type                                                 | Default                  |
+| -------------- | ---------------------------------------------------- | ------------------------ |
+| `url`          | an `https://` URL, or `http://` with `plaintext`     | required                 |
+| `headers`      | a mapping of names to a string or a secret reference | none                     |
+| `tls`          | [client TLS](#tls)                                   | Node.js's built-in roots |
+| `plaintext`    | boolean, only with an `http://` URL                  | `false`                  |
+| `timeout`      | duration                                             | `30s`                    |
+| `resendHeader` | a header name                                        | none                     |
 
 The URL may not hold a user name or password. A header whose name holds `auth`, `cookie`, `token`,
-`secret`, `password`, `key`, `signature` or `credential` must be an env reference. `Content-Length`,
+`secret`, `password`, `key`, `signature` or `credential` must be a secret reference. `Content-Length`,
 `Transfer-Encoding`, `Connection` and `Keep-Alive` are set by Pathways and may not be given.
 `Content-Type` defaults by format.
 
@@ -385,13 +389,13 @@ answer after it, and is retried when none comes within `timeout` or the connecti
 
 What the HTTP source and the health endpoint take:
 
-| Key         | Type                                   | Default                                                                             |
-| ----------- | -------------------------------------- | ----------------------------------------------------------------------------------- |
-| `port`      | 1 to 65,535                            | required                                                                            |
-| `host`      | an address                             | `127.0.0.1`                                                                         |
-| `tls`       | [server TLS](#tls)                     | required unless `plaintext`                                                         |
-| `plaintext` | boolean                                | `false`                                                                             |
-| `auth`      | `none`, or `{ bearer: { env: NAME } }` | mutual TLS when `tls.ca` is set, otherwise a bearer token from the default variable |
+| Key         | Type                                        | Default                                                                             |
+| ----------- | ------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `port`      | 1 to 65,535                                 | required                                                                            |
+| `host`      | an address                                  | `127.0.0.1`                                                                         |
+| `tls`       | [server TLS](#tls)                          | required unless `plaintext`                                                         |
+| `plaintext` | boolean                                     | `false`                                                                             |
+| `auth`      | `none`, or `{ bearer: <secret reference> }` | mutual TLS when `tls.ca` is set, otherwise a bearer token from the default variable |
 
 ### TLS
 
@@ -401,6 +405,35 @@ What the HTTP source and the health endpoint take:
 | client TLS | `ca` to trust in place of Node.js's built-in roots; `cert` and `key`, together, to present a client certificate |
 
 `tls` and `plaintext: true` cannot both be set.
+
+### Secrets
+
+A secret reference names where a secret is read when a command starts. It is one of:
+
+| Form                                             | Read from                                                                                             |
+| ------------------------------------------------ | ----------------------------------------------------------------------------------------------------- |
+| `{ env: NAME }`                                  | the environment variable `NAME`; unset and empty are the same                                         |
+| `{ file: path }`                                 | the file, relative to the YAML file that names it, with one line break at its end dropped             |
+| `{ secret: { provider, name, field, version } }` | the provider `provider`: `env`, `file`, or one named under `secrets:`; `field` and `version` optional |
+
+`field` takes one field of a secret that holds a JSON object, or of a store's structured secret.
+`version` asks for a version the provider keeps; `env` and `file` keep none. `{ env: NAME }` is the
+same as `{ secret: { provider: env, name: NAME } }`, and `{ file: path }` as the `file` provider's.
+
+`secrets:` in `pathways.yaml` names the other providers, by the name a reference gives:
+
+| Key       | Type                                                              | Default |
+| --------- | ----------------------------------------------------------------- | ------- |
+| `module`  | a module whose default export builds a `SecretProvider`, required |         |
+| `options` | a mapping, handed to the module's factory                         | `{}`    |
+| `timeout` | duration: how long resolving one secret may take                  | `10s`   |
+
+A provider's name is a letter, then letters, digits, hyphens and underscores, at most 64; `env` and
+`file` are taken. A reference to a provider that is not named is refused at load, and `pathways
+validate` checks that each module exists without loading it. At start, each provider a reference
+names is built, asked once for each secret, then stopped. A secret it cannot answer, answers late or
+answers expired stops the start, named by its file and key, its name, and the error's name and code;
+never a value. See [Read secrets from files and secret stores](./read-secrets.md).
 
 ## Related
 

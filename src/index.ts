@@ -3,12 +3,13 @@
  *
  * Pathways is early: this entry point exports what an extension is written against (a channel's
  * transform, a custom source or destination, an MLLP source's ACK builder, a lifecycle hook and its
- * events, among them the audit log's entries, a storage adapter, and a key provider for encryption at
- * rest), and the ACK builder an MLLP source uses by default, which a custom one can wrap. The engine
- * itself runs through the `pathways` command.
+ * events, among them the audit log's entries, a storage adapter, a key provider for encryption at
+ * rest, and a secret provider), the ACK builder an MLLP source uses by default, which a custom one can
+ * wrap, and a fake secret provider for tests. The engine itself runs through the `pathways` command.
  *
  * Nothing here loads the engine, the transports or a database driver: apart from `DeliveryRejected`,
- * `EncryptionError`, `defaultAckBuilder`, `LIFECYCLE_EVENTS` and `VERSION`, every export is a type.
+ * `EncryptionError`, `SecretError`, `defaultAckBuilder`, `fakeSecretProvider`, `LIFECYCLE_EVENTS` and
+ * `VERSION`, every export is a type.
  */
 export { VERSION } from "./version.js";
 export type { Format } from "./config/schema.js";
@@ -49,6 +50,19 @@ export {
 } from "./connectors/ack.js";
 export { EncryptionError, type EncryptionErrorCode } from "./encryption/envelope.js";
 export type { KeyProvider, WrappedKey } from "./encryption/keys.js";
+export {
+  SecretError,
+  type ResolvedSecret,
+  type SecretErrorCode,
+  type SecretProvider,
+  type SecretRef,
+} from "./secrets/provider.js";
+export {
+  fakeSecretProvider,
+  type FakeSecret,
+  type FakeSecretEntry,
+  type FakeSecretProvider,
+} from "./secrets/fake.js";
 export type {
   ChannelContext,
   DestinationFactory,
@@ -61,6 +75,7 @@ export type {
   LifecycleHook,
   LogFields,
   LogValue,
+  SecretProviderFactory,
   SourceFactory,
   StoreFactory,
 } from "./extensions/types.js";
