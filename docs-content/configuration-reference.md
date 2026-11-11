@@ -15,7 +15,8 @@ A project is configured by two kinds of YAML file, each checked in full before a
 Unknown keys are refused. Relative paths are resolved against the file that holds them: the project
 root for `pathways.yaml`, the channel's folder for `channel.yaml`. Secrets (tokens, credential
 headers, connection URLs, master keys) are never values in the YAML: each is named as `{ env: NAME }`
-or a file, and read when a command starts.
+or a file, and read when a command starts. Any other setting may be written as a value or read from
+the environment: see [Settings from the environment](#settings-from-the-environment).
 
 **JSON Schemas.** The package ships a JSON Schema (draft-07) of each file, for editors and other
 tools: `@cosyte/pathways/schema/project.json` for `pathways.yaml` and
@@ -28,6 +29,53 @@ See [Check configuration in an editor and in CI](./check-configuration.md).
 `2m`, `1h` or `30d`. A _memory size_ is a whole number of megabytes, or a string such as `256MB`. A
 _byte size_ is a whole number of bytes, or a string such as `512B`, `64KB` or `10MB` (1 KB is 1,024
 bytes). An _env reference_ is `{ env: NAME }`, a variable name of letters, digits and underscores.
+
+## Settings from the environment
+
+Every setting that holds one value (a port, a host, a duration, a size, a boolean other than
+`plaintext`, a path, a URL, a choice such as `onStoreFailure` or the storage `kind`, a key id, one
+event in `events`, one HTTP source path or method) may be
+written as `{ env: NAME }`, or `{ env: NAME, default: value }`, in place of the value. So one
+image, with the same YAML, runs in staging and in production, each with its own environment:
+
+```yaml title="pathways.yaml"
+encryption:
+  keys: [{ id: prod, env: PATHWAYS_KEY }]
+  current: prod
+storage:
+  kind: { env: PATHWAYS_STORAGE, default: sqlite }
+  postgres: { url: { env: PATHWAYS_DATABASE_URL }, tls: {} }
+defaults:
+  retention: { env: RETENTION, default: 30d }
+health:
+  port: { env: HEALTH_PORT, default: 9090 }
+  host: { env: HEALTH_HOST, default: 127.0.0.1 }
+  plaintext: true
+```
+
+- The variable is read when the configuration is loaded, by every command, and its value is checked
+  by the same rule as a value written in the file: `HEALTH_PORT=70000` is refused as `port: 70000`
+  is. Text the setting takes is used as it is; otherwise text that spells a number is a number and
+  `true` or `false` a boolean, so `TIMEOUT=5000` is 5,000 milliseconds and `TIMEOUT=5s` five
+  seconds.
+- `default` is used when the variable is unset or empty, and is read as a value written in the file
+  would be. Without one, an unset variable is a problem.
+- A problem names the file, the key and the variable, never the value:
+  `pathways.yaml: health.port: Too big: expected number to be <=65535 (read from the environment variable HEALTH_PORT)`.
+- Only the variables the files name are read. No variable changes a setting the files do not name:
+  there is no `PATHWAYS_*` prefix scan and no `${VAR}` text substitution, so the YAML stays the one
+  place a setting is named.
+- Secrets keep their own meaning of `{ env: NAME }`: a token, a credential header, a connection URL
+  or a master key stays a reference, read when a command starts and never printed. `plaintext`,
+  `encryption: none`, `auth: none`, a channel's `name` and `format`, and a block (`tls`, `options`)
+  are not read from the environment: turning TLS, encryption or authentication off stays in the
+  file, where the audit sees it.
+- `pathways validate --print` prints the configuration as `start` reads it, with every setting the
+  environment gave and the variable it named; see
+  [Command reference](./command-reference.md#pathways-validate). The query string of a URL read
+  from the environment is printed as `?(hidden)`. The audit log's `config` entries name the
+  variables each file reads, never their values, so a value changed only in the environment is not
+  audited; see [Read the audit log](./read-the-audit-log.md).
 
 ## pathways.yaml
 
@@ -58,7 +106,7 @@ digit, and unique in the list. A key's value is 32 bytes in base64. See
 
 ### Storage
 
-Exactly one of these keys:
+Exactly one of these keys, or with `kind`, any of them:
 
 | Key         | Value                                                                                                     |
 | ----------- | --------------------------------------------------------------------------------------------------------- |
@@ -67,6 +115,12 @@ Exactly one of these keys:
 | `mysql`     | a [database server](#database-server) block, for MySQL or MariaDB                                         |
 | `sqlserver` | a [database server](#database-server) block                                                               |
 | `module`    | a path to a module whose default export builds a `MessageStore`; with `options`, any mapping handed to it |
+| `kind`      | `sqlite`, `postgres`, `mysql`, `sqlserver` or `module`: the block used                                    |
+
+`kind`, usually [read from the environment](#settings-from-the-environment), lets one file hold a
+block for each deployment, such as SQLite in development and PostgreSQL in production. The blocks it
+does not name are checked, not used. `kind: sqlite` needs no block of its own; any other kind needs
+its block. Without `kind`, the one block written is used.
 
 A `MessageStore` from a module keeps the marker the engine writes before each send: `markSending`
 stores the attempt and its start, `nextDelivery` returns it as `sending`, and `markDelivered`,
@@ -145,9 +199,11 @@ The lease one engine per database holds, so a second is refused or waits as a st
 ### Transform configuration
 
 What every channel's transform reads as `ctx.config`: a mapping of names to any YAML value (a
-string, a finite number, a boolean, null, a list or a mapping). A mapping whose one key is `env`,
-`{ env: NAME }`, is read from that environment variable when the engine starts; a variable that is
-not set stops the start with its name, never a value. A channel's own `config` replaces this one key
+string, a finite number, a boolean, null, a list or a mapping). A mapping with the key `env`,
+`{ env: NAME }` or `{ env: NAME, default: value }`, is read from that environment variable when the
+engine starts, never when the configuration loads; a variable that is not set, or is empty, takes the
+`default`, one value that is not a list or a mapping, and with none stops the start with its name,
+never a value. A channel's own `config` replaces this one key
 by key. See [Use the message context](./use-the-message-context.md).
 
 ## channel.yaml

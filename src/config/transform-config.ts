@@ -9,8 +9,9 @@ import type { ChannelConfig, ProjectConfig, TransformConfigBlock } from "./schem
  * own over it, key by key, and each `{ env: NAME }` replaced by that variable's value, read from
  * `env` now. Runs in the engine's process (or the command's) when it starts, never in a worker.
  *
- * A variable that is not set, or is empty, fails the whole resolution with one problem per
- * reference, each naming its file, key and variable, never a value.
+ * A variable that is not set, or is empty, takes the reference's `default`; with none, it fails the
+ * whole resolution with one problem per reference, each naming its file, key and variable, never a
+ * value.
  *
  * @throws {ConfigError} when a referenced variable is not set.
  * @example
@@ -46,12 +47,11 @@ function resolveValue(value: JsonValue, where: string, env: Env, problems: strin
   if (typeof value !== "object" || value === null) return value;
   const reference = envReference(value);
   if (reference !== undefined) {
-    const read = env[reference];
-    if (read === undefined || read === "") {
-      problems.push(`${where}: the environment variable ${reference} is not set`);
-      return null;
-    }
-    return read;
+    const read = env[reference.name];
+    if (read !== undefined && read !== "") return read;
+    if ("fallback" in reference) return reference.fallback;
+    problems.push(`${where}: the environment variable ${reference.name} is not set`);
+    return null;
   }
   const map: Record<string, JsonValue> = {};
   for (const [key, item] of Object.entries(value)) {
@@ -60,11 +60,17 @@ function resolveValue(value: JsonValue, where: string, env: Env, problems: strin
   return map;
 }
 
-/** The variable a map names when it is `{ env: NAME }`, its one key, as the schema checked. */
-function envReference(value: { readonly [key: string]: JsonValue }): string | undefined {
-  const keys = Object.keys(value);
+/**
+ * The variable a map names, and its default, when it is `{ env: NAME }` or
+ * `{ env: NAME, default: value }`, as the schema checked.
+ */
+function envReference(value: {
+  readonly [key: string]: JsonValue;
+}): { readonly name: string; readonly fallback?: JsonValue } | undefined {
   const name = value["env"];
-  return keys.length === 1 && typeof name === "string" ? name : undefined;
+  if (typeof name !== "string") return undefined;
+  const fallback = value["default"];
+  return fallback === undefined ? { name } : { name, fallback };
 }
 
 /**

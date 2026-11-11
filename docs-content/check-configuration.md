@@ -100,7 +100,14 @@ pathways: the configuration is invalid:
 
 It exits 0 when the configuration is valid and 3 when it is not, so a CI job runs it as it is. It
 reads no secret, TLS file or database, so the job needs none of them; `start` still checks those when
-it runs. Beside `pathways test`, which runs each channel's tests:
+it runs. A setting [read from the environment](./configuration-reference.md#settings-from-the-environment)
+is read here too: give the job the variables a deployment sets, or a `default` in the reference.
+
+To see what `start` would run with in one environment, `pathways validate --print` prints the
+configuration as JSON: each setting resolved, the variables the files read listed under
+`environment`, and each secret as the variable or file it is read from, never its value.
+
+Beside `pathways test`, which runs each channel's tests:
 
 ```yaml title=".github/workflows/channels.yml" no-check other tools read this file, not Pathways
 name: Channels

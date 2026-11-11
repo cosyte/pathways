@@ -38,9 +38,10 @@ config:
   lookupUrl: https://codes.example.test/v1
 ```
 
-A value is any YAML value: a string, a number, a boolean, null, a list or a mapping. A mapping whose
-one key is `env` reads an environment variable when the engine starts, so a secret stays out of the
-YAML:
+A value is any YAML value: a string, a number, a boolean, null, a list or a mapping. A mapping with
+the key `env`, `{ env: NAME }`, reads an environment variable when the engine starts, so a secret
+stays out of the YAML. `{ env: NAME, default: value }` takes the default when the variable is not set
+or is empty:
 
 ```yaml title="channels/results-to-ehr/channel.yaml"
 source:
@@ -54,11 +55,13 @@ destinations:
 config:
   facility: SYNTHLAB
   lookupToken: { env: LOOKUP_TOKEN }
+  lookupUrl: { env: LOOKUP_URL, default: "https://codes.example.test/v1" }
 ```
 
-The variable is read in the engine's own process, never in the transform's worker. When it is not
-set, or is empty, `pathways start` stops before it takes anything in, and names the file, the key and
-the variable, never a value:
+The variable is read in the engine's own process, never in the transform's worker, and its value is
+never part of the loaded configuration that `pathways validate --print` shows. When it is not set, or
+is empty, and the reference has no default, `pathways start` stops before it takes anything in, and
+names the file, the key and the variable, never a value:
 
 ```text
 channels/results-to-ehr/channel.yaml: config.lookupToken: the environment variable LOOKUP_TOKEN is not set

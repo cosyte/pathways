@@ -195,7 +195,13 @@ describe("the configuration a transform reads", () => {
 
   it("is the project's block with the channel's over it, key by key, read from the environment", () => {
     const resolved = resolveTransformConfig(
-      { facility: "HOSP", region: "north", key: { env: "SYNTH_API_KEY" } },
+      {
+        facility: "HOSP",
+        region: "north",
+        key: { env: "SYNTH_API_KEY" },
+        level: { env: "SYNTH_UNSET", default: 3 },
+        set: { env: "SYNTH_TOKEN", default: "unused" },
+      },
       channel({
         facility: "LAB",
         endpoints: [{ url: "https://lab.example.test", token: { env: "SYNTH_TOKEN" } }],
@@ -207,6 +213,8 @@ describe("the configuration a transform reads", () => {
       facility: "LAB",
       region: "north",
       key: "synthetic-key",
+      level: 3,
+      set: "synthetic-token",
       endpoints: [{ url: "https://lab.example.test", token: "synthetic-token" }],
       nested: { inner: "inner", plain: null, single: { only: 1 } },
     });
@@ -265,18 +273,30 @@ describe("the configuration a transform reads", () => {
     expect(problems({ a: Number.POSITIVE_INFINITY })).toEqual([
       "config.a: a number must be finite",
     ]);
-    expect(problems({ a: { env: "LAB_KEY", default: "x" } })).toEqual([
-      "config.a: { env: NAME } reads an environment variable at start, and takes no other key",
+    expect(problems({ a: { env: "LAB_KEY", other: "x" } })).toEqual([
+      "config.a: { env: NAME } reads an environment variable at start; it takes only a default, one value that is not a list or a map",
     ]);
     expect(problems({ a: [{ env: "not a name" }] })).toEqual([
-      "config.a.0: { env: NAME } reads an environment variable at start, and takes no other key",
+      "config.a.0: { env: NAME } reads an environment variable at start; it takes only a default, one value that is not a list or a map",
     ]);
     expect(problems({ a: new Date(0), b: undefined })).toEqual([
       "config.a: a string, number, boolean, null, list or map",
       "config.b: a string, number, boolean, null, list or map",
     ]);
+    expect(problems({ a: { env: "LAB_KEY", default: [1] } })).toEqual([
+      "config.a: { env: NAME } reads an environment variable at start; it takes only a default, one value that is not a list or a map",
+    ]);
+    expect(problems({ a: { env: "LAB_KEY", default: Number.NaN } })).toHaveLength(1);
+    expect(
+      problems({
+        a: { env: "A", default: "x" },
+        b: { env: "B", default: 2 },
+        c: { env: "C", default: null },
+        d: { env: "D", default: false },
+      }),
+    ).toEqual([]);
     expect(problems({ a: { env: 5 } })).toEqual([
-      "config.a: { env: NAME } reads an environment variable at start, and takes no other key",
+      "config.a: { env: NAME } reads an environment variable at start; it takes only a default, one value that is not a list or a map",
     ]);
     expect(problems({ deep })[0]).toMatch(/: nests deeper than 32 levels$/);
     expect(channelSchema.safeParse(channelYaml({ a: Number.NaN })).success).toBe(false);
