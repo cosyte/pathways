@@ -64,50 +64,60 @@ destinations:
   - file: { dir: ../../data/out-b }
 `;
 
-/**
- * Writes into `root` a project whose database holds one message in each of four states: 1 delivered,
- * 2 filtered, 3 failed (its transform threw) and 4 retrying (destination 1 cannot write).
- */
-async function buildScenario(root: string): Promise<void> {
-  const files: Record<string, string> = {
-    "test.key": `${generateKey()}\n`,
-    "pathways.yaml": `${KEYS}defaults:\n  pollInterval: 20ms\n`,
-    "channels/adt/channel.yaml": CHANNEL,
-    "channels/adt/transform.ts": LAB_TRANSFORM,
-  };
-  for (const [path, contents] of Object.entries(files)) {
-    await mkdir(dirname(join(root, path)), { recursive: true });
-    await writeFile(join(root, path), contents);
-  }
-  const pass = async (name: string, body: string): Promise<void> => {
-    await dropFile(join(root, "data/inbox", name), body);
-    expect((await runCli(["start", "--once", "-C", root])).code).toBe(EXIT.ok);
-  };
-  await dropFile(join(root, "data/inbox/1.hl7"), ADT_A01);
-  await pass("2.hl7", ADT_A08);
-  await writeFile(join(root, "channels/adt/transform.ts"), THROWS);
-  await pass("3.hl7", ADT_A01);
-  await writeFile(join(root, "channels/adt/transform.ts"), LAB_TRANSFORM);
-  await writeFile(join(root, "data/out-b-blocked"), "");
-  await writeFile(
-    join(root, "channels/adt/channel.yaml"),
-    CHANNEL.replace("../../data/out-b", "../../data/out-b-blocked/inner"),
-  );
-  await pass("4.hl7", ADT_A01);
+/** One `pathways start --once` run of the project in `root`, after dropping `name` into its inbox. */
+async function pass(root: string, name: string, body: string): Promise<void> {
+  await dropFile(join(root, "data/inbox", name), body);
+  expect((await runCli(["start", "--once", "-C", root])).code).toBe(EXIT.ok);
 }
 
 /**
- * The scenario, built once for the file by three `pathways start --once` runs in `beforeAll`, outside
- * every test's time limit. Building it in each test made each one start the engine three times, which
- * on a loaded Windows runner under coverage took a test past its limit.
+ * The steps that write into `root` a project whose database holds one message in each of four
+ * states: 1 delivered, 2 filtered, 3 failed (its transform threw) and 4 retrying (destination 1
+ * cannot write). Each starts the engine once.
+ */
+const SCENARIO_STEPS: readonly ((root: string) => Promise<void>)[] = [
+  async (root) => {
+    const files: Record<string, string> = {
+      "test.key": `${generateKey()}\n`,
+      "pathways.yaml": `${KEYS}defaults:\n  pollInterval: 20ms\n`,
+      "channels/adt/channel.yaml": CHANNEL,
+      "channels/adt/transform.ts": LAB_TRANSFORM,
+    };
+    for (const [path, contents] of Object.entries(files)) {
+      await mkdir(dirname(join(root, path)), { recursive: true });
+      await writeFile(join(root, path), contents);
+    }
+    await dropFile(join(root, "data/inbox/1.hl7"), ADT_A01);
+    await pass(root, "2.hl7", ADT_A08);
+  },
+  async (root) => {
+    await writeFile(join(root, "channels/adt/transform.ts"), THROWS);
+    await pass(root, "3.hl7", ADT_A01);
+  },
+  async (root) => {
+    await writeFile(join(root, "channels/adt/transform.ts"), LAB_TRANSFORM);
+    await writeFile(join(root, "data/out-b-blocked"), "");
+    await writeFile(
+      join(root, "channels/adt/channel.yaml"),
+      CHANNEL.replace("../../data/out-b", "../../data/out-b-blocked/inner"),
+    );
+    await pass(root, "4.hl7", ADT_A01);
+  },
+];
+
+/**
+ * The scenario, built once for the file in `beforeAll`, outside every test's time limit. Building it
+ * in each test made each one start the engine three times, which on a loaded Windows runner under
+ * coverage took a test past its limit. Each engine run has a hook of its own, run in order, so each
+ * has the whole hook time limit to itself rather than a third of one.
  */
 let template: string | undefined;
 
 beforeAll(async () => {
-  const dir = await mkdtemp(join(tmpdir(), "pathways-scenario-"));
-  template = dir;
-  await buildScenario(dir);
+  template = await mkdtemp(join(tmpdir(), "pathways-scenario-"));
 });
+
+for (const step of SCENARIO_STEPS) beforeAll(() => step(template as string));
 
 afterAll(async () => {
   if (template !== undefined) await rm(template, { recursive: true, force: true });

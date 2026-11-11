@@ -374,9 +374,16 @@ export function rememberPeer(
   while (peers.size >= max) {
     const counts = new Map<string, number>([[subject, 1]]);
     for (const name of peers.values()) counts.set(name, (counts.get(name) ?? 0) + 1);
-    // Counting the newcomer, so on a tie its own name gives way first.
+    // Counting the newcomer, so on a tie its own name gives way first: it is counted first, and a
+    // later name takes its place only by holding more.
     let most = subject;
-    for (const [name, count] of counts) if (count > (counts.get(most) ?? 0)) most = name;
+    let top = 0;
+    for (const [name, count] of counts) {
+      if (count > top) {
+        most = name;
+        top = count;
+      }
+    }
     // Every name holds one and the newcomer's none yet: it is not remembered, and pushes out none.
     if (most === subject && counts.get(subject) === 1) return;
     for (const [key, name] of peers) {

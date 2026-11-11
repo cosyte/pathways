@@ -123,6 +123,18 @@ When an MLLP source stores a message as failed, the reason is one of `@cosyte/hl
 as `NO_MSH_SEGMENT`), `NO_CONTROL_ID`, `MULTIPLE_MESSAGES` or `MLLP_TRAILING_BYTES`. An ACK builder
 receives it as `problem`.
 
+## File source codes
+
+Besides the operating system's codes (`EACCES`, `EEXIST` and the like), a `source-read-failed` or
+`source-file-set-aside` line from a file source can carry:
+
+| Code                            | Meaning                                                                                                     |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `ERR_SCRIPT_EXECUTION_TIMEOUT`  | an `include` or `exclude` pattern ran past 50 ms on a path; the file is tried again on a later pass         |
+| `ESTALE`                        | a file left the source folder, or was replaced, between the pass finding it and moving it; it stays         |
+| `ERR_PATHWAYS_FILE_HELD`        | a file moved in from outside the folder could not go back, and waits in `.claimed/` as `refused-...`        |
+| `ERR_PATHWAYS_FILE_ID_UNSTEADY` | the folder's file system changes a file's id when it moves (FAT, exFAT), so the source claims nothing there |
+
 ## Encryption errors
 
 | Code                          | Meaning                                                                                                                              |

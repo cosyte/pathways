@@ -453,18 +453,18 @@ function reportConfigError(error: ConfigError, io: CliIo): void {
 /**
  * The secrets `scope` reads that a provider `secrets:` names holds, resolved now, or, when they
  * cannot be had, the exit code, having said why: `config` for a secret, named by file and key and
- * never by value; `failed` for a provider's module, named by file and key.
+ * never by value; `failed` for a provider's module, named by file and key. Each command calls it
+ * once, before anything else reads a secret.
  */
 async function secretsOrExit(
   project: ProjectConfig,
-  context: OpenStoreContext & {
+  context: Omit<OpenStoreContext, "secrets"> & {
     readonly signal?: AbortSignal | undefined;
     readonly skipDry?: DrySkip | undefined;
   },
   scope: SecretScope,
   io: CliIo,
 ): Promise<Secrets | number> {
-  if (context.secrets !== undefined) return context.secrets;
   try {
     return await resolveSecrets(project, context, scope);
   } catch (error) {
@@ -542,18 +542,16 @@ const STORAGE_REFUSALS: Readonly<Record<StorageError["reason"], string>> = {
 /**
  * Opens the project's store as every command that reads or writes messages does, through
  * `src/storage/open.ts`: the store `pathways.yaml` names, wrapped in encryption at rest under its
- * keys (read now, like every other secret), or in the plaintext store for `encryption: none`.
- * Returns the exit code when it cannot, having said why.
+ * keys, or in the plaintext store for `encryption: none`. The caller has already read every secret,
+ * the keys' among them, so a missing one has stopped it before here. Returns the exit code when it
+ * cannot, having said why.
  */
 async function openWrapped(
   project: ProjectConfig,
-  given: OpenStoreContext,
+  context: OpenStoreContext & { readonly secrets: Secrets },
   io: CliIo,
   command?: string,
 ): Promise<{ readonly store: MessageStore; readonly encrypted: boolean } | number> {
-  const secrets = await secretsOrExit(project, given, "store", io);
-  if (typeof secrets === "number") return secrets;
-  const context = { ...given, secrets };
   const keys = await keysOrExit(project, context, io);
   if (typeof keys === "number") return keys;
   const { storage } = project;
@@ -614,7 +612,7 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
     io,
   );
   if (typeof secrets === "number") return secrets;
-  const context: OpenStoreContext = mode.noMigrate
+  const context: OpenStoreContext & { readonly secrets: Secrets } = mode.noMigrate
     ? { env, logger, secrets, migrate: "none" }
     : { env, logger, secrets };
   const opened = await openWrapped(project, context, io);
@@ -1141,10 +1139,15 @@ const MASKED_QUERY = "?(hidden)";
 /** The URLs the configuration read from environment variables (not from a reference's default). */
 function urlsFromEnvironment(project: ProjectConfig, env: Env): ReadonlySet<string> {
   const urls = new Set<string>();
-  for (const reference of project.environment ?? []) {
+  const references = project.environment;
+  /* v8 ignore if -- validate's project comes from loadProject, which always lists the references */
+  if (references === undefined) return urls;
+  for (const reference of references) {
     if (reference.from !== "environment" || !reference.key.endsWith(".url")) continue;
     const value = env[reference.variable];
-    if (value !== undefined) urls.add(value);
+    /* v8 ignore if -- the project was loaded from this same env, and the variable was set there */
+    if (value === undefined) continue;
+    urls.add(value);
   }
   return urls;
 }
