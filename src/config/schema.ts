@@ -98,6 +98,7 @@ const settingsShape = {
   onStoreFailure: onStoreFailure.optional(),
   ackTimeout: duration.optional(),
   retention: duration.optional(),
+  resendFlag: z.boolean().optional(),
   retentionInterval: duration.optional(),
 };
 
@@ -254,8 +255,27 @@ function httpClientChecks(
 }
 
 const httpDestination = z
-  .strictObject({ ...httpClientShape, timeout: duration.optional() })
-  .superRefine(httpClientChecks);
+  .strictObject({
+    ...httpClientShape,
+    timeout: duration.optional(),
+    resendHeader: z.string().optional(),
+  })
+  .superRefine(httpClientChecks)
+  .superRefine((value, ctx) => {
+    const name = value.resendHeader;
+    if (name === undefined) return;
+    const at = ["resendHeader"];
+    const taken = Object.keys(value.headers ?? {}).some(
+      (header) => header.toLowerCase() === name.toLowerCase(),
+    );
+    if (!HEADER_NAME.test(name)) {
+      ctx.addIssue({ code: "custom", path: at, message: "not a valid header name" });
+    } else if (MANAGED_HEADERS.has(name.toLowerCase()) || name.toLowerCase() === "content-type") {
+      ctx.addIssue({ code: "custom", path: at, message: "Pathways sets this header itself" });
+    } else if (taken) {
+      ctx.addIssue({ code: "custom", path: at, message: "already set in headers" });
+    }
+  });
 
 /** The built-in webhook hook: an HTTP client endpoint whose time limit is its hook entry's. */
 const webhook = z.strictObject(httpClientShape).superRefine(httpClientChecks);
@@ -550,6 +570,7 @@ export const channelSchema = z
     onStoreFailure: settingsShape.onStoreFailure,
     ackTimeout: settingsShape.ackTimeout,
     retention: settingsShape.retention,
+    resendFlag: settingsShape.resendFlag,
   })
   .superRefine((channel, ctx) => {
     // MLLP frames HL7 v2 and its ACKs are HL7 v2 messages, so an MLLP endpoint needs that format.
@@ -583,6 +604,11 @@ export interface Settings {
    * they are replayed or cleared.
    */
   readonly retentionMs: number;
+  /**
+   * Whether the engine writes the marker before each send, so a resend after a crash is flagged
+   * as a possible duplicate. `false` saves one write per attempt, and such a resend goes unflagged.
+   */
+  readonly resendFlag: boolean;
   /** How often `pathways start` runs retention, in milliseconds. Engine-wide. */
   readonly retentionIntervalMs: number;
 }
@@ -595,6 +621,7 @@ export const DEFAULT_SETTINGS: Settings = {
   onStoreFailure: "close",
   ackTimeoutMs: 10_000,
   retentionMs: 30 * 86_400_000,
+  resendFlag: true,
   retentionIntervalMs: 3_600_000,
 };
 
@@ -780,10 +807,15 @@ export interface HttpClientConfig {
   readonly plaintext: boolean;
 }
 
-/** An HTTP destination: each output is POSTed to `url`. */
+/**
+ * An HTTP destination: each output is POSTed to `url`. With `resendHeader`, a possible duplicate (a
+ * resend after an attempt was cut off) carries that header, its value the number of attempts before.
+ */
 export interface HttpDestination extends HttpClientConfig {
   readonly kind: "http";
   readonly timeoutMs: number;
+  /** The header that flags a possible duplicate, or undefined to send none. */
+  readonly resendHeader: string | undefined;
 }
 
 /**

@@ -170,6 +170,12 @@ export interface DeliveryEventBase extends LifecycleEventBase {
   readonly deliveryId: number;
   /** Which attempt this was, from 1. */
   readonly attempt: number;
+  /**
+   * Set when this attempt was a possible duplicate: an earlier one was cut off after the send, so
+   * the receiver may have the message already. `previousAttempts` counts the attempts before it.
+   * Absent otherwise.
+   */
+  readonly resend?: { readonly previousAttempts: number } | undefined;
 }
 
 /**

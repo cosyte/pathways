@@ -218,6 +218,7 @@ describe("the settings tables", () => {
       onStoreFailure: DEFAULT_SETTINGS.onStoreFailure,
       ackTimeout: DEFAULT_SETTINGS.ackTimeoutMs,
       retention: DEFAULT_SETTINGS.retentionMs,
+      resendFlag: String(DEFAULT_SETTINGS.resendFlag),
       pollInterval: DEFAULT_SETTINGS.pollIntervalMs,
       retentionInterval: DEFAULT_SETTINGS.retentionIntervalMs,
     };

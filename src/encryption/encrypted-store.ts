@@ -11,6 +11,7 @@ import type {
   MessageSummary,
   Page,
   PendingDelivery,
+  SendStart,
   PendingMessage,
   ReceivedMessage,
   RequeueRequest,
@@ -129,6 +130,11 @@ abstract class CodecStore implements MessageStore {
   async nextDelivery(channel: string, destination: number): Promise<PendingDelivery | undefined> {
     const next = await this.#inner.nextDelivery(channel, destination);
     return next === undefined ? undefined : { ...next, body: await this.#read(next.body) };
+  }
+
+  /** Writes the marker before a send: no body and no error, so straight through. */
+  markSending(deliveryId: number, start: SendStart): Promise<void> {
+    return this.#inner.markSending(deliveryId, start);
   }
 
   /** Marks a delivery done. */

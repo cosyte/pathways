@@ -30,6 +30,7 @@ export {
   type MessageSink,
   type OutgoingMessage,
   type ReceiveOptions,
+  type Resend,
   type SourceConnector,
 } from "./connectors/types.js";
 export {
@@ -103,6 +104,8 @@ export type {
   RequeueRequest,
   RequeueResult,
   RetryingDelivery,
+  SendingMarker,
+  SendStart,
   StoredContent,
   StoredDelivery,
   StoredMessage,

@@ -59,6 +59,12 @@ Exactly one of these keys:
 | `sqlserver` | a [database server](#database-server) block                                                               |
 | `module`    | a path to a module whose default export builds a `MessageStore`; with `options`, any mapping handed to it |
 
+A `MessageStore` from a module keeps the marker the engine writes before each send: `markSending`
+stores the attempt and its start, `nextDelivery` returns it as `sending`, and `markDelivered`,
+`scheduleRetry` and `failDelivery` clear it in the same write as their outcome. That is how a resend
+after a crash is flagged; see
+[Delivery and errors](./delivery-and-errors.md#a-resend-after-a-crash-is-flagged).
+
 #### Database server
 
 | Key                | Type               | Default                          |
@@ -74,19 +80,20 @@ See [Store messages in a database server](./store-messages-in-a-database.md).
 
 ### Settings
 
-`defaults:` in `pathways.yaml` sets these for every channel. A channel overrides the first five at the
+`defaults:` in `pathways.yaml` sets these for every channel. A channel overrides the first six at the
 top level of its `channel.yaml`; an MLLP source overrides `onStoreFailure`, and an MLLP destination
 `ackTimeout`.
 
-| Key                 | Type                  | Default | Meaning                                                          |
-| ------------------- | --------------------- | ------- | ---------------------------------------------------------------- |
-| `timeout`           | duration              | `5s`    | how long one message's transform may run                         |
-| `memory`            | memory size           | `256MB` | the memory cap of a channel's transform worker                   |
-| `onStoreFailure`    | `close`, `AE` or `AR` | `close` | what an MLLP source answers when a message cannot be stored      |
-| `ackTimeout`        | duration              | `10s`   | how long an MLLP destination waits to connect, then for each ACK |
-| `retention`         | duration              | `30d`   | how long a done message is kept after its last activity          |
-| `pollInterval`      | duration              | `1s`    | how often the engine looks for new work; project only            |
-| `retentionInterval` | duration              | `1h`    | how often a running engine runs retention; project only          |
+| Key                 | Type                  | Default | Meaning                                                                                                                                                      |
+| ------------------- | --------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `timeout`           | duration              | `5s`    | how long one message's transform may run                                                                                                                     |
+| `memory`            | memory size           | `256MB` | the memory cap of a channel's transform worker                                                                                                               |
+| `onStoreFailure`    | `close`, `AE` or `AR` | `close` | what an MLLP source answers when a message cannot be stored                                                                                                  |
+| `ackTimeout`        | duration              | `10s`   | how long an MLLP destination waits to connect, then for each ACK                                                                                             |
+| `retention`         | duration              | `30d`   | how long a done message is kept after its last activity                                                                                                      |
+| `resendFlag`        | boolean               | `true`  | write a marker before each send, so a resend after a crash is flagged; see [Delivery and errors](./delivery-and-errors.md#a-resend-after-a-crash-is-flagged) |
+| `pollInterval`      | duration              | `1s`    | how often the engine looks for new work; project only                                                                                                        |
+| `retentionInterval` | duration              | `1h`    | how often a running engine runs retention; project only                                                                                                      |
 
 ### Hooks
 
@@ -178,18 +185,24 @@ Each entry is exactly one of `file`, `http`, `mllp` or `module`.
 
 #### HTTP destination
 
-| Key         | Type                                               | Default                  |
-| ----------- | -------------------------------------------------- | ------------------------ |
-| `url`       | an `https://` URL, or `http://` with `plaintext`   | required                 |
-| `headers`   | a mapping of names to a string or an env reference | none                     |
-| `tls`       | [client TLS](#tls)                                 | Node.js's built-in roots |
-| `plaintext` | boolean, only with an `http://` URL                | `false`                  |
-| `timeout`   | duration                                           | `30s`                    |
+| Key            | Type                                               | Default                  |
+| -------------- | -------------------------------------------------- | ------------------------ |
+| `url`          | an `https://` URL, or `http://` with `plaintext`   | required                 |
+| `headers`      | a mapping of names to a string or an env reference | none                     |
+| `tls`          | [client TLS](#tls)                                 | Node.js's built-in roots |
+| `plaintext`    | boolean, only with an `http://` URL                | `false`                  |
+| `timeout`      | duration                                           | `30s`                    |
+| `resendHeader` | a header name                                      | none                     |
 
 The URL may not hold a user name or password. A header whose name holds `auth`, `cookie`, `token`,
 `secret`, `password`, `key`, `signature` or `credential` must be an env reference. `Content-Length`,
 `Transfer-Encoding`, `Connection` and `Keep-Alive` are set by Pathways and may not be given.
 `Content-Type` defaults by format.
+
+`resendHeader` names a header sent only on a possible duplicate: a resend after an attempt was cut
+off by a stop. Its value is the number of attempts before, such as `1`. It may not be one of the
+headers above, `Content-Type`, or a name `headers` sets. See
+[Delivery and errors](./delivery-and-errors.md#a-resend-after-a-crash-is-flagged).
 
 There is no key for retries: a 2xx is delivered; a 408, 425, 429, 5xx, a network error or no answer
 within `timeout` is retried, waiting longer when a 429 or a 503 asks with `Retry-After`, never more

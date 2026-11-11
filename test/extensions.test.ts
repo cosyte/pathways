@@ -582,7 +582,7 @@ destinations:
           "export default () => ({ receive: async () => ({ id: 1 }), close: async () => undefined });\n",
       }),
     ).toBe(
-      "pathways.yaml: storage.module: the factory did not return a message store: nextToTransform, completeTransform, failTransform, nextDelivery, markDelivered, scheduleRetry, failDelivery, messageCounts, deliveryCounts, retryingDeliveries, channels, message, messageBody, deliveries, outputs, listMessages, listRetrying, requeue, clear, expire, appendAudit, auditEntries must be methods",
+      "pathways.yaml: storage.module: the factory did not return a message store: nextToTransform, completeTransform, failTransform, nextDelivery, markSending, markDelivered, scheduleRetry, failDelivery, messageCounts, deliveryCounts, retryingDeliveries, channels, message, messageBody, deliveries, outputs, listMessages, listRetrying, requeue, clear, expire, appendAudit, auditEntries must be methods",
     );
   });
 

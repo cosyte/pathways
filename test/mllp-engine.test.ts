@@ -417,6 +417,7 @@ function bind(store: Store): MessageStore {
     completeTransform: store.completeTransform.bind(store),
     failTransform: store.failTransform.bind(store),
     nextDelivery: store.nextDelivery.bind(store),
+    markSending: store.markSending.bind(store),
     markDelivered: store.markDelivered.bind(store),
     scheduleRetry: store.scheduleRetry.bind(store),
     failDelivery: store.failDelivery.bind(store),

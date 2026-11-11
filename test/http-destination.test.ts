@@ -54,6 +54,25 @@ async function outcomeOf(promise: Promise<void>): Promise<unknown> {
 }
 
 describe("HttpDestination", () => {
+  it("names a possible duplicate in its resend header, and sends the header on no other request", async () => {
+    const r = await plainReceiver(200);
+    const target = destination({ url: r.url, resendHeader: "X-Synthetic-Resend" });
+    const resent = { messageId: 1, seq: 0, body: BODY, resend: { previousAttempts: 2 } };
+    expect(await outcomeOf(target.deliver(resent))).toBe("delivered");
+    expect(await outcomeOf(target.deliver({ messageId: 2, seq: 0, body: BODY }))).toBe("delivered");
+    expect(r.received.map((request) => request.headers["x-synthetic-resend"])).toEqual([
+      "2",
+      undefined,
+    ]);
+    // The message itself is sent unchanged.
+    expect(r.received.map((request) => request.body.toString())).toEqual([ADT_A01, ADT_A01]);
+
+    // Without the setting, a resend goes out exactly as the first send did.
+    const plain = destination({ url: r.url });
+    expect(await outcomeOf(plain.deliver(resent))).toBe("delivered");
+    expect(r.received[2]?.headers["x-synthetic-resend"]).toBeUndefined();
+  });
+
   it("delivers on a 2xx whose body breaks off, and the broken body does not stop the next delivery", async () => {
     let answered = 0;
     const r = await receiver((_request, response) => {

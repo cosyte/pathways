@@ -610,7 +610,7 @@ function deliverySummary(deliveries: DeliveryTally): string {
 
 function deliveryTable(deliveries: readonly StoredDelivery[]): string[] {
   return table([
-    ["ID", "GENERATION", "DESTINATION", "OUTPUT", "STATUS", "ATTEMPTS", "WHEN", "ERROR"],
+    ["ID", "GENERATION", "DESTINATION", "OUTPUT", "STATUS", "ATTEMPTS", "WHEN", "ERROR", "RESENT"],
     ...deliveries.map((d) => [
       String(d.id),
       String(d.generation),
@@ -620,6 +620,10 @@ function deliveryTable(deliveries: readonly StoredDelivery[]): string[] {
       String(d.attempts),
       when(d),
       safeError(d.error) ?? "-",
+      // A possible duplicate: an attempt was cut off after the send, and the message sent again.
+      d.interruptedAttempt === undefined
+        ? "-"
+        : `after attempt ${String(d.interruptedAttempt)} cut off`,
     ]),
   ]);
 }

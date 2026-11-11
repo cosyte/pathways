@@ -373,6 +373,7 @@ function resolveDestination(
     kind: "http",
     ...resolveHttpClient(http, dir),
     timeoutMs: http.timeout ?? DEFAULT_HTTP_TIMEOUT_MS,
+    resendHeader: http.resendHeader,
   };
 }
 
@@ -443,6 +444,7 @@ function mergeSettings(
     onStoreFailure?: OnStoreFailure | undefined;
     ackTimeout?: number | undefined;
     retention?: number | undefined;
+    resendFlag?: boolean | undefined;
     retentionInterval?: number | undefined;
   },
 ): Settings {
@@ -453,6 +455,7 @@ function mergeSettings(
     onStoreFailure: override.onStoreFailure ?? base.onStoreFailure,
     ackTimeoutMs: override.ackTimeout ?? base.ackTimeoutMs,
     retentionMs: override.retention ?? base.retentionMs,
+    resendFlag: override.resendFlag ?? base.resendFlag,
     retentionIntervalMs: override.retentionInterval ?? base.retentionIntervalMs,
   };
 }

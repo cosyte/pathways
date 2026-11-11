@@ -73,15 +73,16 @@ defaults:
   retention: 30d
 ```
 
-| Setting             | Default | Where                                 | What it does                                                   |
-| ------------------- | ------- | ------------------------------------- | -------------------------------------------------------------- |
-| `timeout`           | `5s`    | `defaults`, channel                   | how long one message's transform may run                       |
-| `memory`            | `256MB` | `defaults`, channel                   | the memory cap of the channel's transform worker               |
-| `onStoreFailure`    | `close` | `defaults`, channel, MLLP source      | what an MLLP source does when a message cannot be stored       |
-| `ackTimeout`        | `10s`   | `defaults`, channel, MLLP destination | how long an MLLP destination waits to connect, then for an ACK |
-| `retention`         | `30d`   | `defaults`, channel                   | how long a done message is kept after its last activity        |
-| `pollInterval`      | `1s`    | `defaults` only                       | how often the engine looks for new work                        |
-| `retentionInterval` | `1h`    | `defaults` only                       | how often a running engine runs retention                      |
+| Setting             | Default | Where                                 | What it does                                                          |
+| ------------------- | ------- | ------------------------------------- | --------------------------------------------------------------------- |
+| `timeout`           | `5s`    | `defaults`, channel                   | how long one message's transform may run                              |
+| `memory`            | `256MB` | `defaults`, channel                   | the memory cap of the channel's transform worker                      |
+| `onStoreFailure`    | `close` | `defaults`, channel, MLLP source      | what an MLLP source does when a message cannot be stored              |
+| `ackTimeout`        | `10s`   | `defaults`, channel, MLLP destination | how long an MLLP destination waits to connect, then for an ACK        |
+| `retention`         | `30d`   | `defaults`, channel                   | how long a done message is kept after its last activity               |
+| `resendFlag`        | `true`  | `defaults`, channel                   | write a marker before each send, so a resend after a crash is flagged |
+| `pollInterval`      | `1s`    | `defaults` only                       | how often the engine looks for new work                               |
+| `retentionInterval` | `1h`    | `defaults` only                       | how often a running engine runs retention                             |
 
 A duration is a number of milliseconds or a string such as `500ms`, `5s`, `2m`, `1h` or `30d`. A
 memory size is a number of megabytes or a string such as `256MB`.

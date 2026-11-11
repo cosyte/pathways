@@ -240,6 +240,7 @@ export async function connectorsFor(
               where,
             ),
             timeoutMs: destination.timeoutMs,
+            resendHeader: destination.resendHeader,
             now,
             ...(destination.tls === undefined
               ? {}
@@ -312,6 +313,9 @@ interface RunningChannel {
  * - Each destination delivers its messages in order. When a delivery fails, that destination retries
  *   it with growing waits, and later deliveries wait behind it; other destinations carry on. A
  *   delivery the receiver rejects for good is marked failed and the destination moves on.
+ * - Before each send, the delivery is marked with its attempt and start time; the outcome clears
+ *   the mark. A delivery found still marked was cut off after the send, so it is sent again flagged
+ *   as a possible duplicate (`OutgoingMessage.resend`), as is every later send of it.
  * - A message whose transform fails is marked failed, and the channel moves on to the next.
  * - A source that cannot listen (its port is taken) is tried again with the same growing waits,
  *   while the rest of the engine runs and the health endpoint answers 503.
@@ -734,18 +738,45 @@ export class Engine {
       for (;;) {
         const delivery = await store.nextDelivery(config.name, index);
         if (delivery === undefined || delivery.nextAttemptAt > this.now()) break;
+        // Still marked: an attempt was handed over and its outcome never recorded, so it counts.
+        const interrupted = delivery.sending?.attempt;
+        const attempt = (interrupted ?? delivery.attempts) + 1;
+        const flagged = interrupted ?? delivery.interruptedAttempt;
+        const resend = flagged === undefined ? undefined : { previousAttempts: attempt - 1 };
         const about = {
           channel: config.name,
           messageId: delivery.messageId,
           destination: index,
           deliveryId: delivery.id,
-          attempt: delivery.attempts + 1,
+          attempt,
+          ...(resend === undefined ? {} : { resend }),
         };
+        if (interrupted !== undefined) {
+          logger.warn({
+            event: "possible-duplicate",
+            channel: config.name,
+            message: delivery.messageId,
+            delivery: delivery.id,
+            destination: index,
+            reason: "send-interrupted",
+            interruptedAttempt: interrupted,
+          });
+        }
+        // With `resendFlag: false` no marker is written, so a crash after this send goes unflagged;
+        // the one cut off is still noted, so a delivery already found marked keeps its flag.
+        if (config.settings.resendFlag || interrupted !== undefined) {
+          await store.markSending(delivery.id, {
+            attempt,
+            at: this.now(),
+            ...(interrupted === undefined ? {} : { interruptedAttempt: interrupted }),
+          });
+        }
         try {
           await destination.deliver({
             messageId: delivery.messageId,
             seq: delivery.seq,
             body: delivery.body,
+            ...(resend === undefined ? {} : { resend }),
           });
         } catch (error) {
           if (error instanceof DeliveryRejected) {
@@ -765,7 +796,7 @@ export class Engine {
             }));
             continue;
           }
-          const attempts = delivery.attempts + 1;
+          const attempts = attempt;
           const code = errorCode(error);
           if (error instanceof RedirectHeld) {
             // Held, never followed: tried again at the longest wait, while an operator fixes the URL.
@@ -833,6 +864,7 @@ export class Engine {
           channel: config.name,
           destination: index,
           delivery: delivery.id,
+          ...(resend === undefined ? {} : { resend }),
         });
         this.emit(channel, () => ({ type: "delivered", at: this.at(), ...about }));
       }

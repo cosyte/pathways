@@ -227,6 +227,7 @@ destinations:
         X-Sender: pathways
       timeout: 5s
       tls: { ca: lab-ca.crt, cert: client.crt, key: client.key }
+      resendHeader: X-Possible-Duplicate
   - http: { url: "http://127.0.0.1:9000/in", plaintext: true }
   - file: { dir: out }
 `,
@@ -252,6 +253,7 @@ destinations:
           key: join(dir, "client.key"),
         },
         plaintext: false,
+        resendHeader: "X-Possible-Duplicate",
       },
       {
         kind: "http",
@@ -354,6 +356,25 @@ destinations:
     );
     expect(problems.find((p) => p.includes("X-Ok"))).toMatch(/environment variable name/);
     expect(problems.join("\n")).not.toContain("synthetic-secret");
+  });
+
+  it("names a resend header that is no header name, is Pathways' own, or is set already", async () => {
+    const problems = await problemsOf({
+      "channels/a/channel.yaml": `
+source:
+  file: { dir: in }
+destinations:
+  - http: { url: "https://example.test/", resendHeader: "Bad Name" }
+  - http: { url: "https://example.test/", resendHeader: Content-Type }
+  - http: { url: "https://example.test/", resendHeader: x-resend, headers: { X-Resend: "1" } }
+  - http: { url: "https://example.test/", resendHeader: X-Resend }
+`,
+    });
+    expect(problems).toEqual([
+      "channels/a/channel.yaml: destinations.0.http.resendHeader: not a valid header name",
+      "channels/a/channel.yaml: destinations.1.http.resendHeader: Pathways sets this header itself",
+      "channels/a/channel.yaml: destinations.2.http.resendHeader: already set in headers",
+    ]);
   });
 
   it("names a bad url, port, size, path, auth and client TLS by key", async () => {
