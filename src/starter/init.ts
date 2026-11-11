@@ -22,12 +22,19 @@ export const STARTER_KEY_FILE = ".pathways/dev.key";
 
 /**
  * Template files whose name in the package differs from the name they are written under. npm never
- * packs a file named `.gitignore`, so the template carries it without the dot.
+ * packs a file named `.gitignore`, so the template carries it without the dot, and `.dockerignore`
+ * the same way, so the package's own tooling never reads either as its own.
  */
-const RENAMES: Readonly<Record<string, string>> = { gitignore: ".gitignore" };
+const RENAMES: Readonly<Record<string, string>> = {
+  gitignore: ".gitignore",
+  dockerignore: ".dockerignore",
+};
 
-/** Replaced in the starter's `package.json` with this package's version. */
+/** Replaced with this package's version: in `package.json`, and in the `Dockerfile`'s image tag. */
 const VERSION_PLACEHOLDER = "{{pathwaysVersion}}";
+
+/** The starter files that carry {@link VERSION_PLACEHOLDER}. */
+const VERSIONED: ReadonlySet<string> = new Set(["package.json", "Dockerfile"]);
 
 /** Why `pathways init` stopped: the target is not empty, is not a folder, or could not be used. */
 export type InitFailure = "not-empty" | "not-a-folder" | "io";
@@ -83,7 +90,8 @@ export interface InitOptions {
 
 /**
  * Writes the starter project into `target`: `pathways.yaml`, the `adt-to-lab` channel with its
- * transform and synthetic test messages, a `.gitignore`, a `package.json`, and a freshly generated
+ * transform and synthetic test messages, a `.gitignore`, a `package.json`, a `Dockerfile` and
+ * `.dockerignore` that build the project's own image on this version's image, and a freshly generated
  * development master key at {@link STARTER_KEY_FILE}, so stored messages are encrypted from the
  * first run. On Linux and macOS the key and its folder are readable by their owner only (modes 0600
  * and 0700); on Windows a mode sets only the read-only attribute, and the project folder's access
@@ -108,7 +116,7 @@ export async function initProject(target: string, options: InitOptions = {}): Pr
     const name = destinationName(template);
     const destination = join(target, ...name.split("/"));
     let contents = await guard(readFile(join(templateDir, ...template.split("/"))));
-    if (name === "package.json") {
+    if (VERSIONED.has(name)) {
       contents = Buffer.from(contents.toString("utf8").replaceAll(VERSION_PLACEHOLDER, VERSION));
     }
     await guard(mkdir(dirname(destination), { recursive: true }));

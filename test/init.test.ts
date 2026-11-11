@@ -52,9 +52,12 @@ async function snapshot(dir: string): Promise<Record<string, string>> {
   return files;
 }
 
+// Sorted as JavaScript sorts strings: by code unit, so "D" comes before "c".
 const STARTER_FILES = [
+  ".dockerignore",
   ".gitignore",
   ".pathways/dev.key",
+  "Dockerfile",
   "channels/adt-to-lab/channel.yaml",
   "channels/adt-to-lab/tests/a01.expected.hl7",
   "channels/adt-to-lab/tests/a01.hl7",
@@ -163,6 +166,60 @@ describe("pathways init", () => {
       expect(typeof exported[schema], schema).toBe("string");
       expect(named, file).toBe(resolve(installed, exported[schema] as string));
     }
+  });
+
+  // The project's own image is the published Pathways image of this version, by digest, with the
+  // channels laid in. .github/workflows/docker.yml builds it from a starter in CI; these hold the
+  // template to what that build and the deploy how-to rely on.
+  it("writes a Dockerfile that builds the project's image on this version's image, by digest", async () => {
+    const target = await makeProject({});
+    await initProject(target);
+    const dockerfile = await readFile(join(target, "Dockerfile"), "utf8");
+    expect(dockerfile).not.toContain("{{pathwaysVersion}}");
+
+    // The tag alone, which the build refuses until a digest is added to it.
+    const args = dockerfile.match(/^ARG PATHWAYS_IMAGE=.*$/gm);
+    expect(args).toEqual([`ARG PATHWAYS_IMAGE=ghcr.io/cosyte/pathways:${VERSION}`]);
+    expect(dockerfile).toMatch(/^\s+\*@sha256:\*\) ;; \\$/m);
+    const froms = dockerfile.match(/^FROM .*$/gm);
+    expect(froms?.at(-1)).toBe("FROM ${PATHWAYS_IMAGE}");
+
+    // The packages stage runs on the toolchain the Pathways image is built with, by the same digest.
+    const toolchain = /^FROM (node:\S+@sha256:[0-9a-f]{64}) AS toolchain$/m.exec(
+      await readFile(join(import.meta.dirname, "..", "Dockerfile"), "utf8"),
+    )?.[1];
+    expect(toolchain).toBeDefined();
+    expect(froms?.[0]).toBe(`FROM ${toolchain ?? ""} AS packages`);
+
+    // Only production dependencies: Pathways itself is a devDependency, and the image has it.
+    expect(dockerfile).toContain("npm ci --omit=dev --ignore-scripts");
+    expect(dockerfile).toContain("COPY channels /project/channels");
+
+    // Validate and test at build time, in that order, after the channels are copied in.
+    const runs = (dockerfile.match(/^RUN \[.*\]$/gm) ?? []).map(
+      (line) => JSON.parse(line.slice("RUN ".length)) as string[],
+    );
+    expect(runs).toEqual([
+      ["/nodejs/bin/node", "/app/dist/bin/pathways.mjs", "validate", "-C", "/project"],
+      ["/nodejs/bin/node", "/app/dist/bin/pathways.mjs", "test", "-C", "/project"],
+    ]);
+    expect(dockerfile.indexOf("COPY channels")).toBeLessThan(dockerfile.indexOf("RUN ["));
+  });
+
+  it("keeps the key, the database, the message folders and node_modules out of the image's build", async () => {
+    const target = await makeProject({});
+    await initProject(target);
+    const rules = (await readFile(join(target, ".dockerignore"), "utf8"))
+      .split("\n")
+      .filter((line) => line !== "" && !line.startsWith("#"));
+    // Everything is left out, and only what the Dockerfile copies is let back in.
+    expect(rules).toEqual([
+      "*",
+      "!package.json",
+      "!package-lock.json",
+      "!pathways.yaml",
+      "!channels/",
+    ]);
   });
 
   it("writes a project whose tests pass straight away", async () => {

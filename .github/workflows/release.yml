@@ -4,7 +4,9 @@ name: Release
 # (OIDC, with provenance) -> docs artifacts -> GitHub release -> a dispatch that rebuilds docs.cosyte.com.
 # No npm token exists: the package's trusted publisher on npmjs.com names this repository and this
 # file, and npm exchanges the job's `id-token: write` grant for a short-lived publish token.
-# `secrets: inherit` passes DOCS_REPO_DISPATCH_TOKEN, and RELEASE_PR_TOKEN when one is set.
+# `secrets: inherit` passes DOCS_REPO_DISPATCH_TOKEN, and RELEASE_PR_TOKEN when one is set. After it,
+# `image-version` and `image-publish` publish the released version's container image to
+# ghcr.io/cosyte/pathways (see the comment above them).
 #
 # Before the first publish, two things outside this file have to hold, or the run fails and nothing is
 # published:
@@ -30,7 +32,8 @@ on:
   push:
     branches: [main]
 
-# Read-only by default: the release job below grants itself the writes the shared pipeline needs.
+# Read-only by default: the release job below grants itself the writes the shared pipeline needs, and
+# `image-publish` the two the image needs.
 permissions:
   contents: read
 
@@ -56,3 +59,205 @@ jobs:
       # to install this package.
       node-version: "24"
     secrets: inherit
+
+  # THE IMAGE. Once a version has its GitHub release (the shared pipeline cuts it after npm serves
+  # the version, in this run or, for a staged version, in a later one), the image of that version is
+  # published to ghcr.io/cosyte/pathways for linux/amd64 and linux/arm64, with buildx's SBOM and
+  # max-mode provenance attached to the index, tagged with the version, signed by digest with cosign
+  # keyless signing (this workflow's identity, from the job's OIDC token, logged in Sigstore's public
+  # transparency log), then pulled back by digest and checked. No `latest` tag: a deployment names a
+  # version or a digest, so a rollback is the tag before.
+  #
+  # The release tag is made through the API with the job's token, which starts no workflow, so this
+  # cannot run on the tag. It runs after the release job on every push to main, and publishes only
+  # when the version package.json holds has a GitHub release and GHCR has no image of it, so each
+  # version is pushed once and a version tag is never moved. It builds from the release tag's commit.
+  #
+  # `image-version` decides with a token that can only read; `image-publish`, the only job that can
+  # write to GHCR, runs only when it says so. docker.yml's `platforms` job runs the same steps on
+  # every pull request up to the login, with `push: false`, and test/package.test.ts holds the two
+  # equal. Before the first push the GHCR package does not exist: the push creates it, linked to
+  # this repository, and a maintainer makes it public in the package's settings.
+  image-version:
+    needs: release
+    # Also after a failed release run: a version released by an earlier run is still published.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      version: ${{ steps.decide.outputs.version }}
+      publish: ${{ steps.decide.outputs.publish }}
+    env:
+      IMAGE: ghcr.io/cosyte/pathways
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # GHCR answers "not found", "manifest unknown" or "name unknown" for a tag it does not have,
+      # and "denied" while the package does not exist yet. Anything else stops the run, so a version
+      # already pushed is never pushed again.
+      - name: Has this version a GitHub release, and no image yet?
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          version="$(jq -r .version package.json)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if ! gh release view "v$version" --json tagName > /dev/null 2>&1; then
+            echo "v$version has no GitHub release yet: no image to publish."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          if docker buildx imagetools inspect "$IMAGE:$version" > "$RUNNER_TEMP/inspect.txt" 2>&1; then
+            echo "$IMAGE:$version is already published."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          elif grep -qiE 'not found|manifest unknown|name unknown|denied' "$RUNNER_TEMP/inspect.txt"; then
+            echo "v$version is released and $IMAGE:$version is not published: publishing it."
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            cat "$RUNNER_TEMP/inspect.txt"
+            echo "::error::could not tell whether $IMAGE:$version is published"
+            exit 1
+          fi
+          docker logout ghcr.io
+
+  image-publish:
+    needs: image-version
+    if: needs.image-version.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    # The arm64 builds run under QEMU on the hosted amd64 runner.
+    timeout-minutes: 60
+    # One publish at a time, never cancelled: a second run waits, finds the version published and
+    # stops before the build.
+    concurrency:
+      group: image-publish
+      cancel-in-progress: false
+    # packages to push, id-token for the keyless signature.
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    env:
+      IMAGE: ghcr.io/cosyte/pathways
+      RELEASED: ${{ needs.image-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: v${{ needs.image-version.outputs.version }}
+          persist-credentials: false
+
+      - name: Read the version and the commit
+        run: |
+          set -euo pipefail
+          echo "VERSION=$(jq -r .version package.json)" >> "$GITHUB_ENV"
+          echo "REVISION=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: The release tag holds the released version
+        run: test "$VERSION" = "$RELEASED"
+
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build each platform alone and run it on a starter project
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            echo "::group::linux/$arch"
+            platform="linux/$arch"
+            docker buildx build --platform "$platform" --load --tag "pathways:$arch" .
+            actual="$(docker run --rm --platform "$platform" "pathways:$arch" --version)"
+            echo "$platform pathways --version: $actual"
+            test "$actual" = "$VERSION"
+            project="$RUNNER_TEMP/$arch"
+            mkdir "$project"
+            run=(docker run --rm --platform "$platform" --user "$(id -u):$(id -g)" --volume "$project:/project")
+            "${run[@]}" "pathways:$arch" init /project
+            "${run[@]}" "pathways:$arch" test
+            inbox="$project/data/adt-to-lab/in"
+            mkdir -p "$inbox"
+            cp "$project/channels/adt-to-lab/tests/a01.hl7" "$project/channels/adt-to-lab/tests/a08.hl7" "$inbox/"
+            touch -d '1 minute ago' "$inbox/a01.hl7" "$inbox/a08.hl7"
+            # SQLite, through this platform's native better-sqlite3 binary.
+            "${run[@]}" "pathways:$arch" start --once
+            cmp "$project/data/adt-to-lab/out/1-1.hl7" "$project/channels/adt-to-lab/tests/a01.expected.hl7"
+            echo "::endgroup::"
+          done
+          docker image ls --format '{{.Repository}}:{{.Tag}} {{.Size}}' pathways | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # After the wait for the concurrency group: an earlier run may have published it meanwhile.
+      - name: The version is still not published
+        id: absent
+        run: |
+          set -euo pipefail
+          if docker buildx imagetools inspect "$IMAGE:$VERSION" > /dev/null 2>&1; then
+            echo "::notice::$IMAGE:$VERSION was published by another run; nothing to do"
+            echo "absent=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "absent=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build both platforms with SBOM and provenance
+        id: build
+        if: steps.absent.outputs.absent == 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          sbom: true
+          provenance: mode=max
+          tags: ${{ env.IMAGE }}:${{ env.VERSION }}
+          labels: |
+            org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.revision=${{ env.REVISION }}
+
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        if: steps.absent.outputs.absent == 'true'
+
+      - name: Sign the image by digest
+        if: steps.absent.outputs.absent == 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "$IMAGE@$DIGEST"
+
+      # As a deployment checks it: by digest, from the registry, against this workflow's identity.
+      - name: Pull the image by digest and check its signature
+        if: steps.absent.outputs.absent == 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          ref="$IMAGE@$DIGEST"
+          cosign verify "$ref" \
+            --certificate-identity "https://github.com/cosyte/pathways/.github/workflows/release.yml@refs/heads/main" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" > /dev/null
+          for platform in linux/amd64 linux/arm64; do
+            docker pull --platform "$platform" "$ref"
+            test "$(docker run --rm --platform "$platform" "$ref" --version)" = "$VERSION"
+          done
+          # The index holds both platforms and an attestation manifest (SBOM and provenance) for each.
+          docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}' > "$RUNNER_TEMP/index.json"
+          test "$(jq -c '[.manifests[] | select(.platform.os == "linux") | .platform.architecture] | sort' "$RUNNER_TEMP/index.json")" = '["amd64","arm64"]'
+          test "$(jq '[.manifests[] | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest")] | length' "$RUNNER_TEMP/index.json")" = 2
+          {
+            echo "### $IMAGE $VERSION"
+            echo
+            echo "- \`$IMAGE:$VERSION\`"
+            echo "- \`$ref\`"
+          } >> "$GITHUB_STEP_SUMMARY"

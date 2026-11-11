@@ -8,12 +8,23 @@ name: Docker
 # MySQL, MariaDB and SQL Server, service containers here, through the drivers the image carries: pg,
 # mysql2 (for MySQL and MariaDB), and tedious with tarn.
 #
-# It pushes and publishes nothing: where the image is published is not decided yet.
+# Two more jobs, which no ruleset names:
+#
+# - `platforms` runs the release's image steps (release.yml, `image-publish`) up to the registry
+#   login: each of linux/amd64 and linux/arm64 built alone (arm64 under QEMU) and run on a starter
+#   project on SQLite, then both built together with the SBOM and provenance the release attaches,
+#   with `push: false`. test/package.test.ts holds its steps equal to the release's.
+# - `project-image` builds a starter project's own image from its Dockerfile (templates/starter/),
+#   FROM this image by digest, through a registry that lives for the job on the runner's loopback.
+#
+# Nothing here pushes to a public registry or signs: release.yml publishes the image to
+# ghcr.io/cosyte/pathways on each release, and only there.
 #
 # A REQUIRED CHECK. The ruleset `ci-required-checks` names `image`, so a red run here blocks the
 # merge. That is why the workflow has no path filter: a required check whose workflow a filter
 # skips stays pending, and the pull request cannot merge. It is its own workflow, outside ci.yml's
-# shared `ci` job, so an edit here never changes the contexts that job reports.
+# shared `ci` job, so an edit here never changes the contexts that job reports. Never rename the
+# `image` job.
 
 on:
   push:
@@ -258,3 +269,182 @@ jobs:
       - name: Image sizes
         run: |
           docker image ls --format '{{.Repository}}:{{.Tag}} {{.Size}}' pathways | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # The release's image steps with `push: false`: keep them in step with release.yml's
+  # `image-publish` (test/package.test.ts compares them). No login, no push, no signature.
+  platforms:
+    runs-on: ubuntu-latest
+    # The arm64 builds run under QEMU on the hosted amd64 runner.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      IMAGE: ghcr.io/cosyte/pathways
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the version and the commit
+        run: |
+          set -euo pipefail
+          echo "VERSION=$(jq -r .version package.json)" >> "$GITHUB_ENV"
+          echo "REVISION=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build each platform alone and run it on a starter project
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            echo "::group::linux/$arch"
+            platform="linux/$arch"
+            docker buildx build --platform "$platform" --load --tag "pathways:$arch" .
+            actual="$(docker run --rm --platform "$platform" "pathways:$arch" --version)"
+            echo "$platform pathways --version: $actual"
+            test "$actual" = "$VERSION"
+            project="$RUNNER_TEMP/$arch"
+            mkdir "$project"
+            run=(docker run --rm --platform "$platform" --user "$(id -u):$(id -g)" --volume "$project:/project")
+            "${run[@]}" "pathways:$arch" init /project
+            "${run[@]}" "pathways:$arch" test
+            inbox="$project/data/adt-to-lab/in"
+            mkdir -p "$inbox"
+            cp "$project/channels/adt-to-lab/tests/a01.hl7" "$project/channels/adt-to-lab/tests/a08.hl7" "$inbox/"
+            touch -d '1 minute ago' "$inbox/a01.hl7" "$inbox/a08.hl7"
+            # SQLite, through this platform's native better-sqlite3 binary.
+            "${run[@]}" "pathways:$arch" start --once
+            cmp "$project/data/adt-to-lab/out/1-1.hl7" "$project/channels/adt-to-lab/tests/a01.expected.hl7"
+            echo "::endgroup::"
+          done
+          docker image ls --format '{{.Repository}}:{{.Tag}} {{.Size}}' pathways | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Build both platforms with SBOM and provenance
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: false
+          sbom: true
+          provenance: mode=max
+          tags: ${{ env.IMAGE }}:${{ env.VERSION }}
+          labels: |
+            org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.revision=${{ env.REVISION }}
+
+  # A starter project's own image, as a team builds it: FROM the Pathways image by digest, with the
+  # channels copied in, a dependency installed in the build stage, and `pathways validate` and
+  # `pathways test` run by the build. The Pathways image is pushed to a registry that lives for this
+  # job on the runner's loopback, so the project's Dockerfile can name it by digest.
+  project-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    services:
+      # registry:3 (the CNCF distribution registry), pinned 2026-11-11. Its digest is a
+      # multi-platform index.
+      registry:
+        image: registry@sha256:38907510915c3f1604c7e83d6ab602ab3020d092f73bdaed8696773693ff768c
+        ports:
+          - 5000:5000
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build the image and push it to the job's registry
+        run: |
+          set -euo pipefail
+          docker build --tag localhost:5000/pathways:ci .
+          docker push localhost:5000/pathways:ci
+          ref="$(docker inspect --format '{{index .RepoDigests 0}}' localhost:5000/pathways:ci)"
+          echo "the image by digest: $ref"
+          echo "PATHWAYS_IMAGE=$ref" >> "$GITHUB_ENV"
+
+      # @cosyte/pathways is a devDependency and stays out of the image; @cosyte/hl7 stands in for an
+      # extension or a cloud package, which the build stage installs.
+      - name: pathways init writes a project with a Dockerfile and a .dockerignore
+        run: |
+          set -euo pipefail
+          project="$RUNNER_TEMP/project"
+          mkdir "$project"
+          docker run --rm --user "$(id -u):$(id -g)" --volume "$project:/project" "$PATHWAYS_IMAGE" init /project
+          test -f "$project/Dockerfile"
+          test -f "$project/.dockerignore"
+          jq '.dependencies = {"@cosyte/hl7": "^0.1.9"}' "$project/package.json" > "$RUNNER_TEMP/package.json"
+          mv "$RUNNER_TEMP/package.json" "$project/package.json"
+
+      - name: The project's Dockerfile refuses a Pathways image named by a tag alone
+        run: |
+          set -euo pipefail
+          if docker build --build-arg PATHWAYS_IMAGE=localhost:5000/pathways:ci "$RUNNER_TEMP/project" > "$RUNNER_TEMP/tag.log" 2>&1; then
+            echo "::error::the project image built FROM a tag"
+            exit 1
+          fi
+          grep -F "name it by digest" "$RUNNER_TEMP/tag.log"
+
+      - name: A configuration that does not validate, or a channel test that fails, stops the build
+        run: |
+          set -euo pipefail
+          invalid="$RUNNER_TEMP/invalid"
+          cp -r "$RUNNER_TEMP/project" "$invalid"
+          sed -i 's/^  timeout: 5s$/  timeout: soon/' "$invalid/pathways.yaml"
+          grep -q '^  timeout: soon$' "$invalid/pathways.yaml"
+          if docker build --progress plain --build-arg PATHWAYS_IMAGE="$PATHWAYS_IMAGE" "$invalid" > "$RUNNER_TEMP/invalid.log" 2>&1; then
+            echo "::error::a project whose configuration does not validate built"
+            exit 1
+          fi
+          grep -E 'pathways\.mjs validate .*did not complete successfully' "$RUNNER_TEMP/invalid.log"
+          failing="$RUNNER_TEMP/failing"
+          cp -r "$RUNNER_TEMP/project" "$failing"
+          printf 'PID|1||NOT-THE-EXPECTED-OUTPUT\r' >> "$failing/channels/adt-to-lab/tests/a01.expected.hl7"
+          if docker build --progress plain --build-arg PATHWAYS_IMAGE="$PATHWAYS_IMAGE" "$failing" > "$RUNNER_TEMP/failing.log" 2>&1; then
+            echo "::error::a project whose channel test fails built"
+            exit 1
+          fi
+          grep -E 'pathways\.mjs test .*did not complete successfully' "$RUNNER_TEMP/failing.log"
+
+      - name: Build the project's image FROM the image by digest
+        run: docker build --build-arg PATHWAYS_IMAGE="$PATHWAYS_IMAGE" --tag project:ci "$RUNNER_TEMP/project"
+
+      # The channels, the project's package.json and its installed dependency are in /project; the
+      # development key, the database, the message folders and the Dockerfile are not.
+      - name: The project image holds the channels and the dependency, and no key or messages
+        run: |
+          set -euo pipefail
+          docker run --rm project:ci test
+          docker run --rm --entrypoint /nodejs/bin/node project:ci --input-type=module --eval '
+            import { existsSync } from "node:fs";
+            const present = ["channels/adt-to-lab/channel.yaml", "pathways.yaml", "package.json",
+              "node_modules/@cosyte/hl7/package.json"];
+            const absent = [".pathways", "data", "Dockerfile", ".dockerignore",
+              "node_modules/@cosyte/pathways"];
+            for (const p of present) if (!existsSync(`/project/${p}`)) throw new Error(`missing ${p}`);
+            for (const p of absent) if (existsSync(`/project/${p}`)) throw new Error(`present ${p}`);
+          '
+
+      # As a deployment runs it: the master key mounted from outside, and the engine writing its
+      # database and the message folders to mounted volumes, never into the image.
+      - name: The project image runs the channel with the key and the database mounted
+        run: |
+          set -euo pipefail
+          project="$RUNNER_TEMP/project"
+          state="$RUNNER_TEMP/state"
+          data="$RUNNER_TEMP/data"
+          mkdir -p "$state" "$data/adt-to-lab/in"
+          cp "$project/.pathways/dev.key" "$state/"
+          cp "$project/channels/adt-to-lab/tests/a01.hl7" "$project/channels/adt-to-lab/tests/a08.hl7" "$data/adt-to-lab/in/"
+          touch -d '1 minute ago' "$data/adt-to-lab/in/a01.hl7" "$data/adt-to-lab/in/a08.hl7"
+          docker run --rm --user "$(id -u):$(id -g)" \
+            --volume "$state:/project/.pathways" --volume "$data:/project/data" project:ci start --once
+          cmp "$data/adt-to-lab/out/1-1.hl7" "$project/channels/adt-to-lab/tests/a01.expected.hl7"
+          test -f "$state/pathways.db"
+
+      - name: Image sizes
+        run: |
+          docker image ls --format '{{.Repository}}:{{.Tag}} {{.Size}}' | grep -E '^(localhost:5000/pathways|project):ci ' | tee -a "$GITHUB_STEP_SUMMARY"

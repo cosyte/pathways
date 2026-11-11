@@ -114,7 +114,7 @@ describe("the release workflow", () => {
   it("runs on pushes to main and nowhere else, with a read-only default token", () => {
     expect(release.on).toEqual({ push: { branches: ["main"] } });
     expect(release.permissions).toEqual({ contents: "read" });
-    expect(Object.keys(release.jobs)).toEqual(["release"]);
+    expect(Object.keys(release.jobs)).toEqual(["release", "image-version", "image-publish"]);
   });
 
   it("calls the shared release workflow at the same published commit as CI", () => {
@@ -181,5 +181,156 @@ describe("the release workflow", () => {
       changelog: unknown;
     };
     expect(config.changelog).toBe("@changesets/cli/changelog");
+  });
+});
+
+interface Step {
+  readonly name?: string;
+  readonly id?: string;
+  readonly if?: string;
+  readonly uses?: string;
+  readonly run?: string;
+  readonly env?: Record<string, string>;
+  readonly with?: Record<string, unknown>;
+}
+
+interface Job {
+  readonly needs?: string | readonly string[];
+  readonly if?: string;
+  readonly permissions?: Record<string, string>;
+  readonly env?: Record<string, string>;
+  readonly concurrency?: unknown;
+  readonly steps: readonly Step[];
+}
+
+/** A job of a workflow; a missing one has no steps, so each test that reads it fails on its own. */
+function job(file: string, name: string): Job {
+  return (workflow(file).jobs[name] as unknown as Job | undefined) ?? { steps: [] };
+}
+
+/** A step by its name, or by the action it uses when it has none. */
+function step(of: Job, key: string): Step {
+  const found = of.steps.find((s) => s.name === key || s.uses?.split("@")[0] === key);
+  expect(found, `no step ${key}`).toBeDefined();
+  return found as Step;
+}
+
+/** The identity a cosign keyless signature from release.yml carries, on a push to main. */
+const SIGNER = "https://github.com/cosyte/pathways/.github/workflows/release.yml@refs/heads/main";
+const ISSUER = "https://token.actions.githubusercontent.com";
+
+// Each release publishes the image to GHCR, signed, for two platforms, with an SBOM and provenance.
+// A pull request cannot push, so docker.yml's `platforms` job runs the same steps with `push:
+// false`; these hold the two equal, so what a pull request proves is what a release runs.
+describe("the image release", () => {
+  const publish = job("release.yml", "image-publish");
+  const decide = job("release.yml", "image-version");
+  const platforms = job("docker.yml", "platforms");
+
+  // The steps both run, in the same order, the same in every field.
+  const SHARED = [
+    "Read the version and the commit",
+    "docker/setup-qemu-action",
+    "docker/setup-buildx-action",
+    "Build each platform alone and run it on a starter project",
+  ];
+
+  it("runs after the release job, deciding with a read-only token, and publishes only when told", () => {
+    expect(decide.needs).toBe("release");
+    expect(decide.if).toBe("${{ !cancelled() }}");
+    expect(decide.permissions).toEqual({ contents: "read", packages: "read" });
+    expect(publish.needs).toBe("image-version");
+    expect(publish.if).toBe("needs.image-version.outputs.publish == 'true'");
+    expect(publish.permissions).toEqual({
+      contents: "read",
+      packages: "write",
+      "id-token": "write",
+    });
+    expect(publish.concurrency).toEqual({ group: "image-publish", "cancel-in-progress": false });
+    // Built from the release tag, never from a later main.
+    expect(publish.steps[0]?.with?.["ref"]).toBe("v${{ needs.image-version.outputs.version }}");
+    expect(step(publish, "The release tag holds the released version").run).toBe(
+      'test "$VERSION" = "$RELEASED"',
+    );
+  });
+
+  it("runs the same steps on a pull request as on a release, up to the login", () => {
+    expect(platforms.env).toEqual({ IMAGE: "ghcr.io/cosyte/pathways" });
+    expect(publish.env?.["IMAGE"]).toBe("ghcr.io/cosyte/pathways");
+    for (const name of SHARED) expect(step(platforms, name), name).toEqual(step(publish, name));
+    const order = (of: Job): number[] => SHARED.map((name) => of.steps.indexOf(step(of, name)));
+    expect(order(platforms)).toEqual([...order(platforms)].sort((a, b) => a - b));
+    expect(order(publish)).toEqual([...order(publish)].sort((a, b) => a - b));
+    // The smoke runs the image of each platform on SQLite, through its native binary.
+    const smoke = step(publish, "Build each platform alone and run it on a starter project").run;
+    expect(smoke).toContain("for arch in amd64 arm64; do");
+    expect(smoke).toContain('"${run[@]}" "pathways:$arch" start --once');
+  });
+
+  it("builds both platforms with an SBOM and max-mode provenance, and pushes only from a release", () => {
+    const name = "Build both platforms with SBOM and provenance";
+    const released = step(publish, name);
+    const dryRun = step(platforms, name);
+    expect(released.with).toMatchObject({
+      platforms: "linux/amd64,linux/arm64",
+      push: true,
+      sbom: true,
+      provenance: "mode=max",
+      tags: "${{ env.IMAGE }}:${{ env.VERSION }}",
+    });
+    expect(dryRun.with).toEqual({ ...released.with, push: false });
+    expect(dryRun.uses).toBe(released.uses);
+    // No `latest`: a deployment names a version or a digest.
+    expect(String(released.with?.["tags"])).not.toContain("latest");
+  });
+
+  it("pushes, logs in and signs nowhere but the release", () => {
+    const docker = readFileSync(".github/workflows/docker.yml", "utf8");
+    for (const word of ["docker/login-action", "cosign", "push: true", "packages: write"]) {
+      expect(docker, word).not.toContain(word);
+    }
+    expect(platforms.permissions).toEqual({ contents: "read" });
+    // The only `docker push` in docker.yml is to the job's own registry on the runner's loopback.
+    expect(docker.match(/docker push .*/g)).toEqual(["docker push localhost:5000/pathways:ci"]);
+  });
+
+  it("signs the pushed digest keylessly and checks it by digest, as a deployment does", () => {
+    const sign = step(publish, "Sign the image by digest");
+    expect(sign.run).toBe('cosign sign --yes "$IMAGE@$DIGEST"');
+    expect(sign.env).toEqual({ DIGEST: "${{ steps.build.outputs.digest }}" });
+    expect(step(publish, "sigstore/cosign-installer").uses).toMatch(/@[0-9a-f]{40}$/);
+
+    const verify = step(publish, "Pull the image by digest and check its signature");
+    expect(verify.env).toEqual({ DIGEST: "${{ steps.build.outputs.digest }}" });
+    expect(verify.run).toContain('ref="$IMAGE@$DIGEST"');
+    expect(verify.run).toContain(`--certificate-identity "${SIGNER}"`);
+    expect(verify.run).toContain(`--certificate-oidc-issuer "${ISSUER}"`);
+    expect(verify.run).toContain('docker pull --platform "$platform" "$ref"');
+    const names = publish.steps.map((s) => s.name ?? s.uses?.split("@")[0]);
+    expect(names.indexOf("Sign the image by digest")).toBeLessThan(
+      names.indexOf("Pull the image by digest and check its signature"),
+    );
+  });
+
+  // The identity a reader is told to check is the one the release signs with.
+  it("tells a project and the docs to check the identity the release signs with", () => {
+    for (const file of [
+      "templates/starter/Dockerfile",
+      "docs-content/run-in-docker.md",
+      "docs-content/deploy-the-image.md",
+    ]) {
+      const text = readFileSync(file, "utf8");
+      expect(text, file).toContain(`--certificate-identity ${SIGNER}`);
+      expect(text, file).toContain(`--certificate-oidc-issuer ${ISSUER}`);
+    }
+  });
+
+  // Every action is pinned by commit, as the rest of the repository's workflows are.
+  it("pins every action it uses by commit", () => {
+    for (const of of [publish, decide, platforms, job("docker.yml", "project-image")]) {
+      for (const s of of.steps) {
+        if (s.uses !== undefined) expect(s.uses).toMatch(/^[a-z-]+\/[a-z-]+@[0-9a-f]{40}$/);
+      }
+    }
   });
 });
