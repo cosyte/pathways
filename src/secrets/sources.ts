@@ -66,7 +66,9 @@ export type SecretScope = "store" | "operator" | "all";
 
 /**
  * Every secret reference `project` holds, in `scope`, each with the file and key that wrote it. A
- * header written in the YAML is no secret and is not listed.
+ * header written in the YAML is no secret and is not listed. With `skipDry`, a start's view: a
+ * destination that runs dry (its block sets `dryRun: true`, or `dryRun` is `"all"` for
+ * `pathways start --dry-run`) never sends, so its secrets are not listed and never read.
  *
  * @example
  * ```ts
@@ -76,6 +78,7 @@ export type SecretScope = "store" | "operator" | "all";
 export function secretUses(
   project: Pick<ProjectConfig, "storage" | "encryption" | "health" | "hooks" | "channels">,
   scope: SecretScope,
+  skipDry?: DrySkip,
 ): SecretUse[] {
   const uses: SecretUse[] = [];
   const { storage, encryption } = project;
@@ -96,11 +99,17 @@ export function secretUses(
     uses.push({ source: project.health.auth, where: "pathways.yaml: health.auth" });
   }
   uses.push(...hookUses(project.hooks, "pathways.yaml"));
-  for (const channel of project.channels) uses.push(...channelUses(channel));
+  for (const channel of project.channels) uses.push(...channelUses(channel, skipDry));
   return uses;
 }
 
-function channelUses(channel: ChannelConfig): SecretUse[] {
+/**
+ * Which destinations' secrets a start leaves unread: `"each"` skips those whose block sets
+ * `dryRun: true`; `"all"` skips every destination, as `pathways start --dry-run` runs them all dry.
+ */
+export type DrySkip = "each" | "all";
+
+function channelUses(channel: ChannelConfig, skipDry: DrySkip | undefined): SecretUse[] {
   const file = `channels/${channel.name}/channel.yaml`;
   const uses: SecretUse[] = [];
   const { source } = channel;
@@ -113,7 +122,9 @@ function channelUses(channel: ChannelConfig): SecretUse[] {
     }
   }
   for (const [index, destination] of channel.destinations.entries()) {
-    if (destination.kind === "http") {
+    // A destination that runs dry builds no connector, so its secrets are never needed.
+    const dry = skipDry === "all" || (skipDry === "each" && destination.dryRun === true);
+    if (destination.kind === "http" && !dry) {
       uses.push(...headerUses(destination.headers, `${file}: destinations.${index}.http`));
     }
   }

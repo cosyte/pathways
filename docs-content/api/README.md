@@ -292,7 +292,7 @@ const line = (entry: AuditEntry): string => `${entry.at} ${entry.actor} ${entry.
 
 ##### action
 
-> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"`
+> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"verify"`
 
 ##### actor
 
@@ -412,7 +412,7 @@ await store.appendAudit("noah", [{ action: "content-view", channel: "adt", messa
 
 ##### action
 
-> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"`
+> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"verify"`
 
 ##### channel?
 
@@ -448,7 +448,7 @@ const views = await store.auditEntries({ action: "content-view", since: "2026-11
 
 ##### action?
 
-> `readonly` `optional` **action?**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"`
+> `readonly` `optional` **action?**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"verify"`
 
 ##### before?
 
@@ -2080,7 +2080,7 @@ Received at or after this time (ISO 8601, UTC).
 
 ##### state?
 
-> `readonly` `optional` **state?**: `"received"` \| `"filtered"` \| `"delivered"` \| `"failed"` \| `"cleared"` \| `"queued"` \| `"retrying"`
+> `readonly` `optional` **state?**: `"received"` \| `"filtered"` \| `"delivered"` \| `"failed"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
 
 ##### until?
 
@@ -2317,9 +2317,9 @@ A message's deliveries, every generation, oldest first, without bodies.
 
 ##### deliveryCounts()
 
-> **deliveryCounts**(`channel`): `Promise`\<`Record`\<[`DeliveryStatus`](#deliverystatus), `number`\>\>
+> **deliveryCounts**(`channel`): `Promise`\<[`DeliveryCounts`](#deliverycounts-1)\>
 
-How many deliveries of a channel stand at each status.
+How many deliveries of a channel stand at each status; `dry-run` only when some ran dry.
 
 ###### Parameters
 
@@ -2329,14 +2329,15 @@ How many deliveries of a channel stand at each status.
 
 ###### Returns
 
-`Promise`\<`Record`\<[`DeliveryStatus`](#deliverystatus), `number`\>\>
+`Promise`\<[`DeliveryCounts`](#deliverycounts-1)\>
 
 ##### expire()
 
 > **expire**(`channel`, `cutoff`, `dryRun`): `Promise`\<[`ExpireResult`](#expireresult)\>
 
-Deletes a channel's messages that are done (delivered, filtered or cleared) and whose last
-activity is before `cutoff` (ISO 8601), with their deliveries. With `dryRun`, counts them only.
+Deletes a channel's messages that are done (delivered, dry-run, filtered or cleared) and whose
+last activity is before `cutoff` (ISO 8601), with their deliveries. With `dryRun`, counts them
+only.
 
 ###### Parameters
 
@@ -2461,6 +2462,28 @@ A channel's retrying deliveries, oldest first, at most `limit`.
 > **markDelivered**(`deliveryId`, `epoch?`): `Promise`\<`void`\>
 
 Fenced by `epoch` when it is given.
+
+###### Parameters
+
+###### deliveryId
+
+`number`
+
+###### epoch?
+
+`number`
+
+###### Returns
+
+`Promise`\<`void`\>
+
+##### markDryRun()?
+
+> `optional` **markDryRun**(`deliveryId`, `epoch?`): `Promise`\<`void`\>
+
+Marks a delivery `dry-run`: its output stays recorded, it was never sent, and its destination
+moves on to the next. Clears the marker. Fenced by `epoch` when it is given. Optional: an engine
+with a destination that runs dry refuses to start on a store without it.
 
 ###### Parameters
 
@@ -2812,7 +2835,7 @@ The body's size in bytes, or null for a message stored before sizes were kept.
 
 ##### state
 
-> `readonly` **state**: `"received"` \| `"filtered"` \| `"delivered"` \| `"failed"` \| `"cleared"` \| `"queued"` \| `"retrying"`
+> `readonly` **state**: `"received"` \| `"filtered"` \| `"delivered"` \| `"failed"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
 
 The status and the current deliveries, as an operator sees them.
 
@@ -4005,7 +4028,7 @@ The body's size in bytes, or null for a message stored before sizes were kept.
 
 ##### state
 
-> `readonly` **state**: `"received"` \| `"filtered"` \| `"delivered"` \| `"failed"` \| `"cleared"` \| `"queued"` \| `"retrying"`
+> `readonly` **state**: `"received"` \| `"filtered"` \| `"delivered"` \| `"failed"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
 
 The status and the current deliveries, as an operator sees them.
 
@@ -4408,13 +4431,14 @@ const detail: AuditDetail = { status: "transformed", queued: 2 };
 
 ### AuditEventAction
 
-> **AuditEventAction** = `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"`
+> **AuditEventAction** = `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"verify"`
 
 Every action the audit log records, as an [AuditEvent](#auditevent)'s `action`: `search` (messages
 listed), `view` (one message's details, without content), `content-view`, `replay`, `resend`,
 `clear`, `retention` (a run, with what it deleted), `config` (a configuration change seen when
-the engine started), `lease-release` (the engine lease freed by force) and `migrate` (schema steps
-applied by `pathways migrate`). Kept equal to the audit log's own list by a test.
+the engine started), `lease-release` (the engine lease freed by force), `migrate` (schema steps
+applied by `pathways migrate`) and `verify` (a stored message read by `pathways verify`). Kept
+equal to the audit log's own list by a test.
 
 #### Example
 
@@ -4544,12 +4568,34 @@ const table: ContentTable = "deliveries";
 
 ***
 
+### DeliveryCounts
+
+> **DeliveryCounts** = `Readonly`\<`Record`\<`Exclude`\<[`DeliveryStatus`](#deliverystatus), `"dry-run"`\>, `number`\>\> & `object`
+
+How many deliveries stand at each status. `dry-run` is there only when some delivery ran dry, so
+the counts of a project that never runs a destination dry read as they did before dry runs.
+
+#### Type Declaration
+
+##### dry-run?
+
+> `readonly` `optional` **dry-run?**: `number`
+
+#### Example
+
+```ts
+const recorded = (counts: DeliveryCounts): number => counts.delivered + (counts["dry-run"] ?? 0);
+```
+
+***
+
 ### DeliveryStatus
 
-> **DeliveryStatus** = `"pending"` \| `"delivered"` \| `"failed"` \| `"cleared"`
+> **DeliveryStatus** = `"pending"` \| `"delivered"` \| `"failed"` \| `"cleared"` \| `"dry-run"`
 
 Where one delivery of a message to one destination stands. `cleared`: it failed for good, and an
-operator cleared it, or replayed its message.
+operator cleared it, or replayed its message. `dry-run`: its destination runs dry (`dryRun: true`,
+or `pathways start --dry-run`), so its output was recorded and never sent.
 
 #### Example
 
@@ -4561,10 +4607,17 @@ const open = (status: DeliveryStatus): boolean => status === "pending";
 
 ### DeliveryTally
 
-> **DeliveryTally** = `Readonly`\<`Record`\<[`DeliveryStatus`](#deliverystatus) \| `"retrying"`, `number`\>\>
+> **DeliveryTally** = [`DeliveryCounts`](#deliverycounts-1) & `object`
 
 How many of one message's deliveries stand at each status. `retrying` counts the pending ones
-that have failed at least once, so it is part of `pending`.
+that have failed at least once, so it is part of `pending`. `dry-run` is there only when one ran
+dry.
+
+#### Type Declaration
+
+##### retrying
+
+> `readonly` **retrying**: `number`
 
 #### Example
 

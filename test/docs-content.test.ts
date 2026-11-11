@@ -243,6 +243,16 @@ describe("the settings tables", () => {
   });
 });
 
+describe("the dryRun row of the configuration reference", () => {
+  it("says a dryRun read from the environment is turned off, unaudited, by setting it to false", () => {
+    const row = page("configuration-reference.md")
+      .split("\n")
+      .find((line) => line.startsWith("| `dryRun` |"));
+    expect(row).toMatch(/setting that variable to `false` makes the destination send for real/);
+    expect(row).toMatch(/the audit log does not record that change/);
+  });
+});
+
 describe("the quickstart", () => {
   it("shows the starter's transform as init writes it", () => {
     expect(`${titled("quickstart.md", "channels/adt-to-lab/transform.ts")}\n`).toBe(
