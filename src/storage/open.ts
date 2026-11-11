@@ -5,6 +5,7 @@ import type { Env } from "../connectors/endpoint.js";
 import { EncryptedStore, UnencryptedStore } from "../encryption/encrypted-store.js";
 import { keysToStart, type KeyProvider } from "../encryption/keys.js";
 import { customKeyProvider, customStore } from "../extensions/build.js";
+import type { SchemaMode } from "./schema.js";
 import { Store, type MessageStore } from "./store.js";
 
 /**
@@ -19,6 +20,11 @@ export interface OpenStoreContext {
   /** Where master keys, and a custom store's or key provider's credentials, are read from. */
   readonly env: Env;
   readonly logger: Logger;
+  /**
+   * How a built-in store treats its schema when it opens (`StoreOptions.migrate`): `expand` by
+   * default. A custom store keeps its own schema and ignores it.
+   */
+  readonly migrate?: SchemaMode;
 }
 
 /**
@@ -68,7 +74,10 @@ export async function openRawStore(
   context: OpenStoreContext,
 ): Promise<MessageStore> {
   const { storage } = project;
-  if (storage.kind !== "module") return Store.open(storage, { env: context.env });
+  if (storage.kind !== "module") {
+    const { env, migrate } = context;
+    return Store.open(storage, migrate === undefined ? { env } : { env, migrate });
+  }
   return customStore(
     storage,
     {

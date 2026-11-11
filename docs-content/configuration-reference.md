@@ -87,6 +87,7 @@ health:
 | `hooks`      | a list of [hooks](#hooks)                               | none                            |
 | `health`     | see [Health endpoint](#health-endpoint)                 | no health endpoint              |
 | `lease`      | see [Engine lease](#engine-lease)                       | a 15s lease, no standby         |
+| `migrations` | see [Migrations](#migrations)                           | no rollback window              |
 | `config`     | see [Transform configuration](#transform-configuration) | none                            |
 
 ### Encryption
@@ -195,6 +196,16 @@ The lease one engine per database holds, so a second is refused or waits as a st
 | --------- | ----------------------- | ------- | ----------------------------------------------------------------------------------------------------------- |
 | `ttl`     | duration, at least `1s` | `15s`   | how long the lease lasts unless renewed; the holder renews it every third of this                           |
 | `standby` | boolean                 | `false` | start as a standby, as `pathways start --standby` does; needs a database server, and is refused with SQLite |
+
+### Migrations
+
+How `pathways migrate --contract` treats contract steps. See
+[schema changes](./store-messages-in-a-database.md#schema-changes-expand-and-contract) and
+[upgrade Pathways](./upgrade-pathways.md).
+
+| Key              | Type     | Default | Meaning                                                                                                                               |
+| ---------------- | -------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `rollbackWindow` | duration | `0`     | how long after the schema last changed contract steps are refused, so the version before can still be started again; `0` refuses none |
 
 ### Transform configuration
 

@@ -255,6 +255,7 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
     hooks,
     health,
     lease,
+    migrations: { rollbackWindowMs: project.migrations?.rollbackWindow ?? 0 },
     encryption,
     config: (project.config ?? {}) as TransformConfigBlock,
     channels,
