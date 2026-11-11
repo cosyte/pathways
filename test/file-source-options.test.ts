@@ -459,7 +459,10 @@ describe.skipIf(windows)("FileSource and symbolic links", () => {
     expect((await readdir(dir)).sort()).toEqual([CLAIMED_DIR, "link.hl7", "linked-folder"]);
     expect(await readFile(join(outside, "secret.hl7"), "utf8")).toBe("outside");
   });
+});
 
+// A folder link here is a junction on Windows, which needs no privilege; elsewhere a symbolic link.
+describe("FileSource and a folder swapped for a link", () => {
   /**
    * A source on `dir` whose first file, `a.hl7`, is too large: once it is set aside, after the pass
    * found every file, the subfolder `sub` is swapped for a link to `outside`.
@@ -475,7 +478,7 @@ describe.skipIf(windows)("FileSource and symbolic links", () => {
         faults.push(fault);
         if (faults.length > 1) return;
         renameSync(join(dir, "sub"), join(dir, "was-sub"));
-        symlinkSync(outside, join(dir, "sub"), "dir");
+        symlinkSync(outside, join(dir, "sub"), "junction");
       },
       ...options,
     });
@@ -531,7 +534,7 @@ describe.skipIf(windows)("FileSource and symbolic links", () => {
       onFileFault: (fault) => {
         faults.push(fault);
         renameSync(join(dir, "sub"), join(dir, "was-sub"));
-        symlinkSync(outside, join(dir, "sub"), "dir");
+        symlinkSync(outside, join(dir, "sub"), "junction");
       },
     });
     expect(await pass(source)).toEqual(["in"]);
@@ -544,7 +547,7 @@ describe.skipIf(windows)("FileSource and symbolic links", () => {
     await dropFile(join(dir, "held", "x.hl7"), "set aside before");
     await dropFile(join(dir, "a.hl7"), "new");
     const errorDir = join(await makeProject({}), "errors");
-    await symlink(join(dir, "held"), errorDir, "dir");
+    await symlink(join(dir, "held"), errorDir, "junction");
     expect(await pass(sourceOn(dir, { recursive: true, errorDir }))).toEqual(["new"]);
     expect(await tree(dir)).toEqual(["held/x.hl7"]);
   });
