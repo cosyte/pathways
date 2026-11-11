@@ -10,7 +10,7 @@ import { loadServerTls, type ServerTlsMaterial } from "../connectors/tls.js";
  * `standby` while it waits for the engine lease, `running`, `draining` once it was told to stop
  * (or stopped on an error) and is closing its sources, and `fenced` once it lost the engine lease.
  */
-export type EnginePhase = "starting" | "standby" | "running" | "draining" | "fenced";
+export type EngineState = "starting" | "standby" | "running" | "draining" | "fenced";
 
 /**
  * The engine's role: `single` on a store without leases, else `active` while it holds (or is
@@ -20,11 +20,11 @@ export type EngineRole = "single" | "active" | "standby";
 
 /**
  * The one word a probe answers with. Liveness: `live`, or `stalled` when the engine loop has made
- * no step within its bound. Readiness: `ready`, the phase that keeps it from being ready, or
+ * no step within its bound. Readiness: `ready`, the state that keeps it from being ready, or
  * `unavailable` when storage cannot be reached or a source cannot listen.
  */
 export type ProbeWord =
-  "live" | "stalled" | "ready" | Exclude<EnginePhase, "running"> | "unavailable";
+  "live" | "stalled" | "ready" | Exclude<EngineState, "running"> | "unavailable";
 
 /** A probe's answer: its status code and its one word. */
 export interface ProbeAnswer {
@@ -38,9 +38,9 @@ export interface Probes {
   ready(): Promise<ProbeAnswer>;
 }
 
-/** What {@link engineProbes} reads: the phase, and the engine's own two checks. */
+/** What {@link engineProbes} reads: the state, and the engine's own two checks. */
 export interface ProbeSources {
-  readonly phase: () => EnginePhase;
+  readonly state: () => EngineState;
   /** False only when the engine loop runs and has made no step within its bound. */
   readonly live: () => boolean;
   /** False when storage cannot be reached or a source cannot listen. */
@@ -50,12 +50,12 @@ export interface ProbeSources {
 /**
  * The probes of an engine run by `pathways start`. Liveness looks at the engine loop alone, never at
  * a source or a destination, so an orchestrator that restarts on it does not restart an engine
- * whose port is taken or whose receiver is down. Readiness is 503 in every phase but `running`, and
+ * whose port is taken or whose receiver is down. Readiness is 503 in every state but `running`, and
  * while running when storage cannot be reached or a source cannot listen.
  *
  * @example
  * ```ts
- * const probes = engineProbes({ phase: () => phase, live: () => engine.live(), ready: () => engine.ready() });
+ * const probes = engineProbes({ state: () => state, live: () => engine.live(), ready: () => engine.ready() });
  * (await probes.ready()).word; // "starting"
  * ```
  */
@@ -63,8 +63,8 @@ export function engineProbes(sources: ProbeSources): Probes {
   return {
     live: () => (sources.live() ? { status: 200, word: "live" } : { status: 503, word: "stalled" }),
     ready: async () => {
-      const phase = sources.phase();
-      if (phase !== "running") return { status: 503, word: phase };
+      const state = sources.state();
+      if (state !== "running") return { status: 503, word: state };
       return (await sources.ready())
         ? { status: 200, word: "ready" }
         : { status: 503, word: "unavailable" };

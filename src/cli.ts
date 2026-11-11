@@ -28,7 +28,7 @@ import {
   askProbe,
   engineProbes,
   probeEndpointFor,
-  type EnginePhase,
+  type EngineState,
   type ProbeEndpoint,
 } from "./engine/probes.js";
 import { EXIT } from "./exit.js";
@@ -467,7 +467,7 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
   const signal = AbortSignal.any([io.signal ?? new AbortController().signal, stopping.signal]);
   // Where this engine stands, for readiness and the health body. Told to stop, it drains: its
   // sources close while the probes still answer, 503 draining.
-  let phase: EnginePhase = standby ? "standby" : "starting";
+  let state: EngineState = standby ? "standby" : "starting";
   const lease =
     leases === undefined
       ? undefined
@@ -476,21 +476,21 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
           ttlMs: project.lease.ttlMs,
           onLost: (reason) => {
             logger.error({ event: "lease-lost", reason, epoch: lease?.epoch });
-            phase = "fenced";
+            state = "fenced";
             stopping.abort();
           },
         });
   signal.addEventListener("abort", () => {
-    if (phase !== "fenced") phase = "draining";
+    if (state !== "fenced") state = "draining";
   });
   const node = lease?.claimant.node ?? nodeId();
   const identity = (): EngineIdentity => ({
     version: VERSION,
     schemaGeneration: project.storage.kind === "module" ? null : SCHEMA_GENERATION,
     node,
-    role: lease === undefined ? "single" : phase === "standby" ? "standby" : "active",
+    role: lease === undefined ? "single" : state === "standby" ? "standby" : "active",
     leaseEpoch: lease?.epoch ?? null,
-    draining: phase === "draining",
+    draining: state === "draining",
   });
 
   const audit = auditFor(store, io, (error) => {
@@ -513,7 +513,7 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
     return { ...engineHealth, ...identity(), channels };
   };
   const probes = engineProbes({
-    phase: () => phase,
+    state: () => state,
     live: () => engine.live(),
     ready: () => engine.ready(),
   });
@@ -541,7 +541,7 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
     if (lease !== undefined) {
       const taken = await takeLease(lease, { standby, health, signal, logger, io });
       if (taken !== true) return taken;
-      if (phase === "standby") phase = "starting";
+      if (state === "standby") state = "starting";
     }
     return await runEngine(engine, project, store, audit, io, {
       once,
@@ -554,13 +554,13 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
         active = true;
       },
       onRunning: () => {
-        if (phase === "starting") phase = "running";
+        if (state === "starting") state = "running";
       },
       onStopping: () => {
-        if (phase !== "fenced") phase = "draining";
+        if (state !== "fenced") state = "draining";
       },
       onFenced: () => {
-        phase = "fenced";
+        state = "fenced";
       },
     });
   } finally {

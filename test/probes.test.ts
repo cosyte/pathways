@@ -19,7 +19,7 @@ import {
   engineProbes,
   ProbeEndpoint,
   probeEndpointFor,
-  type EnginePhase,
+  type EngineState,
   type Probes,
 } from "../src/engine/probes.js";
 import { migrations, Store, type MessageStore } from "../src/storage/store.js";
@@ -172,20 +172,20 @@ describe("the probes block", () => {
 
 describe("engineProbes", () => {
   it("answers ready only while running, and live from the engine loop alone", async () => {
-    let phase: EnginePhase = "starting";
+    let state: EngineState = "starting";
     let live = true;
     let ready = true;
     const probes = engineProbes({
-      phase: () => phase,
+      state: () => state,
       live: () => live,
       ready: () => Promise.resolve(ready),
     });
     for (const shown of ["starting", "standby", "draining", "fenced"] as const) {
-      phase = shown;
+      state = shown;
       expect(await probes.ready()).toEqual({ status: 503, word: shown });
       expect(probes.live()).toEqual({ status: 200, word: "live" });
     }
-    phase = "running";
+    state = "running";
     expect(await probes.ready()).toEqual({ status: 200, word: "ready" });
     ready = false;
     expect(await probes.ready()).toEqual({ status: 503, word: "unavailable" });
