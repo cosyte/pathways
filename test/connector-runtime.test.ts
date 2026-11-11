@@ -510,6 +510,17 @@ describe("a pass's deadline", () => {
       "returns a sleep given the signal",
       (signal: AbortSignal): Promise<void> => sleep(3_600_000, undefined, { signal }),
     ],
+    [
+      "rejects with the sink's refusal of a message after the cut",
+      (signal: AbortSignal, sink: MessageSink): Promise<void> =>
+        new Promise<void>((resolve, reject) => {
+          signal.addEventListener("abort", () => {
+            sink.receive(bytes("SYNTH-LATE")).then(() => {
+              resolve();
+            }, reject);
+          });
+        }),
+    ],
   ])("ends a run cleanly when a cut pass's poll %s", async (_name, hold) => {
     const out = new Recorder();
     let polls = 0;
@@ -518,10 +529,10 @@ describe("a pass's deadline", () => {
         polls += 1;
         return sink
           .receive(bytes(`SYNTH-${String(polls)}`))
-          .then(() => hold(signal as AbortSignal));
+          .then(() => hold(signal as AbortSignal, sink));
       },
     };
-    const { engine } = await harness(
+    const { engine, events } = await harness(
       { aborting: channelYaml() },
       { aborting: { source: aborting, destinations: [out] } },
       undefined,
@@ -534,6 +545,46 @@ describe("a pass's deadline", () => {
     stop.abort();
     await expect(running).resolves.toBeUndefined();
     expect(out.sent).toEqual(["SYNTH-1"]);
+    expect(named(events, "poll-failed-after-cut")).toEqual([]);
+  });
+
+  // A rejection after the cut that is not the cut's own (no AbortError, no POLL_DEADLINE) is not
+  // swallowed: the run still ends cleanly, and a warning names the error's code, never its text.
+  it("logs a cut pass's poll that rejects with an error of its own, by its code", async () => {
+    const out = new Recorder();
+    let polls = 0;
+    const failing: SourceConnector = {
+      poll: (sink, signal) => {
+        polls += 1;
+        return sink.receive(bytes(`SYNTH-${String(polls)}`)).then(
+          () =>
+            new Promise<void>((_resolve, reject) => {
+              signal?.addEventListener("abort", () => {
+                reject(
+                  Object.assign(new Error("SYNTH-SECRET client text"), { code: "SYNTH_RESET" }),
+                );
+              });
+            }),
+        );
+      },
+    };
+    const { engine, events } = await harness(
+      { failing: channelYaml() },
+      { failing: { source: failing, destinations: [out] } },
+      undefined,
+    );
+    const stop = new AbortController();
+    const running = engine.run(stop.signal);
+    await eventually(() => polls === 1);
+    await sleep(20);
+    stop.abort();
+    await expect(running).resolves.toBeUndefined();
+    expect(out.sent).toEqual(["SYNTH-1"]);
+    await eventually(() => named(events, "poll-failed-after-cut").length === 1);
+    expect(named(events, "poll-failed-after-cut")).toEqual([
+      expect.objectContaining({ level: 40, channel: "failing", code: "SYNTH_RESET" }),
+    ]);
+    expect(JSON.stringify(events)).not.toContain("SYNTH-SECRET");
   });
 });
 

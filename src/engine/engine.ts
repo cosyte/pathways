@@ -1357,13 +1357,17 @@ export class Engine {
       () => !ended.signal.aborted,
     );
     // Once the pass is cut, a rejection from its poll call (a source that hands the signal on to
-    // its client gets an AbortError) is part of the cut, not a failure of the pass.
+    // its client gets an AbortError) is part of the cut, not a failure of the pass. One that is
+    // not the cut's own is still logged, by its code: never its text.
     const pass = Promise.race([
       call.then(
         () => false,
         (error: unknown) => {
-          if (cut.signal.aborted) return true;
-          throw error;
+          if (!cut.signal.aborted) throw error;
+          if (!isCutError(error, cut.signal)) {
+            logger.warn({ event: "poll-failed-after-cut", channel: name, code: errorCode(error) });
+          }
+          return true;
         },
       ),
       deadline,
@@ -2202,6 +2206,18 @@ function untilAborted(work: Promise<void>, signal: AbortSignal): Promise<void> {
       },
     );
   });
+}
+
+/**
+ * Whether a cut pass's `poll` rejected with the cut itself: the signal's own reason, an
+ * `AbortError` (as a client handed the signal throws), or the sink's refusal after the cut.
+ */
+function isCutError(error: unknown, cut: AbortSignal): boolean {
+  return (
+    error === cut.reason ||
+    error instanceof PassCut ||
+    (error instanceof Error && error.name === "AbortError")
+  );
 }
 
 /** Whether a channel's source is down: it cannot listen, or it said it lost its connection. */
