@@ -58,14 +58,16 @@ for each:
 
 | Setting            | Default                          | What it does                                                                                                                      |
 | ------------------ | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `url`              | `{ env: PATHWAYS_DATABASE_URL }` | the environment variable that holds the connection URL                                                                            |
+| `url`              | `{ env: PATHWAYS_DATABASE_URL }` | where the connection URL is read: an environment variable, a file, or a secret store                                              |
 | `tls`              | required, unless `plaintext`     | `{}` verifies the server against Node.js's built-in roots; `ca` trusts your own CA; `cert` and `key` present a client certificate |
 | `plaintext`        | `false`                          | `true` connects without TLS                                                                                                       |
 | `pool.max`         | `10`                             | the most connections the pool opens                                                                                               |
 | `pool.idleTimeout` | `30s`                            | how long an idle connection stays open                                                                                            |
 | `connectTimeout`   | `10s`                            | how long connecting may take                                                                                                      |
 
-The URL holds the password, so it is read from the environment at start and never goes in the YAML.
+The URL holds the password, so it is read at start and never goes in the YAML: from an environment
+variable, or as `{ file: path }` or `{ secret: { provider, name } }` (see
+[Read secrets from files and secret stores](./read-secrets.md)).
 Its scheme is `postgres://` or `postgresql://`, `mysql://` or `mariadb://`, or `sqlserver://` or
 `mssql://`, and its path names the database. TLS is set in `pathways.yaml` only: a PostgreSQL URL
 with `ssl` options is refused, and a MySQL or SQL Server URL with any options after `?` is refused.

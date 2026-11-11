@@ -257,7 +257,7 @@ describe("a custom key provider", () => {
     });
     const mixed = (await loadProject(both).catch((e: unknown) => e)) as ConfigError;
     expect(mixed.problems).toEqual([
-      "pathways.yaml: encryption: either none, { keys: [{ id, env: NAME } or { id, file: path }], current: id }, or { provider: { module: path, options } } to encrypt stored messages",
+      "pathways.yaml: encryption: either none, { keys: [{ id, env: NAME }, { id, file: path } or { id, secret: { provider, name } }], current: id }, or { provider: { module: path, options } } to encrypt stored messages",
     ]);
   });
 });

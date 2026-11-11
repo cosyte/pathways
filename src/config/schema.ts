@@ -190,10 +190,127 @@ const plaintext = z
   .meta({ description: "true runs without TLS. Cannot be set alongside tls. Default false." })
   .optional();
 
-/** A value read from an environment variable at startup: `{ env: NAME }`. */
-const fromEnv = z.strictObject({
-  env: z.string().regex(ENV_NAME, "an environment variable name, such as LAB_TOKEN"),
-});
+/** An environment variable's name. */
+const envName = z.string().regex(ENV_NAME, "an environment variable name, such as LAB_TOKEN");
+
+/**
+ * What a secret provider's name may hold: a letter, then letters, digits, hyphens and underscores,
+ * at most 64. `env` and `file` are the built-in providers; `pathways.yaml`'s `secrets:` names the
+ * rest.
+ *
+ * @example
+ * ```ts
+ * SECRET_PROVIDER_NAME.test("vault"); // true
+ * ```
+ */
+export const SECRET_PROVIDER_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
+
+/**
+ * The secret providers every project has: `env` reads an environment variable, `file` a file.
+ *
+ * @example
+ * ```ts
+ * BUILT_IN_SECRET_PROVIDERS.includes("env"); // true
+ * ```
+ */
+export const BUILT_IN_SECRET_PROVIDERS: readonly string[] = ["env", "file"];
+
+/** `{ secret: { provider, name, field, version } }`: a secret a provider resolves at start. */
+const secretReference = z
+  .strictObject({
+    provider: z
+      .string()
+      .regex(
+        SECRET_PROVIDER_NAME,
+        "a provider's name: a letter, then letters, digits, hyphens and underscores, at most 64",
+      )
+      .meta({
+        description:
+          "The provider: env, file, or a provider named under secrets: in pathways.yaml.",
+      }),
+    name: z.string().min(1).meta({
+      description:
+        "The secret's name in the provider: a variable for env, a path relative to this file for file, a key or path for a secret store.",
+    }),
+    field: z
+      .string()
+      .min(1)
+      .meta({
+        description:
+          "One field of a secret that holds a JSON object, or of a store's structured secret. Default: the whole value.",
+      })
+      .optional(),
+    version: z
+      .string()
+      .min(1)
+      .meta({
+        description:
+          "A version the provider keeps, such as a version id. Default: the current one. env and file have none.",
+      })
+      .optional(),
+  })
+  .meta({
+    description:
+      "A secret resolved at start by a provider: { provider, name }, with field and version optional.",
+  });
+
+/** The keys a secret reference may be written with. */
+const SECRET_SOURCE_KINDS = ["env", "file", "secret"] as const;
+
+/** The shape of a secret reference, shared by every key that reads a secret. */
+const secretSourceShape = {
+  env: envName
+    .meta({ description: "The environment variable the value is read from at start." })
+    .optional(),
+  file: path
+    .meta({
+      description:
+        "The file the value is read from at start, relative to this file. One line break at its end is dropped.",
+    })
+    .optional(),
+  secret: secretReference.optional(),
+};
+
+/** Exactly one of the keys a secret reference is written with. */
+function oneSecretSource(what: string) {
+  return (value: Readonly<Record<string, unknown>>, ctx: z.RefinementCtx): void => {
+    const named = SECRET_SOURCE_KINDS.filter((kind) => value[kind] !== undefined);
+    if (named.length !== 1) {
+      ctx.addIssue({
+        code: "custom",
+        message: `name exactly one of: ${SECRET_SOURCE_KINDS.join(", ")}; ${what} never goes in the YAML`,
+      });
+    }
+  };
+}
+
+/**
+ * A secret read at startup, never written in the YAML: `{ env: NAME }`, `{ file: path }`, or
+ * `{ secret: { provider, name, field, version } }`. `typeError` is the problem for anything that is
+ * not a mapping, such as the secret itself written in place.
+ */
+function secretSource(what: string, typeError?: string) {
+  return restate(
+    z
+      .strictObject(secretSourceShape, {
+        error: (issue) => (issue.code === "invalid_type" ? typeError : undefined),
+      })
+      .meta({
+        description:
+          "Read at start: { env: NAME }, { file: path }, or { secret: { provider, name, field, version } }.",
+      })
+      .superRefine(oneSecretSource(what)),
+    (json) => {
+      json.oneOf = exactlyOneOf(SECRET_SOURCE_KINDS);
+    },
+  );
+}
+
+/** A header value: written in the YAML, or a secret reference. */
+const headerValue = z.union([z.string(), secretSource("a credential")]);
+
+/** The words a problem uses for where a secret may come from. */
+const SECRET_SOURCES_TEXT = "{ env: NAME }, { file: path } or { secret: { provider, name } }";
 
 /** A listening endpoint's TLS: its certificate and key, and the CA its clients' certificates need. */
 const serverTls = z.strictObject({ cert: path, key: path, ca: path.optional() }).meta({
@@ -225,13 +342,13 @@ const clientTls = restate(
 
 /** How a listening endpoint authenticates a request. */
 const auth = z
-  .union([z.literal("none"), z.strictObject({ bearer: fromEnv })], {
+  .union([z.literal("none"), z.strictObject({ bearer: secretSource("a token") })], {
     error:
-      "either none, or { bearer: { env: NAME } } to read the token from an environment variable",
+      "either none, or { bearer: { env: NAME } } to read the token from an environment variable, or { bearer: ... } with { file: path } or { secret: { provider, name } }",
   })
   .meta({
     description:
-      "none, or { bearer: { env: NAME } } to read the token from an environment variable. Default: mutual TLS when tls.ca is set, otherwise a bearer token from the default variable.",
+      "none, or { bearer: { env: NAME } } to read the token from an environment variable ({ file: path } and { secret: { provider, name } } also work). Default: mutual TLS when tls.ca is set, otherwise a bearer token from the default variable.",
   });
 
 /** What every listening endpoint (an HTTP source, the health endpoint) is configured with. */
@@ -297,10 +414,10 @@ const httpSourceResponse = z
           .meta({ description: "The Content-Type sent, such as text/plain. Default: none." })
           .optional(),
         headers: z
-          .record(z.string(), z.union([z.string(), fromEnv]))
+          .record(z.string(), headerValue)
           .meta({
             description:
-              "Headers sent with every answer: a value, or { env: NAME } to read it at start. Nothing is copied from the request.",
+              "Headers sent with every answer: a value, or { env: NAME }, { file: path } or { secret: { provider, name } } to read it at start. Nothing is copied from the request.",
           })
           .optional(),
         body: z
@@ -454,10 +571,10 @@ const httpClientShape = {
         "Where to POST: an https:// URL, or http:// with plaintext: true. No user name or password.",
     }),
   headers: z
-    .record(z.string(), z.union([z.string(), fromEnv]))
+    .record(z.string(), headerValue)
     .meta({
       description:
-        "Headers to send: a value, or { env: NAME } to read it from an environment variable at start. A header that carries a credential must use { env: NAME }.",
+        "Headers to send: a value, or { env: NAME }, { file: path } or { secret: { provider, name } } to read it at start. A header that carries a credential must be read so.",
     })
     .optional(),
   tls: clientTls.optional(),
@@ -490,7 +607,7 @@ function restateHttpClient(json: JsonSchema): void {
 function httpClientChecks(
   value: {
     readonly url: string;
-    readonly headers?: Readonly<Record<string, string | { readonly env: string }>> | undefined;
+    readonly headers?: Readonly<Record<string, string | object>> | undefined;
     readonly tls?: unknown;
     readonly plaintext?: boolean | undefined;
   },
@@ -503,7 +620,7 @@ function httpClientChecks(
     ctx.addIssue({
       code: "custom",
       path: ["url"],
-      message: "credentials do not belong in the url; send them in headers, from { env: NAME }",
+      message: `credentials do not belong in the url; send them in headers, from ${SECRET_SOURCES_TEXT}`,
     });
   }
   if (value.tls !== undefined && value.plaintext === true) {
@@ -530,10 +647,10 @@ function httpClientChecks(
 
 /**
  * Configured headers, by the HTTP client's rules: a valid name, none Pathways sets itself
- * (`managed`), a credential only from `{ env: NAME }`, and a value a header can carry.
+ * (`managed`), a credential only from a secret reference, and a value a header can carry.
  */
 function headerChecks(
-  headers: Readonly<Record<string, string | { readonly env: string }>> | undefined,
+  headers: Readonly<Record<string, string | object>> | undefined,
   managed: ReadonlySet<string>,
   where: readonly string[],
   ctx: z.RefinementCtx,
@@ -548,7 +665,7 @@ function headerChecks(
       ctx.addIssue({
         code: "custom",
         path: at,
-        message: "a credential never goes in the YAML; read it with { env: NAME }",
+        message: `a credential never goes in the YAML; read it with ${SECRET_SOURCES_TEXT}`,
       });
     } else if (typeof header === "string" && !HEADER_VALUE.test(header)) {
       ctx.addIssue({ code: "custom", path: at, message: "not a valid header value" });
@@ -652,19 +769,12 @@ const mllpDestination = restate(
 );
 
 /**
- * A database server's connection URL, read from an environment variable at startup. It carries the
- * password, so it never goes in the YAML.
+ * A database server's connection URL, read at startup. It carries the password, so it never goes in
+ * the YAML.
  */
-const urlFromEnv = z.strictObject(
-  {
-    env: z.string().regex(ENV_NAME, "an environment variable name, such as PATHWAYS_DATABASE_URL"),
-  },
-  {
-    error: (issue) =>
-      issue.code === "invalid_type"
-        ? "a connection URL carries a password, so it never goes in the YAML; read it with { env: NAME }"
-        : undefined,
-  },
+const urlFromSecret = secretSource(
+  "a connection URL",
+  `a connection URL carries a password, so it never goes in the YAML; read it with ${SECRET_SOURCES_TEXT}`,
 );
 
 /** A database server's connection pool. */
@@ -687,10 +797,10 @@ const storagePool = z
 const serverStorage = restate(
   z
     .strictObject({
-      url: urlFromEnv
+      url: urlFromSecret
         .meta({
           description:
-            "{ env: NAME }: the environment variable that holds the connection URL, read at start. Default { env: PATHWAYS_DATABASE_URL }.",
+            "Where the connection URL is read at start: { env: NAME }, { file: path } or { secret: { provider, name } }. Default { env: PATHWAYS_DATABASE_URL }.",
         })
         .optional(),
       tls: clientTls.optional(),
@@ -863,23 +973,17 @@ const masterKey = restate(
         description:
           "The key's id: letters, digits, dots, hyphens and underscores, at most 64, unique in the list. Never secret.",
       }),
-      env: fromEnv.shape.env
+      env: envName
         .meta({ description: "The environment variable the key is read from at start." })
         .optional(),
       file: path
         .meta({ description: "The file the key is read from at start, relative to this file." })
         .optional(),
+      secret: secretReference.optional(),
     })
-    .superRefine((value, ctx) => {
-      if ((value.env === undefined) === (value.file === undefined)) {
-        ctx.addIssue({
-          code: "custom",
-          message: "name exactly one of: env, file; a key's value never goes in the YAML",
-        });
-      }
-    }),
+    .superRefine(oneSecretSource("a key's value")),
   (json) => {
-    json.oneOf = exactlyOneOf(["env", "file"]);
+    json.oneOf = exactlyOneOf(SECRET_SOURCE_KINDS);
   },
 );
 
@@ -914,12 +1018,12 @@ const encryption = z
     ],
     {
       error:
-        "either none, { keys: [{ id, env: NAME } or { id, file: path }], current: id }, or { provider: { module: path, options } } to encrypt stored messages",
+        "either none, { keys: [{ id, env: NAME }, { id, file: path } or { id, secret: { provider, name } }], current: id }, or { provider: { module: path, options } } to encrypt stored messages",
     },
   )
   .meta({
     description:
-      "How stored messages are encrypted: { keys: [{ id, env: NAME } or { id, file: path }], current: id }, { provider: { module, options } }, or none. pathways start needs it.",
+      "How stored messages are encrypted: { keys: [{ id, env: NAME }, { id, file: path } or { id, secret: { provider, name } }], current: id }, { provider: { module, options } }, or none. pathways start needs it.",
   });
 
 /** A `storage:` block: exactly one database, or a custom store's module. */
@@ -952,6 +1056,54 @@ const storage = restate(
     .superRefine(oneKind(STORAGE_BLOCK_KINDS))
     .superRefine(optionsWithModule),
   restateKinds(STORAGE_BLOCK_KINDS),
+);
+
+/** How long a secret provider's resolve may run by default, in milliseconds. */
+export const DEFAULT_SECRET_TIMEOUT_MS = 10_000;
+
+/** `secrets:`: the secret providers a project names, each built by a module, by the name refs use. */
+const secretProviders = restate(
+  z
+    .record(
+      z.string(),
+      z
+        .strictObject({
+          module: modulePath.meta({
+            description:
+              "A module whose default export builds the provider (a SecretProviderFactory), relative to this file.",
+          }),
+          options: moduleOptions.optional(),
+          timeout: duration(
+            "How long resolving one secret may take at start: a duration such as 10s, or a number of milliseconds. Default 10s.",
+          ).optional(),
+        })
+        .meta({ description: "A secret provider, built by a module." }),
+    )
+    .meta({
+      description:
+        "Secret providers, by the name a { secret: { provider, name } } reference gives. env and file are built in. Each is loaded at start, as encryption.provider is.",
+    })
+    .superRefine((value, ctx) => {
+      for (const name of Object.keys(value)) {
+        if (!SECRET_PROVIDER_NAME.test(name)) {
+          ctx.addIssue({
+            code: "custom",
+            path: [name],
+            message:
+              "a provider's name: a letter, then letters, digits, hyphens and underscores, at most 64",
+          });
+        } else if (BUILT_IN_SECRET_PROVIDERS.includes(name)) {
+          ctx.addIssue({
+            code: "custom",
+            path: [name],
+            message: "env and file are built in; give this provider another name",
+          });
+        }
+      }
+    }),
+  (json) => {
+    json["propertyNames"] = { pattern: SECRET_PROVIDER_NAME.source };
+  },
 );
 
 /** The health endpoint: a listener. */
@@ -991,6 +1143,7 @@ const lease = z
 export const projectSchema = z
   .strictObject({
     encryption: encryption.optional(),
+    secrets: secretProviders.optional(),
     storage: storage.optional(),
     hooks,
     defaults: z
@@ -1367,11 +1520,10 @@ export interface ClientTlsFiles {
 }
 
 /**
- * How a listening endpoint authenticates each request: a bearer token read from the named
- * environment variable, or nothing beyond what TLS does (`none`).
+ * How a listening endpoint authenticates each request: a bearer token read at start from where its
+ * secret reference says, or nothing beyond what TLS does (`none`).
  */
-export type EndpointAuth =
-  { readonly kind: "bearer"; readonly env: string } | { readonly kind: "none" };
+export type EndpointAuth = ({ readonly kind: "bearer" } & SecretSource) | { readonly kind: "none" };
 
 /** What every listening endpoint is configured with. `tls` is undefined exactly when `plaintext`. */
 export interface ListenerConfig {
@@ -1407,8 +1559,37 @@ export interface HttpSource extends ListenerConfig {
   readonly maxBytes: number;
 }
 
-/** A header an HTTP destination sends: written in the YAML, or read from an environment variable. */
-export type HeaderValue = { readonly value: string } | { readonly env: string };
+/**
+ * A secret a provider resolves at start: the provider's name (`env`, `file`, or one `pathways.yaml`'s
+ * `secrets:` names), the secret's name there, and optionally one field of it and a version. For the
+ * `file` provider, `name` is an absolute path.
+ *
+ * @example
+ * ```ts
+ * const reference: SecretReference = { provider: "vault", name: "lab/api", field: "token", version: undefined };
+ * ```
+ */
+export interface SecretReference {
+  readonly provider: string;
+  readonly name: string;
+  readonly field: string | undefined;
+  readonly version: string | undefined;
+}
+
+/**
+ * Where a secret is read at start, as the YAML wrote it: an environment variable, a file (an absolute
+ * path), or a provider's secret.
+ *
+ * @example
+ * ```ts
+ * const token: SecretSource = { env: "LAB_TOKEN" };
+ * ```
+ */
+export type SecretSource =
+  { readonly env: string } | { readonly file: string } | { readonly secret: SecretReference };
+
+/** A header an HTTP client or source sends: written in the YAML, or a secret read at start. */
+export type HeaderValue = { readonly value: string } | SecretSource;
 
 /**
  * Where an HTTP client (an HTTP destination, a webhook hook) POSTs, and how.
@@ -1482,8 +1663,7 @@ export type HealthConfig = ListenerConfig;
  * const key: MasterKeySource = { id: "prod-2026-11", env: "PATHWAYS_KEY_2026_11" };
  * ```
  */
-export type MasterKeySource =
-  { readonly id: string; readonly env: string } | { readonly id: string; readonly file: string };
+export type MasterKeySource = { readonly id: string } & SecretSource;
 
 /**
  * How stored messages are encrypted at rest, from `pathways.yaml`: under master keys read from
@@ -1578,7 +1758,7 @@ export interface SqliteStorage {
  * ```ts
  * const storage: ServerStorage = {
  *   kind: "postgres",
- *   urlEnv: "PATHWAYS_DATABASE_URL",
+ *   url: { env: "PATHWAYS_DATABASE_URL" },
  *   tls: { ca: "/srv/project/tls/db-ca.pem", cert: undefined, key: undefined },
  *   plaintext: false,
  *   pool: { max: 10, idleTimeoutMs: 30_000 },
@@ -1588,8 +1768,8 @@ export interface SqliteStorage {
  */
 export interface ServerStorage {
   readonly kind: Exclude<StorageKind, "sqlite">;
-  /** The environment variable that holds the connection URL. */
-  readonly urlEnv: string;
+  /** Where the connection URL is read at start. */
+  readonly url: SecretSource;
   readonly tls: ClientTlsFiles | undefined;
   readonly plaintext: boolean;
   readonly pool: {
@@ -1640,6 +1820,23 @@ export interface LeaseConfig {
   readonly standby: boolean;
 }
 
+/**
+ * A secret provider `pathways.yaml`'s `secrets:` names: a module whose default export builds it.
+ *
+ * @example
+ * ```ts
+ * const vault: SecretProviderConfig = { name: "vault", module: "/srv/project/vault.ts", options: {}, timeoutMs: 10_000 };
+ * ```
+ */
+export interface SecretProviderConfig {
+  /** The name references give it. */
+  readonly name: string;
+  readonly module: string;
+  readonly options: ModuleOptions;
+  /** How long one secret's resolve may take, in milliseconds. */
+  readonly timeoutMs: number;
+}
+
 /** A whole project: the engine settings and every channel under `channels/`. */
 export interface ProjectConfig {
   readonly root: string;
@@ -1662,5 +1859,7 @@ export interface ProjectConfig {
    * start` refuses to run without it; `pathways test` stores nothing and does not need it.
    */
   readonly encryption: EncryptionConfig | undefined;
+  /** The secret providers `secrets:` names; `env` and `file` are built in and not listed. */
+  readonly secrets: readonly SecretProviderConfig[];
   readonly channels: readonly ChannelConfig[];
 }

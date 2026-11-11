@@ -7,9 +7,9 @@ import {
   listenerWarnings,
   refuse,
   reply,
-  type Env,
 } from "../connectors/endpoint.js";
 import type { ServerTlsMaterial } from "../connectors/tls.js";
+import type { SecretReader } from "../secrets/resolve.js";
 import type { DeliveryStatus, MessageStatus } from "../storage/store.js";
 
 /**
@@ -138,7 +138,7 @@ export class HealthEndpoint {
 export function healthEndpointFor(
   config: HealthConfig,
   report: () => Promise<HealthReport>,
-  env: Env,
+  env: SecretReader,
   logger: Logger,
 ): HealthEndpoint {
   const { tls, token } = listenerSecurity(config, env, "pathways.yaml: health");
