@@ -185,7 +185,7 @@ storage:
     const production = await load(files, { STORAGE_KIND: "postgres" });
     expect(production.storage).toMatchObject({
       kind: "postgres",
-      urlEnv: "DB_URL",
+      url: { env: "DB_URL" },
       plaintext: true,
     });
     expect(await problemsOf(files, { STORAGE_KIND: "mysql" })).toEqual([
@@ -372,7 +372,7 @@ destinations:
         LAB_TOKEN: "TESTSECRET",
       },
     );
-    expect(project.storage).toMatchObject({ urlEnv: "DB_URL" });
+    expect(project.storage).toMatchObject({ url: { env: "DB_URL" } });
     expect(project.encryption).toEqual({
       kind: "keys",
       keys: [{ id: "prod", env: "PROD_KEY" }],

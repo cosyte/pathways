@@ -15,14 +15,14 @@ not start or stopped. [Logs, errors and codes](./logs-and-codes.md) lists every 
 
 ```text
 pathways: the configuration is invalid:
-  pathways.yaml: encryption: required to start the engine: set encryption: { keys: [{ id, env: NAME } or { id, file: path }], current: id } or { provider: { module: path } } to encrypt stored messages, or encryption: none to store them unencrypted
+  pathways.yaml: encryption: required to start the engine: set encryption: { keys: [{ id, env: NAME }, { id, file: path } or { id, secret: { provider, name } }], current: id } or { provider: { module: path } } to encrypt stored messages, or encryption: none to store them unencrypted
 ```
 
 `pathways.yaml` has no `encryption:`. Add your keys, as in
 [Encrypt stored messages](./encrypt-stored-messages.md). `pathways test` does not need them.
 
 ```text
-pathways.yaml: encryption.keys.0: the key prod-2026-11 is read from the environment variable PATHWAYS_KEY_2026_11, which is not set
+pathways.yaml: encryption.keys.0: the key prod-2026-11: the environment variable PATHWAYS_KEY_2026_11 is not set
 ```
 
 Every key in the list is read at start, the old ones too. Set the variable, or mount the file. A key

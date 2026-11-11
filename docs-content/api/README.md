@@ -168,6 +168,69 @@ if (error instanceof LeaseLostError) process.exitCode = 1;
 
 > `readonly` **code**: `"ERR_PATHWAYS_LEASE_LOST"` = `"ERR_PATHWAYS_LEASE_LOST"`
 
+***
+
+### SecretError
+
+A secret could not be resolved. Its text names the secret, never a value. A provider can reject with
+one, so the code shows where Pathways reports the failure.
+
+#### Example
+
+```ts
+throw new SecretError("ERR_PATHWAYS_SECRET_NOT_FOUND", "lab/api");
+```
+
+#### Extends
+
+- `Error`
+
+#### Constructors
+
+##### Constructor
+
+> **new SecretError**(`code`, `secret`, `detail?`): [`SecretError`](#secreterror)
+
+###### Parameters
+
+###### code
+
+[`SecretErrorCode`](#secreterrorcode-1)
+
+What went wrong.
+
+###### secret
+
+`string`
+
+The secret's name, never its value.
+
+###### detail?
+
+`string`
+
+What went wrong, in words: never a value. Defaults to the code's own words.
+
+###### Returns
+
+[`SecretError`](#secreterror)
+
+###### Overrides
+
+`Error.constructor`
+
+#### Properties
+
+##### code
+
+> `readonly` **code**: [`SecretErrorCode`](#secreterrorcode-1)
+
+##### secret
+
+> `readonly` **secret**: `string`
+
+The secret's name.
+
 ## Interfaces
 
 ### AckRequest
@@ -1362,6 +1425,163 @@ context.logger.warn({ event: "inbox-read-failed", code: "EACCES" });
 ###### Returns
 
 `void`
+
+***
+
+### FakeSecret
+
+One version of a secret a [fakeSecretProvider](#fakesecretprovider-1) holds: its value, and optionally its version's
+name (by default its place in the list, from `"1"`) and when it expires.
+
+#### Example
+
+```ts
+const secret: FakeSecret = { value: "synthetic-token", version: "v2" };
+```
+
+#### Properties
+
+##### expiresAt?
+
+> `readonly` `optional` **expiresAt?**: `Date`
+
+##### value
+
+> `readonly` **value**: `string`
+
+##### version?
+
+> `readonly` `optional` **version?**: `string`
+
+***
+
+### FakeSecretProvider
+
+A [SecretProvider](#secretprovider) held in memory, for tests: no network, no cloud account. It answers as the
+contract asks of every provider, so a channel that reads `{ secret: { provider, name } }` can be
+tested against it in place of a cloud store.
+
+#### Example
+
+```ts
+const vault = fakeSecretProvider({ "lab/api": '{"token":"synthetic-token"}' });
+await vault.resolve({ name: "lab/api", field: "token" }, AbortSignal.timeout(1_000));
+vault.calls; // [{ name: "lab/api", field: "token" }]
+```
+
+#### Extends
+
+- [`SecretProvider`](#secretprovider)
+
+#### Properties
+
+##### calls
+
+> `readonly` **calls**: readonly [`SecretRef`](#secretref)[]
+
+Every request it was given, in order.
+
+##### stopped
+
+> `readonly` **stopped**: `number`
+
+How many times `stop` was called.
+
+#### Methods
+
+##### delete()
+
+> **delete**(`name`): `void`
+
+Removes `name`, so a later request for it is not found.
+
+###### Parameters
+
+###### name
+
+`string`
+
+###### Returns
+
+`void`
+
+##### fail()
+
+> **fail**(`name`, `error`): `void`
+
+Makes every later request for `name` reject with `error`, as a store that fails would.
+
+###### Parameters
+
+###### name
+
+`string`
+
+###### error
+
+`Error`
+
+###### Returns
+
+`void`
+
+##### resolve()
+
+> **resolve**(`ref`, `signal`): `Promise`\<[`ResolvedSecret`](#resolvedsecret)\>
+
+Resolves one secret.
+
+###### Parameters
+
+###### ref
+
+[`SecretRef`](#secretref)
+
+###### signal
+
+`AbortSignal`
+
+###### Returns
+
+`Promise`\<[`ResolvedSecret`](#resolvedsecret)\>
+
+###### Inherited from
+
+[`SecretProvider`](#secretprovider).[`resolve`](#resolve-1)
+
+##### set()
+
+> **set**(`name`, `entry`): `void`
+
+Sets or replaces `name`; a single value or secret adds it as a new current version.
+
+###### Parameters
+
+###### name
+
+`string`
+
+###### entry
+
+[`FakeSecretEntry`](#fakesecretentry)
+
+###### Returns
+
+`void`
+
+##### stop()?
+
+> `optional` **stop**(): `void` \| `Promise`\<`void`\>
+
+Releases what the provider holds open. Called once start has resolved every secret.
+
+###### Returns
+
+`void` \| `Promise`\<`void`\>
+
+###### Inherited from
+
+[`SecretProvider`](#secretprovider).[`stop`](#stop-3)
 
 ***
 
@@ -3017,6 +3237,38 @@ How many attempts were made before this one, the one cut off among them.
 
 ***
 
+### ResolvedSecret
+
+What a provider answers: the value, the version it is, and when it stops being good, if it does.
+
+#### Example
+
+```ts
+const secret: ResolvedSecret = { value: "synthetic-token", version: "3", expiresAt: new Date("2026-12-01T00:00:00Z") };
+```
+
+#### Properties
+
+##### expiresAt?
+
+> `readonly` `optional` **expiresAt?**: `Date`
+
+When the value stops being good, for a lease or a short-lived credential.
+
+##### value
+
+> `readonly` **value**: `string`
+
+The secret itself. Pathways never logs it, and never puts it in an error.
+
+##### version
+
+> `readonly` **version**: `string`
+
+The version resolved, as the provider names it; never secret.
+
+***
+
 ### RetryingDelivery
 
 A pending delivery that has failed at least once and waits to be tried again.
@@ -3050,6 +3302,101 @@ const late = (d: RetryingDelivery): boolean => d.nextAttemptAt > Date.now() + 60
 > `readonly` **nextAttemptAt**: `number`
 
 Epoch milliseconds of the next try.
+
+***
+
+### SecretProvider
+
+Where secrets come from: an environment variable, a file, or a secret store such as a cloud
+provider's secrets manager. `pathways.yaml` names each provider under `secrets:` by a module whose
+default export builds it, and a `{ secret: { provider, name, field, version } }` reference anywhere
+a secret is read asks it for one.
+
+`resolve` is called once per secret when the engine starts, with a signal that aborts when the
+provider's time limit passes or the start is cancelled. It rejects when the secret cannot be had,
+preferably with a [SecretError](#secreterror). Pathways reports a rejection by the reference's file and key,
+the secret's name and the error's name and code, never the error's text, so an error may say
+anything; a value must still never be put in one.
+
+#### Example
+
+```ts
+const store: SecretProvider = {
+  async resolve(ref, signal) {
+    const found = await myStore.get(ref.name, { version: ref.version, signal });
+    return { value: found.text, version: found.version };
+  },
+};
+```
+
+#### Extended by
+
+- [`FakeSecretProvider`](#fakesecretprovider)
+
+#### Methods
+
+##### resolve()
+
+> **resolve**(`ref`, `signal`): `Promise`\<[`ResolvedSecret`](#resolvedsecret)\>
+
+Resolves one secret.
+
+###### Parameters
+
+###### ref
+
+[`SecretRef`](#secretref)
+
+###### signal
+
+`AbortSignal`
+
+###### Returns
+
+`Promise`\<[`ResolvedSecret`](#resolvedsecret)\>
+
+##### stop()?
+
+> `optional` **stop**(): `void` \| `Promise`\<`void`\>
+
+Releases what the provider holds open. Called once start has resolved every secret.
+
+###### Returns
+
+`void` \| `Promise`\<`void`\>
+
+***
+
+### SecretRef
+
+One secret a provider is asked for: its name in the provider, and optionally one field of it and a
+version. A provider that has no fields or versions refuses a request that names one.
+
+#### Example
+
+```ts
+const ref: SecretRef = { name: "lab/api", field: "token" };
+```
+
+#### Properties
+
+##### field?
+
+> `readonly` `optional` **field?**: `string`
+
+One field of a structured secret, or of a value that is a JSON object.
+
+##### name
+
+> `readonly` **name**: `string`
+
+The secret's name in the provider: a variable, a path, a key. Never secret itself.
+
+##### version?
+
+> `readonly` `optional` **version?**: `string`
+
+A version the provider keeps. Undefined asks for the current one.
 
 ***
 
@@ -4063,6 +4410,14 @@ const folder = typeof options["folder"] === "string" ? options["folder"] : "./in
 
 ***
 
+### FakeSecretEntry
+
+> **FakeSecretEntry** = `string` \| [`FakeSecret`](#fakesecret) \| readonly [`FakeSecret`](#fakesecret)[]
+
+What a fake holds for one name: a value, a version, or every version with the current one last.
+
+***
+
 ### FhirResource
 
 > **FhirResource** = `Fhir.FhirComplex`
@@ -4426,6 +4781,76 @@ if (!result.done) console.log(result.reason);
 
 ***
 
+### SecretErrorCode
+
+> **SecretErrorCode** = `"ERR_PATHWAYS_SECRET_NOT_FOUND"` \| `"ERR_PATHWAYS_SECRET_FIELD"` \| `"ERR_PATHWAYS_SECRET_VERSION"` \| `"ERR_PATHWAYS_SECRET_UNREADABLE"`
+
+The codes a [SecretError](#secreterror) carries:
+
+- `ERR_PATHWAYS_SECRET_NOT_FOUND`: the provider has no secret by that name;
+- `ERR_PATHWAYS_SECRET_FIELD`: the secret has no such field, or holds no fields;
+- `ERR_PATHWAYS_SECRET_VERSION`: the provider has no such version, or keeps none;
+- `ERR_PATHWAYS_SECRET_UNREADABLE`: the provider could not read it.
+
+#### Example
+
+```ts
+const code: SecretErrorCode = "ERR_PATHWAYS_SECRET_NOT_FOUND";
+```
+
+***
+
+### SecretProviderFactory
+
+> **SecretProviderFactory**\<`Options`\> = (`options`, `context`) => [`SecretProvider`](#secretprovider) \| `Promise`\<[`SecretProvider`](#secretprovider)\>
+
+Builds a secret provider: a module's default export, named in `pathways.yaml` as
+`secrets: { vault: { module: ./vault.ts, options: {...} } }`. It returns a `SecretProvider` (or a
+promise of one) that `{ secret: { provider: vault, name } }` references are resolved through. It
+is built when the engine (or a command that opens the store) starts, asked for each secret, and
+stopped. Building it gets the provider's `timeout`, as each request does: a factory still waiting
+then fails the start. Its own credentials come from `context.env`, or from a file its options name.
+
+#### Type Parameters
+
+##### Options
+
+`Options` = [`ExtensionOptions`](#extensionoptions)
+
+#### Parameters
+
+##### options
+
+`Options`
+
+##### context
+
+[`ExtensionContext`](#extensioncontext)
+
+#### Returns
+
+[`SecretProvider`](#secretprovider) \| `Promise`\<[`SecretProvider`](#secretprovider)\>
+
+#### Example
+
+```ts
+// vault.ts
+import type { SecretProviderFactory } from "@cosyte/pathways";
+
+export default (async (options, context) => {
+  const client = await connectStore(options.address, context.env["STORE_ROLE_TOKEN"]);
+  return {
+    resolve: async (ref, signal) => {
+      const found = await client.read(ref.name, { field: ref.field, version: ref.version, signal });
+      return { value: found.value, version: found.version };
+    },
+    stop: () => client.close(),
+  };
+}) satisfies SecretProviderFactory<{ address: string }>;
+```
+
+***
+
 ### SourceAckCode
 
 > **SourceAckCode** = `"AA"` \| `"AE"` \| `"AR"`
@@ -4737,4 +5162,31 @@ const ack = defaultAckBuilder({
   header: parseHL7(mshSegment),
   messageId: 1,
 });
+```
+
+***
+
+### fakeSecretProvider()
+
+> **fakeSecretProvider**(`secrets?`): [`FakeSecretProvider`](#fakesecretprovider)
+
+A provider for tests, holding `secrets` by name. It keeps versions, takes `field` from a value that
+is a JSON object as the built-in providers do, honours the abort signal, and rejects a missing
+name, field or version with a [SecretError](#secreterror).
+
+#### Parameters
+
+##### secrets?
+
+`Readonly`\<`Record`\<`string`, [`FakeSecretEntry`](#fakesecretentry)\>\> = `{}`
+
+#### Returns
+
+[`FakeSecretProvider`](#fakesecretprovider)
+
+#### Example
+
+```ts
+// test/fake-vault.ts, named in a test project's pathways.yaml as secrets: { vault: { module: ./fake-vault.ts } }
+export default () => fakeSecretProvider({ "lab/api": "synthetic-token-0123456789" });
 ```
