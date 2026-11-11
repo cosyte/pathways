@@ -49,7 +49,9 @@ npx pathways messages show 17 --content
 `show` prints the message's state, times, size and duplicate flag, the stored error cut to its stage,
 name, code and location, and each delivery with its attempts and last error. It prints the content
 only with `--content`: the message as received and its current outputs. That view is PHI, so it is
-written to the audit log first, and not shown if the entry cannot be written.
+written to the audit log first, and not shown if the entry cannot be written. For a message whose
+content was [dropped after delivery](./set-message-retention.md#drop-content-after-delivery), it
+prints the content hash and when the content was dropped, and there is no content to show.
 
 ## Replay a failed message
 
@@ -69,8 +71,13 @@ destination's queue. Deliveries of the message that had failed for good are clea
 once with `replay 17 18 23`; they run in the order given.
 
 A replay is refused, changing nothing, when the message is still `received` (the engine will
-transform it), has deliveries still pending (retrying ones included), or its channel is no longer
-configured. It is safe beside a running engine: it never touches a message the engine is working on.
+transform it), has deliveries still pending (retrying ones included), its channel is no longer
+configured, or its content was dropped after delivery. It is safe beside a running engine: it never
+touches a message the engine is working on.
+
+```text
+message 21: refused: its content was dropped after delivery (storage.content: dropAfterDelivery), so there is nothing to send again
+```
 
 ## Send the outputs again
 

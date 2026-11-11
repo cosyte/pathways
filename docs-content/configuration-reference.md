@@ -57,7 +57,7 @@ digit, and unique in the list. A key's value is 32 bytes in base64. See
 
 ### Storage
 
-Exactly one of these keys:
+Exactly one of these keys, or `content` alone to keep the default SQLite file:
 
 | Key         | Value                                                                                                     |
 | ----------- | --------------------------------------------------------------------------------------------------------- |
@@ -67,11 +67,19 @@ Exactly one of these keys:
 | `sqlserver` | a [database server](#database-server) block                                                               |
 | `module`    | a path to a module whose default export builds a `MessageStore`; with `options`, any mapping handed to it |
 
+and, beside it:
+
+| Key       | Value                         | Default | Meaning                                                                                                                                                |
+| --------- | ----------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `content` | `keep` or `dropAfterDelivery` | `keep`  | what is kept of a message's content; a channel overrides it; see [Drop content after delivery](./set-message-retention.md#drop-content-after-delivery) |
+
 A `MessageStore` from a module keeps the marker the engine writes before each send: `markSending`
 stores the attempt and its start, `nextDelivery` returns it as `sending`, and `markDelivered`,
 `scheduleRetry` and `failDelivery` clear it in the same write as their outcome. That is how a resend
 after a crash is flagged; see
-[Delivery and errors](./delivery-and-errors.md#a-resend-after-a-crash-is-flagged).
+[Delivery and errors](./delivery-and-errors.md#a-resend-after-a-crash-is-flagged). For a channel with
+`content: dropAfterDelivery`, it also implements the optional `markDeliveredAndDropContent`; on a
+store without it, `pathways start` refuses that channel.
 
 #### Database server
 
@@ -143,15 +151,16 @@ The lease one engine per database holds, so a second is refused or waits as a st
 
 ## channel.yaml
 
-| Key                                                              | Type                                                | Default                          |
-| ---------------------------------------------------------------- | --------------------------------------------------- | -------------------------------- |
-| `name`                                                           | lowercase letters, digits and hyphens               | the folder's name; must match it |
-| `format`                                                         | `hl7v2`, `fhir`, `x12`, `ccda`, `json` or `text`    | `hl7v2`                          |
-| `source`                                                         | exactly one [source](#sources)                      | required                         |
-| `transform`                                                      | path to the transform module                        | none: messages pass through      |
-| `destinations`                                                   | a list of at least one [destination](#destinations) | required                         |
-| `hooks`                                                          | a list of [hooks](#hooks)                           | none                             |
-| `timeout`, `memory`, `onStoreFailure`, `ackTimeout`, `retention` | see [Settings](#settings)                           | the project's                    |
+| Key                                                              | Type                                                    | Default                          |
+| ---------------------------------------------------------------- | ------------------------------------------------------- | -------------------------------- |
+| `name`                                                           | lowercase letters, digits and hyphens                   | the folder's name; must match it |
+| `format`                                                         | `hl7v2`, `fhir`, `x12`, `ccda`, `json` or `text`        | `hl7v2`                          |
+| `source`                                                         | exactly one [source](#sources)                          | required                         |
+| `transform`                                                      | path to the transform module                            | none: messages pass through      |
+| `destinations`                                                   | a list of at least one [destination](#destinations)     | required                         |
+| `hooks`                                                          | a list of [hooks](#hooks)                               | none                             |
+| `storage`                                                        | `{ content: keep }` or `{ content: dropAfterDelivery }` | the project's `storage.content`  |
+| `timeout`, `memory`, `onStoreFailure`, `ackTimeout`, `retention` | see [Settings](#settings)                               | the project's                    |
 
 A channel with an MLLP source or destination must have the format `hl7v2`.
 

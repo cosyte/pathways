@@ -193,7 +193,12 @@ function timePasses(bin, project) {
 function engineSection(bin, quick) {
   const rows = [];
   for (const channel of CHANNELS) {
-    const empty = makeProject({ format: channel.format, transform: channel.transform, bodies: [] });
+    const empty = makeProject({
+      format: channel.format,
+      transform: channel.transform,
+      bodies: [],
+      content: channel.content,
+    });
     let base;
     try {
       base = { ms: timePasses(bin, empty), memory: probePass(bin, empty) };
@@ -210,6 +215,7 @@ function engineSection(bin, quick) {
         transform: channel.transform,
         bodies,
         extension: channel.extension,
+        content: channel.content,
       });
       try {
         const passMs = timePasses(bin, project);
@@ -319,6 +325,8 @@ async function peakOf(call) {
 async function transformSection(worker, quick) {
   const rows = [];
   for (const channel of CHANNELS) {
+    // What storage keeps does not change the transform: those channels are the engine's to measure.
+    if (channel.content !== undefined) continue;
     const transform = transformOf(channel);
     await worker.loadFormat(channel.format);
     // One message a call: a size that is many messages in a row is the engine's to measure.

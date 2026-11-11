@@ -73,6 +73,37 @@ with `ssl` options is refused, and a MySQL or SQL Server URL with any options af
 Errors about the database name the setting at fault and the driver's error code, never the URL, the
 server or the login.
 
+## What a database keeps after a delete
+
+Retention deletes messages, and [`storage.content:
+dropAfterDelivery`](./set-message-retention.md#drop-content-after-delivery) empties their bodies once
+they are delivered. Either way the delete goes through the database, and a database does not always
+erase at once what it deletes:
+
+- **SQLite.** Pathways opens the file with `secure_delete` on, so the space a deleted or emptied value
+  held is overwritten with zeros in the same transaction. The write-ahead log beside the file
+  (`pathways.db-wal`) can still hold pages as they were before, until later writes overwrite them; when
+  the last connection closes, SQLite copies the log into the file and removes it. Our tests drop a
+  message holding a synthetic marker, close the database, and find no copy of the marker in the file.
+- **PostgreSQL.** A delete or update leaves the old row version in the table as a dead row until
+  `VACUUM` (autovacuum, by default) marks its space free. `VACUUM` does not overwrite that space, so the
+  bytes stay until a new row reuses it, or `VACUUM FULL` rewrites the table. A body of more than about
+  2 KB lives in the table's TOAST table, which works the same way. The write-ahead log holds the row as
+  it was written until its segments are recycled, and archived segments keep it.
+- **MySQL and MariaDB (InnoDB).** A delete marks the row and a background purge removes it later; an
+  update keeps the old version in the undo log until purge. Freed space is not overwritten. The redo
+  log holds the row until it is written over, and with the binary log on and row-based logging, each
+  binary log file holds the row until the file expires.
+- **SQL Server.** A deleted row becomes a ghost record, which a background task cleans up later, and the
+  freed space is not overwritten. The transaction log holds the row until the log is truncated: after a
+  checkpoint under the simple recovery model, after a log backup under full, and log backups keep it.
+- **Every database.** Backups, snapshots and replicas made before the delete keep the content until
+  they expire, and a replica deletes it only once it has caught up.
+
+With encryption at rest, every one of these copies is ciphertext under the master key in use when it
+was written, and stays unreadable without that key. How long your backups and logs keep what was
+deleted is yours to set.
+
 ## One engine per database
 
 One engine runs against a database at a time. Before it opens a source, `pathways start` takes the
@@ -162,7 +193,12 @@ storage:
 The factory receives `options` and a context with the project folder, the environment and a logger
 ([`StoreFactory`](./api/README.md#storefactory)). Its store holds only encrypted bodies and error
 texts: Pathways wraps every store, its own and yours, in the same encryption layer. To be rekeyed, a
-store also implements [`ContentStore`](./api/README.md#contentstore).
+store also implements [`ContentStore`](./api/README.md#contentstore). To serve a channel with
+`storage.content: dropAfterDelivery`, it also implements the optional `markDeliveredAndDropContent`:
+it marks the delivery delivered and, when that was the last delivery of the message's current
+generation still to deliver, empties the message's body and its deliveries' bodies in the same
+transaction, and reports whether it did. `pathways start` refuses such a channel on a store without
+it.
 
 To take part in the engine lease, a store also implements the four optional lease methods,
 `acquireLease`, `renewLease`, `releaseLease` and `leaseHolder`, and honours the optional `epoch` the

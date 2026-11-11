@@ -24,6 +24,7 @@ import {
   projectSchema,
   type ChannelConfig,
   type ClientTlsFiles,
+  type ContentPolicy,
   type EncryptionConfig,
   type EndpointAuth,
   type HeaderValue,
@@ -100,7 +101,10 @@ export async function loadProject(root: string): Promise<ProjectConfig> {
     }
   }
 
-  const settings: Settings = mergeSettings(DEFAULT_SETTINGS, project.defaults ?? {});
+  const settings: Settings = mergeSettings(DEFAULT_SETTINGS, {
+    ...project.defaults,
+    content: project.storage?.content,
+  });
   const databaseFile = resolve(projectRoot, project.storage?.sqlite?.file ?? DEFAULT_DATABASE_FILE);
   const storage = resolveStorage(project.storage, projectRoot, databaseFile);
   const hooks = (project.hooks ?? []).map((hook) => resolveHook(hook, projectRoot));
@@ -170,7 +174,10 @@ export async function loadProject(root: string): Promise<ProjectConfig> {
       problems.push(`${show(file)}: transform: ${show(transform)} does not exist`);
       continue;
     }
-    const channelSettings = mergeSettings(settings, channel);
+    const channelSettings = mergeSettings(settings, {
+      ...channel,
+      content: channel.storage?.content,
+    });
     const source = resolveSource(channel.source, channelDir, channelSettings);
     const destinations = channel.destinations.map((destination) =>
       resolveDestination(destination, channelDir, channelSettings),
@@ -484,6 +491,7 @@ function mergeSettings(
     retention?: number | undefined;
     resendFlag?: boolean | undefined;
     retentionInterval?: number | undefined;
+    content?: ContentPolicy | undefined;
   },
 ): Settings {
   return {
@@ -495,6 +503,7 @@ function mergeSettings(
     retentionMs: override.retention ?? base.retentionMs,
     resendFlag: override.resendFlag ?? base.resendFlag,
     retentionIntervalMs: override.retentionInterval ?? base.retentionIntervalMs,
+    content: override.content ?? base.content,
   };
 }
 

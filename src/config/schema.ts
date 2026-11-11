@@ -784,6 +784,46 @@ export type StorageKind = (typeof STORAGE_KINDS)[number];
 /** What a `storage:` block names: one of the databases, or a custom store's module. */
 const STORAGE_BLOCK_KINDS = [...STORAGE_KINDS, "module"] as const;
 
+/**
+ * What storage keeps of a message's content: `keep` keeps its body and outputs until retention
+ * deletes the message; `dropAfterDelivery` deletes them in the transaction that records its last
+ * delivery, keeping its metadata.
+ *
+ * @example
+ * ```ts
+ * CONTENT_POLICIES.includes("dropAfterDelivery"); // true
+ * ```
+ */
+export const CONTENT_POLICIES = ["keep", "dropAfterDelivery"] as const;
+
+/**
+ * One of {@link CONTENT_POLICIES}.
+ *
+ * @example
+ * ```ts
+ * const content: ContentPolicy = "dropAfterDelivery";
+ * ```
+ */
+export type ContentPolicy = (typeof CONTENT_POLICIES)[number];
+
+/** `storage.content`, in `pathways.yaml` and in a channel. */
+const content = z.enum(CONTENT_POLICIES).meta({
+  description:
+    "What is kept of a message's content: keep (the default) keeps its body and outputs until retention deletes the message; dropAfterDelivery deletes them once every delivery is delivered, keeping ids, times, statuses, sizes and a hash. A channel overrides it.",
+});
+
+/**
+ * Exactly one key of a `storage:` block's kinds, or none when it names `content` alone: then the
+ * database is the default, SQLite.
+ */
+function oneKindOrContent(kinds: readonly string[]) {
+  const one = oneKind(kinds);
+  return (value: Record<string, unknown>, ctx: z.RefinementCtx): void => {
+    const named = kinds.some((kind) => value[kind] !== undefined);
+    if (named || value["content"] === undefined) one(value, ctx);
+  };
+}
+
 /** A hook's time limit: a duration above zero. */
 const hookTimeout = duration(
   "How long one call to the hook may run: a duration above zero, such as 5s, or a number of milliseconds. Default 5s.",
@@ -944,14 +984,22 @@ const storage = restate(
         .optional(),
       module: modulePath.optional(),
       options: moduleOptions.optional(),
+      content: content.optional(),
     })
     .meta({
       description:
-        "Where messages are stored: exactly one of sqlite, postgres, mysql, sqlserver or module. Default SQLite at .pathways/pathways.db.",
+        "Where messages are stored: exactly one of sqlite, postgres, mysql, sqlserver or module (SQLite at .pathways/pathways.db when the block names content alone), and what is kept of their content. Default SQLite at .pathways/pathways.db.",
     })
-    .superRefine(oneKind(STORAGE_BLOCK_KINDS))
+    .superRefine(oneKindOrContent(STORAGE_BLOCK_KINDS))
     .superRefine(optionsWithModule),
-  restateKinds(STORAGE_BLOCK_KINDS),
+  (json) => {
+    restateKinds(STORAGE_BLOCK_KINDS)(json);
+    // One kind, or `content` alone, which keeps the default database, SQLite.
+    json.oneOf = [
+      ...exactlyOneOf(STORAGE_BLOCK_KINDS),
+      { required: ["content"], not: { anyOf: exactlyOneOf(STORAGE_BLOCK_KINDS) } },
+    ];
+  },
 );
 
 /** The health endpoint: a listener. */
@@ -1108,6 +1156,12 @@ export const channelSchema = restate(
       ackTimeout: settingsShape.ackTimeout,
       retention: settingsShape.retention,
       resendFlag: settingsShape.resendFlag,
+      storage: z
+        .strictObject({ content: content.optional() })
+        .meta({
+          description: "What is kept of this channel's messages: overrides pathways.yaml's.",
+        })
+        .optional(),
     })
     .meta({
       title: "channel.yaml",
@@ -1206,6 +1260,11 @@ export interface Settings {
   readonly resendFlag: boolean;
   /** How often `pathways start` runs retention, in milliseconds. Engine-wide. */
   readonly retentionIntervalMs: number;
+  /**
+   * What is kept of a message's content, from `storage.content` in `pathways.yaml` or the channel:
+   * `keep`, or `dropAfterDelivery` to delete the bodies once every delivery is delivered.
+   */
+  readonly content: ContentPolicy;
 }
 
 /** The defaults when neither `pathways.yaml` nor a channel sets a value. */
@@ -1218,6 +1277,7 @@ export const DEFAULT_SETTINGS: Settings = {
   retentionMs: 30 * 86_400_000,
   resendFlag: true,
   retentionIntervalMs: 3_600_000,
+  content: "keep",
 };
 
 /**

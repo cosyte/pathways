@@ -3,6 +3,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 
 import type { Logger } from "pino";
 
+import { ConfigError } from "../config/load.js";
 import type { ChannelConfig, Format, ProjectConfig } from "../config/schema.js";
 import {
   listenerSecurity,
@@ -406,6 +407,7 @@ export class Engine {
         env,
         logger,
       });
+      this.checkContentPolicies();
       for (const config of project.channels) {
         const worker = new ChannelWorker({
           channel: config.name,
@@ -439,6 +441,22 @@ export class Engine {
       await this.stop();
       throw error;
     }
+  }
+
+  /**
+   * Refuses to start when a channel drops content after delivery and the store cannot: it would
+   * keep every body the channel's configuration says it drops.
+   */
+  private checkContentPolicies(): void {
+    const { project, store } = this.options;
+    if (typeof store.markDeliveredAndDropContent === "function") return;
+    const problems = project.channels
+      .filter((channel) => channel.settings.content === "dropAfterDelivery")
+      .map(
+        (channel) =>
+          `channels/${channel.name}/channel.yaml: storage.content: dropAfterDelivery needs a store that can drop content after delivery (markDeliveredAndDropContent), and this one cannot`,
+      );
+    if (problems.length > 0) throw new ConfigError(problems);
   }
 
   /** One pass over every channel: take in, transform, deliver. */
@@ -661,6 +679,10 @@ export class Engine {
             resumed,
             failure,
             size: body.byteLength,
+            // Kept with the metadata once the body is dropped, to match a copy held elsewhere.
+            ...(config.settings.content === "dropAfterDelivery"
+              ? { contentHash: createHash("sha256").update(body).digest("hex") }
+              : {}),
           });
         } catch (error) {
           const code = errorCode(error);
@@ -908,7 +930,19 @@ export class Engine {
         // Delivered: freed now when the store handed it over and the destination kept none of it.
         if (copiesBodies(store) && copiesBodies(destination)) release(delivery.body);
         faultPoint("after-send-before-record");
-        await store.markDelivered(delivery.id, ...this.epoch());
+        if (config.settings.content === "dropAfterDelivery" && store.markDeliveredAndDropContent) {
+          const dropped = await store.markDeliveredAndDropContent(delivery.id, ...this.epoch());
+          if (dropped) {
+            logger.info({
+              event: "content-dropped",
+              channel: config.name,
+              message: delivery.messageId,
+              delivery: delivery.id,
+            });
+          }
+        } else {
+          await store.markDelivered(delivery.id, ...this.epoch());
+        }
         logger.info({
           event: "delivered",
           channel: config.name,

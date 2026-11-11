@@ -523,7 +523,8 @@ replaced them.
 
 > **storedContent**(`table`, `after`, `limit`): `Promise`\<[`StoredContent`](#storedcontent-1)[]\>
 
-Up to `limit` rows of `table` with an id above `after`, oldest first, as stored.
+Up to `limit` rows of `table` with an id above `after`, oldest first, as stored, leaving out the
+rows of a message whose content was dropped: they hold none.
 
 ###### Parameters
 
@@ -1718,7 +1719,8 @@ durable before it resolves, `nextDelivery` returns the marker it wrote, and `mar
 `scheduleRetry` and `failDelivery` clear it in the same write as their outcome. For the operator
 commands: `requeue` and `clear` change nothing unless the message still stands where the caller
 found it, and write their audit entry in the same transaction as their change; `expire` deletes
-only done messages, with their deliveries, and never an audit entry.
+only done messages, with their deliveries, and never an audit entry. A message whose content was
+dropped (`markDeliveredAndDropContent`) is never replayed, resent or expired.
 
 The audit log has two methods, append and read, and no way to change or remove an entry.
 
@@ -1909,7 +1911,8 @@ How many deliveries of a channel stand at each status.
 > **expire**(`channel`, `cutoff`, `dryRun`): `Promise`\<[`ExpireResult`](#expireresult)\>
 
 Deletes a channel's messages that are done (delivered, filtered or cleared) and whose last
-activity is before `cutoff` (ISO 8601), with their deliveries. With `dryRun`, counts them only.
+activity is before `cutoff` (ISO 8601), with their deliveries, leaving those whose content was
+dropped. With `dryRun`, counts them only.
 
 ###### Parameters
 
@@ -2049,6 +2052,32 @@ Fenced by `epoch` when it is given.
 
 `Promise`\<`void`\>
 
+##### markDeliveredAndDropContent()?
+
+> `optional` **markDeliveredAndDropContent**(`deliveryId`, `epoch?`): `Promise`\<`boolean`\>
+
+[markDelivered](#markdelivered), and when that was the last delivery of the message's current generation
+still to be delivered, also drops the bodies of the message and of all its deliveries in the
+same transaction, keeping its metadata: ids, times, statuses, sizes, the content hash and the
+possible-duplicate flag. Keeps every body while any delivery of the current generation has
+failed or waits to be tried again. Resolves to whether it dropped them. Fenced by `epoch` when
+it is given. Optional: a channel with `storage.content: dropAfterDelivery` needs it, and the
+engine refuses to start such a channel on a store without it.
+
+###### Parameters
+
+###### deliveryId
+
+`number`
+
+###### epoch?
+
+`number`
+
+###### Returns
+
+`Promise`\<`boolean`\>
+
 ##### markSending()
 
 > **markSending**(`deliveryId`, `start`, `epoch?`): `Promise`\<`void`\>
@@ -2096,7 +2125,7 @@ One message, without its body, or `undefined` if there is none. Its `error` is r
 
 > **messageBody**(`id`): `Promise`\<`Uint8Array`\<`ArrayBufferLike`\> \| `undefined`\>
 
-One message's body as it arrived, or `undefined` if there is none.
+One message's body as it arrived, or `undefined` if there is none or it was dropped.
 
 ###### Parameters
 
@@ -2160,7 +2189,7 @@ How many messages of a channel stand at each status. The health endpoint reports
 
 > **outputs**(`messageId`): `Promise`\<`Uint8Array`\<`ArrayBufferLike`\>[]\>
 
-The outputs of a message's current generation, in order; none when it has none.
+The outputs of a message's current generation, in order; none when it has none or they were dropped.
 
 ###### Parameters
 
@@ -2346,6 +2375,20 @@ const ids = items.map((message: MessageSummary) => message.id);
 ##### channel
 
 > `readonly` **channel**: `string`
+
+##### contentDroppedAt?
+
+> `readonly` `optional` **contentDroppedAt?**: `string`
+
+When the message's body and its deliveries' bodies were dropped, once its last delivery was
+delivered (`storage.content: dropAfterDelivery`). Undefined while they are kept. Such a
+message cannot be replayed or resent, and its content cannot be shown.
+
+##### contentHash?
+
+> `readonly` `optional` **contentHash?**: `string`
+
+The hash of the body as received, when one was stored with it: see [StoreReceiveOptions](#storereceiveoptions).
 
 ##### deliveries
 
@@ -3279,6 +3322,28 @@ const message: StoredMessage | undefined = await store.message(12);
 
 [`MessageSummary`](#messagesummary).[`channel`](#channel-14)
 
+##### contentDroppedAt?
+
+> `readonly` `optional` **contentDroppedAt?**: `string`
+
+When the message's body and its deliveries' bodies were dropped, once its last delivery was
+delivered (`storage.content: dropAfterDelivery`). Undefined while they are kept. Such a
+message cannot be replayed or resent, and its content cannot be shown.
+
+###### Inherited from
+
+[`MessageSummary`](#messagesummary).[`contentDroppedAt`](#contentdroppedat)
+
+##### contentHash?
+
+> `readonly` `optional` **contentHash?**: `string`
+
+The hash of the body as received, when one was stored with it: see [StoreReceiveOptions](#storereceiveoptions).
+
+###### Inherited from
+
+[`MessageSummary`](#messagesummary).[`contentHash`](#contenthash)
+
 ##### deliveries
 
 > `readonly` **deliveries**: [`DeliveryTally`](#deliverytally)
@@ -3383,6 +3448,13 @@ await store.receive("adt", body, { duplicateKey: hashOfSenderAndControlId });
 ```
 
 #### Properties
+
+##### contentHash?
+
+> `readonly` `optional` **contentHash?**: `string`
+
+A hash of the body as it arrived (the engine passes its SHA-256 in hex, for a channel that drops
+content after delivery), kept with the message's metadata after its body is dropped.
 
 ##### duplicateKey?
 
@@ -4212,9 +4284,10 @@ const done = (status: MessageStatus): boolean => status === "transformed" || sta
 
 ### RefusalReason
 
-> **RefusalReason** = `"not-found"` \| `"changed"` \| `"pending"` \| `"not-failed"`
+> **RefusalReason** = `"not-found"` \| `"changed"` \| `"pending"` \| `"not-failed"` \| `"content-dropped"`
 
-Why storage did not record a replay or a clear.
+Why storage did not record a replay or a clear. `content-dropped`: the message's content was
+dropped after delivery, so there is nothing to replay or resend.
 
 #### Example
 
@@ -4226,7 +4299,7 @@ const retryable = (reason: RefusalReason): boolean => reason === "changed" || re
 
 ### RequeueResult
 
-> **RequeueResult** = \{ `done`: `true`; `entry`: [`AuditEntry`](#auditentry); `generation`: `number`; `queued`: `number`; `status`: [`MessageStatus`](#messagestatus); `superseded`: `number`; \} \| \{ `done`: `false`; `entry`: [`AuditEntry`](#auditentry); `reason`: `Extract`\<[`RefusalReason`](#refusalreason), `"not-found"` \| `"changed"` \| `"pending"`\>; \}
+> **RequeueResult** = \{ `done`: `true`; `entry`: [`AuditEntry`](#auditentry); `generation`: `number`; `queued`: `number`; `status`: [`MessageStatus`](#messagestatus); `superseded`: `number`; \} \| \{ `done`: `false`; `entry`: [`AuditEntry`](#auditentry); `reason`: `Extract`\<[`RefusalReason`](#refusalreason), `"not-found"` \| `"changed"` \| `"pending"` \| `"content-dropped"`\>; \}
 
 What a replay or a resend did, with the audit entry written in the same transaction.
 
@@ -4268,7 +4341,7 @@ Earlier deliveries that had failed for good, now cleared.
 
 ##### Type Literal
 
-\{ `done`: `false`; `entry`: [`AuditEntry`](#auditentry); `reason`: `Extract`\<[`RefusalReason`](#refusalreason), `"not-found"` \| `"changed"` \| `"pending"`\>; \}
+\{ `done`: `false`; `entry`: [`AuditEntry`](#auditentry); `reason`: `Extract`\<[`RefusalReason`](#refusalreason), `"not-found"` \| `"changed"` \| `"pending"` \| `"content-dropped"`\>; \}
 
 #### Example
 

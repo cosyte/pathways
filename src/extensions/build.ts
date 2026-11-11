@@ -44,6 +44,7 @@ const STORE_METHOD_LIST = {
   renewLease: false,
   releaseLease: false,
   leaseHolder: false,
+  markDeliveredAndDropContent: false,
 } satisfies Record<keyof MessageStore, boolean>;
 
 const STORE_METHODS = Object.entries(STORE_METHOD_LIST)

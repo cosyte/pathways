@@ -61,6 +61,60 @@ Retention dry run: 0 messages and 0 deliveries would be deleted. Nothing was del
 
 A dry run deletes nothing and is not audited.
 
+## Drop content after delivery
+
+Retention deletes a message some time after it is done. To keep as little patient data as you can,
+drop a message's content as soon as it is delivered instead:
+
+```yaml title="pathways.yaml"
+encryption:
+  keys:
+    - id: dev
+      file: .pathways/dev.key
+  current: dev
+storage:
+  content: dropAfterDelivery
+```
+
+`storage.content` is `keep` by default. A channel overrides the project's:
+
+```yaml title="channels/adt-to-lab/channel.yaml"
+storage:
+  content: keep
+source:
+  file: { dir: ../../data/adt-to-lab/in }
+transform: ./transform.ts
+destinations:
+  - file: { dir: ../../data/adt-to-lab/out }
+```
+
+With `dropAfterDelivery`, the transaction that records a message's last delivery as delivered also
+deletes the message's body as it was received and the body of every one of its deliveries. Only the
+deliveries of the message's current generation count: one that failed for good before a replay or
+resend does not hold the drop back. While any delivery of the current generation has failed or waits
+to be tried again, every body is kept, so you can still replay or resend it. A filtered message, and
+one whose transform failed, keeps its content until retention deletes it.
+
+What stays is the message's metadata: its id, channel, times, status and its deliveries' statuses,
+attempts and times, its size, the possible-duplicate flag, and a SHA-256 hash of the body as it was
+received, which the engine works out as it stores the message. `pathways messages show` prints the
+hash and when the content was dropped. Each delivery's last error text goes with the bodies, since
+encryption treats it as content too; its attempts count stays.
+
+Once the content is dropped:
+
+- `pathways replay` and `pathways replay --resend` refuse the message, changing nothing: there is
+  nothing to send again.
+- `pathways messages show --content` has no content to print.
+- `pathways rekey` skips it: it holds nothing encrypted.
+- Retention leaves it: its metadata is kept, and no retention period deletes it.
+
+The engine logs `content-dropped` with the channel, the message and the delivery. A message
+received under `keep` and delivered after you switch to `dropAfterDelivery` is dropped too, without
+a hash. A custom store needs `markDeliveredAndDropContent` for this; `pathways start` refuses a
+channel that asks for it on a store without it. What each database still holds after the delete is
+on [Store messages in a database server](./store-messages-in-a-database.md#what-a-database-keeps-after-a-delete).
+
 ## What retention does not reach
 
 - Files a file source keeps with `keepProcessed: true`, in its `processed/` folder.
@@ -68,8 +122,10 @@ A dry run deletes nothing and is not audited.
 - The audit log, which is never deleted by Pathways.
 - Copies of the database in backups, and on a database server, earlier row versions in its logs.
 
-On SQLite, a deleted message's bytes are overwritten with zeros in the file. The period your policy
-needs, and what happens to backups and output folders, are yours to decide.
+On SQLite, a deleted message's bytes are overwritten with zeros in the file; on a server they can
+stay for a while, as [what a database keeps after a
+delete](./store-messages-in-a-database.md#what-a-database-keeps-after-a-delete) says. The period your
+policy needs, and what happens to backups and output folders, are yours to decide.
 
 ## Related
 

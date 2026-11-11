@@ -373,6 +373,9 @@ export async function showCommand(
       ["  duplicate of", message.duplicateOf === null ? "-" : String(message.duplicateOf)],
       ["  generation", String(message.generation)],
       ["  error", safeError(error) ?? "-"],
+      ...(message.contentHash === undefined
+        ? []
+        : [["  content hash", message.contentHash] as [string, string]]),
     ]),
     deliveries.length === 0 ? "No deliveries." : "Deliveries:",
     ...(deliveries.length === 0 ? [] : indent(deliveryTable(deliveries))),
@@ -381,7 +384,11 @@ export async function showCommand(
     message: { ...summary, error: safeError(error) },
     deliveries: shownDeliveries,
   };
-  if (received === undefined) {
+  if (message.contentDroppedAt !== undefined) {
+    lines.push(
+      `Content dropped after delivery at ${message.contentDroppedAt}: storage.content is dropAfterDelivery.`,
+    );
+  } else if (received === undefined) {
     if (!content) {
       lines.push("Content not shown: add --content to print it. Each view is audited.");
     }
@@ -608,6 +615,8 @@ const REFUSALS: Readonly<Record<ActionRefusal, string>> = {
   changed: "it changed while the replay ran, so nothing was recorded; try again",
   unreadable: "what is stored of it could not be decrypted",
   "not-failed": "nothing about it has failed",
+  "content-dropped":
+    "its content was dropped after delivery (storage.content: dropAfterDelivery), so there is nothing to send again",
 };
 
 function describeReplay(result: ReplayResult): string {

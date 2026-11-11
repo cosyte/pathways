@@ -17,7 +17,9 @@ import type { AuditLog } from "./audit.js";
  * - `transform-load`: its channel's transform could not be loaded;
  * - `changed`: it changed while the replay ran, so nothing was recorded;
  * - `unreadable`: what is stored of it could not be decrypted;
- * - `not-failed`: a clear, but nothing about it had failed.
+ * - `not-failed`: a clear, but nothing about it had failed;
+ * - `content-dropped`: its content was dropped after delivery (`storage.content:
+ *   dropAfterDelivery`), so there is nothing to replay or resend.
  *
  * @example
  * ```ts
@@ -32,7 +34,8 @@ export type ActionRefusal =
   | "transform-load"
   | "changed"
   | "unreadable"
-  | "not-failed";
+  | "not-failed"
+  | "content-dropped";
 
 /**
  * What a replay or a resend did to one message. Ids, counts, states and codes only.
@@ -150,6 +153,7 @@ export async function replayMessages(
     const channel = project.channels.find((c) => c.name === message.channel);
     if (channel === undefined) return refuse(id, message.channel, "no-channel");
     if (message.status === "received") return refuse(id, channel.name, "waiting");
+    if (message.contentDroppedAt !== undefined) return refuse(id, channel.name, "content-dropped");
     if (message.deliveries.pending > 0) return refuse(id, channel.name, "pending");
 
     let outputs: readonly Uint8Array[];
