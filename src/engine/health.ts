@@ -7,9 +7,9 @@ import {
   listenerWarnings,
   refuse,
   reply,
-  type Env,
 } from "../connectors/endpoint.js";
 import type { ServerTlsMaterial } from "../connectors/tls.js";
+import type { SecretReader } from "../secrets/resolve.js";
 import type { ChannelRunState, DeliveryStatus, MessageStatus } from "../storage/store.js";
 import { answerProbe, type EngineRole, type Probes } from "./probes.js";
 
@@ -177,7 +177,7 @@ export class HealthEndpoint {
 export function healthEndpointFor(
   config: HealthConfig,
   report: () => Promise<HealthReport>,
-  env: Env,
+  env: SecretReader,
   logger: Logger,
   probes?: Probes,
 ): HealthEndpoint {

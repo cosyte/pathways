@@ -5,8 +5,10 @@ import { parse as parseYaml, YAMLParseError } from "yaml";
 import type { z } from "zod";
 
 import { normalisePath } from "../connectors/http-path.js";
+import { secretSourceOf, secretUses, type SecretSourceYaml } from "../secrets/sources.js";
 import { referencesIn, resolvingEnv, variableAt, type EnvReference } from "./env-ref.js";
 import {
+  BUILT_IN_SECRET_PROVIDERS,
   channelSchema,
   DEFAULT_DATABASE_CONNECT_TIMEOUT_MS,
   DEFAULT_DATABASE_FILE,
@@ -21,6 +23,7 @@ import {
   DEFAULT_MIN_AGE_MS,
   DEFAULT_POOL_IDLE_TIMEOUT_MS,
   DEFAULT_POOL_MAX,
+  DEFAULT_SECRET_TIMEOUT_MS,
   DEFAULT_SETTINGS,
   projectSchema,
   type ChannelConfig,
@@ -36,6 +39,7 @@ import {
   type OnStoreFailure,
   type ProjectConfig,
   type RetryPolicy,
+  type SecretProviderConfig,
   type ServerTlsFiles,
   type Settings,
   type StorageConfig,
@@ -141,12 +145,21 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
   const storage = resolveStorage(project.storage, projectRoot, databaseFile);
   const hooks = (project.hooks ?? []).map((hook) => resolveHook(hook, projectRoot));
   const encryption = resolveEncryption(project.encryption, projectRoot);
+  const secrets: SecretProviderConfig[] = Object.entries(project.secrets ?? {}).map(
+    ([name, provider]) => ({
+      name,
+      module: resolve(projectRoot, provider.module),
+      options: provider.options ?? {},
+      timeoutMs: provider.timeout ?? DEFAULT_SECRET_TIMEOUT_MS,
+    }),
+  );
   problems.push(
     ...(await missingModules(show(projectFile), show, projectEnv, [
       [
         "encryption.provider.module",
         encryption?.kind === "provider" ? encryption.module : undefined,
       ],
+      ...secrets.map((provider) => [`secrets.${provider.name}.module`, provider.module] as const),
       ["storage.module", storage.kind === "module" ? storage.module : undefined],
       ...hookModules(hooks),
     ])),
@@ -278,6 +291,17 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
       `${show(channelsDir)}: no channels; each channel lives in channels/<name>/channel.yaml`,
     );
   }
+  const providers = new Set([...BUILT_IN_SECRET_PROVIDERS, ...secrets.map(({ name }) => name)]);
+  for (const { source, where } of secretUses(
+    { storage, encryption, health, hooks, channels },
+    "all",
+  )) {
+    if ("secret" in source && !providers.has(source.secret.provider)) {
+      problems.push(
+        `${where}: secret.provider: ${source.secret.provider} is not a provider; name env, file, or one under secrets: in pathways.yaml`,
+      );
+    }
+  }
   if (problems.length > 0) throw new ConfigError(problems);
   return {
     root: projectRoot,
@@ -290,6 +314,7 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
     lease,
     migrations: { rollbackWindowMs: project.migrations?.rollbackWindow ?? 0 },
     encryption,
+    secrets,
     channels,
     environment,
   };
@@ -377,17 +402,14 @@ function resolveEncryption(
   }
   return {
     kind: "keys",
-    keys: encryption.keys.map(({ id, env, file }) =>
-      // The schema lets exactly one of env and file through.
-      env === undefined ? { id, file: resolve(root, file as string) } : { id, env },
-    ),
+    keys: encryption.keys.map((key) => ({ id: key.id, ...secretSourceOf(key, root) })),
     current: encryption.current,
   };
 }
 
 /**
  * The storage block, resolved: the SQLite file, TLS files and a custom store's module against the
- * project root, and every default filled in. The connection URL stays an environment variable name until startup reads it.
+ * project root, and every default filled in. The connection URL stays a secret reference until startup reads it.
  */
 function resolveStorage(
   storage: StorageYaml | undefined,
@@ -413,7 +435,10 @@ function resolveStorage(
   const server = { kind, ...(storage?.[kind] as NonNullable<StorageYaml[typeof kind]>) };
   return {
     kind: server.kind,
-    urlEnv: server.url?.env ?? DEFAULT_DATABASE_URL_ENV,
+    url:
+      server.url === undefined
+        ? { env: DEFAULT_DATABASE_URL_ENV }
+        : secretSourceOf(server.url, root),
     tls: server.tls === undefined ? undefined : resolveClientTls(server.tls, root),
     plaintext: server.plaintext === true,
     pool: {
@@ -450,7 +475,7 @@ function resolveSource(
       // The schema passed each path through the request rule, so it reads as a path here.
       paths: (http.paths ?? [http.path ?? "/"]).map((path) => normalisePath(path) as string),
       methods: http.methods ?? ["POST"],
-      response: resolveSourceResponse(http.response),
+      response: resolveSourceResponse(http.response, dir),
       maxBytes: http.maxBytes ?? DEFAULT_MAX_BYTES,
     };
   }
@@ -509,9 +534,10 @@ function resolveConnector(
   };
 }
 
-/** An HTTP source's `response:`, resolved: headers marked as written or from the environment. */
+/** An HTTP source's `response:`, resolved: headers marked as written or read at start. */
 function resolveSourceResponse(
   response: NonNullable<ChannelYaml["source"]["http"]>["response"],
+  dir: string,
 ): HttpSource["response"] {
   if (response === undefined) return { kind: "id" };
   if (response === "ack") return { kind: "ack" };
@@ -519,27 +545,28 @@ function resolveSourceResponse(
     kind: "fixed",
     status: response.status,
     contentType: response.contentType,
-    headers: markHeaders(response.headers),
+    headers: markHeaders(response.headers, dir),
     body: response.body ?? "",
   };
 }
 
-/** Configured headers, each marked as written in the YAML or read from the environment. */
+/** Configured headers, each marked as written in the YAML or a secret read at start. */
 function markHeaders(
-  configured: Readonly<Record<string, string | { readonly env: string }>> | undefined,
+  configured: Readonly<Record<string, string | SecretSourceYaml>> | undefined,
+  dir: string,
 ): Record<string, HeaderValue> {
   const headers: Record<string, HeaderValue> = {};
   for (const [name, value] of Object.entries(configured ?? {})) {
-    headers[name] = typeof value === "string" ? { value } : { env: value.env };
+    headers[name] = typeof value === "string" ? { value } : secretSourceOf(value, dir);
   }
   return headers;
 }
 
-/** An HTTP client endpoint, resolved: headers marked as written or from the environment. */
+/** An HTTP client endpoint, resolved: headers marked as written or read at start. */
 function resolveHttpClient(http: Omit<HttpClientYaml, "timeout">, dir: string): HttpClientConfig {
   return {
     url: http.url,
-    headers: markHeaders(http.headers),
+    headers: markHeaders(http.headers, dir),
     tls: http.tls === undefined ? undefined : resolveClientTls(http.tls, dir),
     plaintext: http.plaintext === true,
   };
@@ -547,7 +574,8 @@ function resolveHttpClient(http: Omit<HttpClientYaml, "timeout">, dir: string): 
 
 /**
  * A listening endpoint, resolved. With no `auth`, mutual TLS authenticates when `tls.ca` is set;
- * otherwise a bearer token is required, read from `defaultTokenEnv`.
+ * otherwise a bearer token is required, read from `defaultTokenEnv`. A token read from a file is
+ * resolved against `dir`.
  */
 function resolveListener(
   listener: ListenerYaml,
@@ -557,8 +585,9 @@ function resolveListener(
   const { tls } = listener;
   let auth: EndpointAuth;
   if (listener.auth === "none") auth = { kind: "none" };
-  else if (listener.auth !== undefined) auth = { kind: "bearer", env: listener.auth.bearer.env };
-  else if (tls?.ca !== undefined) auth = { kind: "none" };
+  else if (listener.auth !== undefined) {
+    auth = { kind: "bearer", ...secretSourceOf(listener.auth.bearer, dir) };
+  } else if (tls?.ca !== undefined) auth = { kind: "none" };
   else auth = { kind: "bearer", env: defaultTokenEnv };
   return {
     host: listener.host ?? DEFAULT_HOST,

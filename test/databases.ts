@@ -83,7 +83,7 @@ export function serverStorage(
 ): ServerStorage {
   return {
     kind,
-    urlEnv: URL_ENV,
+    url: { env: URL_ENV },
     tls: undefined,
     plaintext: true,
     pool: { max: 4, idleTimeoutMs: 1_000 },

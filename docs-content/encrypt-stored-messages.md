@@ -47,6 +47,8 @@ encryption:
 - **`current`** names the key that wraps new values. Every key in the list is read at start, so a
   missing older key stops the start rather than the first read of a value it wrapped.
 - A key file's path is resolved against the project root.
+- A key can also come from a secret store: `secret: { provider, name }` in place of `env` or `file`.
+  See [Read secrets from files and secret stores](./read-secrets.md).
 
 `pathways init` writes a development key into `.pathways/dev.key` and names it in the starter's
 `pathways.yaml`. It is for the machine it was made on; use a key from your secret store anywhere

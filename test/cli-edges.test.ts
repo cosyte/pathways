@@ -80,7 +80,7 @@ describe("pathways with no environment or logger passed", () => {
       out: "",
       err:
         "pathways: the configuration is invalid:\n" +
-        "  pathways.yaml: encryption.keys.0: the key prod is read from the environment variable PATHWAYS_SYNTHETIC_DEFAULT_KEY, which is not set\n",
+        "  pathways.yaml: encryption.keys.0: the key prod: the environment variable PATHWAYS_SYNTHETIC_DEFAULT_KEY is not set\n",
     });
   });
 

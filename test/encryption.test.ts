@@ -337,11 +337,11 @@ describe("master keys from files and environment variables", () => {
     })();
     expect(error).toBeInstanceOf(ConfigError);
     expect((error as ConfigError).problems).toEqual([
-      "pathways.yaml: encryption.keys.0: the key a is read from the environment variable PATHWAYS_KEY_A, which is not set",
+      "pathways.yaml: encryption.keys.0: the key a: the environment variable PATHWAYS_KEY_A is not set",
       "pathways.yaml: encryption.keys.1: the key b: the environment variable PATHWAYS_KEY_B does not hold a key; a key is 32 random bytes in base64, as openssl rand -base64 32 makes",
       "pathways.yaml: encryption.keys.2: the key c: its file could not be read (ENOENT)",
       "pathways.yaml: encryption.keys.3: the key d: its file does not hold a key; a key is 32 random bytes in base64, as openssl rand -base64 32 makes",
-      "pathways.yaml: encryption.keys.4: the key e is read from the environment variable PATHWAYS_KEY_E, which is not set",
+      "pathways.yaml: encryption.keys.4: the key e: the environment variable PATHWAYS_KEY_E is not set",
     ]);
     expect(inspect(error)).not.toMatch(/SYNTHETIC-SECRET|SYNTHETIC-NOT-A-KEY/);
   });
@@ -404,11 +404,11 @@ describe("pathways.yaml encryption", () => {
     ["encryption: { keys: [], current: a }\n", "encryption.keys: at least one key"],
     [
       "encryption: { keys: [{ id: a }], current: a }\n",
-      "encryption.keys.0: name exactly one of: env, file; a key's value never goes in the YAML",
+      "encryption.keys.0: name exactly one of: env, file, secret; a key's value never goes in the YAML",
     ],
     [
       "encryption: { keys: [{ id: a, env: K, file: ./k }], current: a }\n",
-      "encryption.keys.0: name exactly one of: env, file",
+      "encryption.keys.0: name exactly one of: env, file, secret",
     ],
     [
       "encryption: { keys: [{ id: a, env: K }, { id: a, env: L }], current: a }\n",

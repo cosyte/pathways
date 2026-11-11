@@ -18,7 +18,7 @@ import {
 
 import { ConfigError } from "../config/load.js";
 import type { DatabaseStorage, StorageKind } from "../config/schema.js";
-import type { Env } from "../connectors/endpoint.js";
+import type { SecretReader } from "../secrets/resolve.js";
 import { faultPoint } from "../fault-points.js";
 import { dialectFor, type DriverImport } from "./dialects.js";
 import {
@@ -1476,8 +1476,11 @@ function int64OrNull(value: number | string | null): number | null {
 export interface StoreOptions {
   /** The clock for the times a store records. Tests pass their own. */
   readonly now?: () => Date;
-  /** Where a database server's connection URL is read from. Defaults to `process.env`. */
-  readonly env?: Env;
+  /**
+   * Where a database server's connection URL is read from: the environment, or the secrets a start
+   * resolved. Defaults to `process.env`.
+   */
+  readonly env?: SecretReader;
   /** Imports a driver package. Tests pass their own, to stand in for one that is not installed. */
   readonly importDriver?: DriverImport;
   /**

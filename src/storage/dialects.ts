@@ -19,7 +19,7 @@ import type * as TediousModule from "tedious";
 
 import { ConfigError } from "../config/load.js";
 import type { DatabaseStorage, ServerStorage, StorageKind } from "../config/schema.js";
-import { readEnv, type Env } from "../connectors/endpoint.js";
+import { secretHolder, secretPlace, secretsOf, type SecretReader } from "../secrets/resolve.js";
 import { clientTlsOptions, loadClientTls } from "../connectors/tls.js";
 
 type Pg = typeof PgModule;
@@ -85,8 +85,8 @@ const importDriver: DriverImport = (name) => {
  * ```
  */
 export interface DialectOptions {
-  /** Where the connection URL is read from. */
-  readonly env: Env;
+  /** Where the connection URL is read from: the environment, or the secrets a start resolved. */
+  readonly env: SecretReader;
   /** Imports a driver package. Defaults to a plain `import()`. */
   readonly importDriver?: DriverImport;
 }
@@ -303,15 +303,16 @@ function quietConnection(tedious: Tedious): typeof tedious.Connection {
 }
 
 /**
- * Reads and checks a database server's connection URL. Errors name the variable, never its value.
+ * Reads and checks a database server's connection URL. Errors name where it is read from, never its
+ * value.
  */
-function readUrl(storage: ServerStorage, env: Env, where: string): URL {
-  const name = storage.urlEnv;
+function readUrl(storage: ServerStorage, env: SecretReader, where: string): URL {
+  const name = secretHolder(storage.url);
   const schemes = SCHEMES[storage.kind];
-  const url = URL.parse(readEnv(env, name, where));
+  const url = URL.parse(secretsOf(env).read(storage.url, where));
   if (url === null || !schemes.includes(url.protocol)) {
     throw new ConfigError([
-      `${where}: the environment variable ${name} does not hold a ${String(schemes[0])}// URL`,
+      `${where}: ${secretPlace(storage.url)} does not hold a ${String(schemes[0])}// URL`,
     ]);
   }
   const options = [...url.searchParams.keys()];
