@@ -10,7 +10,7 @@ import {
 } from "../connectors/endpoint.js";
 import type { ServerTlsMaterial } from "../connectors/tls.js";
 import type { SecretReader } from "../secrets/resolve.js";
-import type { DeliveryTally, MessageStatus } from "../storage/store.js";
+import type { ChannelRunState, DeliveryTally, MessageStatus } from "../storage/store.js";
 import { answerProbe, type EngineRole, type Probes } from "./probes.js";
 
 /**
@@ -24,6 +24,11 @@ export interface ChannelHealth {
   readonly status: ChannelStatus;
   /** `down` when the channel's source could not listen; the engine keeps trying. */
   readonly source: "up" | "down";
+  /**
+   * What an operator set the channel to with `pathways channel`: `paused` (its source takes
+   * nothing in) or `stopped` (nothing of it runs) are not faults, and leave the answer 200.
+   */
+  readonly state: ChannelRunState;
   /** Absent when storage could not be read. */
   readonly messages?: Readonly<Record<MessageStatus, number>>;
   /**

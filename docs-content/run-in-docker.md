@@ -83,7 +83,23 @@ docker run --rm \
 ```
 
 `--env NAME` with no value passes the variable from your shell, so its value does not appear in the
-command line. A listening endpoint inside a container must bind to `host: 0.0.0.0` to be reached
+command line.
+
+Before you replace a running engine, run `pathways secrets check` in the new image with the same
+variables and mounts: it reads every secret and wraps and unwraps a throwaway key, prints what
+resolved but never a value, and exits 1 if anything cannot be had, so a deploy stops before the old
+engine does. In Kubernetes it fits an `initContainer`, or a Helm pre-install and pre-upgrade hook; in
+Terraform, a step before the service is replaced:
+
+```bash
+docker run --rm \
+  --env PATHWAYS_DATABASE_URL \
+  --env PATHWAYS_KEY_2026_11 \
+  --volume "$PWD:/project" \
+  pathways secrets check -C /project
+```
+
+See [Read secrets: check secrets before a deploy](./read-secrets.md#check-secrets-before-a-deploy). A listening endpoint inside a container must bind to `host: 0.0.0.0` to be reached
 through a published port (`--publish 2575:2575`).
 
 ## Troubleshoot inside the image

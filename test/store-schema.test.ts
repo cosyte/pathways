@@ -81,7 +81,7 @@ describe("the schema on each database", () => {
   it("compares text byte for byte on MySQL and SQL Server, in every table and added column", async () => {
     const mysql = await schemaFor("mysql");
     const tables = mysql.filter((statement) => statement.startsWith("create table"));
-    expect(tables).toHaveLength(5);
+    expect(tables).toHaveLength(6);
     for (const table of tables) {
       expect(table).toMatch(
         /\) engine = InnoDB default character set utf8mb4 collate utf8mb4_bin$/,

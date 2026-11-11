@@ -108,6 +108,8 @@ export type {
   AuditInput,
   AuditOutcome,
   AuditQuery,
+  ChannelRunState,
+  ChannelStateStore,
   ClearResult,
   ContentStore,
   ContentTable,

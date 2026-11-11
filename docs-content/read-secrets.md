@@ -118,10 +118,40 @@ hooks in `pathways.yaml`, which receive each entry they write.
 `pathways validate` checks that every reference names a provider and that each provider's module
 exists. It loads no provider and reads no secret, so it runs in CI without them.
 
+## Check secrets before a deploy
+
+`pathways secrets check` reads every secret `start` would read, now, and runs a throwaway data key
+through the key provider's `wrapKey` and `unwrapKey`. Run it where the engine will run, with the
+same environment, mounted files and cloud credentials, as the step before a deploy: a Kubernetes
+`initContainer` or a Helm pre-install and pre-upgrade hook running the same image, or a Terraform
+step before the service is replaced. A secret that is missing, denied, expired or of the wrong shape,
+or a key the key provider will not wrap, fails the deploy there, before the old engine stops:
+
+```bash
+pathways secrets check
+```
+
+```text
+resolved  pathways.yaml: storage.postgres.url: provider vault, name pathways/database, field url, version 12, identity arn:aws:iam::000000000000:role/pathways-synthetic
+resolved  pathways.yaml: encryption.keys.0: the key prod-2026-11: provider vault, name pathways/master-key, version 3
+failed    pathways.yaml: health.auth: provider vault, name pathways/health-token: the secret pathways/health-token from the provider vault could not be resolved (SecretError ERR_PATHWAYS_SECRET_NOT_FOUND)
+passed    key provider: the built-in master keys wrapped and unwrapped a throwaway key under the key prod-2026-11
+pathways: 3 secret references, 2 resolved, 1 failed; the key provider's round trip passed.
+```
+
+Each line names where the secret is read, its provider and name, and the version the provider
+answered with; the identity the provider read it as, when it says; and when it expires, for a
+short-lived secret. A file's path is left out. No line holds a value, its length or any part of it,
+so the output is safe in a CI log. It exits 0 when everything resolved and 1 when anything did not;
+`--json` prints the same as one document for a pipeline to read. It opens no database and sends no
+message.
+
 ## Write a provider
 
 A provider answers `resolve(ref, signal)` with the value, the version it resolved and, for a
-short-lived secret, when it expires. `ref` holds the secret's `name` and, when the reference gives
+short-lived secret, when it expires. It may add `identity`, the principal it read the secret as (a
+role's ARN, a managed identity's id, a service account's email), which `pathways secrets check`
+prints; it is never secret. `ref` holds the secret's `name` and, when the reference gives
 them, `field` and `version`. Pass `signal` on: it aborts when the provider's time is up. Reject with a
 [`SecretError`](./api/README.md#secreterror) when a secret, field or version is not there, so its code
 reaches the problem Pathways prints:

@@ -26,6 +26,7 @@
         "add-lifecycle-hooks",
         "write-custom-connectors",
         "check-status-and-health",
+        "pause-stop-and-reload-a-channel",
         "inspect-replay-and-clear-messages",
         "set-message-retention",
         "upgrade-pathways",

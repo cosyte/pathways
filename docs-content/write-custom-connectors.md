@@ -74,8 +74,11 @@ a repeat without dropping it.
 A destination has `deliver(message)`, and `stop()` if it keeps a connection open. `message` holds the
 stored message's id, which output of its transform this is (from 0), and the bytes, and `resend` when
 the send is a possible duplicate: an earlier attempt was cut off after the send, so the receiver may
-have it (see [Delivery and errors](./delivery-and-errors.md#a-resend-after-a-crash-is-flagged)). What
-`deliver` does decides what happens:
+have it (see [Delivery and errors](./delivery-and-errors.md#a-resend-after-a-crash-is-flagged)). It
+also holds `signal`, an `AbortSignal` that aborts when an operator halts the channel
+(`pathways channel halt`): pass it to your client to give the send up at once. The engine stops
+waiting for `deliver` either way, records no outcome, and sends the message again after the channel
+resumes. What `deliver` does decides what happens:
 
 - **it resolves**: delivered;
 - **it throws**: retried after 1 second, then 2, 4 and so on up to 5 minutes, with this destination's

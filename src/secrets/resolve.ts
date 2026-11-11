@@ -23,8 +23,15 @@ import { secretUses, type DrySkip, type SecretScope } from "./sources.js";
 /** The environment Pathways reads secrets from: `process.env`, or a stand-in in tests. */
 type Env = Readonly<Record<string, string | undefined>>;
 
-/** The built-in providers, which the resolver reads itself. */
-function builtIn(provider: string): provider is "env" | "file" {
+/**
+ * Whether `provider` is one of the built-in providers, which the resolver reads itself.
+ *
+ * @example
+ * ```ts
+ * builtIn("env"); // true
+ * ```
+ */
+export function builtIn(provider: string): provider is "env" | "file" {
   return provider === "env" || provider === "file";
 }
 
@@ -46,8 +53,15 @@ export function referenceOf(source: SecretSource): SecretReference {
   return source.secret;
 }
 
-/** The same secret, asked for the same way, has the same key. */
-function keyOf(reference: SecretReference): string {
+/**
+ * The same secret, asked for the same way, has the same key.
+ *
+ * @example
+ * ```ts
+ * keyOf({ provider: "vault", name: "lab/api", field: undefined, version: undefined });
+ * ```
+ */
+export function keyOf(reference: SecretReference): string {
   const { provider, name, field, version } = reference;
   return JSON.stringify([provider, name, field ?? null, version ?? null]);
 }
@@ -140,7 +154,16 @@ export class Secrets {
   }
 }
 
-function readBuiltIn(env: Env, reference: SecretReference): ResolvedSecret {
+/**
+ * A reference to the built-in `env` or `file` provider, read now.
+ *
+ * @throws {SecretError} naming the secret, never its value.
+ * @example
+ * ```ts
+ * readBuiltIn(process.env, { provider: "env", name: "LAB_TOKEN", field: undefined, version: undefined });
+ * ```
+ */
+export function readBuiltIn(env: Env, reference: SecretReference): ResolvedSecret {
   const ref = requestOf(reference);
   return reference.provider === "env" ? readEnvSecret(env, ref) : readFileSecret(ref);
 }
@@ -257,12 +280,20 @@ export async function resolveSecrets(
   return new Secrets(context.env, resolved);
 }
 
-/** One secret from `provider`, checked, or the problem that says why it could not be had. */
-async function resolveOne(
+/**
+ * One secret from `provider`, checked, or the problem that says why it could not be had: never a
+ * value, nor the provider's error text.
+ *
+ * @example
+ * ```ts
+ * const answer = await resolveOne(provider, reference, 10_000, {}, Date.now);
+ * ```
+ */
+export async function resolveOne(
   provider: SecretProvider,
   reference: SecretReference,
   timeoutMs: number,
-  context: ResolveContext,
+  context: Pick<ResolveContext, "signal">,
   now: () => number,
 ): Promise<ResolvedSecret | string> {
   const what = describeReference(reference);
@@ -301,8 +332,15 @@ async function resolveOne(
   return secret as ResolvedSecret;
 }
 
-/** Stops a provider under its time limit; a failure is logged by name and code, never its text. */
-async function stopProvider(
+/**
+ * Stops a provider under its time limit; a failure is logged by name and code, never its text.
+ *
+ * @example
+ * ```ts
+ * await stopProvider(provider, 10_000, logger);
+ * ```
+ */
+export async function stopProvider(
   provider: SecretProvider,
   timeoutMs: number,
   logger: Logger,
@@ -315,8 +353,15 @@ async function stopProvider(
   }
 }
 
-/** An error's name and code: never its text, which a provider's own errors may fill with anything. */
-function describeError(error: unknown): string {
+/**
+ * An error's name and code: never its text, which a provider's own errors may fill with anything.
+ *
+ * @example
+ * ```ts
+ * describeError(new SecretError("ERR_PATHWAYS_SECRET_NOT_FOUND", "lab/api")); // "SecretError ERR_PATHWAYS_SECRET_NOT_FOUND"
+ * ```
+ */
+export function describeError(error: unknown): string {
   const code = errorCode(error);
   return `${errorName(error)}${code === undefined ? "" : ` ${code}`}`;
 }

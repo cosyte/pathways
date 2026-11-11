@@ -292,7 +292,7 @@ const line = (entry: AuditEntry): string => `${entry.at} ${entry.actor} ${entry.
 
 ##### action
 
-> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"verify"`
+> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"`
 
 ##### actor
 
@@ -412,7 +412,7 @@ await store.appendAudit("noah", [{ action: "content-view", channel: "adt", messa
 
 ##### action
 
-> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"verify"`
+> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"`
 
 ##### channel?
 
@@ -448,7 +448,7 @@ const views = await store.auditEntries({ action: "content-view", since: "2026-11
 
 ##### action?
 
-> `readonly` `optional` **action?**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"verify"`
+> `readonly` `optional` **action?**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"`
 
 ##### before?
 
@@ -1431,7 +1431,7 @@ context.logger.warn({ event: "inbox-read-failed", code: "EACCES" });
 ### FakeSecret
 
 One version of a secret a [fakeSecretProvider](#fakesecretprovider-1) holds: its value, and optionally its version's
-name (by default its place in the list, from `"1"`) and when it expires.
+name (by default its place in the list, from `"1"`), when it expires and the identity that read it.
 
 #### Example
 
@@ -1444,6 +1444,12 @@ const secret: FakeSecret = { value: "synthetic-token", version: "v2" };
 ##### expiresAt?
 
 > `readonly` `optional` **expiresAt?**: `Date`
+
+##### identity?
+
+> `readonly` `optional` **identity?**: `string`
+
+The principal it answers as having read it, as [ResolvedSecret.identity](#identity-1).
 
 ##### value
 
@@ -2242,6 +2248,18 @@ Every channel with a stored message, by name.
 
 `Promise`\<`string`[]\>
 
+##### channelStates()?
+
+> `optional` **channelStates**(): `Promise`\<`Record`\<`string`, [`ChannelRunState`](#channelrunstate)\>\>
+
+Every channel an operator paused or stopped, by name; a channel missing from it runs. Optional,
+with [setChannelState](#setchannelstate): a store without them keeps a channel's state in the engine only,
+so a restart forgets it.
+
+###### Returns
+
+`Promise`\<`Record`\<`string`, [`ChannelRunState`](#channelrunstate)\>\>
+
 ##### clear()
 
 > **clear**(`messageId`, `actor`): `Promise`\<[`ClearResult`](#clearresult)\>
@@ -2778,6 +2796,26 @@ Fenced by `epoch` when it is given.
 
 `Promise`\<`void`\>
 
+##### setChannelState()?
+
+> `optional` **setChannelState**(`channel`, `state`): `Promise`\<`void`\>
+
+Sets a channel's state; `running` removes its row. Optional, with [channelStates](#channelstates).
+
+###### Parameters
+
+###### channel
+
+`string`
+
+###### state
+
+[`ChannelRunState`](#channelrunstate)
+
+###### Returns
+
+`Promise`\<`void`\>
+
 ***
 
 ### MessageSummary
@@ -3026,6 +3064,15 @@ receiver may have it already. A destination may tell the receiver so (an HTTP de
 > `readonly` **seq**: `number`
 
 Which output of that message's transform this is, from 0.
+
+##### signal?
+
+> `readonly` `optional` **signal?**: `AbortSignal`
+
+Aborted when an operator halts the channel (`pathways channel halt`) while this send is in
+flight. A destination that honours it gives up the send at once; the engine stops waiting
+either way, records no outcome, and sends the message again after the channel resumes, flagged
+as a possible duplicate when the send was marked.
 
 ***
 
@@ -3444,6 +3491,14 @@ const secret: ResolvedSecret = { value: "synthetic-token", version: "3", expires
 > `readonly` `optional` **expiresAt?**: `Date`
 
 When the value stops being good, for a lease or a short-lived credential.
+
+##### identity?
+
+> `readonly` `optional` **identity?**: `string`
+
+Who read it, when the provider can tell: the cloud principal its call ran as, such as a role's
+ARN, a managed identity's id or a service account's email. Never secret. `pathways secrets
+check` prints it, when it is printable ASCII with no space, 1 to 256 characters.
 
 ##### value
 
@@ -4431,14 +4486,15 @@ const detail: AuditDetail = { status: "transformed", queued: 2 };
 
 ### AuditEventAction
 
-> **AuditEventAction** = `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"verify"`
+> **AuditEventAction** = `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"`
 
 Every action the audit log records, as an [AuditEvent](#auditevent)'s `action`: `search` (messages
 listed), `view` (one message's details, without content), `content-view`, `replay`, `resend`,
 `clear`, `retention` (a run, with what it deleted), `config` (a configuration change seen when
 the engine started), `lease-release` (the engine lease freed by force), `migrate` (schema steps
-applied by `pathways migrate`) and `verify` (a stored message read by `pathways verify`). Kept
-equal to the audit log's own list by a test.
+applied by `pathways migrate`), `channel-pause`, `channel-resume`, `channel-stop`,
+`channel-halt` and `channel-reload` (a `pathways channel` command), and `verify` (a stored
+message read by `pathways verify`). Kept equal to the audit log's own list by a test.
 
 #### Example
 
@@ -4503,6 +4559,36 @@ Pathways exports the type only; import the class from `@cosyte/ccda` to build on
 import type { CcdaDocument, Transform } from "@cosyte/pathways";
 
 export default ((document) => (document.getPatient() ? document : null)) satisfies Transform<CcdaDocument>;
+```
+
+***
+
+### ChannelRunState
+
+> **ChannelRunState** = `"running"` \| `"paused"` \| `"stopped"`
+
+What an operator set a channel to: `running` (the default), `paused` (its source takes nothing
+in, while stored messages go on through the transform and delivery) or `stopped` (nothing of it
+runs). Kept in storage, so a restart, and every engine on the same database, honours it.
+
+#### Example
+
+```ts
+const state: ChannelRunState = "paused";
+```
+
+***
+
+### ChannelStateStore
+
+> **ChannelStateStore** = `Required`\<`Pick`\<[`MessageStore`](#messagestore), `"channelStates"` \| `"setChannelState"`\>\>
+
+The channel state methods of [MessageStore](#messagestore), both present.
+
+#### Example
+
+```ts
+const states: ChannelStateStore | undefined = channelStateStore(store);
 ```
 
 ***

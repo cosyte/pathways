@@ -5,13 +5,28 @@ import { parseArgs } from "node:util";
 import { pino, type Logger } from "pino";
 
 import { ConfigError, loadProject } from "./config/load.js";
-import type { ProjectConfig } from "./config/schema.js";
+import { parseDuration, type ChannelConfig, type ProjectConfig } from "./config/schema.js";
 import type { Env } from "./connectors/endpoint.js";
 import { EncryptionError } from "./encryption/envelope.js";
 import { ENCRYPTION_REQUIRED, type KeyProvider } from "./encryption/keys.js";
 import { rekey, rekeyComplete, type RekeyCounts } from "./encryption/rekey.js";
 import { TransformLoadError } from "./engine/channel-worker.js";
-import { Engine, errorCode } from "./engine/engine.js";
+import {
+  controlAddress,
+  controlOpenMessage,
+  ControlServer,
+  EngineNotRunning,
+  sendControl,
+  CONTROL_VERSION,
+} from "./engine/control.js";
+import {
+  Engine,
+  errorCode,
+  MAX_STOP_DEADLINE_MS,
+  STOP_DEADLINE_MS,
+  type ChannelCommand,
+  type ChannelCommandReport,
+} from "./engine/engine.js";
 import {
   healthEndpointFor,
   type EngineIdentity,
@@ -35,7 +50,7 @@ import {
 import { EXIT } from "./exit.js";
 import { HookSet } from "./extensions/hooks.js";
 import { ExtensionLoadError } from "./extensions/load.js";
-import { AuditLog, auditEvent, type AuditListener } from "./operator/audit.js";
+import { AuditLog, auditEvent, operatingSystemUser, type AuditListener } from "./operator/audit.js";
 import {
   auditCommand,
   clearCommand,
@@ -59,6 +74,7 @@ import {
 import { recordConfigChanges } from "./operator/config-audit.js";
 import { verifyCommand, type VerifySelection } from "./operator/verify.js";
 import { InitError, initProject, STARTER_CHANNEL, STARTER_KEY_FILE } from "./starter/init.js";
+import { checkSecrets, formatSecretCheck } from "./secrets/check.js";
 import { resolveSecrets, type Secrets } from "./secrets/resolve.js";
 import type { DrySkip, SecretScope } from "./secrets/sources.js";
 import { emptySqliteLog } from "./storage/dialects.js";
@@ -128,6 +144,11 @@ Commands:
                       secret or opening a connection: for a project's CI.
                       Settings written as { env: NAME } are read as start
                       reads them
+  secrets check       Resolve every secret a start reads, and wrap and unwrap
+                      a throwaway key with the key provider: prints each
+                      secret's provider, name, version, identity and expiry,
+                      never a value. Exits 0 when all resolve, 1 when any
+                      does not: a pre-deploy step
   status [name...]    Each channel's counts, retrying deliveries and failed
                       messages, read from the database
   messages            List stored messages, newest first: ids, states, times,
@@ -160,6 +181,18 @@ Commands:
   migrate             Apply the schema steps this version has and the
                       database lacks, each tagged expand or contract: expand
                       steps always, contract steps with --contract. Audited
+  channel pause <name>
+                      Ask the running engine to stop the channel's source
+                      taking messages in; stored ones go on to delivery
+  channel resume <name>
+                      Run a paused or stopped channel again
+  channel stop <name> Pause the channel, stop transforming and delivering
+                      after the message in hand, and say what it left
+  channel halt <name> As stop, but cut off the delivery in flight now; it is
+                      sent again, flagged, after a resume
+  channel reload <name>
+                      Load the channel's transform and settings anew in a
+                      fresh worker and swap it in between messages
 
 The commands that read or change stored messages open the database as start
 does, so they need the same encryption keys.
@@ -181,13 +214,15 @@ Options:
                         not see which versions other engines run: stop or
                         upgrade them first
       --force           lease release: say the lease's host is gone
+      --deadline <time> channel stop, halt: how long to wait for the work in
+                        flight, such as 30s (default 30s, at most 24d)
       --update          test: save the current outputs as the expected ones
       --print           validate: print the configuration as start reads it,
                         as JSON, with each setting read from the environment
                         and the variable it named; secrets stay references
       --json            status, messages, replay, clear, retention, audit,
-                        lease, migrate, verify: print one JSON document
-                        instead of text
+                        lease, migrate, verify, secrets check, channel: print
+                        one JSON document instead of text
       --channel <name>  messages, audit, verify: only this channel
       --status <state>  messages: only this state: received, queued, retrying,
                         delivered, dry-run, filtered, failed or cleared
@@ -210,7 +245,9 @@ Options:
                         apply none
       --action <name>   audit: only this action: search, view, content-view,
                         replay, resend, clear, retention, config,
-                        lease-release, migrate or verify
+                        lease-release, migrate, channel-pause,
+                        channel-resume, channel-stop, channel-halt,
+                        channel-reload or verify
       --message <id>    audit: only entries about this message
       --encrypt-plaintext
                         rekey: also encrypt what was stored while encryption
@@ -220,7 +257,9 @@ Options:
 
 Every replay, resend, clear, search, view and content view is written to the
 audit log with the operating system user, as are retention runs and the
-configuration changes pathways start sees. The hooks in pathways.yaml receive
+configuration changes pathways start sees. A channel command is written with
+the user the command reports; the control socket's folder, open to that user
+alone, is what limits who can send one. The hooks in pathways.yaml receive
 each entry as an audit event.
 
 Exit codes: 0 done; 1 a test failed, the engine, a command or an extension
@@ -229,8 +268,9 @@ project, rekey left a value not under the current key, a replay, resend or
 clear was refused or the message failed again, another engine holds the lease,
 the engine lost its lease, there was no lease to release, the database schema
 is one this version will not run on or migrate, verify found a difference or a
-failure, or probe found the engine not alive or not ready (probe exits only 0
-or 1); 2 the command line was not
+failure, a secret or the key provider failed secrets check, probe found the
+engine not alive or not ready (probe exits only 0 or 1), no engine runs the
+project, or a channel command was refused; 2 the command line was not
 understood; 3 the configuration is invalid; 4 a message named does not exist.
 `;
 
@@ -249,6 +289,7 @@ const OPTIONS: Readonly<Record<string, readonly OptionName[]>> = {
   start: ["once", "standby", "no-migrate", "dry-run"],
   test: ["update"],
   validate: ["print"],
+  secrets: ["json"],
   status: ["json"],
   messages: ["json", "channel", "status", "since", "until", "limit", "before", "content"],
   replay: ["json", "resend"],
@@ -260,6 +301,7 @@ const OPTIONS: Readonly<Record<string, readonly OptionName[]>> = {
   verify: ["json", "channel", "since", "ids", "samples"],
   probe: ["ready", "if-configured"],
   migrate: ["json", "contract", "dry-run"],
+  channel: ["json", "deadline"],
 };
 
 /**
@@ -326,9 +368,14 @@ export async function run(argv: readonly string[], io: CliIo): Promise<number> {
     case "validate":
       if (rest.length > 0) return usage(io);
       return validate(projectDir, values.print === true, io);
+    case "secrets":
+      if (rest.length !== 1 || rest[0] !== "check") return usage(io);
+      return secretsCheck(projectDir, values.json === true, io);
     case "rekey":
       if (rest.length > 0) return usage(io);
       return rekeyStore(projectDir, values["encrypt-plaintext"] === true, io);
+    case "channel":
+      return channelCommand(projectDir, rest, values, io);
     case "verify": {
       const parsed = parseVerify(rest, values, io);
       if (typeof parsed === "number") return parsed;
@@ -679,6 +726,7 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
     }
     return await runEngine(engine, project, store, audit, io, {
       once,
+      env,
       signal,
       lease,
       // A standby's endpoint is listening already.
@@ -796,6 +844,7 @@ async function runEngine(
   io: CliIo,
   run: {
     readonly once: boolean;
+    readonly env: Env;
     readonly signal: AbortSignal;
     readonly lease: EngineLease | undefined;
     readonly health: HealthEndpoint | undefined;
@@ -830,6 +879,7 @@ async function runEngine(
   }
   run.onActive();
 
+  let control: ControlServer | undefined;
   try {
     try {
       // After the engine has started, so its hooks receive these entries too.
@@ -837,6 +887,11 @@ async function runEngine(
     } catch {
       io.err("pathways: the audit log could not be written.\n");
       return EXIT.failed;
+    }
+    // The control socket `pathways channel` asks through. A single pass opens none.
+    if (!run.once) {
+      control = await openControl(engine, project, run.env, io);
+      if (control === undefined) return EXIT.failed;
     }
     if (!(await listenHealth(run.health, io))) return EXIT.failed;
     run.onRunning();
@@ -870,10 +925,157 @@ async function runEngine(
     return EXIT.failed;
   } finally {
     run.onStopping();
+    await control?.stop();
     await engine.stop();
   }
   // The lease was lost between passes: the run ended at once, before the next check.
   if (run.lease?.lossReason !== undefined) return leaseLost(io, run.lease.lossReason);
+  return EXIT.ok;
+}
+
+/**
+ * Opens the project's control socket, answering each request with the engine's channel command.
+ * A reload reads the project's configuration anew. Says why and returns undefined when it cannot:
+ * another engine runs this project on this machine, or the socket's folder is not this user's.
+ */
+async function openControl(
+  engine: Engine,
+  project: ProjectConfig,
+  env: Env,
+  io: CliIo,
+): Promise<ControlServer | undefined> {
+  const reloadConfig = async (
+    name: string,
+  ): Promise<{
+    readonly config: ChannelConfig | "invalid-config" | "not-configured";
+    readonly transformConfig?: ProjectConfig["config"];
+  }> => {
+    let next: ProjectConfig;
+    try {
+      next = await loadProject(project.root, { env });
+    } catch (error) {
+      /* v8 ignore next: loadProject rejects only with ConfigError */
+      if (!(error instanceof ConfigError)) throw error;
+      return { config: "invalid-config" };
+    }
+    const channel = next.channels.find((c) => c.name === name);
+    if (channel === undefined) return { config: "not-configured" };
+    return { config: channel, transformConfig: next.config };
+  };
+  let server: ControlServer;
+  try {
+    server = new ControlServer(controlAddress(project.root, controlSystem(env)), async (request) =>
+      engine.command(request.command, request.channel, {
+        actor: request.user,
+        ...(request.deadlineMs === undefined ? {} : { deadlineMs: request.deadlineMs }),
+        ...(request.command === "reload" ? await reloadConfig(request.channel) : {}),
+      }),
+    );
+    await server.start();
+  } catch (error) {
+    io.err(controlOpenMessage(error));
+    return undefined;
+  }
+  return server;
+}
+
+/** Where the control socket's folder goes, from the environment the CLI was given. */
+function controlSystem(env: Env): { readonly runtimeDir: string } {
+  return { runtimeDir: env["XDG_RUNTIME_DIR"] ?? "" };
+}
+
+const CHANNEL_COMMANDS: readonly ChannelCommand[] = ["pause", "resume", "stop", "halt", "reload"];
+
+/** What `pathways channel` says when the engine refused a command. */
+const CHANNEL_REFUSALS: Readonly<Record<NonNullable<ChannelCommandReport["refused"]>, string>> = {
+  "no-such-channel": "the engine runs no channel of that name",
+  draining: "a stop is under way on that channel; reload it once it has stopped",
+  "invalid-config":
+    'the configuration is invalid, so the running one was kept; "pathways validate" says why',
+  "not-configured": "that channel is no longer in the configuration; the running one was kept",
+  "needs-restart": "these settings take effect only when the engine is restarted",
+  "transform-load-failed": "the new transform did not load, so the running one was kept",
+  "state-not-stored":
+    "the database did not store the new state, so the channel was put back as it was; try again",
+};
+
+/**
+ * `pathways channel <command> <name>`: asks the engine running this project, through its control
+ * socket, to pause, resume, stop, halt or reload one channel, naming the operating system user.
+ */
+async function channelCommand(
+  projectDir: string,
+  rest: readonly string[],
+  values: Values,
+  io: CliIo,
+): Promise<number> {
+  const [command, name, ...more] = rest;
+  if (
+    command === undefined ||
+    name === undefined ||
+    more.length > 0 ||
+    !CHANNEL_COMMANDS.includes(command as ChannelCommand)
+  ) {
+    return invalid(io, "channel takes a command (pause, resume, stop, halt or reload) and a name.");
+  }
+  if (!isChannelName(name))
+    return invalid(io, "a channel name is lowercase letters, digits and hyphens.");
+  const drains = command === "stop" || command === "halt";
+  if (values.deadline !== undefined && !drains) return usage(io);
+  const deadlineMs = values.deadline === undefined ? undefined : parseDuration(values.deadline);
+  if (values.deadline !== undefined && deadlineMs === undefined) {
+    return invalid(io, "--deadline takes a duration, such as 30s or 2m.");
+  }
+  if (deadlineMs !== undefined && deadlineMs > MAX_STOP_DEADLINE_MS) {
+    return invalid(io, "--deadline is at most 24 days, the longest wait a timer holds.");
+  }
+  let reply;
+  try {
+    reply = await sendControl(
+      controlAddress(projectDir, controlSystem(io.env ?? process.env)),
+      {
+        v: CONTROL_VERSION,
+        command: command as ChannelCommand,
+        channel: name,
+        user: operatingSystemUser(),
+        ...(deadlineMs === undefined ? {} : { deadlineMs }),
+      },
+      (deadlineMs ?? (drains ? STOP_DEADLINE_MS : 0)) + 30_000,
+    );
+  } catch (error) {
+    if (error instanceof EngineNotRunning) {
+      io.err(
+        `pathways: engine not running: nothing answers on this project's control socket (${error.code}).\n`,
+      );
+      return EXIT.failed;
+    }
+    io.err(`pathways: the engine could not be asked (${errorCode(error) ?? "error"}).\n`);
+    return EXIT.failed;
+  }
+  if (!reply.ok) {
+    io.err(`pathways: the engine refused the request (${reply.error}).\n`);
+    return EXIT.failed;
+  }
+  const { report } = reply;
+  if (values.json === true) io.out(`${JSON.stringify(report)}\n`);
+  if (report.refused !== undefined) {
+    const changed = report.changed === undefined ? "" : `: ${report.changed.join(", ")}`;
+    const failure = report.failure === undefined ? "" : ` (${report.failure})`;
+    io.err(`pathways: channel ${name}: ${CHANNEL_REFUSALS[report.refused]}${changed}${failure}.\n`);
+    return EXIT.failed;
+  }
+  if (values.json !== true) {
+    const lines = [
+      `${name}: ${report.state ?? "running"}${command === "reload" ? " (reloaded)" : ""}`,
+    ];
+    if (report.drained === false) lines.push("  work was still in flight at the deadline");
+    if (report.left !== undefined) {
+      lines.push(
+        `  left: ${report.left.toTransform} to transform, ${report.left.toDeliver} to deliver, after a resume`,
+      );
+    }
+    io.out(`${lines.join("\n")}\n`);
+  }
   return EXIT.ok;
 }
 
@@ -943,6 +1145,26 @@ async function validate(projectDir: string, print: boolean, io: CliIo): Promise<
     `pathways: the configuration is valid: ${names.length} channel${names.length === 1 ? "" : "s"} (${names.join(", ")}).\n`,
   );
   return EXIT.ok;
+}
+
+/**
+ * `pathways secrets check`: loads the project as `validate` does, then resolves every secret a start
+ * reads and runs a throwaway key through the key provider. Prints what resolved, never a value: as
+ * text, or with `--json` as one JSON document. Exits 0 when everything resolved, 1 when anything did
+ * not, 3 when the configuration is invalid.
+ */
+async function secretsCheck(projectDir: string, json: boolean, io: CliIo): Promise<number> {
+  const project = await load(projectDir, io);
+  if (project === undefined) return EXIT.config;
+  if (project.encryption === undefined) {
+    reportConfigError(new ConfigError([ENCRYPTION_REQUIRED]), io);
+    return EXIT.config;
+  }
+  // Providers log to stderr, so stdout holds only the report.
+  const env = io.env ?? process.env;
+  const check = await checkSecrets(project, { env, logger: io.logger ?? pino(STDERR_LOG, stderr) });
+  io.out(json ? `${JSON.stringify(check, null, 2)}\n` : formatSecretCheck(check));
+  return check.ok ? EXIT.ok : EXIT.failed;
 }
 
 /** The text `validate --print` shows in place of a masked query string. */
@@ -1462,6 +1684,7 @@ function parseCli(argv: readonly string[]) {
       action: { type: "string" },
       message: { type: "string" },
       "encrypt-plaintext": { type: "boolean" },
+      deadline: { type: "string" },
       ids: { type: "string" },
       samples: { type: "string" },
     },
