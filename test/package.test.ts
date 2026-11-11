@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -372,10 +373,28 @@ describe("the image's version tag", () => {
     "Pull the image by digest and check both platforms and their attestations",
   ];
 
-  /** The steps that can put a tag on an image in a registry. */
+  /**
+   * The steps that can put a tag on an image in a registry: a copy or a tag command, or a build that
+   * pushes (`--push`, or an output that pushes to a registry).
+   */
   const writesTag = (s: Step): boolean =>
     s.with?.["tags"] !== undefined ||
-    /imagetools create|docker (image )?push|docker tag|crane|oras|skopeo/.test(s.run ?? "");
+    /imagetools create|docker (image )?push|docker tag|crane|oras|skopeo/.test(s.run ?? "") ||
+    /--push\b|push=true|type=registry/.test(s.run ?? "");
+
+  it("counts a build that pushes as a step that writes a tag", () => {
+    for (const run of [
+      'docker buildx build --push --tag "$IMAGE:$VERSION" .',
+      'docker buildx build --platform linux/amd64,linux/arm64 \\\n  --tag "$IMAGE:$VERSION" --push .',
+      'docker buildx build --tag "$IMAGE:$VERSION" --output type=registry .',
+      'docker buildx build --output type=image,name="$IMAGE:$VERSION",push=true .',
+      'docker push "$IMAGE:$VERSION"',
+    ]) {
+      expect(writesTag({ run }), run).toBe(true);
+    }
+    // A build loaded into the runner's own Docker writes no tag in a registry.
+    expect(writesTag({ run: 'docker buildx build --load --tag "pathways:$arch" .' })).toBe(false);
+  });
 
   it("is written only after the signature and the attestations are checked", () => {
     const names = publish.steps.map((s) => s.name ?? s.uses?.split("@")[0]);
@@ -472,6 +491,88 @@ describe("the image's version tag", () => {
         const result = recheck(answer, 1);
         expect(result.status, answer).not.toBe(0);
         expect(result.outputs, answer).not.toContain("absent=true");
+      }
+    });
+  });
+
+  // The tag step's own script, with a stand-in `docker` that holds a registry with the pushed digest
+  // and gives the given answer for the version tag until the step writes it.
+  describe.skipIf(process.platform === "win32")("the look-up just before the tag", () => {
+    const INDEX = '{"schemaVersion":2,"manifests":[]}';
+    const DIGEST = `sha256:${createHash("sha256").update(INDEX).digest("hex")}`;
+    const FAKE_DOCKER = [
+      "#!/bin/sh",
+      'echo "$*" >> "$FAKE_DIR/calls"',
+      'case "$*" in',
+      '  *"create --dry-run"*) printf \'%s\' "$FAKE_INDEX"; exit 0 ;;',
+      '  *"imagetools create"*) touch "$FAKE_DIR/tagged"; exit 0 ;;',
+      "esac",
+      'if [ -e "$FAKE_DIR/tagged" ]; then printf \'%s\' "$FAKE_INDEX"; exit 0; fi',
+      "printf '%s\\n' \"$FAKE_OUT\"",
+      'exit "$FAKE_STATUS"',
+      "",
+    ].join("\n");
+
+    function tagWith(output: string, status: number): { status: number | null; tagged: boolean } {
+      const dir = mkdtempSync(join(tmpdir(), "pathways-tag-"));
+      try {
+        const bin = join(dir, "bin");
+        mkdirSync(bin);
+        writeFileSync(join(bin, "docker"), FAKE_DOCKER);
+        chmodSync(join(bin, "docker"), 0o755);
+        writeFileSync(join(dir, "calls"), "");
+        const summary = join(dir, "summary");
+        writeFileSync(summary, "");
+        const result = spawnSync("bash", ["-c", step(publish, TAG).run ?? "exit 0"], {
+          env: {
+            ...process.env,
+            PATH: `${bin}:${process.env["PATH"] ?? ""}`,
+            IMAGE: "ghcr.io/cosyte/pathways",
+            VERSION: "0.0.0-example",
+            DIGEST,
+            RUNNER_TEMP: dir,
+            GITHUB_STEP_SUMMARY: summary,
+            FAKE_DIR: dir,
+            FAKE_INDEX: INDEX,
+            FAKE_OUT: output,
+            FAKE_STATUS: String(status),
+          },
+          encoding: "utf8",
+        });
+        const calls = readFileSync(join(dir, "calls"), "utf8").split("\n");
+        const tagged = calls.some((c) => c.includes("imagetools create --tag"));
+        return { status: result.status, tagged };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+
+    it("tags the checked digest when the registry has no such tag", () => {
+      for (const answer of [
+        "ERROR: ghcr.io/cosyte/pathways:0.0.0-example: not found",
+        "ERROR: manifest unknown",
+      ]) {
+        expect(tagWith(answer, 1), answer).toEqual({ status: 0, tagged: true });
+      }
+    });
+
+    it("refuses to replace a version tag that exists", () => {
+      const result = tagWith("Name: ghcr.io/cosyte/pathways:0.0.0-example", 0);
+      expect(result.status).not.toBe(0);
+      expect(result.tagged).toBe(false);
+    });
+
+    // The package exists by this step, so "denied" no longer means "nothing published yet".
+    it("refuses on a denied answer, and on any other answer it does not know", () => {
+      for (const answer of [
+        "ERROR: denied: denied",
+        "ERROR: unexpected status from HEAD request: 503 Service Unavailable",
+        "ERROR: toomanyrequests: retry later",
+        "",
+      ]) {
+        const result = tagWith(answer, 1);
+        expect(result.status, answer).not.toBe(0);
+        expect(result.tagged, answer).toBe(false);
       }
     });
   });
