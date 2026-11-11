@@ -1079,6 +1079,18 @@ const lease = z
       "The engine lease, which one engine per database holds, so a second is refused or waits as a standby.",
   });
 
+/** How `pathways migrate` treats contract steps. */
+const migrationsBlock = z
+  .strictObject({
+    rollbackWindow: duration(
+      "How long after the schema last changed pathways migrate --contract waits before it applies a contract step, so the Pathways version before can still be started again: a duration such as 7d, or a number of milliseconds. Default 0, no wait.",
+    ).optional(),
+  })
+  .meta({
+    description:
+      "Schema changes: expand steps are applied at start, contract steps by pathways migrate --contract.",
+  });
+
 /** `pathways.yaml` at the project root. Every key is optional. */
 export const projectSchema = z
   .strictObject({
@@ -1091,6 +1103,7 @@ export const projectSchema = z
       .optional(),
     health: health.optional(),
     lease: lease.optional(),
+    migrations: migrationsBlock.optional(),
   })
   .meta({
     title: "pathways.yaml",
@@ -1872,6 +1885,22 @@ export interface LeaseConfig {
   readonly standby: boolean;
 }
 
+/**
+ * How `pathways migrate` treats contract steps, from `pathways.yaml`'s `migrations` block.
+ *
+ * @example
+ * ```ts
+ * const migrations: MigrationsConfig = { rollbackWindowMs: 7 * 86_400_000 };
+ * ```
+ */
+export interface MigrationsConfig {
+  /**
+   * How long after the schema last changed `pathways migrate --contract` waits before it applies a
+   * contract step, in milliseconds; 0 for no wait.
+   */
+  readonly rollbackWindowMs: number;
+}
+
 /** A whole project: the engine settings and every channel under `channels/`. */
 export interface ProjectConfig {
   readonly root: string;
@@ -1889,6 +1918,8 @@ export interface ProjectConfig {
   readonly health: HealthConfig | undefined;
   /** The engine lease's time to live, and whether to start as a standby. */
   readonly lease: LeaseConfig;
+  /** How `pathways migrate` treats contract steps. */
+  readonly migrations: MigrationsConfig;
   /**
    * How stored messages are encrypted, or undefined when `pathways.yaml` does not say. `pathways
    * start` refuses to run without it; `pathways test` stores nothing and does not need it.
