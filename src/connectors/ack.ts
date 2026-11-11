@@ -1,7 +1,20 @@
-import { buildAck, parseHL7, type AckErrorDetail, type Hl7Message } from "@cosyte/hl7";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
+
+import type * as Hl7 from "@cosyte/hl7";
+import type { AckErrorDetail, Hl7Message } from "@cosyte/hl7";
 
 // The ACK an MLLP source sends, and the seam for building a different one. Kept apart from the MLLP
 // connectors so the package entry point, which exports it, does not load the transport.
+//
+// `@cosyte/hl7` LOADS ON THE FIRST ACK. The package entry exports `defaultAckBuilder`, and nothing
+// else in it needs the library, so importing `@cosyte/pathways` does not load it (about 700 KiB of
+// code). It is loaded synchronously, since the builder is, and as the very module an `import` of
+// `@cosyte/hl7` gives, so the `Hl7Message` a caller parsed is an instance of the class `buildAck`
+// checks it against. ES modules resolve the library's `import` entry with `import.meta.resolve` and
+// load it with `require`, which for an ES module returns the instance already loaded; the CommonJS
+// build, which has no `import.meta.resolve`, requires the library's CommonJS entry, as a static
+// import compiled to CommonJS did before.
 
 /**
  * The ACK codes an MLLP source answers with.
@@ -98,7 +111,9 @@ const PLACEHOLDER_HEADER = "MSH|^~\\&|||||||ACK||P|2.5.1\r";
  * ```
  */
 export function defaultAckBuilder(request: AckRequest): Uint8Array {
-  const inbound = request.header ?? parseHL7(PLACEHOLDER_HEADER);
+  const header = request.header;
+  const { buildAck, parseHL7 } = hl7();
+  const inbound = header ?? parseHL7(PLACEHOLDER_HEADER);
   const error = errorDetail(request);
   const ack = buildAck(
     inbound,
@@ -106,6 +121,20 @@ export function defaultAckBuilder(request: AckRequest): Uint8Array {
   );
   const latin1 = inbound.get("MSH.18")?.startsWith("8859") === true;
   return Buffer.from(ack.toString(), latin1 ? "latin1" : "utf8");
+}
+
+let library: typeof Hl7 | undefined;
+
+/** `@cosyte/hl7`, loaded on first use, as the module an `import` of it gives. */
+function hl7(): typeof Hl7 {
+  if (library !== undefined) return library;
+  const require = createRequire(import.meta.url);
+  const resolve = (import.meta as { resolve?: (specifier: string) => string }).resolve;
+  /* v8 ignore next 3 -- the CommonJS build's branch: the tests run the ES module source */
+  library = (
+    resolve === undefined ? require("@cosyte/hl7") : require(fileURLToPath(resolve("@cosyte/hl7")))
+  ) as typeof Hl7;
+  return library;
 }
 
 function errorDetail(request: AckRequest): AckErrorDetail | undefined {
