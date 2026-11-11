@@ -215,7 +215,7 @@ describe("SftpLocation, connecting", () => {
 
   it("gives up a connection that takes longer than its deadline, and tries again next time", async () => {
     fakeServer.stallConnect = true;
-    const location = sftp({ connectTimeoutMs: 20 });
+    const location = sftp({ connectTimeoutMs: 300 });
     expect(await failure(location.list("/inbox"))).toMatchObject({
       code: "ERR_PATHWAYS_SFTP_TIMEOUT",
       down: true,
@@ -248,7 +248,7 @@ describe("SftpLocation, connecting", () => {
 
 describe("SftpLocation, each request", () => {
   it("fails a request the server never answers at its deadline, drops the connection, and connects again", async () => {
-    const location = sftp({ timeoutMs: 20 });
+    const location = sftp({ timeoutMs: 300 });
     await location.list("/inbox");
     fakeServer.stall = (op) => op === "readdir";
     expect(await failure(location.list("/inbox"))).toMatchObject({
@@ -262,18 +262,18 @@ describe("SftpLocation, each request", () => {
   });
 
   it("ignores an answer that comes after the deadline", async () => {
-    const location = sftp({ timeoutMs: 20 });
+    const location = sftp({ timeoutMs: 300 });
     await location.list("/inbox");
-    fakeServer.late = (op) => (op === "readdir" ? 60 : undefined);
+    fakeServer.late = (op) => (op === "readdir" ? 600 : undefined);
     expect(await failure(location.list("/inbox"))).toMatchObject({
       code: "ERR_PATHWAYS_SFTP_TIMEOUT",
     });
-    await new Promise((resolve) => setTimeout(resolve, 80));
+    await new Promise((resolve) => setTimeout(resolve, 700));
   });
 
   it("forgets a connection closed while it was being made", async () => {
     fakeServer.stallConnect = true;
-    const location = sftp({ connectTimeoutMs: 20 });
+    const location = sftp({ connectTimeoutMs: 300 });
     const waiting = failure(location.list("/inbox"));
     await location.close();
     expect(await waiting).toMatchObject({ code: "ERR_PATHWAYS_SFTP_TIMEOUT" });
