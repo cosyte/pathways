@@ -146,7 +146,7 @@ The `leases` table comes with migration `0006-leases`, which only adds the table
 while deliveries are in flight, and an older Pathways never reads it. It has no rollback step; to
 remove it, stop every engine and drop the table.
 
-The `channel_states` table, migration `0008-channel-states`, holds each channel an operator paused or
+The `channel_states` table, migration `0009-channel-states`, holds each channel an operator paused or
 stopped (see [pause, stop and reload a channel](./pause-stop-and-reload-a-channel.md)); a channel
 with no row runs. It too only adds a table, and has no rollback step: dropping it, with every engine
 stopped, sets every channel running again. A custom store may implement `channelStates` and

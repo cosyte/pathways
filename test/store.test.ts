@@ -463,7 +463,7 @@ describe("Store on SQLite files the first slice made", () => {
       "0005-send-markers",
       "0006-leases",
       "0007-schema-info",
-      "0008-channel-states",
+      "0009-channel-states",
     ]);
     db.close();
   });

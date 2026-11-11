@@ -225,7 +225,7 @@ interface LeasesTable {
 
 /**
  * Each channel an operator paused or stopped, one row per channel: a channel with no row runs.
- * Every engine on the database reads it at the top of each pass. Since 0008.
+ * Every engine on the database reads it at the top of each pass. Since 0009.
  */
 interface ChannelStatesTable {
   channel: string;
@@ -1315,7 +1315,7 @@ export function migrations(kind: StorageKind): Record<string, SchemaStep> {
           .execute();
       },
     },
-    "0008-channel-states": {
+    "0009-channel-states": {
       // Expand only: a new table, which an older Pathways never reads. A channel with no row runs,
       // so the table starts empty. To roll it back, stop every engine and drop the table; every
       // channel then runs, and nothing else refers to it.
