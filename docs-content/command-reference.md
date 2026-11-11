@@ -86,15 +86,20 @@ Runs each channel's `tests/` inputs through its transform and compares the outpu
 ## pathways validate
 
 ```text
-pathways validate
+pathways validate [--print]
 ```
 
 Checks `pathways.yaml` and every `channel.yaml` as `start` does before it reads a secret, opens the
 database or listens: every key and the rules between keys, that the transform, module, hook and ACK
 builder files they name exist, and that `pathways.yaml` sets `encryption`. A problem is printed as
 `start` prints it, and the exit code is 3; a valid project prints how many channels it has and exits 0. It reads no secret, TLS file or database, so it runs in a project's CI without them; `start`
-still checks those when it runs. See
+still checks those when it runs. A setting written as `{ env: NAME }` is read from the environment as
+`start` reads it, so an unset variable with no default is a problem here too. See
 [Check configuration in an editor and in CI](./check-configuration.md).
+
+| Option    | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--print` | print the configuration as `start` reads it, as one JSON document, in place of the summary: every default filled in, every path absolute, every [setting from the environment](./configuration-reference.md#settings-from-the-environment) resolved and listed under `environment` with its variable. Secrets stay the references `start` reads them from, and the query string of a URL read from the environment shows as `?(hidden)` |
 
 ## pathways status
 
