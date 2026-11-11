@@ -66,6 +66,14 @@ class FakeClock {
     return this.waits.size;
   }
 
+  /**
+   * Whether a wait is parked until `at`: the engine loop's, when `at` is when it should wake next,
+   * which says its pass is over and it is idle.
+   */
+  parkedUntil(at: number): boolean {
+    return [...this.waits].some((entry) => entry.at === at);
+  }
+
   /** Moves the time on by `ms`, firing each wait due by then. */
   advance(ms: number): void {
     this.now += ms;
@@ -211,7 +219,8 @@ describe("a schedule per polled source", () => {
     void run(engine);
 
     // At start the interval source passes at once; cron's first time is still to come.
-    await eventually(() => often.polledAt.length === 1 && clock.parked > 0);
+    await eventually(() => clock.parkedUntil(AT + 10_000));
+    expect(often.polledAt).toEqual([AT]);
     expect(nightly.polledAt).toEqual([]);
 
     // Ten seconds after its last pass ended, and not before.
@@ -220,7 +229,7 @@ describe("a schedule per polled source", () => {
     expect(often.polledAt).toEqual([AT]);
     often.inbox.push("SYNTH-1");
     clock.advance(1);
-    await eventually(() => out.sent.length === 1);
+    await eventually(() => out.sent.length === 1 && clock.parkedUntil(AT + 20_000));
     expect(often.polledAt).toEqual([AT, AT + 10_000]);
 
     // 02:00 in Chicago on 12 November is 08:00 UTC: the cron source's first pass, then a day on.
@@ -244,7 +253,7 @@ describe("a schedule per polled source", () => {
       "  pollInterval: 1s\n",
     );
     void run(engine);
-    await eventually(() => once.polledAt.length === 1 && clock.parked > 0);
+    await eventually(() => once.polledAt.length === 1 && clock.parkedUntil(AT + 1_000));
     for (let i = 0; i < 5; i += 1) {
       clock.advance(1_000);
       await new Promise((resolve) => setTimeout(resolve, 10));
@@ -262,7 +271,7 @@ describe("a schedule per polled source", () => {
       "  pollInterval: 2s\n",
     );
     void run(engine);
-    await eventually(() => plain.polledAt.length === 1 && clock.parked > 0);
+    await eventually(() => plain.polledAt.length === 1 && clock.parkedUntil(AT + 2_000));
     clock.advance(2_000);
     await eventually(() => plain.polledAt.length === 2);
     expect(plain.polledAt).toEqual([AT, AT + 2_000]);
@@ -277,7 +286,7 @@ describe("a schedule per polled source", () => {
       clock,
     );
     void run(engine);
-    await eventually(() => source.polledAt.length === 1 && clock.parked > 0);
+    await eventually(() => source.polledAt.length === 1 && clock.parkedUntil(AT + 1_000));
     await engine.command("pause", "paused", { actor: "synthetic-operator" });
     clock.advance(5_000);
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -320,21 +329,23 @@ describe("a pass's deadline", () => {
       clock,
     );
     void run(engine);
-    await eventually(() => hung.polledAt.length === 1 && busy.polledAt.length === 1);
+    await eventually(() => hung.polledAt.length === 1 && clock.parkedUntil(AT + 1_000));
 
     // The hung pass holds the other channel up not at all.
     busy.inbox.push("SYNTH-1");
     clock.advance(1_000);
-    await eventually(() => out.sent.length === 1);
+    await eventually(() => out.sent.length === 1 && clock.parkedUntil(AT + 2_000));
     busy.inbox.push("SYNTH-2");
     clock.advance(1_000);
-    await eventually(() => out.sent.length === 2);
+    await eventually(() => out.sent.length === 2 && clock.parkedUntil(AT + 3_000));
     expect(named(events, "poll-deadline")).toEqual([]);
     expect(hung.signals[0]?.aborted).toBe(false);
 
     // At its deadline the pass is cut off: its signal aborts and its sink takes nothing more in.
     clock.advance(58_000);
-    await eventually(() => named(events, "poll-deadline").length === 1);
+    await eventually(
+      () => named(events, "poll-deadline").length === 1 && clock.parkedUntil(AT + 61_000),
+    );
     expect(named(events, "poll-deadline")[0]).toMatchObject({
       channel: "hung",
       deadlineMs: 60_000,
@@ -346,7 +357,9 @@ describe("a pass's deadline", () => {
 
     // Its call has not returned: the next due pass is refused, not started beside it.
     clock.advance(10_000);
-    await eventually(() => named(events, "poll-overlap").length === 1);
+    await eventually(
+      () => named(events, "poll-overlap").length === 1 && clock.parkedUntil(AT + 71_000),
+    );
     expect(named(events, "poll-overlap")[0]).toMatchObject({ channel: "hung" });
     expect(hung.polledAt).toHaveLength(1);
 
@@ -413,7 +426,7 @@ describe("a pass's deadline", () => {
       clock,
     );
     const running = run(engine);
-    await eventually(() => calls === 1 && clock.parked > 0);
+    await eventually(() => calls === 1 && clock.parkedUntil(AT + 5_000));
     clock.advance(5_000);
     await expect(running).rejects.toMatchObject({ code: "ESYNTH" });
   });

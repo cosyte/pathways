@@ -315,8 +315,8 @@ destinations:
 A mapping names exactly one of `every`, `cron` and `onStart`, and may add `deadline` (a duration,
 `5m` by default). `cron` takes five fields (minute, hour, day of month, month, day of week), parsed
 by [croner](https://github.com/Hexagon/croner); `timezone` is an IANA name such as
-`America/Chicago`, `UTC` by default, and goes only with `cron`. `every`, `cron`, `timezone` and
-`deadline` each take an environment reference.
+`America/Chicago`, `UTC` by default, and goes only with `cron`. Each key of the mapping
+takes an environment reference.
 
 - A pass never overlaps itself: a pass that comes due while the last one's `poll` call has not
   returned is skipped, logged as `poll-overlap`, and the next is scheduled as usual.
@@ -418,8 +418,8 @@ destinations:
     retry: { limit: 10, jitter: full }
 ```
 
-| Key | Type | Default | Meaning |
-| --- | --- | --- | --- |
+| Key      | Type    | Default | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| -------- | ------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `dryRun` | boolean | `false` | transform and record each output, mark its delivery `dry-run`, and never send it: no connector is built, so no TLS file is read and no connection opened, and none of its secrets is read or resolved at start, a provider's (`secret:`) included, so a missing or expired one does not stop the start. Takes an environment reference. When `dryRun` is read from an environment variable, setting that variable to `false` makes the destination send for real, and the audit log does not record that change |
 
 A `file` or `module` destination may also set `timeout`, a duration (`30s` by default): how long one

@@ -1087,10 +1087,9 @@ const pollBlock = z
               "The time zone cron reads its times in, such as America/Chicago. Default UTC.",
           }),
         ).optional(),
-        onStart: z
-          .literal(true)
-          .meta({ description: "One pass when the engine starts, and no other." })
-          .optional(),
+        onStart: envable(
+          z.literal(true).meta({ description: "One pass when the engine starts, and no other." }),
+        ).optional(),
         deadline: pollDuration(
           "How long one pass may run before it is cut off and its source takes nothing more in: a duration such as 2m, or a number of milliseconds. Default 5m.",
         ).optional(),
