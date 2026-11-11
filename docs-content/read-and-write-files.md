@@ -78,6 +78,16 @@ claimed. Give each channel a folder of its own when every file must reach one ch
 Write files into the folder by writing them elsewhere on the same disk and moving them in, or rely on
 `minAge` being longer than a write takes.
 
+### Put the folder on a file system that keeps file ids
+
+The source checks each move by the file's id, its device and inode number. FAT and exFAT, as on many
+USB drives and memory cards, can give a file a new id when it moves between folders, on Windows and
+macOS in particular, so that check could not tell one file from another. Before its first claim, the
+source moves an empty file of its own inside `.claimed/` to find out. Where the id changes, it claims
+nothing, and each pass logs `source-read-failed` with `ERR_PATHWAYS_FILE_ID_UNSTEADY`; the files
+stay where they are. Put `dir` on NTFS, APFS, ext4, XFS or another file system that keeps a file's
+id when it moves, and restart.
+
 ## Choose which files a source takes
 
 By default the source takes every regular file in `dir` itself that holds at least one byte and
@@ -108,9 +118,12 @@ destinations:
   `*_*_*_*_*.hl7`. Each run stops after 50 ms, and that file is left where it is and logged as
   `source-read-failed` with `ERR_SCRIPT_EXECUTION_TIMEOUT`. The 50 ms are time on the clock, so a
   busy host can stop a harmless run too: the file is tried again on the next pass, and after three
-  timeouts in a row at longer and longer waits, up to every 64 passes, each logged again. Write a
-  regex with no nested repeat, and a glob with few `*` in a segment (`FAC_*.hl7` rather than
-  `*_*_*_*_*.hl7`).
+  timeouts in a row at longer and longer waits, up to every 64 passes, each logged again. One pass
+  spends at most 500 ms running patterns: the paths it has no time left for wait for the next pass,
+  which runs the paths that have waited longest first, so many such names slow the source down
+  without stopping it, and a file dropped among them is still taken. A path's result is kept while
+  its file is there, so the patterns run on each path once, not on every pass. Write a regex with no
+  nested repeat, and a glob with few `*` in a segment (`FAC_*.hl7` rather than `*_*_*_*_*.hl7`).
 - **`recursive: true`** reads the subfolders of `dir` as well. It never reads `.claimed/`,
   `processed/` (in `dir` itself) or `errorDir`. A file's path from `dir` goes into its claimed name
   and its idempotency key, so `wards/east/a.hl7` and `wards/west/a.hl7` are two messages that never
@@ -121,7 +134,14 @@ destinations:
   is open, and before it is moved into `errorDir` or a marker is deleted, the source checks that
   its folder, with every link resolved, is still `dir` or under it, and that the file is still the
   one it opened or found. A file that fails the check stays and is logged as `source-read-failed`
-  (or `source-file-set-aside`) with the code `ESTALE`.
+  (or `source-file-set-aside`) with the code `ESTALE`. The source checks each move again once it
+  is made: a file it moved that is not the one it checked goes back where it came from, by a hard
+  link and an unlink, so it never replaces a file put there since, and is logged with `ESTALE`. A
+  file that cannot go back (another file is at that name, or its folder is gone) waits in
+  `.claimed/` under a name that starts with `refused-`, is logged with
+  `ERR_PATHWAYS_FILE_HELD`, and is never stored: see
+  [Troubleshooting](./troubleshooting.md#a-file-in-the-inbox-is-not-picked-up). Such a file is never
+  taken while the source runs, wherever a later swap leaves it.
 - **`ignoreDot: false`** reads files and folders whose name starts with a dot, which are left by
   default. `.claimed/` is never read.
 - **`minSize`** (default `1B`) leaves a smaller file where it is. An empty file is left by default:

@@ -1,3 +1,4 @@
+import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 
 import { Ajv } from "ajv";
@@ -14,7 +15,7 @@ import {
   type ProjectConfig,
 } from "../src/config/schema.js";
 import { AuditLog } from "../src/operator/audit.js";
-import { recordConfigChanges } from "../src/operator/config-audit.js";
+import { configFingerprints, recordConfigChanges } from "../src/operator/config-audit.js";
 import { Store } from "../src/storage/store.js";
 import { captureLogger, cleanUp, makeProject } from "./helpers.js";
 
@@ -427,6 +428,27 @@ describe("the config audit", () => {
       (await store.auditEntries({ action: "config", limit: 50 })).items,
     );
     expect(entries).not.toContain("3s");
+  });
+
+  // A folder in the transform's place cannot be read on any system, where a file's mode cannot make
+  // it unreadable on Windows: so this runs everywhere, beside the test that locks a file by its mode.
+  it("fingerprints a file it cannot read as unreadable, and a project with no environment list", async () => {
+    const root = await makeProject({
+      "pathways.yaml": "defaults:\n  timeout: 3s\n",
+      "channels/adt/channel.yaml": `${CHANNEL}transform: ./transform.ts\n`,
+      "channels/adt/transform.ts": "export default (msg: unknown): unknown => msg;\n",
+    });
+    const project = await loadProject(root, { env: {} });
+    await rm(join(root, "channels/adt/transform.ts"));
+    await mkdir(join(root, "channels/adt/transform.ts"));
+
+    // A project built by hand may leave out the list of settings read from the environment.
+    const prints = await configFingerprints({ ...project, environment: undefined });
+    const hash: unknown = expect.stringMatching(/^[0-9a-f]{64}$/);
+    expect(Object.fromEntries(prints)).toEqual({
+      "": { yaml: hash },
+      adt: { yaml: hash, transform: "unreadable" },
+    });
   });
 });
 

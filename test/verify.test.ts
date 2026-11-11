@@ -9,7 +9,9 @@ import type { AllowList } from "@cosyte/script-utils/phi-scan";
 
 import { detectFields } from "../scripts/phi-detect.js";
 import { EXIT, run } from "../src/cli.js";
+import { loadProject } from "../src/config/load.js";
 import { generateKey } from "../src/encryption/keys.js";
+import { verifyCommand } from "../src/operator/verify.js";
 import { Store } from "../src/storage/store.js";
 import {
   byteOffset,
@@ -446,6 +448,28 @@ describe("pathways verify --samples", () => {
     // No database was made: samples need no store.
     const { existsSync } = await import("node:fs");
     expect(existsSync(join(root, ".pathways/pathways.db"))).toBe(false);
+  });
+
+  it("runs from code with no environment given, which then reads process.env", async () => {
+    const root = await makeProject({
+      "test.key": `${generateKey()}\n`,
+      "pathways.yaml": KEYS,
+      "channels/adt/channel.yaml": CHANNEL,
+      "channels/adt/transform.ts": TRANSFORM,
+    });
+    let out = "";
+    const code = await verifyCommand(
+      {
+        project: await loadProject(root),
+        json: false,
+        out: (text) => (out += text),
+        err: (text) => (out += text),
+      },
+      { kind: "samples", dir: join(root, "nowhere") },
+      undefined,
+    );
+    expect(code).toBe(EXIT.ok);
+    expect(out.split("\n")[0]).toBe("Verified 0 samples from the samples folder.");
   });
 });
 

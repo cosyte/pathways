@@ -76,6 +76,14 @@ start --once` run straight after copying a file in can find it too new; run it a
   with the error's code: check the folder's permissions.
 - A file left in `.claimed/<channel>/` belongs to a run of that channel that stopped part way. The
   next pass of the same channel stores it, once.
+- `source-read-failed` with `ERR_PATHWAYS_FILE_ID_UNSTEADY` on each pass: the folder is on a file
+  system that changes a file's id when it moves, such as FAT or exFAT, and the source claims
+  nothing there. Move `dir` to another file system and restart: see
+  [Put the folder on a file system that keeps file ids](./read-and-write-files.md#put-the-folder-on-a-file-system-that-keeps-file-ids).
+- A file in `.claimed/` whose name starts with `refused-`, logged with `ERR_PATHWAYS_FILE_HELD`, is
+  one the source moved in from outside `dir`, through a folder swapped for a link, and could not put
+  back. It is never stored. Find out who swapped the folder, then move the file back where it
+  belongs by hand.
 - Two channels that read one folder share its files: each file goes to whichever channel's pass
   sees it first.
 - On Windows, the source must also be able to open a file to write before it takes it: a read-only
