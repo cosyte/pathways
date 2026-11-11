@@ -370,6 +370,7 @@ const CURRENT_SCHEMA = [
   `CREATE TABLE "deliveries" ("id" integer primary key autoincrement, "message_id" integer not null references "messages" ("id"), "channel" text not null, "destination" integer not null, "seq" integer not null, "body" blob not null, "status" text not null, "attempts" integer not null, "next_attempt_at" integer not null, "last_error" text, "delivered_at" text, "generation" integer default 0 not null, "sending_at" integer, "sending_attempt" integer, "interrupted_attempt" integer)`,
   `CREATE TABLE "kysely_migration" ("name" varchar(255) not null primary key, "timestamp" varchar(255) not null)`,
   `CREATE TABLE "kysely_migration_lock" ("id" varchar(255) not null primary key, "is_locked" integer default 0 not null)`,
+  `CREATE TABLE "leases" ("name" text primary key, "owner" text not null, "host" text not null, "epoch" integer not null, "since" integer not null, "expires_at" integer not null)`,
   `CREATE TABLE "messages" ("id" integer primary key autoincrement, "channel" text not null, "received_at" text not null, "body" blob not null, "status" text not null, "error" text, "updated_at" text not null, "dedup_key" text, "duplicate_of" integer, "size" integer, "generation" integer default 0 not null, "idempotency_key" text)`,
   `CREATE TABLE sqlite_sequence(name,seq)`,
 ];
@@ -439,6 +440,7 @@ describe("Store on SQLite files the first slice made", () => {
       "0003-operator-and-audit",
       "0004-idempotency-keys",
       "0005-send-markers",
+      "0006-leases",
     ]);
     db.close();
   });

@@ -36,7 +36,7 @@ Pathways. Nothing is written if the folder is not empty.
 ## pathways start
 
 ```text
-pathways start [--once]
+pathways start [--once | --standby]
 ```
 
 Runs every channel, and the health endpoint if `pathways.yaml` configures one, until it receives
@@ -55,9 +55,14 @@ To run it as a Windows service, use a service wrapper that stops a console progr
 it ends the process, and give it a stop timeout longer than your longest hook `timeout`, so the
 hooks finish what is queued.
 
-| Option   | Meaning                                                                                     |
-| -------- | ------------------------------------------------------------------------------------------- |
-| `--once` | take in, transform and deliver what is waiting, then exit; no health endpoint, no retention |
+It first takes the engine lease, so a second engine on the same database is refused and exits 1,
+naming the holder. An engine that loses its lease stops sending and taking in at once and exits 1.
+See [one engine per database](./store-messages-in-a-database.md#one-engine-per-database).
+
+| Option      | Meaning                                                                                                                                                                 |
+| ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--once`    | take in, transform and deliver what is waiting, then exit; no health endpoint, no retention                                                                             |
+| `--standby` | hold no lease and open no source until the engine holding the lease stops, then take over; health answers 503 `standby` until then. Needs a database server, not SQLite |
 
 ## pathways test
 
@@ -175,15 +180,28 @@ engine. Needs `encryption` with keys or a provider, and, for a custom store, one
 | --------------------- | -------------------------------------------------------- |
 | `--encrypt-plaintext` | also encrypt values stored while `encryption` was `none` |
 
+## pathways lease
+
+```text
+pathways lease status [--json]
+pathways lease release --force [--json]
+```
+
+`lease status` prints who holds the engine lease: its node id, host, since when, epoch, and the time
+it has left, by the database's clock. `lease release --force` frees the lease of an engine whose
+host is gone, so the next start takes it at once instead of after it lapses, and writes the release
+to the audit log (`lease-release`); it exits 1 when the lease is already free. An engine still
+running under a lease freed this way stops at its next renewal.
+
 ## Exit codes
 
-| Code | Meaning                                                                                                                                                                                                                                        |
-| ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0    | done                                                                                                                                                                                                                                           |
-| 1    | a test failed; the engine, a command or an extension module could not start or stopped on an error; `init` could not write; `rekey` left a value not under the current key; a replay, resend or clear was refused, or the message failed again |
-| 2    | the command line was not understood; nothing was done                                                                                                                                                                                          |
-| 3    | the configuration is invalid; nothing was done                                                                                                                                                                                                 |
-| 4    | a message named does not exist; any others named were still acted on                                                                                                                                                                           |
+| Code | Meaning                                                                                                                                                                                                                                                                                                                                     |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0    | done                                                                                                                                                                                                                                                                                                                                        |
+| 1    | a test failed; the engine, a command or an extension module could not start or stopped on an error; `init` could not write; `rekey` left a value not under the current key; a replay, resend or clear was refused, or the message failed again; another engine holds the lease, the engine lost its lease, or there was no lease to release |
+| 2    | the command line was not understood; nothing was done                                                                                                                                                                                                                                                                                       |
+| 3    | the configuration is invalid; nothing was done                                                                                                                                                                                                                                                                                              |
+| 4    | a message named does not exist; any others named were still acted on                                                                                                                                                                                                                                                                        |
 
 ## Related
 

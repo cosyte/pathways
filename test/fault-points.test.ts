@@ -27,6 +27,7 @@ import {
   available,
   closeAdmins,
   dropDatabases,
+  leaseLapsed,
   requiredServers,
   TEST_DATABASES,
   testStorage,
@@ -158,7 +159,9 @@ async function project(database: TestDatabase): Promise<Project> {
       : `storage:\n  ${database.kind}: { plaintext: true, pool: { max: 2 } }\n`;
   await writeFile(
     join(root, "pathways.yaml"),
-    "encryption:\n  keys: [{ id: test, file: ./test.key }]\n  current: test\n" + block,
+    "encryption:\n  keys: [{ id: test, file: ./test.key }]\n  current: test\n" +
+      "lease:\n  ttl: 3s\n" +
+      block,
   );
   await writeFile(
     join(root, "channels/notes/channel.yaml"),
@@ -211,7 +214,8 @@ function run(setup: Project, args: readonly string[]): Promise<Ended> {
 
 /**
  * Runs `pathways <args> -C root` with `armed` in PATHWAYS_TEST_FAULT_POINT, waits for it to reach
- * the point, and ends it there with SIGKILL. Rejects when it ends first, or takes over 30 seconds.
+ * the point, and ends it there with SIGKILL, then waits for its engine lease to lapse (3s). Rejects
+ * when it ends first, or takes over 30 seconds.
  */
 async function killAt(setup: Project, args: readonly string[], armed: string): Promise<Ended> {
   const child = spawn(process.execPath, ["--import", "tsx", BIN, ...args, "-C", setup.root], {
@@ -244,7 +248,10 @@ async function killAt(setup: Project, args: readonly string[], armed: string): P
     // A hard stop, on every system: SIGKILL on Linux and macOS, TerminateProcess on Windows.
     child.kill("SIGKILL");
   }
-  return exited;
+  const ended = await exited;
+  // The killed engine's lease stays held until it lapses; the restart that follows takes it then.
+  await leaseLapsed(() => setup.storage.open());
+  return ended;
 }
 
 /**

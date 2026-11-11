@@ -22,7 +22,22 @@ import type { DatabaseStorage, StorageKind } from "../config/schema.js";
 import type { Env } from "../connectors/endpoint.js";
 import { faultPoint } from "../fault-points.js";
 import { dialectFor, type DriverImport } from "./dialects.js";
+import {
+  ENGINE_LEASE,
+  LeaseLostError,
+  type LeaseClaim,
+  type LeaseClaimant,
+  type LeaseHolder,
+} from "./lease.js";
 import { markCopiesBodies } from "./ownership.js";
+
+export {
+  ENGINE_LEASE,
+  LeaseLostError,
+  type LeaseClaim,
+  type LeaseClaimant,
+  type LeaseHolder,
+} from "./lease.js";
 
 /**
  * Where a stored message stands. `cleared`: it failed, and an operator cleared it with
@@ -161,10 +176,29 @@ interface AuditLogTable {
   detail: string | null;
 }
 
+/**
+ * The leases: one row per lease, named. The engine takes the `engine` lease. Every time is in epoch
+ * milliseconds by the database's clock, never a node's. Since 0006.
+ */
+interface LeasesTable {
+  name: string;
+  /** The node that took it last: an id each engine process draws at start. Empty until taken. */
+  owner: string;
+  /** The host name of that node. */
+  host: string;
+  /** Rises by one on every acquisition; a fenced write carries the epoch it was taken under. */
+  epoch: Int64;
+  /** When it was taken. */
+  since: Int64;
+  /** When it lapses unless renewed; 0 once released. */
+  expires_at: Int64;
+}
+
 interface Tables {
   messages: MessagesTable;
   deliveries: DeliveriesTable;
   audit_log: AuditLogTable;
+  leases: LeasesTable;
 }
 
 /**
@@ -523,6 +557,7 @@ export interface ExpireResult {
  * - `replay`, `resend`, `clear`: what the commands of the same names did;
  * - `retention`: a retention run and what it deleted;
  * - `config`: a change to the configuration, seen when the engine started.
+ * - `lease-release`: `pathways lease release --force` freed the engine lease.
  *
  * @example
  * ```ts
@@ -538,6 +573,7 @@ export const AUDIT_ACTIONS = [
   "clear",
   "retention",
   "config",
+  "lease-release",
 ] as const;
 
 /**
@@ -648,6 +684,14 @@ export interface AuditQuery {
  *
  * The audit log has two methods, append and read, and no way to change or remove an entry.
  *
+ * The lease methods are optional. A store with `acquireLease`, `renewLease`, `releaseLease` and
+ * `leaseHolder` lets `pathways start` refuse a second engine and run a standby; each judges expiry
+ * by one clock, the database's, in the same statement as its change. Given an `epoch`, the fenced
+ * writes (`completeTransform`, `failTransform`, `markSending`, `markDelivered`, `scheduleRetry` and
+ * `failDelivery`) change their row only while the engine lease still carries that epoch, in the
+ * same statement, and reject with a {@link LeaseLostError} when they change nothing. A store
+ * without the lease methods runs as before, with a warning at start, and cannot run a standby.
+ *
  * @example
  * ```ts
  * class PoolStore implements MessageStore {
@@ -675,27 +719,53 @@ export interface MessageStore {
     options?: StoreReceiveOptions,
   ): Promise<ReceivedMessage>;
   nextToTransform(channel: string): Promise<PendingMessage | undefined>;
+  /** Fenced by `epoch` when it is given: see the lease methods above. */
   completeTransform(
     messageId: number,
     outputs: readonly Uint8Array[],
     destinations: number,
+    epoch?: number,
   ): Promise<void>;
-  failTransform(messageId: number, error: string): Promise<void>;
+  /** Fenced by `epoch` when it is given. */
+  failTransform(messageId: number, error: string, epoch?: number): Promise<void>;
   nextDelivery(channel: string, destination: number): Promise<PendingDelivery | undefined>;
   /**
    * Writes the marker before a delivery is handed to its destination, in one write: the attempt and
    * its start, and the attempt found cut off when `start.interruptedAttempt` is set. A delivery
-   * {@link nextDelivery} returns still marked was cut off, and its next send is flagged.
+   * {@link nextDelivery} returns still marked was cut off, and its next send is flagged. Fenced by
+   * `epoch` when it is given.
    */
-  markSending(deliveryId: number, start: SendStart): Promise<void>;
-  markDelivered(deliveryId: number): Promise<void>;
+  markSending(deliveryId: number, start: SendStart, epoch?: number): Promise<void>;
+  /** Fenced by `epoch` when it is given. */
+  markDelivered(deliveryId: number, epoch?: number): Promise<void>;
+  /** Fenced by `epoch` when it is given. */
   scheduleRetry(
     deliveryId: number,
     attempts: number,
     nextAttemptAt: number,
     error: string,
+    epoch?: number,
   ): Promise<void>;
-  failDelivery(deliveryId: number, error: string): Promise<void>;
+  /** Fenced by `epoch` when it is given. */
+  failDelivery(deliveryId: number, error: string, epoch?: number): Promise<void>;
+  /**
+   * Takes the lease `name` for `ttlMs` when it is free or has lapsed by the database's clock,
+   * raising its epoch by one, in one statement; else answers with its holder. Optional.
+   */
+  acquireLease?(name: string, claimant: LeaseClaimant, ttlMs: number): Promise<LeaseClaim>;
+  /**
+   * Extends the lease `name` to `ttlMs` from now, by the database's clock, while it still carries
+   * `epoch` and has not lapsed. Returns whether it did. Optional, with {@link acquireLease}.
+   */
+  renewLease?(name: string, epoch: number, ttlMs: number): Promise<boolean>;
+  /**
+   * Frees the lease `name`, so the next acquisition takes it at once: only while it carries `epoch`
+   * when that is given, whoever holds it when not (`pathways lease release --force`). Returns
+   * whether it freed it. Optional, with {@link acquireLease}.
+   */
+  releaseLease?(name: string, epoch?: number): Promise<boolean>;
+  /** The lease's last holder, or `undefined` when it was never taken. Optional, with {@link acquireLease}. */
+  leaseHolder?(name: string): Promise<LeaseHolder | undefined>;
   /** How many messages of a channel stand at each status. The health endpoint reports these. */
   messageCounts(channel: string): Promise<Record<MessageStatus, number>>;
   /** How many deliveries of a channel stand at each status. */
@@ -807,6 +877,45 @@ export function isContentStore(store: MessageStore): store is MessageStore & Con
   return (
     typeof candidate.storedContent === "function" && typeof candidate.replaceContent === "function"
   );
+}
+
+/**
+ * The lease methods of {@link MessageStore}, all four present.
+ *
+ * @example
+ * ```ts
+ * const leases: LeaseStore | undefined = leaseStore(store);
+ * ```
+ */
+export type LeaseStore = Required<
+  Pick<MessageStore, "acquireLease" | "renewLease" | "releaseLease" | "leaseHolder">
+>;
+
+/**
+ * `store`'s lease methods, or `undefined` when it lacks any of the four: such a store runs one
+ * engine without a lease, and cannot run a standby. {@link Store} has them; a custom store may.
+ *
+ * @example
+ * ```ts
+ * if (leaseStore(store) === undefined) logger.warn({ event: "lease-unsupported" });
+ * ```
+ */
+export function leaseStore(store: MessageStore): LeaseStore | undefined {
+  if (
+    typeof store.acquireLease !== "function" ||
+    typeof store.renewLease !== "function" ||
+    typeof store.releaseLease !== "function" ||
+    typeof store.leaseHolder !== "function"
+  ) {
+    return undefined;
+  }
+  const leases = store as MessageStore & LeaseStore;
+  return {
+    acquireLease: (name, claimant, ttlMs) => leases.acquireLease(name, claimant, ttlMs),
+    renewLease: (name, epoch, ttlMs) => leases.renewLease(name, epoch, ttlMs),
+    releaseLease: (name, epoch) => leases.releaseLease(name, epoch),
+    leaseHolder: (name) => leases.leaseHolder(name),
+  };
 }
 
 /** A column type: one Kysely knows by name, or raw SQL. */
@@ -1014,8 +1123,37 @@ export function migrations(kind: StorageKind): Record<string, Migration> {
           .execute();
       },
     },
+    "0006-leases": {
+      // Expand only: a new table, which an older Pathways never reads, and no change to a row of
+      // the others, so it is safe while deliveries are in flight. Its first row is written by the
+      // first engine that asks for the lease. To roll it back, stop every engine and drop the
+      // table; nothing else refers to it.
+      async up(db: Kysely<unknown>): Promise<void> {
+        await db.schema
+          .createTable("leases")
+          .addColumn("name", t.name, (col) => col.primaryKey())
+          .addColumn("owner", t.name, (col) => col.notNull())
+          .addColumn("host", t.name, (col) => col.notNull())
+          .addColumn("epoch", t.int64, (col) => col.notNull())
+          .addColumn("since", t.int64, (col) => col.notNull())
+          .addColumn("expires_at", t.int64, (col) => col.notNull())
+          .$call(t.table)
+          .execute();
+      },
+    },
   };
 }
+
+/**
+ * Now, in epoch milliseconds, by each database's own clock: every lease decision reads it inside
+ * the statement that makes the change, so no node's clock, skewed or not, takes part.
+ */
+const DATABASE_NOW: Readonly<Record<StorageKind, RawBuilder<number>>> = {
+  sqlite: sql<number>`cast((julianday('now') - 2440587.5) * 86400000 as integer)`,
+  postgres: sql<number>`cast(floor(extract(epoch from statement_timestamp()) * 1000) as bigint)`,
+  mysql: sql<number>`cast(floor(unix_timestamp(current_timestamp(3)) * 1000) as signed)`,
+  sqlserver: sql<number>`datediff_big(millisecond, cast('1970-01-01' as datetime2), sysutcdatetime())`,
+};
 
 /** How many messages retention deletes in one transaction, so the engine is never held up long. */
 const EXPIRE_BATCH = 500;
@@ -1226,7 +1364,8 @@ export class StorageError extends Error {
  *
  * Every database runs the same queries but three. SQL Server writes `TOP` where the others write
  * `LIMIT`, and each returns a new row's id its own way (`RETURNING`, `OUTPUT`, or MySQL's insert id).
- * Nothing claims rows: one engine process owns a database, and reads the head of each queue in order.
+ * Nothing claims rows: one engine process owns a database, by the engine lease (`acquireLease`), and
+ * reads the head of each queue in order; each of its writes carries the lease's epoch.
  * The operator commands write beside it (a replay, a clear, retention), each change in one
  * transaction that writes first and re-checks what it read, so it never undoes the engine's work.
  *
@@ -1521,18 +1660,22 @@ export class Store implements MessageStore, ContentStore {
     messageId: number,
     outputs: readonly Uint8Array[],
     destinations: number,
+    epoch?: number,
   ): Promise<void> {
     const at = this.now();
     await this.db.transaction().execute(async (tx) => {
       // The update first: see receive() for why every transaction here writes before it reads.
-      await tx
+      const updated = await tx
         .updateTable("messages")
         .set({
           status: outputs.length === 0 ? "filtered" : "transformed",
           updated_at: at.toISOString(),
         })
         .where("id", "=", messageId)
-        .execute();
+        .$if(epoch !== undefined, (q) => q.where(this.fence("received", epoch)))
+        .executeTakeFirst();
+      // Thrown inside the transaction, so nothing of it is kept.
+      if (epoch !== undefined && updated.numUpdatedRows === 0n) throw new LeaseLostError();
       const message = await tx
         .selectFrom("messages")
         .select(["channel", "generation"])
@@ -1543,12 +1686,14 @@ export class Store implements MessageStore, ContentStore {
   }
 
   /** Marks a message `failed`, with its error, so the channel moves on to the next. */
-  async failTransform(messageId: number, error: string): Promise<void> {
-    await this.db
+  async failTransform(messageId: number, error: string, epoch?: number): Promise<void> {
+    const updated = await this.db
       .updateTable("messages")
       .set({ status: "failed", error, updated_at: this.now().toISOString() })
       .where("id", "=", messageId)
-      .execute();
+      .$if(epoch !== undefined, (q) => q.where(this.fence("received", epoch)))
+      .executeTakeFirst();
+    fenced(epoch, updated);
   }
 
   /**
@@ -1592,9 +1737,9 @@ export class Store implements MessageStore, ContentStore {
   }
 
   /** Writes the marker before a send, in one UPDATE: see {@link MessageStore.markSending}. */
-  async markSending(deliveryId: number, start: SendStart): Promise<void> {
+  async markSending(deliveryId: number, start: SendStart, epoch?: number): Promise<void> {
     const { attempt, at, interruptedAttempt } = start;
-    await this.db
+    const updated = await this.db
       .updateTable("deliveries")
       .set({
         sending_at: at,
@@ -1602,12 +1747,14 @@ export class Store implements MessageStore, ContentStore {
         ...(interruptedAttempt === undefined ? {} : { interrupted_attempt: interruptedAttempt }),
       })
       .where("id", "=", deliveryId)
-      .execute();
+      .$if(epoch !== undefined, (q) => q.where(this.fence("pending", epoch)))
+      .executeTakeFirst();
+    fenced(epoch, updated);
   }
 
   /** Marks a delivery done, and clears its marker. */
-  async markDelivered(deliveryId: number): Promise<void> {
-    await this.db
+  async markDelivered(deliveryId: number, epoch?: number): Promise<void> {
+    const updated = await this.db
       .updateTable("deliveries")
       .set({
         status: "delivered",
@@ -1616,7 +1763,9 @@ export class Store implements MessageStore, ContentStore {
         sending_attempt: null,
       })
       .where("id", "=", deliveryId)
-      .execute();
+      .$if(epoch !== undefined, (q) => q.where(this.fence("pending", epoch)))
+      .executeTakeFirst();
+    fenced(epoch, updated);
   }
 
   /** Records a failed attempt and when to try again, and clears the marker. */
@@ -1625,8 +1774,9 @@ export class Store implements MessageStore, ContentStore {
     attempts: number,
     nextAttemptAt: number,
     error: string,
+    epoch?: number,
   ): Promise<void> {
-    await this.db
+    const updated = await this.db
       .updateTable("deliveries")
       .set({
         attempts,
@@ -1636,16 +1786,108 @@ export class Store implements MessageStore, ContentStore {
         sending_attempt: null,
       })
       .where("id", "=", deliveryId)
-      .execute();
+      .$if(epoch !== undefined, (q) => q.where(this.fence("pending", epoch)))
+      .executeTakeFirst();
+    fenced(epoch, updated);
   }
 
   /** Marks a delivery `failed` for good, so its destination moves on to the next; clears the marker. */
-  async failDelivery(deliveryId: number, error: string): Promise<void> {
-    await this.db
+  async failDelivery(deliveryId: number, error: string, epoch?: number): Promise<void> {
+    const updated = await this.db
       .updateTable("deliveries")
       .set({ status: "failed", last_error: error, sending_at: null, sending_attempt: null })
       .where("id", "=", deliveryId)
-      .execute();
+      .$if(epoch !== undefined, (q) => q.where(this.fence("pending", epoch)))
+      .executeTakeFirst();
+    fenced(epoch, updated);
+  }
+
+  /**
+   * Takes the lease when it is free or has lapsed, in one UPDATE that reads the database's clock
+   * and raises the epoch: of two engines asking at once, the database lets one change the row and
+   * the other change nothing, on every database at its default isolation level. The row is made
+   * on the first request; two first requests at once both try, and one insert is refused.
+   */
+  async acquireLease(name: string, claimant: LeaseClaimant, ttlMs: number): Promise<LeaseClaim> {
+    const now = DATABASE_NOW[this.kind];
+    const take = (): Promise<{ numUpdatedRows: bigint }> =>
+      this.db
+        .updateTable("leases")
+        .set({
+          owner: claimant.node,
+          host: claimant.host,
+          epoch: sql<number>`${sql.ref("epoch")} + 1`,
+          since: now,
+          expires_at: sql<number>`${now} + ${ttlMs}`,
+        })
+        .where("name", "=", name)
+        .where("expires_at", "<=", now)
+        .executeTakeFirst();
+    for (let round = 0; round < 2; round += 1) {
+      if ((await take()).numUpdatedRows > 0n) {
+        const row = await this.db
+          .selectFrom("leases")
+          .select("epoch")
+          .where("name", "=", name)
+          .where("owner", "=", claimant.node)
+          .executeTakeFirstOrThrow();
+        return { acquired: true, epoch: Number(row.epoch) };
+      }
+      const holder = await this.leaseHolder(name);
+      if (holder !== undefined) return { acquired: false, holder };
+      // The first request for this lease: make its row, lapsed, and take it. Another engine asking
+      // at the same moment may make it first, and then this insert is refused, which is fine.
+      await this.db
+        .insertInto("leases")
+        .values({ name, owner: "", host: "", epoch: 0, since: 0, expires_at: 0 })
+        .execute()
+        .catch(() => undefined);
+    }
+    /* v8 ignore next 2: the row exists after the first round, so the second takes or refuses */
+    throw new Error("the lease could not be taken or read");
+  }
+
+  /** Extends the lease while it carries `epoch` and has not lapsed, by the database's clock. */
+  async renewLease(name: string, epoch: number, ttlMs: number): Promise<boolean> {
+    const now = DATABASE_NOW[this.kind];
+    const renewed = await this.db
+      .updateTable("leases")
+      .set({ expires_at: sql<number>`${now} + ${ttlMs}` })
+      .where("name", "=", name)
+      .where("epoch", "=", epoch)
+      .where("expires_at", ">", now)
+      .executeTakeFirst();
+    return renewed.numUpdatedRows > 0n;
+  }
+
+  /** Frees the lease: under `epoch` only when it is given, whoever holds it when not. */
+  async releaseLease(name: string, epoch?: number): Promise<boolean> {
+    const released = await this.db
+      .updateTable("leases")
+      .set({ expires_at: 0 })
+      .where("name", "=", name)
+      .where("owner", "<>", "")
+      .$if(epoch !== undefined, (q) => q.where("epoch", "=", epoch as number))
+      .executeTakeFirst();
+    return released.numUpdatedRows > 0n;
+  }
+
+  /** The lease's last holder and its time left, by the database's clock. */
+  async leaseHolder(name: string): Promise<LeaseHolder | undefined> {
+    const row = await this.db
+      .selectFrom("leases")
+      .select(["owner", "host", "epoch", "since", "expires_at"])
+      .select(DATABASE_NOW[this.kind].as("now"))
+      .where("name", "=", name)
+      .executeTakeFirst();
+    if (row === undefined || row.owner === "") return undefined;
+    return {
+      node: row.owner,
+      host: row.host,
+      since: new Date(Number(row.since)).toISOString(),
+      epoch: Number(row.epoch),
+      expiresInMs: Number(row.expires_at) - Number(row.now),
+    };
   }
 
   /** How many messages of `channel` stand at each status. */
@@ -2141,6 +2383,16 @@ export class Store implements MessageStore, ContentStore {
     });
   }
 
+  /**
+   * The fence on an engine write: the row still stands at `status`, where only the engine moves
+   * it from, and the engine lease still carries `epoch`. Both are read in the statement that
+   * writes, so a write from an engine whose lease another has taken since changes nothing.
+   */
+  private fence(status: "received" | "pending", epoch: number | undefined): RawBuilder<SqlBool> {
+    const lease = sql<SqlBool>`exists (select 1 from ${sql.table("leases")} where ${sql.ref("leases.name")} = ${ENGINE_LEASE} and ${sql.ref("leases.epoch")} = ${epoch})`;
+    return sql<SqlBool>`(${sql.ref("status")} = ${status} and ${lease})`;
+  }
+
   /** Keeps a query's first row. */
   private first<TB extends keyof Tables, O>(
     query: SelectQueryBuilder<Tables, TB, O>,
@@ -2193,4 +2445,9 @@ export class Store implements MessageStore, ContentStore {
  */
 function blob(body: Uint8Array): Buffer {
   return Buffer.isBuffer(body) ? body : Buffer.from(body.buffer, body.byteOffset, body.byteLength);
+}
+
+/** Rejects with a {@link LeaseLostError} when a fenced write, given `epoch`, changed nothing. */
+function fenced(epoch: number | undefined, result: { readonly numUpdatedRows: bigint }): void {
+  if (epoch !== undefined && result.numUpdatedRows === 0n) throw new LeaseLostError();
 }

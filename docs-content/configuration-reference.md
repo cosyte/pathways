@@ -38,6 +38,7 @@ bytes). An _env reference_ is `{ env: NAME }`, a variable name of letters, digit
 | `defaults`   | see [Settings](#settings)               | the defaults below              |
 | `hooks`      | a list of [hooks](#hooks)               | none                            |
 | `health`     | see [Health endpoint](#health-endpoint) | no health endpoint              |
+| `lease`      | see [Engine lease](#engine-lease)       | a 15s lease, no standby         |
 
 ### Encryption
 
@@ -129,6 +130,16 @@ and `audit`. See
 
 A [listener](#listener). Its token is read from `PATHWAYS_HEALTH_TOKEN` when `auth` is not set. See
 [Check status and health](./check-status-and-health.md).
+
+### Engine lease
+
+The lease one engine per database holds, so a second is refused or waits as a standby. See
+[one engine per database](./store-messages-in-a-database.md#one-engine-per-database).
+
+| Key       | Type                    | Default | Meaning                                                                                                     |
+| --------- | ----------------------- | ------- | ----------------------------------------------------------------------------------------------------------- |
+| `ttl`     | duration, at least `1s` | `15s`   | how long the lease lasts unless renewed; the holder renews it every third of this                           |
+| `standby` | boolean                 | `false` | start as a standby, as `pathways start --standby` does; needs a database server, and is refused with SQLite |
 
 ## channel.yaml
 

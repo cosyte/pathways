@@ -792,6 +792,27 @@ const health = restate(
   (json) => Object.assign(json, TLS_OR_PLAINTEXT),
 );
 
+/** The engine lease: how long it lasts, and whether this engine waits as a standby. */
+const lease = z
+  .strictObject({
+    ttl: duration(
+      "How long the engine lease lasts unless its holder renews it, which it does every third of this: a duration of at least 1s, such as 15s, or a number of milliseconds. Default 15s.",
+    )
+      .refine((value) => value >= 1_000, 'a duration of at least 1s, such as "15s"')
+      .optional(),
+    standby: z
+      .boolean()
+      .meta({
+        description:
+          "true starts this engine as a standby: it holds no lease and opens no source until the engine holding the lease stops, then takes over. Needs a database server. Default false.",
+      })
+      .optional(),
+  })
+  .meta({
+    description:
+      "The engine lease, which one engine per database holds, so a second is refused or waits as a standby.",
+  });
+
 /** `pathways.yaml` at the project root. Every key is optional. */
 export const projectSchema = z
   .strictObject({
@@ -803,6 +824,7 @@ export const projectSchema = z
       .meta({ description: "Settings for every channel. A channel can override most of them." })
       .optional(),
     health: health.optional(),
+    lease: lease.optional(),
   })
   .meta({
     title: "pathways.yaml",
@@ -1016,6 +1038,17 @@ export const DEFAULT_SETTINGS: Settings = {
   resendFlag: true,
   retentionIntervalMs: 3_600_000,
 };
+
+/**
+ * How long the engine lease lasts unless renewed, by default: 15 seconds. The holder renews it
+ * every third of that.
+ *
+ * @example
+ * ```ts
+ * DEFAULT_LEASE_TTL_MS / 3; // 5000, the renewal interval
+ * ```
+ */
+export const DEFAULT_LEASE_TTL_MS = 15_000;
 
 /** How long a file must sit unchanged in a file source before it is read, by default. */
 export const DEFAULT_MIN_AGE_MS = 1_000;
@@ -1393,6 +1426,21 @@ export type StorageConfig =
   | DatabaseStorage
   | { readonly kind: "module"; readonly module: string; readonly options: ModuleOptions };
 
+/**
+ * The engine lease's settings, from `pathways.yaml`'s `lease` block.
+ *
+ * @example
+ * ```ts
+ * const lease: LeaseConfig = { ttlMs: 15_000, standby: false };
+ * ```
+ */
+export interface LeaseConfig {
+  /** How long the lease lasts unless renewed, in milliseconds; renewed every third of it. */
+  readonly ttlMs: number;
+  /** Whether `pathways start` waits as a standby (as `--standby` does). */
+  readonly standby: boolean;
+}
+
 /** A whole project: the engine settings and every channel under `channels/`. */
 export interface ProjectConfig {
   readonly root: string;
@@ -1408,6 +1456,8 @@ export interface ProjectConfig {
   readonly hooks: readonly HookConfig[];
   /** The health endpoint, or undefined when `pathways.yaml` does not configure one. */
   readonly health: HealthConfig | undefined;
+  /** The engine lease's time to live, and whether to start as a standby. */
+  readonly lease: LeaseConfig;
   /**
    * How stored messages are encrypted, or undefined when `pathways.yaml` does not say. `pathways
    * start` refuses to run without it; `pathways test` stores nothing and does not need it.

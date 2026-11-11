@@ -9,8 +9,13 @@
 // connections and transactions open, until the test ends it with SIGKILL (TerminateProcess on
 // Windows). The database then sees a dropped connection, as it would after a power cut, and the
 // test restarts the engine and checks what was kept.
+//
+// With PATHWAYS_TEST_FAULT_POINT_RESUME also set, naming a file, the child holds at the point until
+// that file exists and then carries on, as a process paused by its host (a long GC, a VM stalled)
+// carries on: its timers have not run meanwhile, and its connections are still open. The lease
+// tests hold an engine this way while a second one takes over, then let it write.
 
-import { writeSync } from "node:fs";
+import { existsSync, writeSync } from "node:fs";
 
 /**
  * The points a crash test can stop the process at, each between two steps whose order keeps a
@@ -41,6 +46,15 @@ export const FAULT_POINT_ENV = "PATHWAYS_TEST_FAULT_POINT";
 
 /** The line a process writes to stderr as it freezes at a point, before the point's name. */
 export const FAULT_POINT_REACHED = "pathways fault point reached: ";
+
+/**
+ * The environment variable that names a file: with it set, a process held at a point carries on
+ * once the file exists, rather than waiting to be killed. Read when the point is reached.
+ */
+export const FAULT_POINT_RESUME_ENV = "PATHWAYS_TEST_FAULT_POINT_RESUME";
+
+/** The line a held process writes to stderr as it carries on, before the point's name. */
+export const FAULT_POINT_RESUMED = "pathways fault point resumed: ";
 
 /**
  * The function each point calls: it does nothing unless `armed` names that point, and on the
@@ -78,12 +92,25 @@ export function faultPoints(
 /* v8 ignore start -- runs only in a child process, which the crash test then kills */
 /**
  * Says which point was reached on stderr, then blocks the thread so nothing more runs: no write
- * commits and no connection closes until the test kills the process. Should no test do so in a
- * minute, the process ends itself the same hard way.
+ * commits and no connection closes until the test kills the process, or, with
+ * {@link FAULT_POINT_RESUME_ENV} set, until its file exists. Should neither happen in a minute, the
+ * process ends itself the same hard way.
  */
 function freeze(point: FaultPoint): void {
   writeSync(2, `${FAULT_POINT_REACHED}${point}\n`);
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60_000);
+  const cell = new Int32Array(new SharedArrayBuffer(4));
+  const resume = process.env[FAULT_POINT_RESUME_ENV];
+  if (resume !== undefined && resume !== "") {
+    for (let waited = 0; waited < 60_000; waited += 25) {
+      if (existsSync(resume)) {
+        writeSync(2, `${FAULT_POINT_RESUMED}${point}\n`);
+        return;
+      }
+      Atomics.wait(cell, 0, 0, 25);
+    }
+  } else {
+    Atomics.wait(cell, 0, 0, 60_000);
+  }
   process.kill(process.pid, "SIGKILL");
 }
 /* v8 ignore stop */

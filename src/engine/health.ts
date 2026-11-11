@@ -33,10 +33,11 @@ export interface ChannelHealth {
  * The health endpoint's body. `status` is `unavailable` (and the answer 503) only when the engine
  * itself is broken: storage cannot be read, or a source cannot listen. A destination that is down
  * shows as a channel `retrying`, with the answer still 200, because restarting the engine would not
- * bring it back.
+ * bring it back. A standby (`pathways start --standby`) answers `standby`, with 503 and no channels,
+ * until it takes the engine lease, so a load balancer's readiness check sends it nothing.
  */
 export interface HealthReport {
-  readonly status: "ok" | "unavailable";
+  readonly status: "ok" | "unavailable" | "standby";
   readonly storage: "ok" | "unreachable";
   readonly channels: Readonly<Record<string, ChannelHealth>>;
 }
@@ -75,7 +76,7 @@ export interface HealthEndpointOptions {
 
 /**
  * The health endpoint: `GET` (or `HEAD`) on any path answers 200 with a {@link HealthReport}, or
- * 503 when the engine itself is broken. It is authenticated like an HTTP source: a bearer token by
+ * 503 when the engine itself is broken or is a standby. It is authenticated like an HTTP source: a bearer token by
  * default, or mutual TLS.
  *
  * @example

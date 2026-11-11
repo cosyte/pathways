@@ -5,6 +5,9 @@ import type {
   ClearResult,
   DeliveryStatus,
   ExpireResult,
+  LeaseClaim,
+  LeaseClaimant,
+  LeaseHolder,
   MessageQuery,
   MessageStatus,
   MessageStore,
@@ -21,6 +24,7 @@ import type {
   StoredMessage,
   StoreReceiveOptions,
 } from "../storage/store.js";
+import { leaseStore } from "../storage/store.js";
 import { copiesBodies, markCopiesBodies, release } from "../storage/ownership.js";
 import {
   decrypt,
@@ -58,9 +62,26 @@ abstract class CodecStore implements MessageStore {
   /** Whether the store underneath keeps no body it is handed, and reads each into a buffer of its own. */
   readonly #innerCopies: boolean;
 
+  /** The lease methods, straight through, present only when the store underneath has all four. */
+  readonly acquireLease?: (
+    name: string,
+    claimant: LeaseClaimant,
+    ttlMs: number,
+  ) => Promise<LeaseClaim>;
+  readonly renewLease?: (name: string, epoch: number, ttlMs: number) => Promise<boolean>;
+  readonly releaseLease?: (name: string, epoch?: number) => Promise<boolean>;
+  readonly leaseHolder?: (name: string) => Promise<LeaseHolder | undefined>;
+
   protected constructor(inner: MessageStore, codec: Codec) {
     this.#inner = inner;
     this.#codec = codec;
+    const leases = leaseStore(inner);
+    if (leases !== undefined) {
+      this.acquireLease = leases.acquireLease;
+      this.renewLease = leases.renewLease;
+      this.releaseLease = leases.releaseLease;
+      this.leaseHolder = leases.leaseHolder;
+    }
     this.#innerCopies = copiesBodies(inner);
     // A codec that copies keeps no body it is handed and reads each into a new buffer; one that does
     // not passes bodies straight through, so this store copies when the one underneath does.
@@ -115,15 +136,16 @@ abstract class CodecStore implements MessageStore {
     messageId: number,
     outputs: readonly Uint8Array[],
     destinations: number,
+    epoch?: number,
   ): Promise<void> {
     await this.#stored(outputs, (stored) =>
-      this.#inner.completeTransform(messageId, stored, destinations),
+      this.#inner.completeTransform(messageId, stored, destinations, epoch),
     );
   }
 
   /** Marks a message failed, its error passed through the codec. */
-  async failTransform(messageId: number, error: string): Promise<void> {
-    await this.#inner.failTransform(messageId, await this.#codec.storeText(error));
+  async failTransform(messageId: number, error: string, epoch?: number): Promise<void> {
+    await this.#inner.failTransform(messageId, await this.#codec.storeText(error), epoch);
   }
 
   /** The oldest pending delivery for one destination, its body read back. */
@@ -133,13 +155,13 @@ abstract class CodecStore implements MessageStore {
   }
 
   /** Writes the marker before a send: no body and no error, so straight through. */
-  markSending(deliveryId: number, start: SendStart): Promise<void> {
-    return this.#inner.markSending(deliveryId, start);
+  markSending(deliveryId: number, start: SendStart, epoch?: number): Promise<void> {
+    return this.#inner.markSending(deliveryId, start, epoch);
   }
 
   /** Marks a delivery done. */
-  markDelivered(deliveryId: number): Promise<void> {
-    return this.#inner.markDelivered(deliveryId);
+  markDelivered(deliveryId: number, epoch?: number): Promise<void> {
+    return this.#inner.markDelivered(deliveryId, epoch);
   }
 
   /** Records a failed attempt, its error passed through the codec. */
@@ -148,18 +170,20 @@ abstract class CodecStore implements MessageStore {
     attempts: number,
     nextAttemptAt: number,
     error: string,
+    epoch?: number,
   ): Promise<void> {
     await this.#inner.scheduleRetry(
       deliveryId,
       attempts,
       nextAttemptAt,
       await this.#codec.storeText(error),
+      epoch,
     );
   }
 
   /** Marks a delivery failed for good, its error passed through the codec. */
-  async failDelivery(deliveryId: number, error: string): Promise<void> {
-    await this.#inner.failDelivery(deliveryId, await this.#codec.storeText(error));
+  async failDelivery(deliveryId: number, error: string, epoch?: number): Promise<void> {
+    await this.#inner.failDelivery(deliveryId, await this.#codec.storeText(error), epoch);
   }
 
   /** How many messages of `channel` stand at each status. */

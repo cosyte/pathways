@@ -1,8 +1,11 @@
 import { parseDuration, type ProjectConfig } from "../config/schema.js";
 import { channelStatus } from "../engine/health.js";
+import { describeHolder } from "../engine/lease.js";
 import { EXIT } from "../exit.js";
 import {
   AUDIT_ACTIONS,
+  ENGINE_LEASE,
+  leaseStore,
   MESSAGE_STATES,
   type AuditAction,
   type AuditDetail,
@@ -479,6 +482,73 @@ export async function retentionCommand(context: OperatorContext, dryRun: boolean
   }
   print(context, report, lines);
   return EXIT.ok;
+}
+
+/**
+ * `pathways lease status`: who holds the engine lease, since when, under which epoch, and how long
+ * it has left, by the database's clock. Ids, a host name, times and numbers only.
+ *
+ * @example
+ * ```ts
+ * const code = await leaseStatusCommand(context);
+ * ```
+ */
+export async function leaseStatusCommand(context: OperatorContext): Promise<number> {
+  const leases = leaseStore(context.store);
+  if (leases === undefined) return noLeases(context);
+  const holder = await leases.leaseHolder(ENGINE_LEASE);
+  const held = holder !== undefined && holder.expiresInMs > 0;
+  let line = "Engine lease: never taken.";
+  if (holder !== undefined) {
+    line = held
+      ? `Engine lease: held by ${describeHolder(holder)}.`
+      : `Engine lease: free; last held by ${describeHolder(holder)}.`;
+  }
+  print(context, { lease: ENGINE_LEASE, held, holder: holder ?? null }, [line]);
+  return EXIT.ok;
+}
+
+/**
+ * `pathways lease release --force`: frees the engine lease of an engine whose host is gone, so the
+ * next engine takes it at once rather than after it lapses. The release is written to the audit
+ * log, whichever way it goes. An engine still running under it stops at its next renewal.
+ *
+ * @example
+ * ```ts
+ * const code = await leaseReleaseCommand(context);
+ * ```
+ */
+export async function leaseReleaseCommand(context: OperatorContext): Promise<number> {
+  const leases = leaseStore(context.store);
+  if (leases === undefined) return noLeases(context);
+  const holder = await leases.leaseHolder(ENGINE_LEASE);
+  const held = holder !== undefined && holder.expiresInMs > 0 ? holder : undefined;
+  if (held === undefined || !(await leases.releaseLease(ENGINE_LEASE, held.epoch))) {
+    await context.audit.record({
+      action: "lease-release",
+      outcome: "refused",
+      detail: { reason: "free" },
+    });
+    print(context, { released: false, holder: holder ?? null }, [
+      "Engine lease: nothing to release; it is free.",
+    ]);
+    return EXIT.failed;
+  }
+  await context.audit.record({
+    action: "lease-release",
+    detail: { node: held.node, epoch: held.epoch, leftMs: held.expiresInMs },
+  });
+  print(context, { released: true, holder: held }, [
+    `Engine lease released: it was held by ${describeHolder(held)}. The next engine to start takes it.`,
+  ]);
+  return EXIT.ok;
+}
+
+function noLeases(context: OperatorContext): number {
+  context.err(
+    "pathways: this store has no engine lease: a custom store without the lease methods runs one engine, unfenced.\n",
+  );
+  return EXIT.failed;
 }
 
 /**

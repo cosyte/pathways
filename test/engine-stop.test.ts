@@ -10,7 +10,9 @@
 // console is the SIGINT a person or a service wrapper sends, and the command reference says so. The
 // hard stop runs on every system: it loses no message, and the hook events still queued are lost.
 // So does the hard stop in the middle of a send, the receiver given the message and the engine
-// ended before it could record that: the next start sends that message again, flagged.
+// ended before it could record that: the next start sends that message again, flagged. A hard stop
+// leaves the engine lease held until it lapses, a time to live (2s here) later; the next start
+// waits for that, as a supervisor restarting it after the time to live would.
 import { spawn, type ChildProcess } from "node:child_process";
 import { readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -18,6 +20,8 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { generateKey } from "../src/encryption/keys.js";
+import { Store } from "../src/storage/store.js";
+import { leaseLapsed } from "./databases.js";
 import { ADT_A01, cleanUp, dropFileWhileRunning, LAB_TRANSFORM, makeProject } from "./helpers.js";
 
 afterEach(cleanUp);
@@ -61,7 +65,7 @@ async function project(): Promise<Project> {
   await writeFile(
     join(root, "pathways.yaml"),
     "encryption:\n  keys: [{ id: test, file: ./test.key }]\n  current: test\n" +
-      "defaults:\n  pollInterval: 10ms\n" +
+      "defaults:\n  pollInterval: 10ms\nlease:\n  ttl: 2s\n" +
       `hooks:\n  - module: ./hooks/slow.ts\n    options: { file: ${JSON.stringify(hookFile)} }\n`,
   );
   return { root, hookFile };
@@ -160,6 +164,7 @@ describe("pathways start, stopped from outside", () => {
     expect(flushed["delivered"] ?? 0).toBeLessThan(MESSAGES);
 
     // Every message was stored before its file left the inbox, and delivered before the stop.
+    await leaseLapsed(() => Store.open(join(root, ".pathways/pathways.db")));
     const again = start(root, true);
     expect(await again.exited).toEqual({ code: 0, signal: null });
     expect(again.stderr()).toBe("");
@@ -200,7 +205,7 @@ describe("pathways start, ended in the middle of a send", () => {
     await writeFile(
       join(root, "pathways.yaml"),
       "encryption:\n  keys: [{ id: test, file: ./test.key }]\n  current: test\n" +
-        "defaults:\n  pollInterval: 10ms\n",
+        "defaults:\n  pollInterval: 10ms\nlease:\n  ttl: 2s\n",
     );
     await writeFile(
       join(root, "channels/adt/channel.yaml"),
@@ -237,6 +242,7 @@ describe("pathways start, ended in the middle of a send", () => {
 
     // The next start sends message 2 again, flagged, then message 3 for the first time.
     await rm(hold);
+    await leaseLapsed(() => Store.open(join(root, ".pathways/pathways.db")));
     const again = start(root, true);
     expect(await again.exited).toEqual({ code: 0, signal: null });
     expect(again.stderr()).toBe("");

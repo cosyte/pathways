@@ -130,6 +130,44 @@ The master key's id, when the failure concerns one.
 
 The master key's id, when the failure concerns one.
 
+***
+
+### LeaseLostError
+
+A fenced write that changed nothing: the epoch it carried is no longer the engine lease's, so
+another engine has taken the lease since, or the row it was to change moved under that engine.
+The engine that sees it stops sending and taking at once and exits (log code `lease-lost`).
+
+#### Example
+
+```ts
+if (error instanceof LeaseLostError) process.exitCode = 1;
+```
+
+#### Extends
+
+- `Error`
+
+#### Constructors
+
+##### Constructor
+
+> **new LeaseLostError**(): [`LeaseLostError`](#leaselosterror)
+
+###### Returns
+
+[`LeaseLostError`](#leaselosterror)
+
+###### Overrides
+
+`Error.constructor`
+
+#### Properties
+
+##### code
+
+> `readonly` **code**: `"ERR_PATHWAYS_LEASE_LOST"` = `"ERR_PATHWAYS_LEASE_LOST"`
+
 ## Interfaces
 
 ### AckRequest
@@ -191,7 +229,7 @@ const line = (entry: AuditEntry): string => `${entry.at} ${entry.actor} ${entry.
 
 ##### action
 
-> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"`
+> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"`
 
 ##### actor
 
@@ -311,7 +349,7 @@ await store.appendAudit("noah", [{ action: "content-view", channel: "adt", messa
 
 ##### action
 
-> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"`
+> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"`
 
 ##### channel?
 
@@ -347,7 +385,7 @@ const views = await store.auditEntries({ action: "content-view", since: "2026-11
 
 ##### action?
 
-> `readonly` `optional` **action?**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"`
+> `readonly` `optional` **action?**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"`
 
 ##### before?
 
@@ -1383,6 +1421,66 @@ Wraps a 32-byte data key under the current master key.
 
 ***
 
+### LeaseClaimant
+
+Who asks for a lease: the node, an id each engine process draws at start, and its host name.
+
+#### Example
+
+```ts
+const claimant: LeaseClaimant = { node: "3f9a1c2b", host: "engine-a" };
+```
+
+#### Properties
+
+##### host
+
+> `readonly` **host**: `string`
+
+##### node
+
+> `readonly` **node**: `string`
+
+***
+
+### LeaseHolder
+
+A lease's last holder, by the database's clock: who took it, when, under which epoch, and how
+long it has left. `expiresInMs` of 0 or less means it has lapsed or was released, and the next
+acquisition takes it.
+
+#### Example
+
+```ts
+const held = (holder: LeaseHolder): boolean => holder.expiresInMs > 0;
+```
+
+#### Properties
+
+##### epoch
+
+> `readonly` **epoch**: `number`
+
+##### expiresInMs
+
+> `readonly` **expiresInMs**: `number`
+
+##### host
+
+> `readonly` **host**: `string`
+
+##### node
+
+> `readonly` **node**: `string`
+
+##### since
+
+> `readonly` **since**: `string`
+
+When it was taken, as an ISO 8601 time in UTC.
+
+***
+
 ### LifecycleEventBase
 
 What every lifecycle event about a channel carries: its type, when it happened and the channel it
@@ -1624,6 +1722,14 @@ only done messages, with their deliveries, and never an audit entry.
 
 The audit log has two methods, append and read, and no way to change or remove an entry.
 
+The lease methods are optional. A store with `acquireLease`, `renewLease`, `releaseLease` and
+`leaseHolder` lets `pathways start` refuse a second engine and run a standby; each judges expiry
+by one clock, the database's, in the same statement as its change. Given an `epoch`, the fenced
+writes (`completeTransform`, `failTransform`, `markSending`, `markDelivered`, `scheduleRetry` and
+`failDelivery`) change their row only while the engine lease still carries that epoch, in the
+same statement, and reject with a [LeaseLostError](#leaselosterror) when they change nothing. A store
+without the lease methods runs as before, with a warning at start, and cannot run a standby.
+
 #### Example
 
 ```ts
@@ -1637,6 +1743,31 @@ class PoolStore implements MessageStore {
 ```
 
 #### Methods
+
+##### acquireLease()?
+
+> `optional` **acquireLease**(`name`, `claimant`, `ttlMs`): `Promise`\<[`LeaseClaim`](#leaseclaim)\>
+
+Takes the lease `name` for `ttlMs` when it is free or has lapsed by the database's clock,
+raising its epoch by one, in one statement; else answers with its holder. Optional.
+
+###### Parameters
+
+###### name
+
+`string`
+
+###### claimant
+
+[`LeaseClaimant`](#leaseclaimant)
+
+###### ttlMs
+
+`number`
+
+###### Returns
+
+`Promise`\<[`LeaseClaim`](#leaseclaim)\>
 
 ##### appendAudit()
 
@@ -1715,7 +1846,9 @@ is nothing failed. The audit entry is written in the same transaction.
 
 ##### completeTransform()
 
-> **completeTransform**(`messageId`, `outputs`, `destinations`): `Promise`\<`void`\>
+> **completeTransform**(`messageId`, `outputs`, `destinations`, `epoch?`): `Promise`\<`void`\>
+
+Fenced by `epoch` when it is given: see the lease methods above.
 
 ###### Parameters
 
@@ -1728,6 +1861,10 @@ is nothing failed. The audit entry is written in the same transaction.
 readonly `Uint8Array`\<`ArrayBufferLike`\>[]
 
 ###### destinations
+
+`number`
+
+###### epoch?
 
 `number`
 
@@ -1794,7 +1931,9 @@ activity is before `cutoff` (ISO 8601), with their deliveries. With `dryRun`, co
 
 ##### failDelivery()
 
-> **failDelivery**(`deliveryId`, `error`): `Promise`\<`void`\>
+> **failDelivery**(`deliveryId`, `error`, `epoch?`): `Promise`\<`void`\>
+
+Fenced by `epoch` when it is given.
 
 ###### Parameters
 
@@ -1806,13 +1945,19 @@ activity is before `cutoff` (ISO 8601), with their deliveries. With `dryRun`, co
 
 `string`
 
+###### epoch?
+
+`number`
+
 ###### Returns
 
 `Promise`\<`void`\>
 
 ##### failTransform()
 
-> **failTransform**(`messageId`, `error`): `Promise`\<`void`\>
+> **failTransform**(`messageId`, `error`, `epoch?`): `Promise`\<`void`\>
+
+Fenced by `epoch` when it is given.
 
 ###### Parameters
 
@@ -1824,9 +1969,29 @@ activity is before `cutoff` (ISO 8601), with their deliveries. With `dryRun`, co
 
 `string`
 
+###### epoch?
+
+`number`
+
 ###### Returns
 
 `Promise`\<`void`\>
+
+##### leaseHolder()?
+
+> `optional` **leaseHolder**(`name`): `Promise`\<[`LeaseHolder`](#leaseholder) \| `undefined`\>
+
+The lease's last holder, or `undefined` when it was never taken. Optional, with [acquireLease](#acquirelease).
+
+###### Parameters
+
+###### name
+
+`string`
+
+###### Returns
+
+`Promise`\<[`LeaseHolder`](#leaseholder) \| `undefined`\>
 
 ##### listMessages()
 
@@ -1866,11 +2031,17 @@ A channel's retrying deliveries, oldest first, at most `limit`.
 
 ##### markDelivered()
 
-> **markDelivered**(`deliveryId`): `Promise`\<`void`\>
+> **markDelivered**(`deliveryId`, `epoch?`): `Promise`\<`void`\>
+
+Fenced by `epoch` when it is given.
 
 ###### Parameters
 
 ###### deliveryId
+
+`number`
+
+###### epoch?
 
 `number`
 
@@ -1880,11 +2051,12 @@ A channel's retrying deliveries, oldest first, at most `limit`.
 
 ##### markSending()
 
-> **markSending**(`deliveryId`, `start`): `Promise`\<`void`\>
+> **markSending**(`deliveryId`, `start`, `epoch?`): `Promise`\<`void`\>
 
 Writes the marker before a delivery is handed to its destination, in one write: the attempt and
 its start, and the attempt found cut off when `start.interruptedAttempt` is set. A delivery
-[nextDelivery](#nextdelivery) returns still marked was cut off, and its next send is flagged.
+[nextDelivery](#nextdelivery) returns still marked was cut off, and its next send is flagged. Fenced by
+`epoch` when it is given.
 
 ###### Parameters
 
@@ -1895,6 +2067,10 @@ its start, and the attempt found cut off when `start.interruptedAttempt` is set.
 ###### start
 
 [`SendStart`](#sendstart)
+
+###### epoch?
+
+`number`
 
 ###### Returns
 
@@ -2026,6 +2202,53 @@ message twice.
 
 `Promise`\<[`ReceivedMessage`](#receivedmessage)\>
 
+##### releaseLease()?
+
+> `optional` **releaseLease**(`name`, `epoch?`): `Promise`\<`boolean`\>
+
+Frees the lease `name`, so the next acquisition takes it at once: only while it carries `epoch`
+when that is given, whoever holds it when not (`pathways lease release --force`). Returns
+whether it freed it. Optional, with [acquireLease](#acquirelease).
+
+###### Parameters
+
+###### name
+
+`string`
+
+###### epoch?
+
+`number`
+
+###### Returns
+
+`Promise`\<`boolean`\>
+
+##### renewLease()?
+
+> `optional` **renewLease**(`name`, `epoch`, `ttlMs`): `Promise`\<`boolean`\>
+
+Extends the lease `name` to `ttlMs` from now, by the database's clock, while it still carries
+`epoch` and has not lapsed. Returns whether it did. Optional, with [acquireLease](#acquirelease).
+
+###### Parameters
+
+###### name
+
+`string`
+
+###### epoch
+
+`number`
+
+###### ttlMs
+
+`number`
+
+###### Returns
+
+`Promise`\<`boolean`\>
+
 ##### requeue()
 
 > **requeue**(`messageId`, `request`, `actor`): `Promise`\<[`RequeueResult`](#requeueresult)\>
@@ -2071,7 +2294,9 @@ How many of a channel's pending deliveries have failed at least once and wait fo
 
 ##### scheduleRetry()
 
-> **scheduleRetry**(`deliveryId`, `attempts`, `nextAttemptAt`, `error`): `Promise`\<`void`\>
+> **scheduleRetry**(`deliveryId`, `attempts`, `nextAttemptAt`, `error`, `epoch?`): `Promise`\<`void`\>
+
+Fenced by `epoch` when it is given.
 
 ###### Parameters
 
@@ -2090,6 +2315,10 @@ How many of a channel's pending deliveries have failed at least once and wait fo
 ###### error
 
 `string`
+
+###### epoch?
+
+`number`
 
 ###### Returns
 
@@ -3436,12 +3665,13 @@ const detail: AuditDetail = { status: "transformed", queued: 2 };
 
 ### AuditEventAction
 
-> **AuditEventAction** = `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"`
+> **AuditEventAction** = `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"`
 
 Every action the audit log records, as an [AuditEvent](#auditevent)'s `action`: `search` (messages
 listed), `view` (one message's details, without content), `content-view`, `replay`, `resend`,
-`clear`, `retention` (a run, with what it deleted) and `config` (a configuration change seen when
-the engine started). Kept equal to the audit log's own list by a test.
+`clear`, `retention` (a run, with what it deleted), `config` (a configuration change seen when
+the engine started) and `lease-release` (the engine lease freed by force). Kept equal to the
+audit log's own list by a test.
 
 #### Example
 
@@ -3844,6 +4074,36 @@ export default (async (options, context) => {
     unwrapKey: (keyId, wrapped) => kms.decrypt(keyId, wrapped),
   };
 }) satisfies KeyProviderFactory<{ region: string; keyId: string }>;
+```
+
+***
+
+### LeaseClaim
+
+> **LeaseClaim** = \{ `acquired`: `true`; `epoch`: `number`; \} \| \{ `acquired`: `false`; `holder`: [`LeaseHolder`](#leaseholder); \}
+
+What [MessageStore.acquireLease](#acquirelease) answers: the lease and its new epoch, or the holder that
+keeps it.
+
+#### Example
+
+```ts
+const claim = await store.acquireLease(ENGINE_LEASE, claimant, 15_000);
+if (!claim.acquired) console.error(claim.holder.node);
+```
+
+***
+
+### LeaseStore
+
+> **LeaseStore** = `Required`\<`Pick`\<[`MessageStore`](#messagestore), `"acquireLease"` \| `"renewLease"` \| `"releaseLease"` \| `"leaseHolder"`\>\>
+
+The lease methods of [MessageStore](#messagestore), all four present.
+
+#### Example
+
+```ts
+const leases: LeaseStore | undefined = leaseStore(store);
 ```
 
 ***
@@ -4252,6 +4512,21 @@ export default ((interchange) => interchange) satisfies Transform<X12Interchange
 ```
 
 ## Variables
+
+### ENGINE\_LEASE
+
+> `const` **ENGINE\_LEASE**: `"engine"` = `"engine"`
+
+The name of the lease an engine takes on its database before it opens a source, so a second
+engine on the same database is refused. The fenced writes check this lease's epoch.
+
+#### Example
+
+```ts
+const holder = await store.leaseHolder?.(ENGINE_LEASE);
+```
+
+***
 
 ### LIFECYCLE\_EVENTS
 
