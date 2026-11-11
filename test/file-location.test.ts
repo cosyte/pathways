@@ -108,6 +108,33 @@ describe("FileSource over a location", () => {
     expect(location.under("/errors")).toEqual(["/errors/big.hl7"]);
   });
 
+  it("refuses a file whose folder the location resolves outside the source folder, on any location", async () => {
+    // The shared check runs on every location: this one resolves a subfolder somewhere else, as a
+    // folder swapped for a link would be, and has no check of its own.
+    class Escaping extends FakeLocation {
+      override async root(dir: string): Promise<string> {
+        const resolved = await super.root(dir);
+        return resolved === "/inbox/wards" ? "/elsewhere/wards" : resolved;
+      }
+    }
+    const location = new Escaping();
+    location.put("/inbox/wards/a.hl7", "first");
+    const errors: unknown[] = [];
+    const { sink, stored } = store();
+    const source = new FileSource({
+      dir: "/inbox",
+      channel: "adt",
+      minAgeMs: 0,
+      recursive: true,
+      onReadError: (error) => errors.push(error),
+      location,
+    });
+    await source.poll(sink);
+    expect(stored.size).toBe(0);
+    expect(errors).toEqual([expect.objectContaining({ code: "ESTALE" })]);
+    expect(location.under("/inbox")).toEqual(["/inbox/wards/a.hl7"]);
+  });
+
   it("claims nothing where a file's id changes when it moves", async () => {
     const location = new FakeLocation();
     location.steady = false;

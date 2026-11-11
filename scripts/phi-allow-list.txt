@@ -43,6 +43,12 @@ EMAILDOMAIN example.test
 # manifest is otherwise worth scanning.
 EMAILDOMAIN cosyte.com
 
+# --- SSH protocol names ---
+# SSH names an extension or algorithm a vendor defines as name@domain (RFC 4251, section 6):
+# posix-rename@openssh.com, fsync@openssh.com, hmac-sha1-etm@openssh.com and the like, which the
+# SFTP location and its tests use. Protocol identifiers, not anyone's address.
+EMAILDOMAIN openssh.com
+
 # --- Synthetic person-name tokens ---
 # The test patient every fixture in this repository uses: test/helpers.ts (HL7
 # v2, FHIR, X12 and C-CDA) and scripts/bench.ts. Obviously not a person.

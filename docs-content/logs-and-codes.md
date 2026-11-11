@@ -141,6 +141,32 @@ Besides the operating system's codes (`EACCES`, `EEXIST` and the like), a `sourc
 | `ERR_PATHWAYS_FILE_HELD`        | a file moved in from outside the folder could not go back, and waits in `.claimed/` as `refused-...`        |
 | `ERR_PATHWAYS_FILE_ID_UNSTEADY` | the folder's file system changes a file's id when it moves (FAT, exFAT), so the source claims nothing there |
 
+## SFTP codes
+
+A file source or destination on an SFTP server gives the SFTP status of a failed request as the
+operating system's code where there is one (`ENOENT`, `EACCES`, `ENOTSUP`, and `ELOOP` for a link
+where a file was opened), and otherwise one of these. The first nine, and a system code on
+connecting (such as `ECONNREFUSED`), mark the source `down` until a pass runs again. A missing `ssh2`
+package stops the engine at the first pass that needs it.
+
+| Code                                 | Meaning                                                                     |
+| ------------------------------------ | --------------------------------------------------------------------------- |
+| `ERR_PATHWAYS_SFTP_HOST_KEY_UNKNOWN` | the known hosts hold no key for the server; the error names its fingerprint |
+| `ERR_PATHWAYS_SFTP_HOST_KEY_CHANGED` | the server's key is not the one the known hosts or `hostKey` hold           |
+| `ERR_PATHWAYS_SFTP_HOST_KEY_REVOKED` | the server's key is on an `@revoked` line                                   |
+| `ERR_PATHWAYS_SFTP_AUTH`             | the server refused the login                                                |
+| `ERR_PATHWAYS_SFTP_KEY_INVALID`      | the private key could not be read, or its passphrase is wrong               |
+| `ERR_PATHWAYS_SFTP_NO_POSIX_RENAME`  | the server has no `posix-rename@openssh.com`, so a claim cannot be made     |
+| `ERR_PATHWAYS_SFTP_TIMEOUT`          | the connection, or one request, took longer than its deadline               |
+| `ERR_PATHWAYS_SFTP_CONNECTION_LOST`  | the connection dropped while it was in use                                  |
+| `ERR_PATHWAYS_SFTP_CONNECT`          | the connection could not be made, with no system code                       |
+| `ERR_PATHWAYS_SFTP_NOT_INSTALLED`    | the `ssh2` package is not installed                                         |
+| `ERR_PATHWAYS_SFTP_SIZE_MISMATCH`    | a read or a write moved a different number of bytes than the file's size    |
+| `ERR_PATHWAYS_SFTP_FAILURE`          | the server failed a request without saying why                              |
+| `ERR_PATHWAYS_SFTP_EOF`              | the server said the file ended where it should not have                     |
+| `ERR_PATHWAYS_SFTP_BAD_MESSAGE`      | the server could not read a request                                         |
+| `ERR_PATHWAYS_SFTP_STATUS_<n>`       | any other SFTP status, by number                                            |
+
 ## Encryption errors
 
 | Code                          | Meaning                                                                                                                              |

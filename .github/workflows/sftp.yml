@@ -1,0 +1,57 @@
+name: SFTP
+
+# The SFTP location against OpenSSH's own server: test/sftp-server.test.ts starts sshd from the
+# runner's openssh-server on the loopback, as the runner's user, with keys it makes for the run and
+# synthetic files only. It checks the host key (plain and ssh-keygen -H hashed known_hosts, and the
+# fingerprint ssh-keygen prints), the extensions the claim uses, two engines on one folder, a run
+# stopped at each step of a pass, a server that goes down and comes back, and that a SHA-1 MAC is
+# offered only when named. test/sftp-install.test.ts checks ssh2 installed as pure JavaScript.
+#
+# Its own workflow, beside ci.yml rather than inside it, so it never changes the contexts the shared
+# `ci` job reports and never adds to its time. No ruleset requires it yet; its context is `sftp`.
+#
+# The server is the runner image's own OpenSSH package, not a container: sshd runs as the runner's
+# user on a free port, so no image or root is needed. Its version is printed in the log.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  sftp:
+    name: sftp
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # The runner image carries the OpenSSH server; install it only where it does not.
+      - name: Make sure sshd is there
+        run: |
+          if [ ! -x /usr/sbin/sshd ]; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends openssh-server
+          fi
+          /usr/sbin/sshd -V 2>&1 || true
+          ssh-keygen -V 2>&1 || true
+      - name: Run the SFTP suites against OpenSSH
+        env:
+          PATHWAYS_TEST_SSHD: /usr/sbin/sshd
+        run: pnpm exec vitest run test/sftp-server.test.ts test/sftp-install.test.ts --reporter=verbose

@@ -48,5 +48,17 @@ trustPolicyExclude:
 # the Visual Studio 18 there and failed the install. pnpm 10 runs no dependency's install script
 # unless it is named in onlyBuiltDependencies; naming it here says it is skipped on purpose. The
 # Docker image installs the same way (--ignore-scripts).
+#
+# ssh2's install script only tries to compile its optional crypto binding, which Pathways does not
+# use (below); naming it here says that script is skipped on purpose.
 ignoredBuiltDependencies:
   - better-sqlite3
+  - ssh2
+
+# ssh2, the SFTP client, has two optional native add-ons: a crypto binding its own install script
+# builds with node-gyp, and cpu-features, which only orders its default ciphers. Pathways runs it as
+# pure JavaScript: the two optional packages are never installed and ssh2's install script never
+# runs, so nothing is compiled. test/sftp-install.test.ts fails when either is present.
+ignoredOptionalDependencies:
+  - cpu-features
+  - nan

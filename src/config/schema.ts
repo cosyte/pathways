@@ -1659,6 +1659,91 @@ const pathPatterns = (description: string) =>
     )
     .meta({ description });
 
+/** The SHA-1 based algorithms an `sftp:` block may turn back on, each by name. */
+export const SFTP_WEAK_ALGORITHMS = ["ssh-rsa", "hmac-sha1", "hmac-sha1-etm@openssh.com"] as const;
+
+/**
+ * A file source's or destination's `sftp:` block: the server `dir` is on, the login, and how its key
+ * is checked. The private key is a secret reference, never the YAML; the server's key is checked
+ * against `knownHosts` or `hostKey`, exactly one, with no way to skip the check.
+ */
+const sftpBlock = z
+  .strictObject({
+    host: host.meta({ description: "The SFTP server's host name or address." }),
+    port: port.optional(),
+    user: envable(z.string().min(1).meta({ description: "The user to log in as." })),
+    key: secretSource(
+      "a private key",
+      "the private key never goes in the YAML: { env: NAME }, { file: path } or { secret: { provider, name } }",
+    ).meta({
+      description:
+        "The private key to log in with, read at start: { env: NAME }, { file: path } (refused when its group or others can read it) or { secret: { provider, name } }.",
+    }),
+    passphrase: secretSource("a passphrase")
+      .meta({ description: "The private key's passphrase, read at start, when it has one." })
+      .optional(),
+    knownHosts: path
+      .meta({
+        description:
+          "A known_hosts file, in OpenSSH's format, relative to this file: the server's key must be in it.",
+      })
+      .optional(),
+    hostKey: envable(
+      z.string().min(1).meta({
+        description:
+          "The server's one key: its public key (keytype base64, as in its .pub file) or its fingerprint (SHA256:...).",
+      }),
+    ).optional(),
+    weakAlgorithms: z
+      .array(z.enum(SFTP_WEAK_ALGORITHMS))
+      .meta({
+        description:
+          "SHA-1 based algorithms to offer, each by name, for a server that needs one: ssh-rsa, hmac-sha1, hmac-sha1-etm@openssh.com. Default: none.",
+      })
+      .optional(),
+    connectTimeout: duration(
+      "How long the connection, key exchange and login may take. Default 20s.",
+      { ms: 1, message: 'a duration of at least 1ms, such as "20s"' },
+    ).optional(),
+    timeout: duration(
+      "How long one request (a listing, a stat, one read or write) may take before the connection is dropped. Default 30s.",
+      { ms: 1, message: 'a duration of at least 1ms, such as "30s"' },
+    ).optional(),
+    keepalive: duration(
+      "How often a keepalive is sent while connected; three unanswered drop the connection. Default 15s.",
+      { ms: 1, message: 'a duration of at least 1ms, such as "15s"' },
+    ).optional(),
+  })
+  .meta({
+    description:
+      "Read or write dir on an SFTP server, an absolute path there. Exactly one of knownHosts or hostKey.",
+  })
+  .superRefine((value, ctx) => {
+    if ((value.knownHosts === undefined) === (value.hostKey === undefined)) {
+      ctx.addIssue({
+        code: "custom",
+        message: "name exactly one of knownHosts or hostKey: the server's key is always checked",
+      });
+    }
+  });
+
+/** With `sftp:`, `dir` (and a source's `errorDir`) are absolute paths on the server. */
+function sftpPaths(keys: readonly string[]) {
+  return (value: Readonly<Record<string, unknown>>, ctx: z.RefinementCtx): void => {
+    if (value["sftp"] === undefined) return;
+    for (const key of keys) {
+      const written = value[key];
+      if (typeof written === "string" && !written.startsWith("/")) {
+        ctx.addIssue({
+          code: "custom",
+          path: [key],
+          message: "an absolute path on the SFTP server, such as /inbox",
+        });
+      }
+    }
+  };
+}
+
 /** A channel's `source:` block: exactly one kind. */
 const source = restate(
   z
@@ -1748,8 +1833,10 @@ const source = restate(
                 "How many passes in a row a file fails to open before it moves into errorDir. Default 3.",
             }),
           ).optional(),
+          sftp: sftpBlock.optional(),
         })
         .meta({ description: "Read each file dropped into dir as one message." })
+        .superRefine(sftpPaths(["dir", "errorDir"]))
         .optional(),
       http: httpSource.optional(),
       mllp: mllpSource.optional(),
@@ -1784,8 +1871,10 @@ const destination = restate(
           dir: path.meta({
             description: "The folder to write into, relative to this file. Created if missing.",
           }),
+          sftp: sftpBlock.optional(),
         })
         .meta({ description: "Write each output into dir as a file of its own." })
+        .superRefine(sftpPaths(["dir"]))
         .optional(),
       http: httpDestination.optional(),
       mllp: mllpDestination.optional(),
@@ -2236,6 +2325,26 @@ export interface FileSource {
   readonly errorDir: string | undefined;
   /** How many passes in a row a file fails to open before it moves into `errorDir`. */
   readonly readTries: number;
+  /** The SFTP server `dir` and `errorDir` are on, or `undefined` for a folder on this machine. */
+  readonly sftp?: SftpConfig | undefined;
+}
+
+/**
+ * An `sftp:` block, resolved: `knownHosts` to an absolute path, and its secrets as references.
+ * Exactly one of `knownHosts` and `hostKey` is set.
+ */
+export interface SftpConfig {
+  readonly host: string;
+  readonly port: number;
+  readonly user: string;
+  readonly key: SecretSource;
+  readonly passphrase: SecretSource | undefined;
+  readonly knownHosts: string | undefined;
+  readonly hostKey: string | undefined;
+  readonly weakAlgorithms: readonly (typeof SFTP_WEAK_ALGORITHMS)[number][];
+  readonly connectTimeoutMs: number | undefined;
+  readonly timeoutMs: number | undefined;
+  readonly keepaliveMs: number | undefined;
 }
 
 /**
@@ -2248,6 +2357,8 @@ export type PathPattern = { readonly glob: string } | { readonly regex: string }
 export interface FileDestination {
   readonly kind: "file";
   readonly dir: string;
+  /** The SFTP server `dir` is on, or `undefined` for a folder on this machine. */
+  readonly sftp?: SftpConfig | undefined;
 }
 
 /**

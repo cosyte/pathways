@@ -47,6 +47,7 @@ import {
   type RetryPolicy,
   type SecretProviderConfig,
   type ServerTlsFiles,
+  type SftpConfig,
   type Settings,
   type StorageConfig,
   type TransformConfigBlock,
@@ -525,9 +526,12 @@ function resolveSource(
   }
   // The schema lets exactly one kind through, so a source that is not HTTP is a file source.
   const file = source.file as NonNullable<typeof source.file>;
+  const sftp = resolveSftp(file.sftp, dir);
+  // On an SFTP server the folders are the server's own absolute paths, never this machine's.
+  const place = (written: string): string => (sftp === undefined ? resolve(dir, written) : written);
   return {
     kind: "file",
-    dir: resolve(dir, file.dir),
+    dir: place(file.dir),
     minAgeMs: file.minAge ?? DEFAULT_MIN_AGE_MS,
     keepProcessed: file.keepProcessed ?? false,
     include: patterns(file.include),
@@ -540,8 +544,30 @@ function resolveSource(
     sortBy: file.sortBy ?? "name",
     stable: file.stable ?? false,
     doneFile: file.doneFile,
-    errorDir: file.errorDir === undefined ? undefined : resolve(dir, file.errorDir),
+    errorDir: file.errorDir === undefined ? undefined : place(file.errorDir),
     readTries: file.readTries ?? DEFAULT_READ_TRIES,
+    sftp,
+  };
+}
+
+/** An `sftp:` block as the YAML wrote it. */
+type SftpYaml = NonNullable<NonNullable<DestinationYaml["file"]>["sftp"]>;
+
+/** A file block's `sftp:`, resolved: `knownHosts` and secret files against `dir`. */
+function resolveSftp(sftp: SftpYaml | undefined, dir: string): SftpConfig | undefined {
+  if (sftp === undefined) return undefined;
+  return {
+    host: sftp.host,
+    port: sftp.port ?? 22,
+    user: sftp.user,
+    key: secretSourceOf(sftp.key, dir),
+    passphrase: sftp.passphrase === undefined ? undefined : secretSourceOf(sftp.passphrase, dir),
+    knownHosts: sftp.knownHosts === undefined ? undefined : resolve(dir, sftp.knownHosts),
+    hostKey: sftp.hostKey,
+    weakAlgorithms: sftp.weakAlgorithms ?? [],
+    connectTimeoutMs: sftp.connectTimeout,
+    timeoutMs: sftp.timeout,
+    keepaliveMs: sftp.keepalive,
   };
 }
 
@@ -612,7 +638,8 @@ function resolveConnector(
   if (http === undefined) {
     // The schema lets exactly one kind through, so a destination that is not HTTP is a file one.
     const file = destination.file as NonNullable<typeof destination.file>;
-    return { kind: "file", dir: resolve(dir, file.dir) };
+    const sftp = resolveSftp(file.sftp, dir);
+    return { kind: "file", dir: sftp === undefined ? resolve(dir, file.dir) : file.dir, sftp };
   }
   return {
     kind: "http",
