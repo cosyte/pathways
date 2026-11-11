@@ -413,18 +413,18 @@ function reportConfigError(error: ConfigError, io: CliIo): void {
 /**
  * The secrets `scope` reads that a provider `secrets:` names holds, resolved now, or, when they
  * cannot be had, the exit code, having said why: `config` for a secret, named by file and key and
- * never by value; `failed` for a provider's module, named by file and key.
+ * never by value; `failed` for a provider's module, named by file and key. Each command calls it
+ * once, before anything else reads a secret.
  */
 async function secretsOrExit(
   project: ProjectConfig,
-  context: OpenStoreContext & {
+  context: Omit<OpenStoreContext, "secrets"> & {
     readonly signal?: AbortSignal | undefined;
     readonly skipDry?: DrySkip | undefined;
   },
   scope: SecretScope,
   io: CliIo,
 ): Promise<Secrets | number> {
-  if (context.secrets !== undefined) return context.secrets;
   try {
     return await resolveSecrets(project, context, scope);
   } catch (error) {
