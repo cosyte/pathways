@@ -2,6 +2,8 @@
 // source that says it lost its connection and got it back, and a deadline on every delivery. The
 // engine waits on a fake clock here, so each test moves time itself; sources and destinations are
 // fakes the test drives.
+import { setTimeout as sleep } from "node:timers/promises";
+
 import { afterEach, describe, expect, it } from "vitest";
 
 import { loadProject } from "../src/config/load.js";
@@ -141,20 +143,21 @@ const channelYaml = (source = "", destination = ""): string =>
 interface Harness {
   readonly engine: Engine;
   readonly store: Store;
-  readonly clock: FakeClock;
+  readonly clock: FakeClock | undefined;
   readonly events: LogEvent[];
   readonly bench: Bench;
   readonly project: ProjectConfig;
 }
 
 /**
- * An engine on `channels` (name to channel.yaml), on a fake clock, each channel's connectors the
- * test's, and a hook recording every event in `bench.events.all`.
+ * An engine on `channels` (name to channel.yaml), on a fake clock (on Node's own timers when it is
+ * `undefined`), each channel's connectors the test's, and a hook recording every event in
+ * `bench.events.all`.
  */
 async function harness(
   channels: Record<string, string>,
   connectors: Record<string, { source: SourceConnector; destinations: DestinationConnector[] }>,
-  clock: FakeClock,
+  clock: FakeClock | undefined,
   defaults = "  pollInterval: 1h\n",
 ): Promise<Harness> {
   const bench = freshBench();
@@ -176,8 +179,7 @@ async function harness(
     store,
     logger,
     env: {},
-    now: () => clock.now,
-    wait: clock.wait,
+    ...(clock === undefined ? {} : { now: () => clock.now, wait: clock.wait }),
     connectors: (channel) => connectors[channel.name] as NonNullable<(typeof connectors)[string]>,
   });
   engines.push(engine);
@@ -488,6 +490,50 @@ describe("a pass's deadline", () => {
     // No time passes: the call returned at the cut.
     await running;
     expect(clock.parked).toBe(0);
+  });
+
+  // A source that hands the pass's signal on to its client rejects with an AbortError when the
+  // run ends. That rejection is part of the cut, not a failure: the run ends cleanly and the last
+  // pass delivers what the source took in. On Node's own timers, as `pathways start` runs, since
+  // which settles first, the rejection or the end of the deadline's wait, turns on their timing.
+  it.each([
+    [
+      "rejects in its own abort listener",
+      (signal: AbortSignal): Promise<void> =>
+        new Promise<void>((_resolve, reject) => {
+          signal.addEventListener("abort", () => {
+            reject(signal.reason as Error);
+          });
+        }),
+    ],
+    [
+      "returns a sleep given the signal",
+      (signal: AbortSignal): Promise<void> => sleep(3_600_000, undefined, { signal }),
+    ],
+  ])("ends a run cleanly when a cut pass's poll %s", async (_name, hold) => {
+    const out = new Recorder();
+    let polls = 0;
+    const aborting: SourceConnector = {
+      poll: (sink, signal) => {
+        polls += 1;
+        return sink
+          .receive(bytes(`SYNTH-${String(polls)}`))
+          .then(() => hold(signal as AbortSignal));
+      },
+    };
+    const { engine } = await harness(
+      { aborting: channelYaml() },
+      { aborting: { source: aborting, destinations: [out] } },
+      undefined,
+    );
+    const stop = new AbortController();
+    const running = engine.run(stop.signal);
+    await eventually(() => polls === 1);
+    // Twenty milliseconds into the pass, the loop asleep for the hour's poll interval.
+    await sleep(20);
+    stop.abort();
+    await expect(running).resolves.toBeUndefined();
+    expect(out.sent).toEqual(["SYNTH-1"]);
   });
 });
 

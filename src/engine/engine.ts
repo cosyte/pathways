@@ -1342,7 +1342,7 @@ export class Engine {
    * takes nothing more in (each later `receive` rejects with the code `POLL_DEADLINE`, so the source
    * keeps the message), the signal handed to `poll` aborts, and no pass starts until that `poll`
    * call returns. A pass asked for while one is still in flight is refused, and logged. Rejects as
-   * the source's `poll` does before the deadline.
+   * the source's `poll` does before the pass is cut off; a rejection after it is part of the cut.
    */
   private async poll(channel: RunningChannel): Promise<void> {
     const { logger } = this.options;
@@ -1369,7 +1369,18 @@ export class Engine {
     const deadline = this.wait(deadlineMs, AbortSignal.any([ended.signal, cut.signal])).then(
       () => !ended.signal.aborted,
     );
-    const pass = Promise.race([call.then(() => false), deadline]);
+    // Once the pass is cut, a rejection from its poll call (a source that hands the signal on to
+    // its client gets an AbortError) is part of the cut, not a failure of the pass.
+    const pass = Promise.race([
+      call.then(
+        () => false,
+        (error: unknown) => {
+          if (cut.signal.aborted) return true;
+          throw error;
+        },
+      ),
+      deadline,
+    ]);
     channel.polling = settled(pass);
     try {
       if ((await pass) && !cut.signal.aborted) {
