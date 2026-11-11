@@ -16,20 +16,21 @@ text or a source file's name. Commands whose standard output is their report (`s
 
 ### Messages
 
-| Event                 | Level | Fields                                                                                 | Meaning                                                                                                 |
-| --------------------- | ----- | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `received`            | info  | `channel`, `message`, `bytes`, `failed`                                                | a message is stored; `failed` when the source stored it as failed                                       |
-| `already-stored`      | info  | `channel`, `message`                                                                   | a source handed in again a message it had stored before a stop                                          |
-| `possible-duplicate`  | warn  | `channel`, `message`, `duplicateOf`                                                    | same sender and control ID as an earlier message                                                        |
-| `possible-duplicate`  | warn  | `channel`, `message`, `delivery`, `destination`, `reason`, `interruptedAttempt`        | a delivery was found cut off after its send (`reason` `send-interrupted`), and is sent again, flagged   |
-| `receive-failed`      | error | `channel`, `code`                                                                      | a message could not be stored, and was not acknowledged                                                 |
-| `transformed`         | info  | `channel`, `message`, `outputs`                                                        | the transform returned outputs                                                                          |
-| `filtered`            | info  | `channel`, `message`, `outputs`                                                        | the transform returned none                                                                             |
-| `transform-failed`    | warn  | `channel`, `message`, `kind`, `name`, `code`, `where`                                  | the message is marked failed; `kind` is the stage                                                       |
-| `delivered`           | info  | `channel`, `destination`, `delivery`, `resend`                                         | a destination accepted an output; `resend` only on a flagged resend                                     |
-| `delivery-retry`      | warn  | `channel`, `destination`, `delivery`, `attempt`, `retryInMs`, `code`                   | it is tried again after `retryInMs`                                                                     |
-| `delivery-redirected` | warn  | `channel`, `destination`, `delivery`, `attempt`, `retryInMs`, `status`, `locationHost` | an HTTP destination answered a 3xx; held, never followed, and tried again after `retryInMs` (5 minutes) |
-| `delivery-rejected`   | warn  | `channel`, `destination`, `delivery`, `reason`                                         | the destination rejected it for good                                                                    |
+| Event                 | Level | Fields                                                                                 | Meaning                                                                                                                         |
+| --------------------- | ----- | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `received`            | info  | `channel`, `message`, `bytes`, `failed`                                                | a message is stored; `failed` when the source stored it as failed                                                               |
+| `already-stored`      | info  | `channel`, `message`                                                                   | a source handed in again a message it had stored before a stop                                                                  |
+| `possible-duplicate`  | warn  | `channel`, `message`, `duplicateOf`                                                    | same sender and control ID as an earlier message                                                                                |
+| `possible-duplicate`  | warn  | `channel`, `message`, `delivery`, `destination`, `reason`, `interruptedAttempt`        | a delivery was found cut off after its send (`reason` `send-interrupted`), and is sent again, flagged                           |
+| `receive-failed`      | error | `channel`, `code`                                                                      | a message could not be stored, and was not acknowledged                                                                         |
+| `transformed`         | info  | `channel`, `message`, `outputs`                                                        | the transform returned outputs                                                                                                  |
+| `filtered`            | info  | `channel`, `message`, `outputs`                                                        | the transform returned none                                                                                                     |
+| `transform-failed`    | warn  | `channel`, `message`, `kind`, `name`, `code`, `where`                                  | the message is marked failed; `kind` is the stage                                                                               |
+| `delivered`           | info  | `channel`, `destination`, `delivery`, `resend`                                         | a destination accepted an output; `resend` only on a flagged resend                                                             |
+| `delivery-retry`      | warn  | `channel`, `destination`, `delivery`, `attempt`, `retryInMs`, `code`                   | it is tried again after `retryInMs`                                                                                             |
+| `delivery-redirected` | warn  | `channel`, `destination`, `delivery`, `attempt`, `retryInMs`, `status`, `locationHost` | an HTTP destination answered a 3xx; held, never followed, and tried again after `retryInMs` (`retry.max`, 5 minutes by default) |
+| `delivery-rejected`   | warn  | `channel`, `destination`, `delivery`, `reason`                                         | the destination rejected it for good                                                                                            |
+| `delivery-exhausted`  | warn  | `channel`, `destination`, `delivery`, `attempt`, `reason`, `code`                      | out of retries (`reason` `limit` or `maxAge`): marked failed, its body kept for a resend                                        |
 
 A `transform-failed` line's `kind` is `load`, `parse`, `transform`, `output`, `timeout`, `memory` or
 `crash`. `where` is `file:line:column` in the transform, when it threw.
@@ -95,7 +96,10 @@ keeps the operating system's code, such as `ECONNREFUSED` or `ENOTFOUND`.
 | `ETIMEDOUT`               | HTTP      | no answer within `timeout`                    |
 
 A `delivery-retry` line's `retryInMs` is the backoff, or the wait a 429's or a 503's `Retry-After`
-asked for when that is longer, up to 5 minutes. A `delivery-redirected` line's `locationHost` is the
+asked for when that is longer, up to the destination's `retry.max`, 5 minutes by default. A
+`delivery-exhausted` line comes only from a destination whose retry settings set a `limit` or a
+`maxAge`; see
+[Delivery and errors](./delivery-and-errors.md#set-retries-per-destination). A `delivery-redirected` line's `locationHost` is the
 host (and port, when it names one) of the 3xx answer's `Location`, never its path or query, and is
 absent when there is no `Location` or it names no host.
 

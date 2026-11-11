@@ -3,7 +3,13 @@ import { setTimeout as sleep } from "node:timers/promises";
 
 import type { Logger } from "pino";
 
-import type { ChannelConfig, Format, ProjectConfig } from "../config/schema.js";
+import {
+  DEFAULT_RETRY,
+  type ChannelConfig,
+  type Format,
+  type ProjectConfig,
+  type RetryPolicy,
+} from "../config/schema.js";
 import { resolveTransformConfig } from "../config/transform-config.js";
 import {
   listenerSecurity,
@@ -38,10 +44,16 @@ import { channelStatus, type ChannelHealth, type HealthReport } from "./health.j
 import type { FailureSummary } from "./worker-entry.js";
 import { copyFacts, keepFacts, sourceFacts } from "./source-facts.js";
 
-/** The first retry waits this long; each later one waits twice as long as the one before. */
-export const RETRY_FIRST_MS = 1_000;
-/** No retry waits longer than this, whatever a server asks; a held redirect waits this long. */
-export const RETRY_MAX_MS = 300_000;
+/**
+ * By default the first retry waits this long, and each later one twice as long as the one before.
+ * `retry.first` sets it per project, channel or destination.
+ */
+export const RETRY_FIRST_MS = DEFAULT_RETRY.firstMs;
+/**
+ * By default no retry waits longer than this, whatever a server asks, and a held redirect waits this
+ * long. `retry.max` sets it per project, channel or destination.
+ */
+export const RETRY_MAX_MS = DEFAULT_RETRY.maxMs;
 
 /**
  * The file extension a file destination writes for each format.
@@ -78,7 +90,9 @@ export const CONTENT_TYPES: Readonly<Record<Format, string>> = {
 };
 
 /**
- * How long to wait before attempt number `attempts + 1`, after `attempts` failures.
+ * How long to wait before attempt number `attempts + 1`, after `attempts` failures, with the default
+ * retry settings: 1 second, doubling to 5 minutes. A source that cannot listen is tried again on
+ * these waits.
  *
  * @example
  * ```ts
@@ -87,23 +101,78 @@ export const CONTENT_TYPES: Readonly<Record<Format, string>> = {
  * ```
  */
 export function retryDelay(attempts: number): number {
-  return Math.min(RETRY_FIRST_MS * 2 ** Math.max(0, attempts - 1), RETRY_MAX_MS);
+  return retryBackoff(attempts, DEFAULT_RETRY);
+}
+
+/**
+ * The capped exponential wait before attempt number `attempts + 1`, after `attempts` failures:
+ * `policy.firstMs` times `policy.factor` to the power `attempts - 1`, never past `policy.maxMs`,
+ * rounded to a whole millisecond.
+ *
+ * @example
+ * ```ts
+ * retryBackoff(3, DEFAULT_RETRY); // 4000
+ * retryBackoff(3, { ...DEFAULT_RETRY, firstMs: 500, factor: 3 }); // 4500
+ * ```
+ */
+export function retryBackoff(attempts: number, policy: RetryPolicy): number {
+  const { firstMs, factor, maxMs } = policy;
+  return Math.round(Math.min(firstMs * factor ** Math.max(0, attempts - 1), maxMs));
 }
 
 /**
  * How long a delivery waits before attempt number `attempts + 1`: the backoff, or the wait the
- * server asked for (`hintMs`, from a Retry-After) when that is longer, never past
- * {@link RETRY_MAX_MS}.
+ * server asked for (`hintMs`, from a Retry-After) when that is longer, never past `policy.maxMs`
+ * ({@link RETRY_MAX_MS} by default). With `jitter: "full"` the backoff is a random time between 0
+ * and {@link retryBackoff}, drawn from `random` (a number from 0 up to 1, as `Math.random` gives).
  *
  * @example
  * ```ts
  * retryWait(1, undefined); // 1000
  * retryWait(1, 120_000); // 120000
  * retryWait(1, 3_600_000); // 300000
+ * retryWait(3, undefined, { ...DEFAULT_RETRY, jitter: "full" }, () => 0.5); // 2000
  * ```
  */
-export function retryWait(attempts: number, hintMs: number | undefined): number {
-  return Math.min(Math.max(retryDelay(attempts), hintMs ?? 0), RETRY_MAX_MS);
+export function retryWait(
+  attempts: number,
+  hintMs: number | undefined,
+  policy: RetryPolicy = DEFAULT_RETRY,
+  random: () => number = Math.random,
+): number {
+  const capped = retryBackoff(attempts, policy);
+  const backoff = policy.jitter === "full" ? Math.round(random() * capped) : capped;
+  return Math.min(Math.max(backoff, hintMs ?? 0), policy.maxMs);
+}
+
+/**
+ * Why a delivery's retries ran out: it had its `limit` of attempts, or its next attempt would come
+ * later than `maxAge` after it was queued.
+ */
+export type RetryExhaustion = "limit" | "maxAge";
+
+/**
+ * Whether a delivery that just failed attempt number `attempt` has run out of retries under
+ * `policy`, and why: `undefined` while it may be tried again after `waitMs`. `ageMs` is how long
+ * ago it was queued, or `undefined` when that is not known, which no `maxAge` can then fail.
+ *
+ * @example
+ * ```ts
+ * retryExhausted(3, 4_000, undefined, { ...DEFAULT_RETRY, limit: 3 }); // "limit"
+ * retryExhausted(1, 1_000, 59_500, { ...DEFAULT_RETRY, maxAgeMs: 60_000 }); // "maxAge"
+ * ```
+ */
+export function retryExhausted(
+  attempt: number,
+  waitMs: number,
+  ageMs: number | undefined,
+  policy: RetryPolicy,
+): RetryExhaustion | undefined {
+  if (policy.limit !== undefined && attempt >= policy.limit) return "limit";
+  if (policy.maxAgeMs !== undefined && ageMs !== undefined && ageMs + waitMs > policy.maxAgeMs) {
+    return "maxAge";
+  }
+  return undefined;
 }
 
 /**
@@ -316,6 +385,11 @@ export interface EngineOptions {
    * Without one the engine runs unfenced, as with a store that has no lease methods.
    */
   readonly fence?: EngineFence;
+  /**
+   * A number from 0 up to 1 for each retry with `jitter: "full"`. Defaults to `Math.random`; tests
+   * pass their own.
+   */
+  readonly random?: () => number;
 }
 
 interface RunningChannel {
@@ -348,6 +422,9 @@ interface RunningChannel {
  * - Each destination delivers its messages in order. When a delivery fails, that destination retries
  *   it with growing waits, and later deliveries wait behind it; other destinations carry on. A
  *   delivery the receiver rejects for good is marked failed and the destination moves on.
+ * - Each destination's retry settings (its own, its channel's, or the project's) set those waits,
+ *   and may set a limit or an age past which the delivery is marked failed, its body kept, and the
+ *   destination moves on; `rotate` lets later deliveries go ahead of one waiting, breaking order.
  * - Before each send, the delivery is marked with its attempt and start time; the outcome clears
  *   the mark. A delivery found still marked was cut off after the send, so it is sent again flagged
  *   as a possible duplicate (`OutgoingMessage.resend`), as is every later send of it.
@@ -832,13 +909,32 @@ export class Engine {
     }
   }
 
+  /**
+   * How long ago a message's current deliveries were queued (its transform, replay or resend), when
+   * `policy` has a `maxAge` and the store says; otherwise `undefined`. Read only after a failure.
+   */
+  private async ageOf(messageId: number, policy: RetryPolicy): Promise<number | undefined> {
+    if (policy.maxAgeMs === undefined) return undefined;
+    const message = await this.options.store.message(messageId);
+    const queued = message === undefined ? Number.NaN : Date.parse(message.updatedAt);
+    return Number.isNaN(queued) ? undefined : Math.max(0, this.now() - queued);
+  }
+
   private async deliverAll(channel: RunningChannel): Promise<void> {
     const { config, connectors } = channel;
     const { store, logger } = this.options;
     for (const [index, destination] of connectors.destinations.entries()) {
+      const policy = config.destinations[index]?.retry ?? config.settings.retry;
+      // With rotate, a delivery waiting for a retry steps aside for the due ones behind it; each is
+      // tried once a pass, so a retry due at once waits for the next pass.
+      const tried = new Set<number>();
       for (;;) {
-        const delivery = await store.nextDelivery(config.name, index);
+        const delivery = await (policy.rotate
+          ? store.nextDelivery(config.name, index, { dueBy: this.now() })
+          : store.nextDelivery(config.name, index));
         if (delivery === undefined || delivery.nextAttemptAt > this.now()) break;
+        if (tried.has(delivery.id)) break;
+        tried.add(delivery.id);
         // Still marked: an attempt was handed over and its outcome never recorded, so it counts.
         const interrupted = delivery.sending?.attempt;
         const attempt = (interrupted ?? delivery.attempts) + 1;
@@ -905,23 +1001,62 @@ export class Engine {
           }
           const attempts = attempt;
           const code = errorCode(error);
-          if (error instanceof RedirectHeld) {
-            // Held, never followed: tried again at the longest wait, while an operator fixes the URL.
-            await store.scheduleRetry(
+          const held = error instanceof RedirectHeld ? error : undefined;
+          const hint = error instanceof RetryableError ? error.retryAfterMs : undefined;
+          // Held, never followed: tried again at the longest wait, while an operator fixes the URL.
+          const wait =
+            held === undefined
+              ? retryWait(attempts, hint, policy, this.options.random)
+              : policy.maxMs;
+          const failure = `delivery: ${code ?? "error"}`;
+          const exhausted = retryExhausted(
+            attempts,
+            wait,
+            await this.ageOf(delivery.messageId, policy),
+            policy,
+          );
+          if (exhausted !== undefined) {
+            // Out of retries: failed, its body kept for an operator to resend, and the queue moves on.
+            await store.failDelivery(
               delivery.id,
-              attempts,
-              this.now() + RETRY_MAX_MS,
-              `delivery: ${error.code}`,
+              `exhausted (${exhausted}, ${String(attempts)} attempts): ${failure}`,
               ...this.epoch(),
             );
-            const { status, locationHost } = error;
+            logger.warn({
+              event: "delivery-exhausted",
+              channel: config.name,
+              destination: index,
+              delivery: delivery.id,
+              attempt: attempts,
+              reason: exhausted,
+              code,
+            });
+            this.emit(channel, () => ({
+              type: "delivery-exhausted",
+              at: this.at(),
+              ...about,
+              reason: exhausted,
+              name: errorName(error),
+              code,
+            }));
+            continue;
+          }
+          await store.scheduleRetry(
+            delivery.id,
+            attempts,
+            this.now() + wait,
+            failure,
+            ...this.epoch(),
+          );
+          if (held !== undefined) {
+            const { status, locationHost } = held;
             logger.warn({
               event: "delivery-redirected",
               channel: config.name,
               destination: index,
               delivery: delivery.id,
               attempt: attempts,
-              retryInMs: RETRY_MAX_MS,
+              retryInMs: wait,
               status,
               locationHost,
             });
@@ -929,40 +1064,33 @@ export class Engine {
               type: "delivery-redirected",
               at: this.at(),
               ...about,
-              retryInMs: RETRY_MAX_MS,
-              retryAt: this.at(RETRY_MAX_MS),
+              retryInMs: wait,
+              retryAt: this.at(wait),
               status,
               locationHost,
             }));
-            break;
+          } else {
+            logger.warn({
+              event: "delivery-retry",
+              channel: config.name,
+              destination: index,
+              delivery: delivery.id,
+              attempt: attempts,
+              retryInMs: wait,
+              code,
+            });
+            this.emit(channel, () => ({
+              type: "delivery-retry",
+              at: this.at(),
+              ...about,
+              retryInMs: wait,
+              retryAt: this.at(wait),
+              name: errorName(error),
+              code,
+            }));
           }
-          const hint = error instanceof RetryableError ? error.retryAfterMs : undefined;
-          const wait = retryWait(attempts, hint);
-          await store.scheduleRetry(
-            delivery.id,
-            attempts,
-            this.now() + wait,
-            `delivery: ${code ?? "error"}`,
-            ...this.epoch(),
-          );
-          logger.warn({
-            event: "delivery-retry",
-            channel: config.name,
-            destination: index,
-            delivery: delivery.id,
-            attempt: attempts,
-            retryInMs: wait,
-            code,
-          });
-          this.emit(channel, () => ({
-            type: "delivery-retry",
-            at: this.at(),
-            ...about,
-            retryInMs: wait,
-            retryAt: this.at(wait),
-            name: errorName(error),
-            code,
-          }));
+          // In order, later deliveries wait behind this one; with rotate they go ahead of it.
+          if (policy.rotate) continue;
           break;
         }
         // Delivered: freed now when the store handed it over and the destination kept none of it.
