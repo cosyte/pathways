@@ -61,6 +61,7 @@ import { verifyCommand, type VerifySelection } from "./operator/verify.js";
 import { InitError, initProject, STARTER_CHANNEL, STARTER_KEY_FILE } from "./starter/init.js";
 import { resolveSecrets, type Secrets } from "./secrets/resolve.js";
 import type { DrySkip, SecretScope } from "./secrets/sources.js";
+import { emptySqliteLog } from "./storage/dialects.js";
 import { openRawStore, openStore, startingKeys, type OpenStoreContext } from "./storage/open.js";
 import { SchemaVersionError } from "./storage/schema.js";
 import {
@@ -142,7 +143,10 @@ Commands:
   audit               Read the audit log, newest first
   rekey               Re-encrypt every stored message under the current key
                       of pathways.yaml's encryption, so older keys can be
-                      retired
+                      retired: on SQLite once it exits 0, on a database
+                      server once it no longer keeps earlier row versions,
+                      and on either only once no copy or backup from before
+                      rekey may be restored
   probe [--ready] [--if-configured]
                       Ask the running engine's probe listener (pathways.yaml's
                       probes block) whether it is alive, or with --ready
@@ -413,18 +417,18 @@ function reportConfigError(error: ConfigError, io: CliIo): void {
 /**
  * The secrets `scope` reads that a provider `secrets:` names holds, resolved now, or, when they
  * cannot be had, the exit code, having said why: `config` for a secret, named by file and key and
- * never by value; `failed` for a provider's module, named by file and key.
+ * never by value; `failed` for a provider's module, named by file and key. Each command calls it
+ * once, before anything else reads a secret.
  */
 async function secretsOrExit(
   project: ProjectConfig,
-  context: OpenStoreContext & {
+  context: Omit<OpenStoreContext, "secrets"> & {
     readonly signal?: AbortSignal | undefined;
     readonly skipDry?: DrySkip | undefined;
   },
   scope: SecretScope,
   io: CliIo,
 ): Promise<Secrets | number> {
-  if (context.secrets !== undefined) return context.secrets;
   try {
     return await resolveSecrets(project, context, scope);
   } catch (error) {
@@ -502,18 +506,16 @@ const STORAGE_REFUSALS: Readonly<Record<StorageError["reason"], string>> = {
 /**
  * Opens the project's store as every command that reads or writes messages does, through
  * `src/storage/open.ts`: the store `pathways.yaml` names, wrapped in encryption at rest under its
- * keys (read now, like every other secret), or in the plaintext store for `encryption: none`.
- * Returns the exit code when it cannot, having said why.
+ * keys, or in the plaintext store for `encryption: none`. The caller has already read every secret,
+ * the keys' among them, so a missing one has stopped it before here. Returns the exit code when it
+ * cannot, having said why.
  */
 async function openWrapped(
   project: ProjectConfig,
-  given: OpenStoreContext,
+  context: OpenStoreContext & { readonly secrets: Secrets },
   io: CliIo,
   command?: string,
 ): Promise<{ readonly store: MessageStore; readonly encrypted: boolean } | number> {
-  const secrets = await secretsOrExit(project, given, "store", io);
-  if (typeof secrets === "number") return secrets;
-  const context = { ...given, secrets };
   const keys = await keysOrExit(project, context, io);
   if (typeof keys === "number") return keys;
   const { storage } = project;
@@ -574,7 +576,7 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
     io,
   );
   if (typeof secrets === "number") return secrets;
-  const context: OpenStoreContext = mode.noMigrate
+  const context: OpenStoreContext & { readonly secrets: Secrets } = mode.noMigrate
     ? { env, logger, secrets, migrate: "none" }
     : { env, logger, secrets };
   const opened = await openWrapped(project, context, io);
@@ -949,10 +951,15 @@ const MASKED_QUERY = "?(hidden)";
 /** The URLs the configuration read from environment variables (not from a reference's default). */
 function urlsFromEnvironment(project: ProjectConfig, env: Env): ReadonlySet<string> {
   const urls = new Set<string>();
-  for (const reference of project.environment ?? []) {
+  const references = project.environment;
+  /* v8 ignore if -- validate's project comes from loadProject, which always lists the references */
+  if (references === undefined) return urls;
+  for (const reference of references) {
     if (reference.from !== "environment" || !reference.key.endsWith(".url")) continue;
     const value = env[reference.variable];
-    if (value !== undefined) urls.add(value);
+    /* v8 ignore if -- the project was loaded from this same env, and the variable was set there */
+    if (value === undefined) continue;
+    urls.add(value);
   }
   return urls;
 }
@@ -970,6 +977,21 @@ const REKEY_NEEDS_KEYS =
 /** What `rekey` says about a custom store that cannot list and replace what it holds. */
 const REKEY_NEEDS_CONTENT_STORE =
   "pathways: pathways.yaml: storage.module: rekey needs a store that also implements ContentStore (storedContent and replaceContent).\n";
+
+/**
+ * What `rekey` adds when every value is under the current key but the store is not SQLite. On
+ * SQLite, rekey then empties the write-ahead log into the file, whose freed space `secure_delete`
+ * zeroes, so the live database's files hold no earlier version; a database server keeps earlier row
+ * versions a while (see `Store.replaceContent`), and a custom store may too, so there an older key
+ * still guards them and is not yet safe to retire. On any store, a copy or backup made before rekey
+ * still holds every value under the older key.
+ */
+const REKEY_KEEPS_EARLIER_VERSIONS =
+  "pathways: every value is under the current key, but this store is not SQLite, so it may still hold earlier versions of the rewritten rows under the older keys (a database server keeps them in its logs, free space, replicas and backups). Keep each older key until it no longer does.\n";
+
+/** What `rekey` adds on SQLite when a read under way keeps the write-ahead log from being emptied. */
+const REKEY_LOG_HELD =
+  "pathways: every value is under the current key, but a connection still reading the database keeps the earlier versions in its write-ahead log; run rekey again once that read is done.\n";
 
 async function rekeyStore(
   projectDir: string,
@@ -1030,7 +1052,14 @@ async function rekeyStore(
   if (counts.changed > 0) {
     io.err("pathways: some values changed while rekey ran; run it again.\n");
   }
-  return rekeyComplete(counts) ? EXIT.ok : EXIT.failed;
+  if (!rekeyComplete(counts)) return EXIT.failed;
+  if (project.storage.kind !== "sqlite") {
+    io.err(REKEY_KEEPS_EARLIER_VERSIONS);
+  } else if (!emptySqliteLog(project.storage.file)) {
+    io.err(REKEY_LOG_HELD);
+    return EXIT.failed;
+  }
+  return EXIT.ok;
 }
 
 async function test(

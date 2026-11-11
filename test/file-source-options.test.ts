@@ -12,6 +12,7 @@ import {
   type FileFault,
   FileSource,
   type FileSourceOptions,
+  PATTERN_TIME_PER_PASS_MS,
   PROCESSED_DIR,
   REGEX_TIME_LIMIT_MS,
 } from "../src/connectors/file.js";
@@ -687,7 +688,7 @@ describe("FileSource and a pattern run that times out", () => {
     expect(errors).toEqual([expect.objectContaining({ code: "ERR_SCRIPT_EXECUTION_TIMEOUT" })]);
   });
 
-  it("tries a path again on each pass until three runs in a row time out, and a match resets the count", async () => {
+  it("tries a path again on each pass until three runs in a row time out, and keeps a match", async () => {
     const dir = await inbox();
     await dropFile(join(dir, "a.hl7"), "body");
     const errors: unknown[] = [];
@@ -706,18 +707,13 @@ describe("FileSource and a pattern run that times out", () => {
     expect(await pass(source)).toEqual([]);
     expect(await pass(source)).toEqual(["body"]);
     expect(errors).toHaveLength(2);
-    // The count starts again from a match: two more timeouts in a row do not set the path aside.
+    // A match is kept while a pass finds the path, so a file dropped at it again is taken with no
+    // run, and the timeouts before the match count for nothing.
     await dropFile(join(dir, "a.hl7"), "again");
-    run.mockImplementationOnce(() => {
-      throw timedOut();
-    });
-    run.mockImplementationOnce(() => {
-      throw timedOut();
-    });
-    expect(await pass(source)).toEqual([]);
-    expect(await pass(source)).toEqual([]);
+    const runs = run.mock.calls.length;
     expect(await pass(source)).toEqual(["again"]);
-    expect(errors).toHaveLength(4);
+    expect(run).toHaveBeenCalledTimes(runs);
+    expect(errors).toHaveLength(2);
   });
 
   it("sets a path aside after three timeouts in a row, then tries it at doubling waits up to 64 passes, saying each timeout", async () => {
@@ -774,6 +770,111 @@ describe("FileSource and a pattern run that times out", () => {
     expect(run).toHaveBeenCalledTimes(3);
     expect(errors).toEqual([]);
   });
+
+  it("runs the patterns on a path once while its file is there, not on every pass", async () => {
+    const dir = await inbox();
+    await dropFile(join(dir, "draft.tmp"), "left");
+    const source = sourceOn(dir, { exclude: [{ glob: "*.tmp" }] });
+    const run = vi.spyOn(Script.prototype, "runInContext");
+    for (let index = 0; index < 3; index += 1) expect(await pass(source)).toEqual([]);
+    expect(run).toHaveBeenCalledTimes(1);
+    // Once the file is gone the result is forgotten, and a file of that name is judged again.
+    unlinkSync(join(dir, "draft.tmp"));
+    expect(await pass(source)).toEqual([]);
+    await dropFile(join(dir, "draft.tmp"), "left again");
+    expect(await pass(source)).toEqual([]);
+    expect(run).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the count of a path the pass had no time for, so it is set aside after three timeouts all the same", async () => {
+    const dir = await inbox();
+    for (let index = 0; index < 7; index += 1)
+      await dropFile(join(dir, `slow-${index}.hl7`), "slow");
+    const said: number[] = [];
+    let passes = 0;
+    const source = sourceOn(dir, {
+      include: [{ glob: "*.hl7" }],
+      onReadError: () => said.push(passes),
+    });
+    let clock = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => clock);
+    vi.spyOn(Script.prototype, "runInContext").mockImplementation(() => {
+      clock += 100;
+      throw timedOut();
+    });
+    for (passes = 1; passes <= 12; passes += 1) expect(await pass(source)).toEqual([]);
+    // Five runs a pass at most. Each path times out three times in a row, whichever passes it waits
+    // through for want of time, then waits 1 pass, then 2: the same counts whatever the walk's order.
+    const perPass = Array.from({ length: 12 }, (_, at) => said.filter((p) => p === at + 1).length);
+    expect(perPass).toEqual([5, 5, 5, 4, 5, 2, 2, 3, 2, 2, 0, 0]);
+  });
+
+  it("spends at most the pass's time on pattern runs, and runs the paths that waited longest first", async () => {
+    const dir = await inbox();
+    for (let index = 0; index < 20; index += 1) {
+      await dropFile(join(dir, `slow-${String(index).padStart(2, "0")}.hl7`), "slow");
+    }
+    const said: number[] = [];
+    let passes = 0;
+    const source = sourceOn(dir, {
+      include: [{ glob: "*.hl7" }],
+      onReadError: () => said.push(passes),
+    });
+    // Each run on a slow name takes 100 ms on this clock and times out; any other is free, and
+    // matches, as *.hl7 matches late.hl7.
+    let clock = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => clock);
+    vi.spyOn(Script.prototype, "runInContext").mockImplementation((context) => {
+      if (!String(context["path"]).startsWith("slow-")) return true;
+      clock += 100;
+      throw timedOut();
+    });
+    passes = 1;
+    expect(await pass(source)).toEqual([]);
+    // A file dropped after the slow names waits behind the 15 that were never run.
+    await dropFile(join(dir, "late.hl7"), "late");
+    const taken: number[] = [];
+    for (passes = 2; passes <= 8; passes += 1) {
+      if ((await pass(source)).includes("late")) taken.push(passes);
+    }
+    // 500 ms a pass is five runs of 100 ms: never more in one pass.
+    const perPass = new Map<number, number>();
+    for (const at of said) perPass.set(at, (perPass.get(at) ?? 0) + 1);
+    expect(Math.max(...perPass.values())).toBe(PATTERN_TIME_PER_PASS_MS / 100);
+    // The 15 that waited from the first pass go first, five a pass; then the line of the second
+    // pass, the late file and the five that timed out on the first, in the order the walk found
+    // them, so the late file is taken on the fifth pass or the sixth.
+    expect(taken).toHaveLength(1);
+    expect(taken[0]).toBeGreaterThanOrEqual(5);
+    expect(taken[0]).toBeLessThanOrEqual(6);
+  });
+});
+
+describe("FileSource and many names a pattern runs too long on", () => {
+  it("stops running patterns for a pass once the pass has spent its time, and takes the others later", async () => {
+    const dir = await inbox();
+    // Names built to make ^(a+)+$ backtrack: unguarded, each test of one takes many seconds.
+    for (let index = 0; index < 16; index += 1) {
+      await dropFile(join(dir, `${"a".repeat(28 + index)}!`), "slow");
+    }
+    await dropFile(join(dir, "aaa"), "fast");
+    const said: number[] = [];
+    let passes = 0;
+    const source = sourceOn(dir, {
+      include: [{ regex: "^(a+)+$" }],
+      onReadError: () => said.push(passes),
+    });
+    const bodies: string[] = [];
+    for (passes = 1; passes <= 4; passes += 1) bodies.push(...(await pass(source)));
+    expect(bodies).toEqual(["fast"]);
+    // Each timed-out run takes at least the limit, so a pass holds at most this many, and one more
+    // that started just before the pass's time ran out.
+    const most = PATTERN_TIME_PER_PASS_MS / REGEX_TIME_LIMIT_MS + 1;
+    for (let at = 1; at <= 4; at += 1) {
+      expect(said.filter((value) => value === at).length).toBeLessThanOrEqual(most);
+    }
+    expect(said.length).toBeGreaterThanOrEqual(16);
+  });
 });
 
 // Symbolic links need a privilege on Windows that CI's runner does not grant to every process.
@@ -787,6 +888,20 @@ describe.skipIf(windows)("FileSource and symbolic links", () => {
     expect(await pass(sourceOn(dir, { recursive: true, ignoreDot: false }))).toEqual(["inside"]);
     expect((await readdir(dir)).sort()).toEqual([CLAIMED_DIR, "link.hl7", "linked-folder"]);
     expect(await readFile(join(outside, "secret.hl7"), "utf8")).toBe("outside");
+  });
+});
+
+// The link is a junction on Windows, which needs no privilege, so this runs there too; elsewhere a
+// symbolic link to the folder.
+describe("FileSource and a link to a folder", () => {
+  it("never follows it, on every system", async () => {
+    const dir = await inbox();
+    const outside = await makeProject({ "folder/b.hl7": "outside" });
+    await dropFile(join(dir, "a.hl7"), "inside");
+    await symlink(join(outside, "folder"), join(dir, "linked-folder"), "junction");
+    expect(await pass(sourceOn(dir, { recursive: true }))).toEqual(["inside"]);
+    expect((await readdir(dir)).sort()).toEqual([CLAIMED_DIR, "linked-folder"]);
+    expect(await readFile(join(outside, "folder", "b.hl7"), "utf8")).toBe("outside");
   });
 });
 

@@ -57,8 +57,13 @@ export interface RekeyOptions {
 }
 
 /**
- * Whether a rekey left every stored value under the current master key, so every older key can be
- * retired.
+ * Whether a rekey left every stored value under the current master key. On SQLite, an older key can
+ * be retired once `pathways rekey` has also emptied the write-ahead log into the file
+ * (`emptySqliteLog`), whose freed space the store zeroes. A database server keeps earlier row
+ * versions in its logs, free space, replicas and backups for a while, still under the older key, so
+ * there retire it only once the server no longer holds them. On any store, a copy or backup made
+ * before the rekey holds every value under the older key: retiring that key while such a copy may
+ * be restored loses every stored message in it.
  *
  * @example
  * ```ts
@@ -76,11 +81,13 @@ type Outcome<T> =
 const TABLES: readonly ContentTable[] = ["messages", "deliveries"];
 
 /**
- * Re-encrypts every stored body and error text under the provider's current master key, so an older
- * key can be retired once this reports nothing left under it. Each value is decrypted first, which
- * also checks its integrity; values already under the current key are left as they were. A row is
- * replaced only if the engine has not changed it meanwhile, so it is safe to run while the engine
- * runs. Returns counts only.
+ * Re-encrypts every stored body and error text under the provider's current master key. Once this
+ * reports nothing left under an older key, that key can be retired on SQLite after the write-ahead
+ * log is emptied, and on a database server only once the server no longer keeps earlier row
+ * versions, and on either not while a copy made before may be restored ({@link rekeyComplete}). Each
+ * value is decrypted first, which also checks its integrity; values already under the current key
+ * are left as they were. A row is replaced only if the engine has not changed it meanwhile, so it is
+ * safe to run while the engine runs. Returns counts only.
  *
  * @example
  * ```ts

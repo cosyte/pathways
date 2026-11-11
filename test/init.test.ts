@@ -291,6 +291,18 @@ describe("pathways init", () => {
     });
   });
 
+  // Windows answers a path below a file with ENOENT, which counts as a target not there yet, so
+  // this gives a path no system can look up: one with a NUL character, which Node refuses.
+  it("refuses a target it cannot look up, on every system, with the error code only", async () => {
+    const root = await makeProject({});
+    await expect(initProject(join(root, "SYNTHETIC\0SECRET"))).rejects.toMatchObject({
+      name: "InitError",
+      reason: "io",
+      code: "ERR_INVALID_ARG_VALUE",
+    });
+    expect(await readdir(root)).toEqual([]);
+  });
+
   it.each([
     [["init", "a", "b"]],
     [["init", "a", "-C", "b"]],

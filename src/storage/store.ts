@@ -2282,9 +2282,11 @@ export class Store implements MessageStore, ContentStore {
    * The old values are overwritten in place, but a database server keeps earlier row versions for
    * a while: PostgreSQL until VACUUM, and even then in free space and its WAL; MySQL in its undo
    * log and binary log; SQL Server in its transaction log and freed pages; and every server in its
-   * backups. Under encryption those versions are ciphertext under the older master key, so that key
-   * is what keeps them unreadable: retire it once the server no longer holds them, not as soon as
-   * rekey reports nothing left under it. SQLite, opened with `secure_delete`, zeroes them in its file.
+   * replicas and backups. Under encryption those versions are ciphertext under the older master key,
+   * so that key is what keeps them unreadable: retire it once the server no longer holds them, not as
+   * soon as rekey reports nothing left under it. SQLite, opened with `secure_delete`, zeroes them in
+   * its file, but its write-ahead log keeps them until `pathways rekey` empties it
+   * (`emptySqliteLog`). On any database, a copy or backup made before still holds them.
    */
   async replaceContent(
     current: StoredContent,
