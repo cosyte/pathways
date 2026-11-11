@@ -2,7 +2,7 @@
 id: performance
 title: Performance
 sidebar_label: Performance
-description: "What we measure on Pathways (end-to-end throughput, latency, memory, import time and scaling) and how, and how to run the benchmarks yourself."
+description: "What we measure on Pathways (end-to-end throughput, open-loop latency and capacity, memory, import time and scaling) and how, and how to run the benchmarks yourself."
 ---
 
 # Performance
@@ -67,6 +67,57 @@ JSON read of the transform worker to a cost that grows no faster than their inpu
 base build against the head build with the bench suite, interleaved on one runner. The comparison
 is advisory: it reports and never fails a pull request.
 
+## The open-loop bench
+
+`pnpm bench` and the engine passes above are closed loops: every message is already waiting, and
+the engine sets the pace. That says how fast the engine drains a backlog, not how it answers
+traffic that arrives on its own schedule. `bench/open-loop/run.mjs` measures that, from outside the
+engine, in three processes:
+
+- **The engine** is the built `pathways start`, as production runs it: the engine lease held, the
+  marker written before each send, encryption at rest on, a health endpoint, and the fault points
+  compiled out of the build. Each channel takes synthetic HL7 v2 `ADT^A01` messages, sets MSH-5 in
+  its worker, and delivers to an MLLP receiver (and, in one case, an HTTP receiver and a folder too).
+- **The sender** sends MLLP, MLLP over TLS or HTTPS at a fixed rate, in a process of its own. It is
+  an open loop: message _n_ is due at _start + n / rate_ and goes out when it is due, answered or
+  not. Each message's latency runs from when it was due to its ACK, so a sender that falls behind is
+  charged for the wait, rather than quietly sending less while the engine is slow (the coordinated
+  omission that wrk2 describes). Latency is recorded in HdrHistogram and reported as p50, p99, p99.9
+  and the maximum, never a mean.
+- **The driver** runs the receivers, reads the engine's queue (stored messages not yet transformed,
+  and deliveries not yet done) from the health endpoint once a second, and reads the engine's
+  resident set from the operating system.
+
+**Capacity** is written down as a rule. A ladder of rates runs each rate for 20 seconds. A rate
+holds when every message is answered `AA`, the p99 is at most 100 ms, and the queue stays flat: its
+fitted growth over the step (a Theil-Sen slope, which one outlying sample cannot move) is less than
+one second of the step's traffic. The capacity of a run is the highest rate that holds, with every
+rate below it holding too.
+
+The cases are MLLP, MLLP over TLS and HTTPS on SQLite; MLLP over TLS on PostgreSQL; four channels
+with three destinations each; a retry backlog, where the MLLP receiver goes down for 30 seconds
+while traffic keeps coming and then returns (how long the backlog takes to drain, how long the
+engine's first delivery on its new connection takes, and how long a new sender connection waits
+for its first ACK meanwhile); a startup with a backlog, where the engine is stopped with a backlog
+and started again (the time to answer health, to the first ACK on a new connection, and to drain);
+an hour at one rate, for the slope of the resident set; and the closed-loop drain, for comparison.
+
+Each case runs five times on one runner, and every run is reported with the spread: none is picked.
+Each reading states the message size, the destinations, the storage and the disk under it,
+encryption, TLS, the runner, the Node version and the commit, in the results format of
+[`@cosyte/bench`](https://github.com/cosyte/config/tree/main/packages/bench). The Bench reading
+workflow runs them on GitHub-hosted runners, which share their machines, so the readings are
+advisory.
+
+### The first published figure
+
+The figure on the Pathways page of cosyte.com, about 1,100 messages a second, is a closed-loop
+drain: `pnpm bench` with 2,000 messages already waiting in a folder, one channel, file to file
+through SQLite, on Node 26 and a developer machine's local disk, taken once by hand. It is how fast
+that machine drained a backlog, not a rate the engine holds under traffic. The Bench reading
+workflow's `closed loop` job runs the same command on a GitHub-hosted runner, and names the disk it
+ran on, beside the open-loop readings.
+
 ## How the engine keeps a message's cost down
 
 - **A body moves; it is not copied.** Encryption and decryption write into one buffer. A store
@@ -105,6 +156,19 @@ pnpm bench:reading --out reading.json   # every benchmark, in fresh processes
 pnpm bench:profile --out profile        # memory, the transform path, profiles and budgets
 pnpm test:perf                          # the scaling gates
 ```
+
+The open-loop bench runs one case at a time against a build, five runs by default (`--runs`), and
+needs the `openssl` command for its TLS material. The PostgreSQL case reads an administrator's URL
+from `PATHWAYS_BENCH_POSTGRES_URL`, and makes and drops a database of its own for each run:
+
+```bash
+pnpm build
+node bench/open-loop/run.mjs --case mllps --out mllps.json --summary mllps.md
+node bench/open-loop/run.mjs --case soak --runs 1 --seconds 3600
+```
+
+The cases are `mllp`, `mllps`, `https`, `postgres`, `channels`, `retry-backlog`, `startup-backlog`,
+`soak` and `drain`.
 
 The database is `sqlite`, `postgres`, `mysql` or `sqlserver`. A server's URL is an administrator's,
 in the same form as the test URLs in `.github/workflows/databases.yml`.

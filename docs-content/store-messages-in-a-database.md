@@ -94,10 +94,21 @@ a delivery's outcome) carries the epoch the engine took the lease under, checked
 statement. If another engine has taken the lease since, the write changes nothing, and the engine
 stops sending and taking in at once, logs `lease-lost`, and exits 1 for its supervisor to restart.
 It does the same when a renewal is refused or fails, or comes later than the lease lasts by the
-engine's own monotonic clock (the process was paused, say). The send itself cannot be fenced: an
-engine paused after handing a message to its destination and before recording it can mean one
-delivery is sent twice, the second flagged as a possible duplicate, which at-least-once delivery
-allows.
+engine's own monotonic clock (the process was paused, say).
+
+The send itself cannot be fenced, so a paused engine can mean one delivery is sent twice, which
+at-least-once delivery allows:
+
+- **Paused after the send, before recording it.** The engine that takes over sees the marker and
+  sends the delivery again, flagged as a possible duplicate.
+- **Paused after writing the marker, before the send.** The engine that takes over sends first,
+  flagged; when the paused engine wakes it sends the same delivery second, unflagged, then finds its
+  lease gone at its next write and stops.
+- **With `resendFlag: false`,** no marker is written, so a resend after either pause goes out
+  unflagged.
+- **In the few seconds after `pathways lease release --force` on an engine that is still running,**
+  until it stops at its next renewal, a new engine can send a delivery the old one is sending too,
+  and either copy can go out unflagged. Free a lease by force only when its engine's host is gone.
 
 The lease is a row, not a database lock. A session lock (PostgreSQL's advisory locks, SQL Server's
 `sp_getapplock`) belongs to one connection, and a pooled connection that is dropped and replaced
@@ -124,8 +135,9 @@ within the time to live plus one renewal interval plus its own start time: about
 start with the default 15-second time to live.
 
 A standby is refused on SQLite: the database is one file on one host, so a second engine there is
-refused instead. A custom store without the lease methods runs one engine as before, with a
-`lease-unsupported` warning at start, and cannot run a standby.
+refused instead. A custom store without the lease methods runs unfenced: nothing refuses a second
+engine on the same store, and no write checks an epoch, so two engines can send the same delivery.
+The engine logs a `lease-unsupported` warning at start, and cannot run a standby.
 
 The `leases` table comes with migration `0006-leases`, which only adds the table: it is safe to run
 while deliveries are in flight, and an older Pathways never reads it. It has no rollback step; to
@@ -157,8 +169,9 @@ To take part in the engine lease, a store also implements the four optional leas
 engine passes as the last argument of `completeTransform`, `failTransform`, `markSending`,
 `markDelivered`, `scheduleRetry` and `failDelivery`: given one, the write changes its row only while
 the `engine` lease still carries that epoch, judged in the same statement, and otherwise rejects with
-`LeaseLostError`. A store that has none of this needs no change: it runs one engine, unfenced, with a
-warning at start.
+`LeaseLostError`. A store that has none of this needs no change, but its engine runs unfenced: a
+second engine on the same store is not refused, and the engine logs a `lease-unsupported` warning
+at start.
 
 ## Related
 

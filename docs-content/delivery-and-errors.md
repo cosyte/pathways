@@ -53,7 +53,8 @@ What the flag does not cover:
 - **Two engines on one database are fenced by the engine lease.** A second engine is refused, and an
   engine whose lease another has taken can no longer record an outcome: see
   [one engine per database](./store-messages-in-a-database.md#one-engine-per-database). An engine
-  paused between a send and its record can still mean that delivery is sent once more, flagged.
+  paused around a send can still mean that delivery is sent once more; that page says when the
+  extra copy is flagged and when it is not.
 - **The marker is as durable as the database.** On SQLite it survives a process kill. Whether it
   survives a power loss depends on the database's sync setting (SQLite's `synchronous`), the same as
   for stored messages.
