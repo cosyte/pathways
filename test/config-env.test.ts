@@ -632,7 +632,8 @@ destinations:
 
   it("take a reference at every key that holds one value, but the documented exceptions", () => {
     // configuration-reference.md, "Settings from the environment": plaintext, a channel's name and
-    // format are never read from the environment (encryption: none and auth: none are the short
+    // format, and the header names an HTTP source hands a transform, are never read from the
+    // environment (encryption: none and auth: none are the short
     // form of a block, and blocks are not scalars, so the walk passes over them). Matched by the
     // whole path, so a new key that only shares one of these names is still checked.
     const EXCEPTIONS: readonly string[] = [
@@ -644,6 +645,7 @@ destinations:
       "channel.yaml.name",
       "channel.yaml.format",
       "channel.yaml.source.http.plaintext",
+      "channel.yaml.source.http.contextHeaders.[]",
       "channel.yaml.source.mllp.plaintext",
       "channel.yaml.destinations.[].http.plaintext",
       "channel.yaml.destinations.[].mllp.plaintext",

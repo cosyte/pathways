@@ -69,7 +69,8 @@ health:
   or a master key stays a reference, read when a command starts and never printed. `plaintext`,
   `encryption: none`, `auth: none`, a channel's `name` and `format`, and a block (`tls`, `options`)
   are not read from the environment: turning TLS, encryption or authentication off stays in the
-  file, where the audit sees it.
+  file, where the audit sees it. Nor are the names in an HTTP source's `contextHeaders`: which
+  request headers reach a transform stays in the file, where a credential header is refused at load.
 - `pathways validate --print` prints the configuration as `start` reads it, with every setting the
   environment gave and the variable it named; see
   [Command reference](./command-reference.md#pathways-validate). The query string of a URL read
