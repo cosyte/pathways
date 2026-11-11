@@ -74,7 +74,11 @@ no mutation floor. Both join when Pathways adopts the standard's ratchet.
   and operator tests, and the crash tests, on each. It runs on Linux only: the servers run as Linux
   containers. The crash tests on SQLite run in the test suite on every system.
 - **The image job** builds the Docker image and runs the starter project through it on every pull
-  request, on Linux only, where the image runs.
+  request, on Linux only, where the image runs. Beside it, the same pull request builds the image
+  for `linux/amd64` and `linux/arm64` (arm64 under emulation) and runs the starter project on each,
+  as the release does before it publishes, and builds a starter project's own image from its
+  `Dockerfile`, checking that a configuration that does not validate or a channel test that fails
+  stops that build.
 - **The scaling gates and the benchmark comparison** run on Linux only, on one kind of runner, so
   their numbers compare with each other.
 - **The PHI scan** runs on every commit (a pre-commit hook) and in CI.
