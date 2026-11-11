@@ -408,6 +408,7 @@ for (const database of TEST_DATABASES) {
 
     it("counts metadata it cannot read, stored unencrypted, or changed meanwhile, as it does bodies", async () => {
       const raw = await openRaw(database);
+      open.push(raw);
       const ring = keyring("lost", "dev");
       const index = indexes("adt", { key: "mrn", bits: 12 });
       await new EncryptedStore(raw, ring("lost"), index).receive("adt", bytes("x"), {
