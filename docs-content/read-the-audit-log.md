@@ -14,18 +14,19 @@ entry.
 
 ## What is recorded
 
-| Action                                                                              | Written when                                                                                                               |
-| ----------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `search`                                                                            | `pathways messages` lists messages                                                                                         |
-| `view`                                                                              | `pathways messages show <id>` shows one message, without its content                                                       |
-| `content-view`                                                                      | `pathways messages show <id> --content`; written before the content is shown, and the content is not shown if it cannot be |
-| `replay`                                                                            | `pathways replay <id>`, whether it was done or refused                                                                     |
-| `resend`                                                                            | `pathways replay <id> --resend`, whether it was done or refused                                                            |
-| `clear`                                                                             | `pathways clear <id>`, whether it was done or refused                                                                      |
-| `retention`                                                                         | each retention run, from the engine or `pathways retention`, but not a dry run                                             |
-| `config`                                                                            | `pathways start` finds `pathways.yaml`, a `channel.yaml` or a transform added, changed or removed since the last start     |
-| `lease-release`                                                                     | `pathways lease release --force` frees the engine lease                                                                    |
-| `channel-pause`, `channel-resume`, `channel-stop`, `channel-halt`, `channel-reload` | a `pathways channel` command, whether it was done or refused, with the user the command reports                            |
+| Action                                                                              | Written when                                                                                                                   |
+| ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `search`                                                                            | `pathways messages` lists messages                                                                                             |
+| `view`                                                                              | `pathways messages show <id>` shows one message, without its content                                                           |
+| `content-view`                                                                      | `pathways messages show <id> --content`; written before the content is shown, and the content is not shown if it cannot be     |
+| `replay`                                                                            | `pathways replay <id>`, whether it was done or refused                                                                         |
+| `resend`                                                                            | `pathways replay <id> --resend`, whether it was done or refused                                                                |
+| `clear`                                                                             | `pathways clear <id>`, whether it was done or refused                                                                          |
+| `retention`                                                                         | each retention run, from the engine or `pathways retention`, but not a dry run                                                 |
+| `config`                                                                            | `pathways start` finds `pathways.yaml`, a `channel.yaml` or a transform added, changed or removed since the last start         |
+| `migrate`                                                                           | `pathways migrate` applied schema steps, said which it would apply (a dry run), or refused; once the database has an audit log |
+| `lease-release`                                                                     | `pathways lease release --force` frees the engine lease                                                                        |
+| `channel-pause`, `channel-resume`, `channel-stop`, `channel-halt`, `channel-reload` | a `pathways channel` command, whether it was done or refused, with the user the command reports                                |
 
 Each entry holds the time, the operating system user who acted, the action, its outcome (`ok`,
 `refused` or `not-found`), the channel and the message, and a detail of counts, states, codes and

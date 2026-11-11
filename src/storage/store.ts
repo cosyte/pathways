@@ -15,7 +15,6 @@ import {
   type SqlBool,
   type Transaction,
 } from "kysely";
-import { Migrator, type Migration, type MigrationProvider } from "kysely/migration";
 
 import { ConfigError } from "../config/load.js";
 import type { DatabaseStorage, StorageKind } from "../config/schema.js";
@@ -30,6 +29,20 @@ import {
   type LeaseHolder,
 } from "./lease.js";
 import { markCopiesBodies } from "./ownership.js";
+import {
+  migrateSchema,
+  openSchema,
+  readSchema,
+  recordedSteps,
+  SchemaVersionError,
+  SCHEMA_INFO_STEP,
+  type MigrateOptions,
+  type MigrationReport,
+  type SchemaMode,
+  type SchemaState,
+  type SchemaStep,
+} from "./schema.js";
+import { VERSION } from "../version.js";
 
 export {
   ENGINE_LEASE,
@@ -196,7 +209,7 @@ interface LeasesTable {
 
 /**
  * Each channel an operator paused or stopped, one row per channel: a channel with no row runs.
- * Every engine on the database reads it at the top of each pass. Since 0007.
+ * Every engine on the database reads it at the top of each pass. Since 0008.
  */
 interface ChannelStatesTable {
   channel: string;
@@ -582,6 +595,7 @@ export interface ExpireResult {
  * - `retention`: a retention run and what it deleted;
  * - `config`: a change to the configuration, seen when the engine started.
  * - `lease-release`: `pathways lease release --force` freed the engine lease.
+ * - `migrate`: `pathways migrate` applied schema steps, or said which it would apply.
  * - `channel-pause`, `channel-resume`, `channel-stop`, `channel-halt` and `channel-reload`: what
  *   the `pathways channel` commands of the same names asked, with the user the client named.
  *
@@ -600,6 +614,7 @@ export const AUDIT_ACTIONS = [
   "retention",
   "config",
   "lease-release",
+  "migrate",
   "channel-pause",
   "channel-resume",
   "channel-stop",
@@ -1070,18 +1085,36 @@ const COLUMN_TYPES: Readonly<Record<StorageKind, ColumnTypes>> = {
 };
 
 /**
- * The schema's migrations, in the column types of `kind`. One portable set: each database runs the
- * same steps under the same names, so the migration table reads the same everywhere.
+ * The schema step that adds the audit log: a database without it has none to write to.
+ *
+ * @example
+ * ```ts
+ * const audited = state.applied.some((step) => step.name === AUDIT_LOG_STEP);
+ * ```
+ */
+export const AUDIT_LOG_STEP = "0003-operator-and-audit";
+
+/**
+ * The schema's steps, in the column types of `kind`, each tagged `expand` or `contract`. One
+ * portable set: each database runs the same steps under the same names, so the migration table
+ * reads the same everywhere.
+ *
+ * Every step carries a tag. An expand step only adds, so the Pathways before it runs on the schema
+ * after it, and it is applied at start. A contract step removes or changes what an older Pathways
+ * reads, names the oldest Pathways that runs once it is applied, and waits for
+ * `pathways migrate --contract`. A release's code runs on its schema both before and after its own
+ * contract steps.
  *
  * @example
  * ```ts
  * const provider = { getMigrations: () => Promise.resolve(migrations("postgres")) };
  * ```
  */
-export function migrations(kind: StorageKind): Record<string, Migration> {
+export function migrations(kind: StorageKind): Record<string, SchemaStep> {
   const t = COLUMN_TYPES[kind];
   return {
     "0001-messages-and-deliveries": {
+      tag: "expand",
       async up(db: Kysely<unknown>): Promise<void> {
         await db.schema
           .createTable("messages")
@@ -1122,6 +1155,7 @@ export function migrations(kind: StorageKind): Record<string, Migration> {
       },
     },
     "0002-possible-duplicates": {
+      tag: "expand",
       async up(db: Kysely<unknown>): Promise<void> {
         // One column per statement: SQLite adds only one column per ALTER TABLE.
         await db.schema.alterTable("messages").addColumn("dedup_key", t.name).execute();
@@ -1133,7 +1167,8 @@ export function migrations(kind: StorageKind): Record<string, Migration> {
           .execute();
       },
     },
-    "0003-operator-and-audit": {
+    [AUDIT_LOG_STEP]: {
+      tag: "expand",
       async up(db: Kysely<unknown>): Promise<void> {
         // Sizes are kept from now on; a message stored before has none, rather than a guess.
         await db.schema.alterTable("messages").addColumn("size", t.int64).execute();
@@ -1172,6 +1207,7 @@ export function migrations(kind: StorageKind): Record<string, Migration> {
       },
     },
     "0004-idempotency-keys": {
+      tag: "expand",
       async up(db: Kysely<unknown>): Promise<void> {
         await db.schema.alterTable("messages").addColumn("idempotency_key", t.name).execute();
         await db.schema
@@ -1182,6 +1218,7 @@ export function migrations(kind: StorageKind): Record<string, Migration> {
       },
     },
     "0005-send-markers": {
+      tag: "expand",
       // Expand only: three columns that may be null, which an older Pathways never reads.
       async up(db: Kysely<unknown>): Promise<void> {
         await db.schema.alterTable("deliveries").addColumn("sending_at", t.int64).execute();
@@ -1193,6 +1230,7 @@ export function migrations(kind: StorageKind): Record<string, Migration> {
       },
     },
     "0006-leases": {
+      tag: "expand",
       // Expand only: a new table, which an older Pathways never reads, and no change to a row of
       // the others, so it is safe while deliveries are in flight. Its first row is written by the
       // first engine that asks for the lease. To roll it back, stop every engine and drop the
@@ -1210,10 +1248,30 @@ export function migrations(kind: StorageKind): Record<string, Migration> {
           .execute();
       },
     },
-    "0007-channel-states": {
+    [SCHEMA_INFO_STEP]: {
+      // Expand only: a new table, which an older Pathways never reads. One row per applied step,
+      // written in the step's own transaction: its generation, its tag, the oldest Pathways that
+      // runs on the schema once it is applied, and the Pathways that applied it. This step writes
+      // its own row and those of every step before it.
+      tag: "expand",
+      async up(db: Kysely<unknown>): Promise<void> {
+        await db.schema
+          .createTable("schema_info")
+          .addColumn("step", t.name, (col) => col.primaryKey())
+          .addColumn("generation", "integer", (col) => col.notNull())
+          .addColumn("tag", t.status, (col) => col.notNull())
+          .addColumn("min_engine", t.status, (col) => col.notNull())
+          .addColumn("applied_by", t.status, (col) => col.notNull())
+          .addColumn("applied_at", t.time, (col) => col.notNull())
+          .$call(t.table)
+          .execute();
+      },
+    },
+    "0008-channel-states": {
       // Expand only: a new table, which an older Pathways never reads. A channel with no row runs,
       // so the table starts empty. To roll it back, stop every engine and drop the table; every
       // channel then runs, and nothing else refers to it.
+      tag: "expand",
       async up(db: Kysely<unknown>): Promise<void> {
         await db.schema
           .createTable("channel_states")
@@ -1400,6 +1458,13 @@ export interface StoreOptions {
   readonly env?: Env;
   /** Imports a driver package. Tests pass their own, to stand in for one that is not installed. */
   readonly importDriver?: DriverImport;
+  /**
+   * How the store treats its schema when it opens: `expand` (the default) applies the expand steps
+   * it lacks under the migration lock; `none` applies nothing and refuses a schema that lacks one
+   * (`pathways start --no-migrate`); `inspect` applies and refuses nothing (`pathways migrate`).
+   * Contract steps are applied only by {@link Store.migrate}.
+   */
+  readonly migrate?: SchemaMode;
 }
 
 /**
@@ -1503,15 +1568,61 @@ export class Store implements MessageStore, ContentStore {
       await db.destroy();
       throw new StorageError("open", error);
     }
-    const provider: MigrationProvider = {
-      getMigrations: () => Promise.resolve(migrations(config.kind)),
-    };
-    const { error } = await new Migrator({ db, provider }).migrateToLatest();
+    const now = options.now ?? (() => new Date());
+    const store = new Store(db, config.kind, now);
+    let error: unknown;
+    try {
+      ({ error } = await openSchema(
+        db as Kysely<unknown>,
+        config.kind,
+        store.steps(),
+        VERSION,
+        options.migrate ?? "expand",
+      ));
+    } catch (thrown) {
+      await db.destroy();
+      if (thrown instanceof SchemaVersionError) throw thrown;
+      throw new StorageError("schema", thrown);
+    }
     if (error !== undefined) {
       await db.destroy();
       throw new StorageError("schema", error);
     }
-    return new Store(db, config.kind, options.now ?? (() => new Date()));
+    return store;
+  }
+
+  /** This version's schema steps, as they run here: each records itself in `schema_info`. */
+  private steps(): Record<string, SchemaStep> {
+    return recordedSteps(migrations(this.kind), VERSION, this.now);
+  }
+
+  /**
+   * The database's schema as it stands, read against this version's steps: its generation, the
+   * oldest Pathways it allows, who last changed it, and the steps applied and still to apply.
+   *
+   * @example
+   * ```ts
+   * const { generation, pending } = await store.schema();
+   * ```
+   */
+  async schema(): Promise<SchemaState> {
+    return readSchema(this.db as Kysely<unknown>, this.steps());
+  }
+
+  /**
+   * Applies this version's pending expand steps, and with `contract` its pending contract steps,
+   * under the migration lock, as `pathways migrate` does. Contract steps wait while the schema
+   * changed within `rollbackWindowMs`. A schema a newer Pathways moved forward is left as it is.
+   *
+   * @throws {SchemaVersionError} when this version cannot run on the schema.
+   * @throws {SchemaStepError} when a step fails.
+   * @example
+   * ```ts
+   * const report = await store.migrate({ contract: true, dryRun: true });
+   * ```
+   */
+  async migrate(options: MigrateOptions = {}): Promise<MigrationReport> {
+    return migrateSchema(this.db as Kysely<unknown>, this.kind, this.steps(), VERSION, options);
   }
 
   /** Closes the database, and every pooled connection to it. */
