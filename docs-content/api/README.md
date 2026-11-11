@@ -606,6 +606,7 @@ const key = (event: DeliveryEventBase): string => `${event.channel}/${event.dest
 #### Extended by
 
 - [`DeliveredEvent`](#deliveredevent)
+- [`DeliveryRedirectedEvent`](#deliveryredirectedevent)
 - [`DeliveryRejectedEvent`](#deliveryrejectedevent)
 - [`DeliveryRetryEvent`](#deliveryretryevent)
 
@@ -619,7 +620,7 @@ When it happened, as an ISO 8601 time in UTC, such as `2026-11-07T12:00:00.000Z`
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`at`](#at-7)
+[`LifecycleEventBase`](#lifecycleeventbase).[`at`](#at-8)
 
 ##### attempt
 
@@ -635,7 +636,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-11)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-12)
 
 ##### deliveryId
 
@@ -653,11 +654,120 @@ The destination's place in the channel's `destinations:` list, from 0.
 
 ##### type
 
-> `readonly` **type**: `"received"` \| `"receive-failed"` \| `"transformed"` \| `"filtered"` \| `"transform-failed"` \| `"delivered"` \| `"delivery-retry"` \| `"delivery-rejected"` \| `"source-down"` \| `"source-up"` \| `"audit"`
+> `readonly` **type**: `"received"` \| `"receive-failed"` \| `"transformed"` \| `"filtered"` \| `"transform-failed"` \| `"delivered"` \| `"delivery-retry"` \| `"delivery-redirected"` \| `"delivery-rejected"` \| `"source-down"` \| `"source-up"` \| `"audit"`
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-6)
+[`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-7)
+
+***
+
+### DeliveryRedirectedEvent
+
+An HTTP destination answered with a redirect (a 3xx). Redirects are never followed, since
+following one could send a message to a host nobody configured: the delivery is held and tried
+again after the longest wait, five minutes, and its later deliveries wait behind it, until the
+destination's URL is fixed. It names the Location's host only, never its path or query.
+
+#### Example
+
+```ts
+if (event.type === "delivery-redirected") page(`${event.channel} moved to ${event.locationHost}`);
+```
+
+#### Extends
+
+- [`DeliveryEventBase`](#deliveryeventbase)
+
+#### Properties
+
+##### at
+
+> `readonly` **at**: `string`
+
+When it happened, as an ISO 8601 time in UTC, such as `2026-11-07T12:00:00.000Z`.
+
+###### Inherited from
+
+[`DeliveryEventBase`](#deliveryeventbase).[`at`](#at-3)
+
+##### attempt
+
+> `readonly` **attempt**: `number`
+
+Which attempt this was, from 1.
+
+###### Inherited from
+
+[`DeliveryEventBase`](#deliveryeventbase).[`attempt`](#attempt-1)
+
+##### channel
+
+> `readonly` **channel**: `string`
+
+The channel's name.
+
+###### Inherited from
+
+[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-6)
+
+##### deliveryId
+
+> `readonly` **deliveryId**: `number`
+
+###### Inherited from
+
+[`DeliveryEventBase`](#deliveryeventbase).[`deliveryId`](#deliveryid-1)
+
+##### destination
+
+> `readonly` **destination**: `number`
+
+The destination's place in the channel's `destinations:` list, from 0.
+
+###### Inherited from
+
+[`DeliveryEventBase`](#deliveryeventbase).[`destination`](#destination-1)
+
+##### locationHost
+
+> `readonly` **locationHost**: `string` \| `undefined`
+
+The host the Location names, with its port when it has one, or undefined when it names none.
+
+##### messageId
+
+> `readonly` **messageId**: `number`
+
+###### Inherited from
+
+[`DeliveryEventBase`](#deliveryeventbase).[`messageId`](#messageid-6)
+
+##### retryAt
+
+> `readonly` **retryAt**: `string`
+
+When the next attempt is due, as an ISO 8601 time in UTC.
+
+##### retryInMs
+
+> `readonly` **retryInMs**: `number`
+
+How long until the next attempt, in milliseconds.
+
+##### status
+
+> `readonly` **status**: `number`
+
+The 3xx status, such as 301 or 308.
+
+##### type
+
+> `readonly` **type**: `"delivery-redirected"`
+
+###### Overrides
+
+[`DeliveryEventBase`](#deliveryeventbase).[`type`](#type-2)
 
 ***
 
@@ -753,7 +863,9 @@ The destination's short, stable reason, such as `AE` or `HTTP 400`.
 ### DeliveryRetryEvent
 
 A delivery failed in a way worth trying again (a refused connection, a timeout, an MLLP `AR`, an
-HTTP 5xx). The destination retries it after `retryInMs`, and its later deliveries wait behind it.
+HTTP 408, 425, 429 or 5xx). The destination retries it after `retryInMs`, and its later deliveries
+wait behind it. `retryInMs` is the backoff, or the wait a 429's or a 503's Retry-After asked for
+when that is longer, up to five minutes.
 
 #### Example
 
@@ -1043,7 +1155,7 @@ When it happened, as an ISO 8601 time in UTC, such as `2026-11-07T12:00:00.000Z`
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`at`](#at-7)
+[`LifecycleEventBase`](#lifecycleeventbase).[`at`](#at-8)
 
 ##### channel
 
@@ -1053,7 +1165,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-11)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-12)
 
 ##### messageId
 
@@ -1065,7 +1177,7 @@ The channel's name.
 
 ###### Overrides
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-6)
+[`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-7)
 
 ***
 
@@ -1235,7 +1347,7 @@ The channel's name.
 
 ##### type
 
-> `readonly` **type**: `"received"` \| `"receive-failed"` \| `"transformed"` \| `"filtered"` \| `"transform-failed"` \| `"delivered"` \| `"delivery-retry"` \| `"delivery-rejected"` \| `"source-down"` \| `"source-up"` \| `"audit"`
+> `readonly` **type**: `"received"` \| `"receive-failed"` \| `"transformed"` \| `"filtered"` \| `"transform-failed"` \| `"delivered"` \| `"delivery-retry"` \| `"delivery-redirected"` \| `"delivery-rejected"` \| `"source-down"` \| `"source-up"` \| `"audit"`
 
 ***
 
@@ -2151,7 +2263,7 @@ When it happened, as an ISO 8601 time in UTC, such as `2026-11-07T12:00:00.000Z`
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`at`](#at-7)
+[`LifecycleEventBase`](#lifecycleeventbase).[`at`](#at-8)
 
 ##### bytes
 
@@ -2167,7 +2279,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-11)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-12)
 
 ##### duplicateOf
 
@@ -2191,7 +2303,7 @@ True when the source stored it as failed, such as an MLLP message with no usable
 
 ###### Overrides
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-6)
+[`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-7)
 
 ***
 
@@ -2251,7 +2363,7 @@ When it happened, as an ISO 8601 time in UTC, such as `2026-11-07T12:00:00.000Z`
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`at`](#at-7)
+[`LifecycleEventBase`](#lifecycleeventbase).[`at`](#at-8)
 
 ##### channel
 
@@ -2261,7 +2373,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-11)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-12)
 
 ##### code
 
@@ -2281,7 +2393,7 @@ The error's name, such as `SqliteError`.
 
 ###### Overrides
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-6)
+[`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-7)
 
 ***
 
@@ -2501,7 +2613,7 @@ When it happened, as an ISO 8601 time in UTC, such as `2026-11-07T12:00:00.000Z`
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`at`](#at-7)
+[`LifecycleEventBase`](#lifecycleeventbase).[`at`](#at-8)
 
 ##### attempt
 
@@ -2517,7 +2629,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-11)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-12)
 
 ##### code
 
@@ -2547,7 +2659,7 @@ When the next try is due, as an ISO 8601 time in UTC.
 
 ###### Overrides
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-6)
+[`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-7)
 
 ***
 
@@ -2575,7 +2687,7 @@ When it happened, as an ISO 8601 time in UTC, such as `2026-11-07T12:00:00.000Z`
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`at`](#at-7)
+[`LifecycleEventBase`](#lifecycleeventbase).[`at`](#at-8)
 
 ##### channel
 
@@ -2585,7 +2697,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-11)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-12)
 
 ##### type
 
@@ -2593,7 +2705,7 @@ The channel's name.
 
 ###### Overrides
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-6)
+[`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-7)
 
 ***
 
@@ -2706,7 +2818,7 @@ const message: StoredMessage | undefined = await store.message(12);
 
 ###### Inherited from
 
-[`MessageSummary`](#messagesummary).[`channel`](#channel-13)
+[`MessageSummary`](#messagesummary).[`channel`](#channel-14)
 
 ##### deliveries
 
@@ -2787,7 +2899,7 @@ The status and the current deliveries, as an operator sees them.
 
 ###### Inherited from
 
-[`MessageSummary`](#messagesummary).[`status`](#status)
+[`MessageSummary`](#messagesummary).[`status`](#status-1)
 
 ##### updatedAt
 
@@ -2877,7 +2989,7 @@ When it happened, as an ISO 8601 time in UTC, such as `2026-11-07T12:00:00.000Z`
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`at`](#at-7)
+[`LifecycleEventBase`](#lifecycleeventbase).[`at`](#at-8)
 
 ##### channel
 
@@ -2887,7 +2999,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-11)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-12)
 
 ##### messageId
 
@@ -2905,7 +3017,7 @@ How many outputs the transform returned.
 
 ###### Overrides
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-6)
+[`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-7)
 
 ***
 
@@ -2934,7 +3046,7 @@ When it happened, as an ISO 8601 time in UTC, such as `2026-11-07T12:00:00.000Z`
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`at`](#at-7)
+[`LifecycleEventBase`](#lifecycleeventbase).[`at`](#at-8)
 
 ##### channel
 
@@ -2944,7 +3056,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-11)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-12)
 
 ##### code
 
@@ -2974,7 +3086,7 @@ The error's name, such as `TypeError`.
 
 ###### Overrides
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-6)
+[`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-7)
 
 ##### where
 
@@ -3508,7 +3620,7 @@ export default (async (options, context) => {
 
 ### LifecycleEvent
 
-> **LifecycleEvent** = [`ReceivedEvent`](#receivedevent) \| [`ReceiveFailedEvent`](#receivefailedevent) \| [`TransformedEvent`](#transformedevent) \| [`FilteredEvent`](#filteredevent) \| [`TransformFailedEvent`](#transformfailedevent) \| [`DeliveredEvent`](#deliveredevent) \| [`DeliveryRetryEvent`](#deliveryretryevent) \| [`DeliveryRejectedEvent`](#deliveryrejectedevent) \| [`SourceDownEvent`](#sourcedownevent) \| [`SourceUpEvent`](#sourceupevent) \| [`AuditEvent`](#auditevent)
+> **LifecycleEvent** = [`ReceivedEvent`](#receivedevent) \| [`ReceiveFailedEvent`](#receivefailedevent) \| [`TransformedEvent`](#transformedevent) \| [`FilteredEvent`](#filteredevent) \| [`TransformFailedEvent`](#transformfailedevent) \| [`DeliveredEvent`](#deliveredevent) \| [`DeliveryRetryEvent`](#deliveryretryevent) \| [`DeliveryRedirectedEvent`](#deliveryredirectedevent) \| [`DeliveryRejectedEvent`](#deliveryrejectedevent) \| [`SourceDownEvent`](#sourcedownevent) \| [`SourceUpEvent`](#sourceupevent) \| [`AuditEvent`](#auditevent)
 
 Any lifecycle event: switch on `type` to narrow it. Engine-wide hooks receive every channel's
 events and the audit log's; a channel's own hooks receive that channel's events.
@@ -3913,7 +4025,7 @@ export default ((interchange) => interchange) satisfies Transform<X12Interchange
 
 ### LIFECYCLE\_EVENTS
 
-> `const` **LIFECYCLE\_EVENTS**: readonly \[`"received"`, `"receive-failed"`, `"transformed"`, `"filtered"`, `"transform-failed"`, `"delivered"`, `"delivery-retry"`, `"delivery-rejected"`, `"source-down"`, `"source-up"`, `"audit"`\]
+> `const` **LIFECYCLE\_EVENTS**: readonly \[`"received"`, `"receive-failed"`, `"transformed"`, `"filtered"`, `"transform-failed"`, `"delivered"`, `"delivery-retry"`, `"delivery-redirected"`, `"delivery-rejected"`, `"source-down"`, `"source-up"`, `"audit"`\]
 
 Every lifecycle event's `type`, in the order a message meets them. A hook entry's `events:` list in
 the YAML names some of these to receive only those.
@@ -3928,7 +4040,7 @@ LIFECYCLE_EVENTS.includes("delivered"); // true
 
 ### VERSION
 
-> `const` **VERSION**: `"0.0.0"` = `"0.0.0"`
+> `const` **VERSION**: `"0.0.1"` = `"0.0.1"`
 
 The version of `@cosyte/pathways`, kept equal to `package.json#version` (a test fails when they
 differ).

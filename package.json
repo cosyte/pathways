@@ -81,6 +81,8 @@
     "attw": "cosyte-attw",
     "version": "changeset version && tsx scripts/sync-version.ts && cosyte-process format",
     "pack:docs": "cosyte-process pack-docs",
+    "docs:reference": "cosyte-docs-reference",
+    "check:docs-reference": "cosyte-docs-reference --check",
     "release": "changeset publish",
     "prepublishOnly": "pnpm clean && pnpm typecheck && pnpm lint && pnpm test && pnpm build",
     "prepare": "command -v simple-git-hooks >/dev/null 2>&1 && simple-git-hooks 1>&2 || true",
@@ -99,7 +101,7 @@
     "@cosyte/bench": "^0.1.2",
     "@cosyte/eslint-config": "^0.1.4",
     "@cosyte/prettier-config": "^0.1.2",
-    "@cosyte/process": "^0.1.7",
+    "@cosyte/process": "^0.1.8",
     "@cosyte/script-utils": "^0.1.8",
     "@cosyte/synth": "^0.1.5",
     "@cosyte/test-utils": "^0.1.4",
@@ -154,7 +156,8 @@
   "pnpm": {
     "overrides": {
       "esbuild@>=0.27.3 <0.28.2": "0.28.2",
-      "minimatch@>=7.0.0 <11.0.1": "11.0.5"
+      "minimatch@>=7.0.0 <11.0.1": "11.0.5",
+      "typedoc>minimatch": "10.2.6"
     }
   }
 }

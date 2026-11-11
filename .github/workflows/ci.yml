@@ -47,3 +47,31 @@ jobs:
       run-scaling-gate: true
       run-bench-compare: true
       bench-suites: bench/pathways.bench.mjs
+      # The docs-content structure check, inside `verify`, before the install: every link and image
+      # under docs-content/ that points inside the package, and every page id sidebars.json names,
+      # must resolve. A finding fails `verify` on both Node lines.
+      check-docs-content: true
+
+  # The API reference in docs-content/api/ held to the source, with `cosyte-docs-reference --check`
+  # from @cosyte/process. It fails when the committed pages differ from what the TSDoc comments
+  # generate (an export changed and `pnpm docs:reference` was not run), and when an export has no
+  # TSDoc summary. The shared workflow has no input for it, so it is a job of its own beside `ci`,
+  # and its context is `docs-reference`. Never rename it once the ruleset requires it.
+  docs-reference:
+    name: docs-reference
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      # The Node floor, which engines.node and the matrix above state.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          cache: pnpm
+      # TypeDoc reads the source and its types from node_modules; nothing is built.
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: docs-content/api matches the source, and every export has a TSDoc summary
+        run: pnpm check:docs-reference
