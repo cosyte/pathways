@@ -12,6 +12,7 @@ import {
 } from "../connectors/endpoint.js";
 import { FileDestination, FileSource } from "../connectors/file.js";
 import { HttpDestination, HttpSource } from "../connectors/http.js";
+import { RedirectHeld, RetryableError } from "../connectors/http-core.js";
 import { MllpDestination, MllpSource } from "../connectors/mllp.js";
 import { loadClientTls, loadServerTls } from "../connectors/tls.js";
 import {
@@ -34,7 +35,7 @@ import type { FailureSummary } from "./worker-entry.js";
 
 /** The first retry waits this long; each later one waits twice as long as the one before. */
 export const RETRY_FIRST_MS = 1_000;
-/** No retry waits longer than this. */
+/** No retry waits longer than this, whatever a server asks; a held redirect waits this long. */
 export const RETRY_MAX_MS = 300_000;
 
 /**
@@ -82,6 +83,22 @@ export const CONTENT_TYPES: Readonly<Record<Format, string>> = {
  */
 export function retryDelay(attempts: number): number {
   return Math.min(RETRY_FIRST_MS * 2 ** Math.max(0, attempts - 1), RETRY_MAX_MS);
+}
+
+/**
+ * How long a delivery waits before attempt number `attempts + 1`: the backoff, or the wait the
+ * server asked for (`hintMs`, from a Retry-After) when that is longer, never past
+ * {@link RETRY_MAX_MS}.
+ *
+ * @example
+ * ```ts
+ * retryWait(1, undefined); // 1000
+ * retryWait(1, 120_000); // 120000
+ * retryWait(1, 3_600_000); // 300000
+ * ```
+ */
+export function retryWait(attempts: number, hintMs: number | undefined): number {
+  return Math.min(Math.max(retryDelay(attempts), hintMs ?? 0), RETRY_MAX_MS);
 }
 
 /**
@@ -223,6 +240,7 @@ export async function connectorsFor(
               where,
             ),
             timeoutMs: destination.timeoutMs,
+            now,
             ...(destination.tls === undefined
               ? {}
               : { tls: loadClientTls(destination.tls, `${where}.tls`) }),
@@ -748,8 +766,39 @@ export class Engine {
             continue;
           }
           const attempts = delivery.attempts + 1;
-          const wait = retryDelay(attempts);
           const code = errorCode(error);
+          if (error instanceof RedirectHeld) {
+            // Held, never followed: tried again at the longest wait, while an operator fixes the URL.
+            await store.scheduleRetry(
+              delivery.id,
+              attempts,
+              this.now() + RETRY_MAX_MS,
+              `delivery: ${error.code}`,
+            );
+            const { status, locationHost } = error;
+            logger.warn({
+              event: "delivery-redirected",
+              channel: config.name,
+              destination: index,
+              delivery: delivery.id,
+              attempt: attempts,
+              retryInMs: RETRY_MAX_MS,
+              status,
+              locationHost,
+            });
+            this.emit(channel, () => ({
+              type: "delivery-redirected",
+              at: this.at(),
+              ...about,
+              retryInMs: RETRY_MAX_MS,
+              retryAt: this.at(RETRY_MAX_MS),
+              status,
+              locationHost,
+            }));
+            break;
+          }
+          const hint = error instanceof RetryableError ? error.retryAfterMs : undefined;
+          const wait = retryWait(attempts, hint);
           await store.scheduleRetry(
             delivery.id,
             attempts,

@@ -60,6 +60,7 @@ export {
   LIFECYCLE_EVENTS,
   type DeliveredEvent,
   type DeliveryEventBase,
+  type DeliveryRedirectedEvent,
   type DeliveryRejectedEvent,
   type DeliveryRetryEvent,
   type FilteredEvent,

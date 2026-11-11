@@ -48,12 +48,20 @@ Each destination has its own queue, in the order the outputs were made.
 - When a delivery fails in a way worth trying again, the destination retries it after 1 second, then
   2, 4, 8 and so on, up to 5 minutes between tries, **for as long as it takes**: until it succeeds or
   someone acts. Later outputs for that destination wait behind it, so they arrive in order.
+- When an HTTP 429 or 503 carries a `Retry-After` header, the retry waits as long as the server asks
+  if that is longer, still never more than 5 minutes. The time of the next attempt is stored, so a
+  restart keeps the wait.
 - Other destinations of the same channel, and other channels, keep going.
 
 Worth trying again means the receiver may take it later: a refused connection, a timeout, no ACK, an
-MLLP `AR`, an HTTP 5xx, 408 or 429. A delivery the receiver rejects for good (an MLLP `AE`, any other
-HTTP 4xx) is marked failed, and the destination moves on to the next output: sending the same message
-again cannot help.
+MLLP `AR`, an HTTP 5xx, 408, 425 or 429. A delivery the receiver rejects for good (an MLLP `AE`, a
+final HTTP 1xx, any other HTTP 4xx) is marked failed, and the destination moves on to the next
+output: sending the same message again cannot help.
+
+An HTTP redirect (a 3xx) is neither: it is never followed, since following one could send a message to
+a host nobody configured. The delivery is held, tried again every 5 minutes with later outputs behind
+it, and reported as `delivery-redirected`, naming the host the redirect points to, until someone fixes
+the destination's URL.
 
 Retrying forever, in order, is the choice that loses nothing and reorders nothing. Its cost is that a
 destination that is down for a day holds a day of messages, and an operator has to see that; the
