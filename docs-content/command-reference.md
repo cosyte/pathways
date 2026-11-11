@@ -185,7 +185,9 @@ pathways rekey [--encrypt-plaintext]
 Re-encrypts every stored body and error text under the current master key, so older keys can be
 retired. Prints how many values it re-encrypted, found already current, encrypted from plaintext, left
 unencrypted, could not read, and skipped because they changed while it ran. Safe beside a running
-engine. Needs `encryption` with keys or a provider, and, for a custom store, one that also implements
+engine. On SQLite, an older key can go once rekey exits 0. On a database server or a custom store,
+rekey also says on stderr that the store may still hold earlier versions of the rewritten rows under
+the older keys: keep each until the server's logs, free space and backups no longer hold them. Needs `encryption` with keys or a provider, and, for a custom store, one that also implements
 `ContentStore`.
 
 | Option                | Meaning                                                  |

@@ -102,11 +102,13 @@ key's id.
    it meanwhile, and counts any it skipped under "changed while rekey ran". It exits 0 once every value
    is under the current key, and 1 while any is not; run it again until it exits 0.
 
-4. Remove the old key from the list.
+4. Remove the old key from the list: on SQLite, as soon as rekey exits 0; on a database server, only
+   once the server no longer keeps earlier versions of the rewritten rows, as below.
 
 On SQLite, a rewritten value's old bytes are overwritten in the file. A database server keeps earlier
-row versions in its logs and backups for a while, so on a server, retire the old key only once those
-no longer hold rows written under it.
+row versions in its logs, free space and backups for a while, still under the old key, so on a server,
+retire the old key only once those no longer hold rows written under it. `rekey` says so on stderr
+when it finishes on a store that is not SQLite.
 
 ## Turn encryption on for an existing database
 

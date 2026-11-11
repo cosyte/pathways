@@ -10,6 +10,7 @@ import { decryptWithKeyId } from "../src/encryption/envelope.js";
 import { decodeKey, generateKey, LocalKeyProvider } from "../src/encryption/keys.js";
 import type { RekeyCounts } from "../src/encryption/rekey.js";
 import { Store } from "../src/storage/store.js";
+import { freshBench } from "./extension-helpers.js";
 import {
   ADT_A01,
   captureLogger,
@@ -69,6 +70,10 @@ async function rawDatabase(root: string): Promise<string> {
   }
   return raw;
 }
+
+/** What rekey adds, on a store that is not SQLite, once every value is under the current key. */
+const REKEY_KEEPS_EARLIER_VERSIONS =
+  "pathways: every value is under the current key, but this store is not SQLite, so it may still hold earlier versions of the rewritten rows under the older keys (a database server keeps them in its logs, free space and backups). Keep each older key until it no longer does.\n";
 
 const ENV_KEYS =
   "encryption:\n  keys: [{ id: prod, env: PATHWAYS_SYNTHETIC_KEY }]\n  current: prod\n";
@@ -242,6 +247,28 @@ describe("pathways rekey", () => {
     await raw.close();
     expect((await runCli(["start", "--once", "-C", root])).code).toBe(EXIT.ok);
     expect(await readFile(join(root, "data/outbox/1-1.hl7"), "utf8")).toBe("out");
+  });
+
+  it("on a store other than SQLite, says the old key can go only once the store keeps no earlier row versions", async () => {
+    const root = await rotated("new");
+    const raw = await Store.open((await loadProject(root)).databaseFile);
+    // A custom store module that hands rekey the test's store: like a database server, it is not
+    // the SQLite file whose freed bytes Pathways zeroes.
+    freshBench().notes["store"] = [raw];
+    await writeFile(
+      join(root, "handed.ts"),
+      "export default () => (globalThis as unknown as { pathwaysTest: { notes: Record<string, unknown[]> } }).pathwaysTest.notes['store']?.[0];\n",
+    );
+    await writeFile(
+      join(root, "pathways.yaml"),
+      `${keysYaml("new")}storage: { module: ./handed.ts }\n`,
+    );
+    expect(await runCli(["rekey", "-C", root])).toEqual({
+      code: EXIT.ok,
+      out: report({ reencrypted: 4 }),
+      err: REKEY_KEEPS_EARLIER_VERSIONS,
+      events: [],
+    });
   });
 
   it("exits 1 while a value names a key it cannot read, so the key is not retired", async () => {
