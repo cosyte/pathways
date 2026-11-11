@@ -98,13 +98,19 @@ async function inbox(): Promise<string> {
   return dir;
 }
 
-/** The events, each path relative to `dir` (`.` for `dir` itself) with any claim id left out. */
+/**
+ * The events, each path relative to `dir` (`.` for `dir` itself) with any claim id left out, and
+ * without the move of the source's own empty file that checks, once, how the file system keeps ids.
+ */
 function eventsIn(dir: string): string[] {
-  return disk.events.map(([what, arg]) => {
-    if (what === "receive") return `${what} ${arg}`;
-    const path = relative(dir, arg).split(sep).join("/");
-    return `${what} ${path.replace(/\d{15}\.\d{8}\.[0-9a-f]{8}-/, "<claim>-") || "."}`;
-  });
+  const probe = /[\\/]\.claimed[\\/]probe-[0-9a-f]{16}$/;
+  return disk.events
+    .filter(([what, arg]) => !(what === "rename" && probe.test(arg)))
+    .map(([what, arg]) => {
+      if (what === "receive") return `${what} ${arg}`;
+      const path = relative(dir, arg).split(sep).join("/");
+      return `${what} ${path.replace(/\d{15}\.\d{8}\.[0-9a-f]{8}-/, "<claim>-") || "."}`;
+    });
 }
 
 describe("FileSource on disk", () => {
