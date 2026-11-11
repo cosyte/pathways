@@ -612,6 +612,31 @@ config:
     expect(log).not.toContain("synthetic-secret-token");
   });
 
+  it("names a file a recursive source took by its path from the source folder, with its size", async () => {
+    const { root, engine } = await started(
+      {
+        "channels/adt/channel.yaml": CHANNEL.replace(
+          "minAge: 0 }",
+          "minAge: 0, recursive: true, include: ['**/*.hl7'] }",
+        ),
+        "channels/adt/transform.ts": ECHO_CONTEXT,
+      },
+      { SYNTH_CHANNEL_TOKEN: "synthetic-secret-token" },
+    );
+    await dropFile(join(root, "data/inbox/east/TESTPATIENT-a01.hl7"), ADT_A01);
+    await engine.tick();
+    const [written] = await readdir(join(root, "data/out"));
+    const ctx = JSON.parse(await readFile(join(root, "data/out", written ?? ""), "utf8")) as {
+      source: unknown;
+    };
+    expect(ctx.source).toEqual({
+      kind: "file",
+      name: "east/TESTPATIENT-a01.hl7",
+      size: Buffer.byteLength(ADT_A01),
+      receivedAt: expect.any(String) as unknown,
+    });
+  });
+
   it("refuses to start when a variable the configuration names is not set, naming it", async () => {
     const root = await makeProject({
       "pathways.yaml": PROJECT,

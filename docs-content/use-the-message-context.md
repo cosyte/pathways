@@ -118,7 +118,7 @@ stored, as an ISO 8601 time.
 
 | Kind     | Fields                                                                                                      |
 | -------- | ----------------------------------------------------------------------------------------------------------- |
-| `file`   | `name`, the file's name as it was dropped; `size`, in bytes                                                 |
+| `file`   | `name`, the file's name as it was dropped, as `sub/a01.hl7` under `recursive`; `size`, in bytes             |
 | `http`   | `method`; `path`, as the source matched it, without a query; `remoteAddress`; `headers`, by lower-case name |
 | `mllp`   | `remoteAddress`; `tlsPeerSubject`, the common name of the sender's certificate over mutual TLS              |
 | `module` | `facts`: what the custom source passed to `sink.receive` as `source`                                        |

@@ -109,7 +109,8 @@ describe("a file source", () => {
         return Promise.resolve(bodies.length);
       },
     };
-    await new FileSource({ dir, channel: "own", minAgeMs: 0 }).poll(sink);
+    // An empty file is left by default (minSize 1); minSize 0 takes it as an empty message.
+    await new FileSource({ dir, channel: "own", minAgeMs: 0, minSize: 0 }).poll(sink);
     expect(bodies).toHaveLength(1);
     expect(bodies[0]).toBeInstanceOf(Uint8Array);
     expect(bodies[0]?.byteLength).toBe(0);

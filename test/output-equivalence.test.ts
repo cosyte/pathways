@@ -225,7 +225,8 @@ describe("output equivalence", () => {
             "name: eq",
             `format: ${format}`,
             "source:",
-            "  file: { dir: ../../data/in, minAge: 0 }",
+            // The corpus holds an empty message, which a file source leaves unless minSize is 0.
+            "  file: { dir: ../../data/in, minAge: 0, minSize: 0 }",
             ...(format === "hl7v2" ? ["transform: ./transform.ts"] : []),
             "destinations:",
             "  - file: { dir: ../../data/out }",
