@@ -4,6 +4,7 @@ import type * as Hl7 from "@cosyte/hl7";
 import type * as X12 from "@cosyte/x12";
 
 import type { Format } from "./config/schema.js";
+import type { FormatModel, JsonValue } from "./engine/worker-entry.js";
 
 /**
  * An HL7 v2 message as an `hl7v2` channel's transform receives it: `@cosyte/hl7`'s `Hl7Message`.
@@ -58,39 +59,21 @@ export type X12Interchange = X12.X12Interchange;
  */
 export type CcdaDocument = Ccda.CcdaDocument;
 
-/**
- * Any JSON value, as a `json` channel's transform receives it from `JSON.parse`.
- *
- * @example
- * ```ts
- * const value: JsonValue = { status: "ok", tries: [1, 2] };
- * ```
- */
-export type JsonValue =
-  string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+// Declared beside the format registry, in the worker, which imports nothing of the package's own.
+export type { JsonValue } from "./engine/worker-entry.js";
 
 /**
- * The message each format hands a transform, by the `format` a channel declares.
+ * The message each format hands a transform, by the `format` a channel declares, read from the
+ * format registry: `hl7v2` an {@link Hl7Message}, `fhir` a {@link FhirResource}, `x12` an
+ * {@link X12Interchange}, `ccda` a {@link CcdaDocument}, `json` a {@link JsonValue} (a string a
+ * `json` transform returns is sent as it is, not JSON-quoted), and `text` the body as a string.
  *
  * @example
  * ```ts
  * type Claim = MessageTypes["x12"]; // X12Interchange
  * ```
  */
-export interface MessageTypes {
-  /** HL7 v2, parsed with `@cosyte/hl7`. */
-  hl7v2: Hl7Message;
-  /** FHIR R4 JSON, parsed with `@cosyte/fhir`. */
-  fhir: FhirResource;
-  /** An X12 interchange, parsed with `@cosyte/x12`. */
-  x12: X12Interchange;
-  /** A C-CDA document, parsed with `@cosyte/ccda`. */
-  ccda: CcdaDocument;
-  /** Any JSON value. A string a `json` transform returns is sent as it is, not JSON-quoted. */
-  json: JsonValue;
-  /** The body as a string. */
-  text: string;
-}
+export type MessageTypes = { [F in Format]: FormatModel<F> };
 
 /**
  * The message a channel of format `F` hands its transform.
@@ -103,15 +86,18 @@ export interface MessageTypes {
 export type MessageFor<F extends Format> = MessageTypes[F];
 
 /**
- * What a transform may return: a message or a string to send on, several of them, or `null` (or
- * nothing) to filter the message out.
+ * What a transform may return: a message, a string or bytes to send on, several of them, or `null`
+ * (or nothing) to filter the message out. A string is sent as UTF-8; bytes (a `Uint8Array`, which a
+ * `Buffer` is) are sent as they are, so a body in another charset keeps its bytes.
  *
  * @example
  * ```ts
  * const filtered: TransformOutput<string> = null;
+ * const bytes: TransformOutput<string> = Buffer.from("MSH|^~\\&|LAB", "latin1");
  * ```
  */
-export type TransformOutput<M> = M | string | readonly (M | string)[] | null | undefined;
+export type TransformOutput<M> =
+  M | string | Uint8Array | readonly (M | string | Uint8Array)[] | null | undefined;
 
 /**
  * The configuration a transform reads as `ctx.config`: the `config:` block of `pathways.yaml`, with
