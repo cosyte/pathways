@@ -1,0 +1,20 @@
+name: Probe
+
+on:
+  push:
+    branches: [ci/windows-macos-tarball-smoke]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    uses: cosyte/.github/.github/workflows/ci.yml@0be6757a773885cbd5165dbfa0f93772d907b3e8 # workflows-2026-11-10-0be6757a7738
+    with:
+      run-phi-scan: true
+      node-versions: '["24"]'
+      os: '["windows-latest", "macos-latest"]'
+      expect-unpublished-deps: ""
+      run-actionlint: false
+      run-prepublish-manifest-lint: false
+      run-prepublish-install: false
