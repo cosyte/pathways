@@ -54,6 +54,7 @@ import { ChannelWorker, TransformLoadError, type TransformOutcome } from "./chan
 import type { EngineFence } from "./lease.js";
 import { channelStatus, type ChannelHealth, type EngineHealth } from "./health.js";
 import { formatTable, type FailureSummary } from "./worker-entry.js";
+import { DeadlineTimer } from "./deadline.js";
 import { nextPollAt, pollOf } from "./schedule.js";
 import { copyFacts, keepFacts, sourceFacts } from "./source-facts.js";
 
@@ -1357,13 +1358,17 @@ export class Engine {
       () => !ended.signal.aborted,
     );
     // Once the pass is cut, a rejection from its poll call (a source that hands the signal on to
-    // its client gets an AbortError) is part of the cut, not a failure of the pass.
+    // its client gets an AbortError) is part of the cut, not a failure of the pass. One that is
+    // not the cut's own is still logged, by its code: never its text.
     const pass = Promise.race([
       call.then(
         () => false,
         (error: unknown) => {
-          if (cut.signal.aborted) return true;
-          throw error;
+          if (!cut.signal.aborted) throw error;
+          if (!isCutError(error, cut.signal)) {
+            logger.warn({ event: "poll-failed-after-cut", channel: name, code: errorCode(error) });
+          }
+          return true;
         },
       ),
       deadline,
@@ -1918,7 +1923,20 @@ export class Engine {
     return Number.isNaN(queued) ? undefined : Math.max(0, this.now() - queued);
   }
 
+  /**
+   * Delivers what the channel has due, one attempt at a time, each cut off at its destination's
+   * deadline by one timer between them all.
+   */
   private async deliverAll(channel: RunningChannel): Promise<void> {
+    const deadline = new DeadlineTimer(() => this.now(), this.wait);
+    try {
+      await this.deliverEach(channel, deadline);
+    } finally {
+      deadline.close();
+    }
+  }
+
+  private async deliverEach(channel: RunningChannel, deadline: DeadlineTimer): Promise<void> {
     const { config, connectors } = channel;
     const { store, logger } = this.options;
     for (const [index, destination] of connectors.destinations.entries()) {
@@ -1990,13 +2008,24 @@ export class Engine {
         }
         const halt = channel.halt.signal;
         // The whole attempt (connecting, sending, and the receiver's confirmation) is bounded.
+        // One controller per attempt: aborted by a halt, with the halt's reason, or at the deadline.
+        // The halt signal is a fresh one here (a halt replaces the one it aborts at once).
         const limitMs = deliveryDeadlineMs(config.destinations[index]);
-        const expired = new AbortController();
-        const ended = new AbortController();
-        const signal = AbortSignal.any([halt, expired.signal]);
-        void this.wait(limitMs, ended.signal).then(() => {
-          if (!ended.signal.aborted) expired.abort();
+        const cutOff = new AbortController();
+        const { signal } = cutOff;
+        let expired = false;
+        const onHalt = (): void => {
+          cutOff.abort(halt.reason);
+        };
+        halt.addEventListener("abort", onHalt, { once: true });
+        deadline.set(this.now() + limitMs, () => {
+          expired = true;
+          cutOff.abort();
         });
+        const ended = (): void => {
+          deadline.clear();
+          halt.removeEventListener("abort", onHalt);
+        };
         try {
           await untilAborted(
             destination.deliver({
@@ -2009,7 +2038,7 @@ export class Engine {
             signal,
           );
         } catch (thrown) {
-          ended.abort();
+          ended();
           if (halt.aborted) {
             // Halted: no outcome is recorded, so the delivery stays pending, and its marker (when
             // written) flags the next send as a possible duplicate, since the receiver may have it.
@@ -2023,7 +2052,7 @@ export class Engine {
             return;
           }
           // Cut off at the deadline: an attempt that failed, retried as any other.
-          const error = expired.signal.aborted ? new DeliveryTimeout(limitMs) : thrown;
+          const error = expired ? new DeliveryTimeout(limitMs) : thrown;
           if (error instanceof DeliveryRejected) {
             await store.failDelivery(delivery.id, `rejected: ${error.reason}`, ...this.epoch());
             logger.warn({
@@ -2135,7 +2164,7 @@ export class Engine {
           if (policy.rotate) continue;
           break;
         }
-        ended.abort();
+        ended();
         // Delivered: freed now when the store handed it over and the destination kept none of it.
         if (copiesBodies(store) && copiesBodies(destination)) release(delivery.body);
         faultPoint("after-send-before-record");
@@ -2202,6 +2231,18 @@ function untilAborted(work: Promise<void>, signal: AbortSignal): Promise<void> {
       },
     );
   });
+}
+
+/**
+ * Whether a cut pass's `poll` rejected with the cut itself: the signal's own reason, an
+ * `AbortError` (as a client handed the signal throws), or the sink's refusal after the cut.
+ */
+function isCutError(error: unknown, cut: AbortSignal): boolean {
+  return (
+    error === cut.reason ||
+    error instanceof PassCut ||
+    (error instanceof Error && error.name === "AbortError")
+  );
 }
 
 /** Whether a channel's source is down: it cannot listen, or it said it lost its connection. */
