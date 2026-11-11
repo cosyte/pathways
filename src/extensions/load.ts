@@ -78,10 +78,11 @@ export async function loadDefaultFunction(
 
 /**
  * Loads a factory from `file`, calls it with `options` and `context`, and checks what it returns
- * with `check`, which answers with what is missing, or `undefined` when the value fits.
+ * with `check`, which answers with what is missing, or `undefined` when the value fits. With
+ * `timeoutMs`, a factory that has not finished by then is abandoned and the load fails.
  *
- * @throws {ExtensionLoadError} when the module will not load, the factory throws, or `check` refuses
- *   what it returned.
+ * @throws {ExtensionLoadError} when the module will not load, the factory throws or runs past
+ *   `timeoutMs`, or `check` refuses what it returned.
  * @example
  * ```ts
  * const source = await buildFromModule<SourceConnector>(file, where, "a source factory", options, context, checkSource);
@@ -94,12 +95,19 @@ export async function buildFromModule<T>(
   options: unknown,
   context: unknown,
   check: (value: unknown) => string | undefined,
+  timeoutMs?: number,
 ): Promise<T> {
   const factory = await loadDefaultFunction(file, where, what);
   let built: unknown;
   try {
-    built = await factory(options, context);
+    built =
+      timeoutMs === undefined
+        ? await factory(options, context)
+        : await withTimeout(() => factory(options, context), timeoutMs);
   } catch (error) {
+    if (timeoutMs !== undefined && isTimeout(error)) {
+      throw new ExtensionLoadError(where, `the factory did not finish within ${timeoutMs} ms`);
+    }
     throw new ExtensionLoadError(where, `the factory threw (${describe(error, file)})`);
   }
   const missing = check(built);

@@ -35,6 +35,7 @@ import type { LifecycleEvent } from "../extensions/events.js";
 import { HookSet } from "../extensions/hooks.js";
 import type { ChannelContext } from "../extensions/types.js";
 import { AuditLog, auditEvent } from "../operator/audit.js";
+import { resolveSecrets, type Secrets } from "../secrets/resolve.js";
 import { recordRetention, runRetention, type RetentionReport } from "../operator/retention.js";
 import { copiesBodies, markCopiesBodies, release } from "../storage/ownership.js";
 import type { MessageStore, ReceivedMessage } from "../storage/store.js";
@@ -237,10 +238,12 @@ export interface ConnectorContext {
   /** Epoch milliseconds now. */
   readonly now: () => number;
   readonly logger: Logger;
-  /** Where tokens and secret headers are read from. */
+  /** Where tokens and secret headers are read from, and what extensions are given as `env`. */
   readonly env: Env;
   /** Every destination runs dry, as `pathways start --dry-run` asks, whatever its block says. */
   readonly dryRun?: boolean | undefined;
+  /** The secrets a start resolved; `env` alone without them. */
+  readonly secrets?: Secrets | undefined;
 }
 
 /**
@@ -282,6 +285,7 @@ export async function connectorsFor(
   context: ConnectorContext,
 ): Promise<ChannelConnectors> {
   const { now, logger, env } = context;
+  const secrets = context.secrets ?? env;
   const file = `channels/${channel.name}/channel.yaml`;
   const extension = (fields: Readonly<Record<string, string | number>>): ChannelContext => ({
     channel: channel.name,
@@ -310,7 +314,7 @@ export async function connectorsFor(
       });
       break;
     case "http": {
-      const { tls, token } = listenerSecurity(source, env, `${file}: source.http`);
+      const { tls, token } = listenerSecurity(source, secrets, `${file}: source.http`);
       const { response } = source;
       sourceConnector = new HttpSource({
         host: source.host,
@@ -321,7 +325,12 @@ export async function connectorsFor(
           response.kind === "fixed"
             ? {
                 ...response,
-                headers: resolveHeaders({}, response.headers, env, `${file}: source.http.response`),
+                headers: resolveHeaders(
+                  {},
+                  response.headers,
+                  secrets,
+                  `${file}: source.http.response`,
+                ),
               }
             : response,
         maxBytes: source.maxBytes,
@@ -387,7 +396,7 @@ export async function connectorsFor(
             headers: resolveHeaders(
               { "Content-Type": CONTENT_TYPES[channel.format] },
               destination.headers,
-              env,
+              secrets,
               where,
             ),
             timeoutMs: destination.timeoutMs,
@@ -440,6 +449,11 @@ export interface EngineOptions {
   readonly connectors?: (channel: ChannelConfig) => ChannelConnectors | Promise<ChannelConnectors>;
   /** Where tokens and secret headers are read from. Defaults to `process.env`. */
   readonly env?: Env;
+  /**
+   * The secrets a start resolved, which tokens and secret headers are read from. Without them, the
+   * engine resolves its project's at start.
+   */
+  readonly secrets?: Secrets | undefined;
   /**
    * The audit log the engine records retention runs in. Defaults to one over `store`, naming the
    * operating system user; pass one to share it, and its listeners, with other callers.
@@ -572,12 +586,15 @@ export class Engine {
       }
     }
     try {
+      const secrets =
+        this.options.secrets ?? (await resolveSecrets(project, { env, logger }, "all"));
       this.hooks = await HookSet.open(project.hooks, {
         file: "pathways.yaml",
         channel: undefined,
         dir: project.root,
         env,
         logger,
+        secrets,
       });
       for (const config of project.channels) {
         const worker = new ChannelWorker({
@@ -593,11 +610,12 @@ export class Engine {
           dir: config.dir,
           env,
           logger,
+          secrets,
         });
         let connectors: ChannelConnectors;
         try {
           connectors = await (this.options.connectors?.(config) ??
-            connectorsFor(config, { now: this.now, logger, env, dryRun }));
+            connectorsFor(config, { now: this.now, logger, env, secrets, dryRun }));
         } catch (error) {
           await hooks.stop();
           throw error;

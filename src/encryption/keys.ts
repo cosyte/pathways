@@ -5,11 +5,9 @@ import {
   randomBytes,
   type KeyObject,
 } from "node:crypto";
-import { readFileSync } from "node:fs";
-
 import { ConfigError } from "../config/load.js";
 import type { EncryptionConfig } from "../config/schema.js";
-import type { Env } from "../connectors/endpoint.js";
+import { secretPlace, secretsOf, type SecretReader } from "../secrets/resolve.js";
 import { EncryptionError } from "./envelope.js";
 
 /**
@@ -197,11 +195,11 @@ export class LocalKeyProvider implements KeyProvider {
 
 /** What `start` and `validate` say when `pathways.yaml` does not set `encryption`. */
 export const ENCRYPTION_REQUIRED =
-  "pathways.yaml: encryption: required to start the engine: set encryption: { keys: [{ id, env: NAME } or { id, file: path }], current: id } or { provider: { module: path } } to encrypt stored messages, or encryption: none to store them unencrypted";
+  "pathways.yaml: encryption: required to start the engine: set encryption: { keys: [{ id, env: NAME }, { id, file: path } or { id, secret: { provider, name } }], current: id } or { provider: { module: path } } to encrypt stored messages, or encryption: none to store them unencrypted";
 
 /**
- * The master keys `pathways start` encrypts with: read from each key's environment variable or file
- * now, at startup. Undefined for `encryption: none`. A custom provider (`encryption: { provider }`)
+ * The master keys `pathways start` encrypts with: read now, at startup, from each key's environment
+ * variable, file or secret provider. Undefined for `encryption: none`. A custom provider (`encryption: { provider }`)
  * is loaded by `startingKeys` in `src/storage/open.ts` instead.
  *
  * @throws {ConfigError} when `pathways.yaml` does not set `encryption`, or a key cannot be read (see
@@ -214,19 +212,20 @@ export const ENCRYPTION_REQUIRED =
  */
 export function keysToStart(
   encryption: Exclude<EncryptionConfig, { readonly kind: "provider" }> | undefined,
-  env: Env,
+  env: SecretReader,
 ): LocalKeyProvider | undefined {
   if (encryption === undefined) throw new ConfigError([ENCRYPTION_REQUIRED]);
   return encryption.kind === "none" ? undefined : readMasterKeys(encryption, env);
 }
 
 /**
- * Reads every master key the configuration names, each from its environment variable or file, and
- * returns them as a {@link LocalKeyProvider}. Every key is read, not only the current one, so a
+ * Reads every master key the configuration names, each where its reference says (an environment
+ * variable, a file, or a secret a provider resolved at start), through the same resolver as every
+ * other secret, and returns them as a {@link LocalKeyProvider}. Every key is read, not only the current one, so a
  * missing old key shows at startup rather than at the first value it wrapped.
  *
- * @throws {ConfigError} naming the key's id and its variable (or that its file could not be read)
- *   for each key that is missing or is not 32 bytes in base64. Never the value.
+ * @throws {ConfigError} naming the key's id and where it is read from for each key that is missing
+ *   or is not 32 bytes in base64. Never the value.
  * @example
  * ```ts
  * const keys = readMasterKeys(
@@ -237,35 +236,25 @@ export function keysToStart(
  */
 export function readMasterKeys(
   encryption: Extract<EncryptionConfig, { kind: "keys" }>,
-  env: Env,
+  env: SecretReader,
 ): LocalKeyProvider {
+  const secrets = secretsOf(env);
   const problems: string[] = [];
   const keys: [string, Buffer][] = [];
   for (const [index, source] of encryption.keys.entries()) {
     const where = `pathways.yaml: encryption.keys.${index}: the key ${source.id}`;
     let text: string;
-    if ("env" in source) {
-      const value = env[source.env];
-      if (value === undefined || value === "") {
-        problems.push(
-          `${where} is read from the environment variable ${source.env}, which is not set`,
-        );
-        continue;
-      }
-      text = value;
-    } else {
-      try {
-        text = readFileSync(source.file, "utf8");
-      } catch (error) {
-        problems.push(`${where}: its file could not be read${codeSuffix(error)}`);
-        continue;
-      }
+    try {
+      text = secrets.read(source, where);
+    } catch (error) {
+      // The resolver throws only ConfigError, whose problems name the key and never its value.
+      problems.push(...(error as ConfigError).problems);
+      continue;
     }
     const key = decodeKey(text);
     if (key === undefined) {
-      const holder = "env" in source ? `the environment variable ${source.env}` : "its file";
       problems.push(
-        `${where}: ${holder} does not hold a key; a key is 32 random bytes in base64, as openssl rand -base64 32 makes`,
+        `${where}: ${secretPlace(source)} does not hold a key; a key is 32 random bytes in base64, as openssl rand -base64 32 makes`,
       );
       continue;
     }
@@ -277,10 +266,4 @@ export function readMasterKeys(
   } finally {
     for (const [, key] of keys) key.fill(0);
   }
-}
-
-function codeSuffix(error: unknown): string {
-  const code = (error as { code?: unknown }).code;
-  /* v8 ignore next -- its only caller passes readFileSync's errors, which all carry a code */
-  return typeof code === "string" ? ` (${code})` : "";
 }

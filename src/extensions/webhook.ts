@@ -1,8 +1,9 @@
 import type { HttpClientConfig } from "../config/schema.js";
-import { resolveHeaders, type Env } from "../connectors/endpoint.js";
+import { resolveHeaders } from "../connectors/endpoint.js";
 import { HttpDestination } from "../connectors/http.js";
 import { loadClientTls } from "../connectors/tls.js";
 import { DeliveryRejected } from "../connectors/types.js";
+import type { SecretReader } from "../secrets/resolve.js";
 import type { LifecycleHook } from "./types.js";
 
 /**
@@ -16,8 +17,8 @@ import type { LifecycleHook } from "./types.js";
 export interface WebhookOptions {
   /** The hook's time limit: each POST, connection to answer, gets this long. */
   readonly timeoutMs: number;
-  /** Where header values written as `{ env: NAME }` are read from. */
-  readonly env: Env;
+  /** Where header values written as secret references are read from. */
+  readonly env: SecretReader;
   /** The file and key that name the hook, such as `pathways.yaml: hooks.0`, for errors. */
   readonly where: string;
 }
@@ -26,7 +27,8 @@ export interface WebhookOptions {
  * The built-in webhook hook, named in the YAML as `hooks: [{ webhook: { url, headers } }]`. It POSTs
  * each event as JSON to `url`: HTTPS unless the hook says `plaintext: true` with an `http://` url,
  * with the server's certificate always verified, against `tls.ca` when set. Headers that carry a
- * credential are read from the environment (`{ env: NAME }`) at startup and never logged.
+ * credential are read at startup (`{ env: NAME }`, `{ file: path }` or `{ secret: ... }`) and never
+ * logged.
  *
  * It is an HTTP destination whose messages are events, so it treats answers the same way: a 2xx is
  * done, and anything else, or no answer within the hook's time limit, fails the call with a
@@ -37,7 +39,7 @@ export interface WebhookOptions {
  * An event holds ids, counts, error names, codes and times, never message content, so the body never
  * does either.
  *
- * @throws {ConfigError} when a header's variable is not set or a TLS file cannot be read.
+ * @throws {ConfigError} when a header's secret cannot be had or a TLS file cannot be read.
  * @example
  * ```ts
  * const hook = webhookHook(
