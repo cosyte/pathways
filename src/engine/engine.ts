@@ -585,6 +585,7 @@ export class Engine {
         ]);
       }
     }
+    this.logDryDestinations(dryRun);
     try {
       const secrets =
         this.options.secrets ?? (await resolveSecrets(project, { env, logger }, "all"));
@@ -631,6 +632,22 @@ export class Engine {
       await this.stop();
       throw error;
     }
+  }
+
+  /**
+   * Says once at start which destinations of each channel run dry, by index, so a destination left
+   * out of the line is one that sends. Nothing is said when none runs dry.
+   */
+  private logDryDestinations(all: boolean): void {
+    const channels: Record<string, number[]> = {};
+    for (const channel of this.options.project.channels) {
+      const dry = channel.destinations.flatMap((_, index) =>
+        runsDry(channel, index, all) ? [index] : [],
+      );
+      if (dry.length > 0) channels[channel.name] = dry;
+    }
+    if (Object.keys(channels).length === 0) return;
+    this.options.logger.warn({ event: "dry-run-destinations", channels });
   }
 
   /**

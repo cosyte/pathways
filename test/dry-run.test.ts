@@ -151,6 +151,25 @@ describe("a destination that runs dry", () => {
     );
   });
 
+  it("names each channel's dry destinations at start, so one that sends is seen by its absence", async () => {
+    const target = await listener();
+    const root = await project(target.port, "    dryRun: true");
+    const one = await start(["start", "--once", "-C", root]);
+    expect(one.code).toBe(EXIT.ok);
+    expect(one.events.filter((e) => e.event === "dry-run-destinations")).toEqual([
+      expect.objectContaining({ level: 40, channels: { adt: [0] } }),
+    ]);
+
+    const all = await start(["start", "--once", "--dry-run", "-C", root]);
+    expect(all.events.filter((e) => e.event === "dry-run-destinations")).toEqual([
+      expect.objectContaining({ channels: { adt: [0, 1] } }),
+    ]);
+
+    const env = { SYNTHETIC_MISSING_TOKEN: "Bearer synthetic-token" };
+    const sending = await start(["start", "--once", "-C", await project(target.port, "")], env);
+    expect(sending.events.filter((e) => e.event === "dry-run-destinations")).toEqual([]);
+  });
+
   it("takes an environment reference", async () => {
     const root = await project(1, "    dryRun: { env: ADT_DRY_RUN, default: false }");
     const dry = await loadProject(root, { env: { ADT_DRY_RUN: "true" } });

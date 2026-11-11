@@ -62,6 +62,7 @@ A `transform-failed` line's `kind` is `load`, `parse`, `transform`, `output`, `t
 | `plaintext-copies`     | a file source keeps plaintext copies (`keepProcessed: true`)                                                                                                                           |
 | `unencrypted-storage`  | `encryption: none`                                                                                                                                                                     |
 | `dry-run`              | `pathways start --dry-run`: every destination runs dry (`destinations` is `all`)                                                                                                       |
+| `dry-run-destinations` | at start, the destinations that run dry, by index under each channel's name (`channels`); a destination not named sends                                                                |
 | `dry-run-pending`      | a channel with a destination that runs dry (`destinations`, by index) has `pending` deliveries at start, of every destination; each of a dry destination is marked `dry-run`, not sent |
 | `retention`            | a retention run, with the `messages` and `deliveries` it deleted                                                                                                                       |
 | `retention-failed`     | a retention run failed, by `code`; the next run tries again                                                                                                                            |
