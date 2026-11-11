@@ -22,6 +22,25 @@ export type LeaseLossReason =
   "renewal-refused" | "renewal-failed" | "renewal-late" | "write-refused";
 
 /**
+ * The {@link LeaseLostError} {@link EngineLease.check} throws: the lease was found lost before a
+ * write, for `reason`, rather than refused by one.
+ *
+ * @example
+ * ```ts
+ * if (error instanceof LeaseCheckFailed) console.error(error.reason);
+ * ```
+ */
+export class LeaseCheckFailed extends LeaseLostError {
+  readonly reason: LeaseLossReason;
+
+  /** @param reason Why the lease was lost. */
+  constructor(reason: LeaseLossReason) {
+    super();
+    this.reason = reason;
+  }
+}
+
+/**
  * What the engine needs from a lease: the epoch its writes carry, and a check before each send and
  * each message it takes, which throws a {@link LeaseLostError} once the lease is lost.
  *
@@ -147,7 +166,7 @@ export class EngineLease implements EngineFence {
     if (this.lost === undefined && this.monotonic() - this.renewedAt > this.options.ttlMs) {
       this.lose("renewal-late");
     }
-    if (this.lost !== undefined) throw new LeaseLostError();
+    if (this.lost !== undefined) throw new LeaseCheckFailed(this.lost);
   }
 
   /** Records that a fenced write changed nothing: the lease is lost. */

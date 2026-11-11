@@ -262,6 +262,34 @@ describe("pathways start on a custom store", () => {
     }
   });
 
+  it("sends nothing more once a renewal finds the lease freed, and says why it stopped", async () => {
+    // The destination frees the lease as it delivers the first message and takes its time, so the
+    // renewal meanwhile is refused; the first outcome still records (the epoch stands), and the
+    // check before the next send stops the engine.
+    const root = await makeProject({
+      "test.key": `${generateKey()}\n`,
+      "pathways.yaml": `${KEYS}storage: { module: ${LEASED_STORE_FILE} }\nlease:\n  ttl: 1s\n`,
+      "destination.ts": `
+import { engineLease } from ${JSON.stringify(pathToFileURL(LEASED_STORE_FILE).href)};
+export default () => ({
+  async deliver(): Promise<void> {
+    const lease = engineLease();
+    if (lease !== undefined) lease.expiresAt = 0;
+    await new Promise((resolve) => setTimeout(resolve, 700));
+  },
+});
+`,
+      "channels/adt/channel.yaml":
+        "source:\n  file: { dir: ../../data/inbox, minAge: 0 }\ndestinations:\n  - module: ../../destination.ts\n",
+    });
+    await dropFile(join(root, "data/inbox/a01.hl7"), ADT_A01);
+    await dropFile(join(root, "data/inbox/a02.hl7"), ADT_A01);
+    const ended = await cli(["start", "--once", "-C", root]);
+    expect(ended.code).toBe(EXIT.failed);
+    expect(ended.err).toContain("the engine lease was lost (renewal-refused)");
+    expect(ended.events.filter((e) => e.event === "delivered")).toHaveLength(1);
+  });
+
   it("starts as a standby when pathways.yaml says so, except for a single pass", async () => {
     const yaml = `storage: { module: ${LEASED_STORE_FILE} }\nlease:\n  standby: true\n`;
     const once = await cli(["start", "--once", "-C", await project(yaml)]);

@@ -12,7 +12,12 @@ import { rekey, rekeyComplete, type RekeyCounts } from "./encryption/rekey.js";
 import { TransformLoadError } from "./engine/channel-worker.js";
 import { Engine, errorCode } from "./engine/engine.js";
 import { healthEndpointFor, type HealthEndpoint, type HealthReport } from "./engine/health.js";
-import { describeHolder, EngineLease, type LeaseLossReason } from "./engine/lease.js";
+import {
+  describeHolder,
+  EngineLease,
+  LeaseCheckFailed,
+  type LeaseLossReason,
+} from "./engine/lease.js";
 import { EXIT } from "./exit.js";
 import { HookSet } from "./extensions/hooks.js";
 import { ExtensionLoadError } from "./extensions/load.js";
@@ -620,13 +625,14 @@ async function runEngine(
     if (run.once) await engine.tick();
     else await engine.run(run.signal);
   } catch (error) {
+    // The lease was found lost before a send or a take: logged when it was lost.
+    if (error instanceof LeaseCheckFailed) return leaseLost(io, error.reason);
     if (error instanceof LeaseLostError) {
       // A write the database refused under this engine's epoch: logged as such even when a late
       // renewal was noticed first, since the refusal is what shows another engine took over.
       if (run.lease?.lossReason === undefined) run.lease?.writeRefused();
-      else if (run.lease.lossReason !== "write-refused") {
+      else
         run.logger.error({ event: "lease-lost", reason: "write-refused", epoch: run.lease.epoch });
-      }
       return leaseLost(io, "write-refused");
     }
     // A stored value that cannot be decrypted stops the engine, as any storage failure does, and is
