@@ -1,4 +1,4 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env node
 /**
  * The tarball smoke: proves the packed package installs and runs on the system it runs on, as a
  * team would meet it. CI's `tarball-smoke` job runs it on Linux, Windows and macOS after
@@ -7,7 +7,7 @@
  * ```sh
  * pnpm build
  * npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP"
- * pnpm exec tsx scripts/tarball-smoke.ts "$RUNNER_TEMP"/cosyte-pathways-*.tgz
+ * node scripts/tarball-smoke.ts "$RUNNER_TEMP"/cosyte-pathways-*.tgz
  * ```
  *
  * In a new empty folder it installs the tarball with npm, which proves its `files` (the build and
@@ -17,6 +17,10 @@
  * starter channel's tests; and `start --once`, which stores the starter's two synthetic messages in
  * SQLite through that addon, delivers the admission and filters the update. Every message here is
  * the starter's own synthetic one. It prints what it checked and exits 1 on the first failure.
+ *
+ * Node runs it as it is, stripping the types, with no package of this repository loaded: it imports
+ * Node's own modules only, and is started with `node`, not through pnpm, so nothing of pnpm's
+ * environment reaches the npm it runs.
  */
 
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
@@ -45,13 +49,16 @@ function check(ok: boolean, what: string): void {
   process.stdout.write(`tarball smoke: ok: ${what}\n`);
 }
 
+/** `text` in double quotes when it holds a space, for a Windows shell. */
+const quote = (text: string): string => (text.includes(" ") ? `"${text}"` : text);
+
 /**
  * Runs `command` with `args` in `cwd`. On Windows npm and the installed bin are `.cmd` shims, which
- * only a shell can start, so there it runs through one, with each argument quoted.
+ * only a shell can start, so there it runs through one. Only what holds a space is quoted: a shim
+ * started by a quoted bare name (`"npm"`) looks for its own files in the wrong folder.
  */
 function run(command: string, args: readonly string[], cwd: string): SpawnSyncReturns<string> {
-  const quoted = windows ? args.map((arg) => `"${arg}"`) : args;
-  const result = spawnSync(windows ? `"${command}"` : command, quoted, {
+  const result = spawnSync(windows ? quote(command) : command, windows ? args.map(quote) : args, {
     cwd,
     encoding: "utf8",
     shell: windows,

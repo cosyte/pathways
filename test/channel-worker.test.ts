@@ -102,7 +102,10 @@ describe("ChannelWorker", () => {
     workers.push(worker);
     expect(await worker.run(bytes("bad"))).toMatchObject({
       ok: false,
-      failure: { name: "TypeError", where: expect.stringMatching(/^transform\.ts:2:\d+$/) as unknown },
+      failure: {
+        name: "TypeError",
+        where: expect.stringMatching(/^transform\.ts:2:\d+$/) as unknown,
+      },
     });
   });
 

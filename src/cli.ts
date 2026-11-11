@@ -246,6 +246,12 @@ async function init(target: string, io: CliIo): Promise<number> {
       files.map((file) => `  ${file}\n`).join("") +
       `${STARTER_KEY_FILE} is a development key that encrypts stored messages on\n` +
       "this machine; production keys come from a secret store (see pathways.yaml).\n" +
+      // The key is written with mode 0600, which Linux and macOS enforce. On Windows Node maps a
+      // mode to the read-only attribute alone, so there the folder's access list is the control.
+      (process.platform === "win32"
+        ? "On Windows the key file's mode does not limit who can read it: the project\n" +
+          "folder's access control list does, so keep it to the accounts that run Pathways.\n"
+        : "") +
       'Next, in the project folder: "pathways test" runs the channel\'s tests, and\n' +
       '"pathways start" runs the channel.\n',
   );

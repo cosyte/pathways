@@ -13,7 +13,7 @@ import {
   initProject,
   STARTER_KEY_FILE,
 } from "../src/starter/init.js";
-import { captureLogger, cleanUp, makeProject } from "./helpers.js";
+import { captureLogger, cleanUp, makeProject, usePlatform } from "./helpers.js";
 
 afterEach(cleanUp);
 
@@ -61,6 +61,11 @@ const STARTER_FILES = [
 
 const CHANNEL = "channels/adt-to-lab";
 
+/** What `pathways init` adds on Windows, where a file's mode does not keep the key private. */
+const ON_WINDOWS =
+  "On Windows the key file's mode does not limit who can read it: the project\n" +
+  "folder's access control list does, so keep it to the accounts that run Pathways.\n";
+
 describe("pathways init", () => {
   it("writes the starter project into a new folder and lists what it wrote", async () => {
     const target = join(await makeProject({}), "nested", "new-project");
@@ -72,11 +77,33 @@ describe("pathways init", () => {
         STARTER_FILES.map((file) => `  ${file}\n`).join("") +
         ".pathways/dev.key is a development key that encrypts stored messages on\n" +
         "this machine; production keys come from a secret store (see pathways.yaml).\n" +
+        (process.platform === "win32" ? ON_WINDOWS : "") +
         'Next, in the project folder: "pathways test" runs the channel\'s tests, and\n' +
         '"pathways start" runs the channel.\n',
       err: "",
     });
     expect(Object.keys(await snapshot(target)).sort()).toEqual(STARTER_FILES);
+  });
+
+  // A file's mode is the key's control on Linux and macOS. On Windows it is not: Node maps the mode
+  // to the read-only attribute alone, and who may read the file is the folder's access control list.
+  it("says on Windows that the folder's access control list keeps the key private, and only there", async () => {
+    for (const [platform, says] of [
+      ["win32", true],
+      ["linux", false],
+      ["darwin", false],
+    ] as const) {
+      const target = await makeProject({});
+      const restore = usePlatform(platform);
+      let result: Awaited<ReturnType<typeof runCli>>;
+      try {
+        result = await runCli(["init", target]);
+      } finally {
+        restore();
+      }
+      expect(result.code).toBe(EXIT.ok);
+      expect(result.out.includes(ON_WINDOWS), platform).toBe(says);
+    }
   });
 
   it("writes into an empty folder named with --project", async () => {

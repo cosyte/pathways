@@ -48,4 +48,4 @@ jobs:
       - name: Pack the package
         run: npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP"
       - name: Install the tarball in an empty folder, then init, test and start --once
-        run: pnpm exec tsx scripts/tarball-smoke.ts "$RUNNER_TEMP"/cosyte-pathways-*.tgz
+        run: node scripts/tarball-smoke.ts "$RUNNER_TEMP"/cosyte-pathways-*.tgz
