@@ -13,7 +13,7 @@ import { rekey, rekeyComplete, type RekeyCounts } from "./encryption/rekey.js";
 import { TransformLoadError } from "./engine/channel-worker.js";
 import {
   controlAddress,
-  ControlError,
+  controlOpenMessage,
   ControlServer,
   EngineNotRunning,
   sendControl,
@@ -960,12 +960,7 @@ async function openControl(
     );
     await server.start();
   } catch (error) {
-    const reason = error instanceof ControlError ? error.reason : errorCode(error);
-    io.err(
-      reason === "in-use"
-        ? "pathways: another engine runs this project on this machine: its control socket answers.\n"
-        : `pathways: the control socket could not be opened (${reason ?? "error"}).\n`,
-    );
+    io.err(controlOpenMessage(error));
     return undefined;
   }
   return server;

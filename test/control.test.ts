@@ -15,6 +15,8 @@ import {
   ControlServer,
   EngineNotRunning,
   probe,
+  connectFailure,
+  controlOpenMessage,
   removeStale,
   sendControl,
   unsafeFolder,
@@ -212,10 +214,42 @@ describe("ControlServer", () => {
     folders.push(base);
     const stale = join(base, "stale.sock");
     await writeFile(stale, "");
-    removeStale(stale);
+    // A pipe's address has no folder, and nothing is removed for it.
+    removeStale({ dir: undefined, path: stale });
+    expect((await stat(stale)).isFile()).toBe(true);
+    removeStale({ dir: base, path: stale });
     await expect(stat(stale)).rejects.toMatchObject({ code: "ENOENT" });
     // One that is not there is no matter.
-    expect(() => removeStale(stale)).not.toThrow();
+    expect(() => removeStale({ dir: base, path: stale })).not.toThrow();
+  });
+
+  it("tells a refused or missing socket from any other failure to connect", () => {
+    const failed = (code?: string): Error =>
+      Object.assign(new Error("connect failed"), code === undefined ? {} : { code });
+    expect(connectFailure(failed("ECONNREFUSED"))).toMatchObject({
+      name: "EngineNotRunning",
+      code: "ECONNREFUSED",
+    });
+    expect(connectFailure(failed("ENOENT"))).toBeInstanceOf(EngineNotRunning);
+    const denied = failed("EACCES");
+    expect(connectFailure(denied)).toBe(denied);
+    const bare = failed();
+    expect(connectFailure(bare)).toBe(bare);
+  });
+
+  it("says why the control socket could not be opened, by reason or code alone", () => {
+    expect(controlOpenMessage(new ControlError("in-use"))).toBe(
+      "pathways: another engine runs this project on this machine: its control socket answers.\n",
+    );
+    expect(controlOpenMessage(new ControlError("unsafe-folder"))).toBe(
+      "pathways: the control socket could not be opened (unsafe-folder).\n",
+    );
+    expect(controlOpenMessage(Object.assign(new Error("TESTPATIENT"), { code: "EACCES" }))).toBe(
+      "pathways: the control socket could not be opened (EACCES).\n",
+    );
+    expect(controlOpenMessage(new Error("TESTPATIENT"))).toBe(
+      "pathways: the control socket could not be opened (error).\n",
+    );
   });
 
   it("refuses a socket folder that is not a folder, is another user's, or is open to others", () => {
@@ -361,6 +395,18 @@ describe("pathways channel", () => {
     });
     expect(code).toBe(1);
     expect(err.join("")).toContain("engine not running");
+    // With XDG_RUNTIME_DIR set (Windows ignores it), nothing answers there either.
+    const runtime = await mkdtemp(unix ? "/tmp/pwc-" : join(tmpdir(), "pwc-"));
+    folders.push(runtime);
+    const again: string[] = [];
+    expect(
+      await run(["channel", "pause", "adt", "-C", root], {
+        out: () => undefined,
+        err: (text) => again.push(text),
+        env: { XDG_RUNTIME_DIR: runtime },
+      }),
+    ).toBe(1);
+    expect(again.join("")).toContain("engine not running");
   });
 
   it("refuses a command line it does not understand, before asking anything", async () => {

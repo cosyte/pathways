@@ -4,7 +4,7 @@ import { createConnection, createServer, type Server, type Socket } from "node:n
 import { tmpdir } from "node:os";
 import { posix, resolve } from "node:path";
 
-import type { ChannelCommand, ChannelCommandReport } from "./engine.js";
+import { errorCode, type ChannelCommand, type ChannelCommandReport } from "./engine.js";
 
 /**
  * The control socket: `pathways start` listens on it, and `pathways channel` asks the running
@@ -180,17 +180,18 @@ export function unsafeFolder(
 }
 
 /**
- * Removes the socket file at `path` that no engine answers on, left by one that died; one that is
- * not there is no matter.
+ * Removes the socket file at `address.path` that no engine answers on, left by one that died; one
+ * that is not there is no matter. A Windows pipe (an address with no folder) leaves no file.
  *
  * @example
  * ```ts
- * if (!(await probe(path))) removeStale(path);
+ * if (!(await probe(address.path))) removeStale(address);
  * ```
  */
-export function removeStale(path: string): void {
+export function removeStale(address: ControlAddress): void {
+  if (address.dir === undefined) return;
   try {
-    unlinkSync(path);
+    unlinkSync(address.path);
   } catch (error) {
     /* v8 ignore next: only a socket that is not there may stay */
     if ((error as { code?: unknown }).code !== "ENOENT") throw error;
@@ -213,12 +214,44 @@ export function probe(path: string): Promise<boolean> {
       socket.destroy();
       resolvePromise(true);
     });
-    socket.once("error", (error: Error & { code?: unknown }) => {
+    socket.once("error", (error: Error) => {
       socket.destroy();
-      if (error.code === "ECONNREFUSED" || error.code === "ENOENT") resolvePromise(false);
-      else reject(error);
+      const failure = connectFailure(error);
+      if (failure instanceof EngineNotRunning) resolvePromise(false);
+      else reject(failure);
     });
   });
+}
+
+/**
+ * What a failed connection to the control socket means: {@link EngineNotRunning} when it was
+ * refused or there is no socket, else the error itself.
+ *
+ * @example
+ * ```ts
+ * connectFailure(Object.assign(new Error("refused"), { code: "ECONNREFUSED" })); // EngineNotRunning
+ * ```
+ */
+export function connectFailure(error: Error): Error {
+  const code = (error as { code?: unknown }).code;
+  return code === "ECONNREFUSED" || code === "ENOENT" ? new EngineNotRunning(code) : error;
+}
+
+/**
+ * What `pathways start` says when the control socket could not be opened: another engine answers
+ * on it, or the folder or the socket could not be had, by reason or code alone.
+ *
+ * @example
+ * ```ts
+ * controlOpenMessage(new ControlError("in-use")); // "pathways: another engine runs this project..."
+ * ```
+ */
+export function controlOpenMessage(error: unknown): string {
+  const reason = error instanceof ControlError ? error.reason : errorCode(error);
+  if (reason === "in-use") {
+    return "pathways: another engine runs this project on this machine: its control socket answers.\n";
+  }
+  return `pathways: the control socket could not be opened (${reason ?? "error"}).\n`;
 }
 
 /** Handles one request; the server catches what it throws and answers `failed`. */
@@ -260,7 +293,7 @@ export class ControlServer {
     if (dir !== undefined) ownFolder(dir);
     // A Windows pipe is probed too: an engine answering on it is named as one, as on a socket.
     if (await probe(path)) throw new ControlError("in-use");
-    if (dir !== undefined) removeStale(path);
+    removeStale(this.address);
     const server = createServer((socket) => {
       this.serve(socket);
     });
@@ -417,13 +450,10 @@ export function sendControl(
     socket.on("data", (chunk: string) => {
       received += chunk;
     });
-    socket.once("error", (error: Error & { code?: unknown }) => {
+    socket.once("error", (error: Error) => {
       clearTimeout(timer);
       socket.destroy();
-      /* v8 ignore next: socket errors carry a code */
-      const code = typeof error.code === "string" ? error.code : undefined;
-      if (code === "ECONNREFUSED" || code === "ENOENT") reject(new EngineNotRunning(code));
-      else reject(error);
+      reject(connectFailure(error));
     });
     socket.once("end", () => {
       clearTimeout(timer);
