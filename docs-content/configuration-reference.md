@@ -138,14 +138,15 @@ A [listener](#listener). Its token is read from `PATHWAYS_HEALTH_TOKEN` when `au
 balancer or an orchestrator. Off unless set. See
 [Probe liveness and readiness](./check-status-and-health.md#probe-liveness-and-readiness).
 
-| Key         | Type                                 | Default                     |
-| ----------- | ------------------------------------ | --------------------------- |
-| `port`      | 1 to 65,535                          | required                    |
-| `host`      | an address                           | `127.0.0.1`                 |
-| `tls`       | `cert` and `key`, paths to PEM files | required unless `plaintext` |
-| `plaintext` | boolean                              | `false`                     |
+| Key         | Type        | Default     |
+| ----------- | ----------- | ----------- |
+| `port`      | 1 to 65,535 | required    |
+| `host`      | an address  | `127.0.0.1` |
+| `plaintext` | `true`      | required    |
 
-It takes no `auth` and no `tls.ca`: a probe presents neither a token nor a client certificate.
+It serves plain HTTP only, with no `tls` and no `auth`: it answers one word and takes nothing in,
+and a probe presents no token. `plaintext: true` says so, as it does for every endpoint without
+TLS.
 
 ### Engine lease
 

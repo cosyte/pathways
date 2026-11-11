@@ -107,7 +107,8 @@ probes:
 ```
 
 It listens on `127.0.0.1` unless `host` says otherwise; inside a container, set `host: 0.0.0.0` for
-a probe from outside it to reach it. `tls: { cert, key }` serves it over HTTPS.
+a probe from outside it to reach it. It serves plain HTTP only, which `plaintext: true` says: it
+answers one word and takes nothing in.
 
 | Path      | 200     | 503                                                                                                                                          |
 | --------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------- |

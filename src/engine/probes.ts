@@ -1,9 +1,7 @@
-import { request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http";
-import { request as httpsRequest } from "node:https";
+import { request, type IncomingMessage, type ServerResponse } from "node:http";
 
 import type { ProbesConfig } from "../config/schema.js";
 import { Endpoint } from "../connectors/endpoint.js";
-import { loadServerTls, type ServerTlsMaterial } from "../connectors/tls.js";
 
 /**
  * Where `pathways start` stands: `starting` until the engine has started and its loop runs,
@@ -117,19 +115,18 @@ export interface ProbeEndpointOptions {
   readonly host: string;
   /** The port to listen on; 0 picks a free one, which {@link ProbeEndpoint.port} then reports. */
   readonly port: number;
-  /** TLS, or undefined for plaintext HTTP. */
-  readonly tls: ServerTlsMaterial | undefined;
   readonly probes: Probes;
 }
 
 /**
- * The probe listener: `GET` (or `HEAD`) `/livez` and `/readyz` answer 200 or 503 and one word, with
- * no token. Every other path answers 404 `not-found`, and every other method 405. It holds no
- * channel name, no count and nothing stored, so it can answer anyone who can reach its port.
+ * The probe listener, on plain HTTP: `GET` (or `HEAD`) `/livez` and `/readyz` answer 200 or 503 and
+ * one word, with no token. Every other path answers 404 `not-found`, and every other method 405. It
+ * holds no channel name, no count and nothing stored, and takes nothing in, so it can answer anyone
+ * who can reach its port, and TLS would protect nothing.
  *
  * @example
  * ```ts
- * const listener = new ProbeEndpoint({ host: "127.0.0.1", port: 9091, tls: undefined, probes });
+ * const listener = new ProbeEndpoint({ host: "127.0.0.1", port: 9091, probes });
  * await listener.start();
  * await listener.stop();
  * ```
@@ -137,11 +134,11 @@ export interface ProbeEndpointOptions {
 export class ProbeEndpoint {
   private readonly endpoint: Endpoint;
 
-  /** @param options Where to listen, TLS, and the probes to answer. */
+  /** @param options Where to listen, and the probes to answer. */
   constructor(options: ProbeEndpointOptions) {
-    const { host, port, tls, probes } = options;
+    const { host, port, probes } = options;
     this.endpoint = new Endpoint(
-      { host, port, tls, token: undefined },
+      { host, port, tls: undefined, token: undefined },
       async (request, response) => {
         if (request.method !== "GET" && request.method !== "HEAD") {
           word(response, 405, "method-not-allowed", true);
@@ -169,9 +166,8 @@ export class ProbeEndpoint {
 }
 
 /**
- * Builds the probe listener `pathways.yaml` configures, reading its TLS files.
+ * Builds the probe listener `pathways.yaml` configures.
  *
- * @throws {ConfigError} when a TLS file cannot be read or loaded.
  * @example
  * ```ts
  * const listener = probeEndpointFor(project.probes, probes);
@@ -179,11 +175,7 @@ export class ProbeEndpoint {
  * ```
  */
 export function probeEndpointFor(config: ProbesConfig, probes: Probes): ProbeEndpoint {
-  const tls =
-    config.tls === undefined
-      ? undefined
-      : loadServerTls({ ...config.tls, ca: undefined }, "pathways.yaml: probes.tls");
-  return new ProbeEndpoint({ host: config.host, port: config.port, tls, probes });
+  return new ProbeEndpoint({ host: config.host, port: config.port, probes });
 }
 
 /** How long `pathways probe` waits for an answer before it counts the engine as not answering. */
@@ -196,9 +188,7 @@ export type ProbeResult =
 
 /**
  * Asks the probe listener `config` names for `/livez`, or `/readyz` when `ready`, as `pathways
- * probe` does. A wildcard host (`0.0.0.0`, `::`) is asked on the loopback address. Over TLS the
- * certificate is not verified: the request carries nothing and only the status is read, as a load
- * balancer's health check does.
+ * probe` does. A wildcard host (`0.0.0.0`, `::`) is asked on the loopback address.
  *
  * @example
  * ```ts
@@ -211,8 +201,6 @@ export function askProbe(
   options: { readonly ready: boolean; readonly timeoutMs?: number },
 ): Promise<ProbeResult> {
   const host = config.host === "0.0.0.0" ? "127.0.0.1" : config.host === "::" ? "::1" : config.host;
-  const tls = config.tls !== undefined;
-  const request = tls ? httpsRequest : httpRequest;
   return new Promise((resolve) => {
     const failed = (error: unknown): void => {
       resolve({ status: undefined, code: codeOf(error) });
@@ -225,7 +213,6 @@ export function askProbe(
         method: "GET",
         agent: false,
         signal: AbortSignal.timeout(options.timeoutMs ?? PROBE_TIMEOUT_MS),
-        ...(tls ? { rejectUnauthorized: false } : {}),
       },
       (response) => {
         let text = "";

@@ -205,8 +205,7 @@ Asks the probe listener of the engine running in this project (the `probes` bloc
 on a 200 and 1 on anything else. It exits 1, saying why, when `pathways.yaml` has no `probes` block,
 when the configuration is invalid, or when nothing answers within 5 seconds, so a container's health
 check sees only 0 or 1. It reads `pathways.yaml` and opens no database. A listener on `0.0.0.0` or
-`::` is asked on the loopback address; over TLS the certificate is not checked, since the request
-carries nothing and only the status is read.
+`::` is asked on the loopback address.
 
 | Option    | Meaning                            |
 | --------- | ---------------------------------- |

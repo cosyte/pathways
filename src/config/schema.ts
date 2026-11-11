@@ -792,33 +792,29 @@ const health = restate(
   (json) => Object.assign(json, TLS_OR_PLAINTEXT),
 );
 
+const PROBES_PLAINTEXT =
+  "required: plaintext: true. The probe listener serves plain HTTP only: it answers one word and takes nothing in";
+
 /**
- * The probe listener: a liveness and a readiness answer, one word each, with no token. TLS takes a
- * certificate and key only, since a load balancer's or an orchestrator's probe presents no client
- * certificate.
+ * The probe listener: a liveness and a readiness answer, one word each, with no token, on plain
+ * HTTP. It carries one word and takes nothing in, so TLS would protect nothing; like every endpoint
+ * without TLS, its block says `plaintext: true`.
  */
-const probes = restate(
-  z
-    .strictObject({
-      port,
-      host: host
-        .meta({ description: "The address to listen on. Default 127.0.0.1, this machine only." })
-        .optional(),
-      tls: z
-        .strictObject({ cert: path, key: path })
-        .meta({
-          description: "TLS: cert and key, paths to PEM files. Required unless plaintext: true.",
-        })
-        .optional(),
-      plaintext,
-    })
-    .meta({
+const probes = z
+  .strictObject({
+    port,
+    host: host
+      .meta({ description: "The address to listen on. Default 127.0.0.1, this machine only." })
+      .optional(),
+    plaintext: z.literal(true, { error: PROBES_PLAINTEXT }).meta({
       description:
-        "The probe listener, off unless set: GET /livez and /readyz answer 200 or 503 and one word, with no token and no channel names or counts, for a load balancer or an orchestrator.",
-    })
-    .superRefine((value, ctx) => tlsOrPlaintext(value, ctx, LISTENER_TLS_REQUIRED)),
-  (json) => Object.assign(json, TLS_OR_PLAINTEXT),
-);
+        "Required, and true: the probe listener serves plain HTTP only, since it answers one word and takes nothing in.",
+    }),
+  })
+  .meta({
+    description:
+      "The probe listener, off unless set: GET /livez and /readyz answer 200 or 503 and one word, on plain HTTP, with no token and no channel names or counts, for a load balancer or an orchestrator.",
+  });
 
 /** The engine lease: how long it lasts, and whether this engine waits as a standby. */
 const lease = z
@@ -1304,19 +1300,17 @@ export interface MllpDestination {
 export type HealthConfig = ListenerConfig;
 
 /**
- * The probe listener, from `pathways.yaml`'s `probes` block: where it listens, and its TLS (`tls` is
- * undefined exactly when `plaintext`). It takes no token.
+ * The probe listener, from `pathways.yaml`'s `probes` block: where it listens. It serves plain HTTP
+ * and takes no token.
  *
  * @example
  * ```ts
- * const probes: ProbesConfig = { host: "127.0.0.1", port: 9091, tls: undefined, plaintext: true };
+ * const probes: ProbesConfig = { host: "127.0.0.1", port: 9091 };
  * ```
  */
 export interface ProbesConfig {
   readonly host: string;
   readonly port: number;
-  readonly tls: { readonly cert: string; readonly key: string } | undefined;
-  readonly plaintext: boolean;
 }
 
 /**

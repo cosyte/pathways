@@ -120,18 +120,7 @@ export async function loadProject(root: string): Promise<ProjectConfig> {
   const probes =
     project.probes === undefined
       ? undefined
-      : {
-          host: project.probes.host ?? DEFAULT_HOST,
-          port: project.probes.port,
-          tls:
-            project.probes.tls === undefined
-              ? undefined
-              : {
-                  cert: resolve(projectRoot, project.probes.tls.cert),
-                  key: resolve(projectRoot, project.probes.tls.key),
-                },
-          plaintext: project.probes.plaintext === true,
-        };
+      : { host: project.probes.host ?? DEFAULT_HOST, port: project.probes.port };
   const lease = {
     ttlMs: project.lease?.ttl ?? DEFAULT_LEASE_TTL_MS,
     standby: project.lease?.standby ?? false,

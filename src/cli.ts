@@ -528,7 +528,7 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
       if (project.probes !== undefined) probeListener = probeEndpointFor(project.probes, probes);
     } catch (error) {
       await store.close();
-      /* v8 ignore next: healthEndpointFor and probeEndpointFor throw only ConfigError */
+      /* v8 ignore next: healthEndpointFor throws only ConfigError */
       if (!(error instanceof ConfigError)) throw error;
       reportConfigError(error, io);
       return EXIT.config;

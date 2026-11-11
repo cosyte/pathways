@@ -6,7 +6,7 @@ import { access } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { EXIT, run } from "../src/cli.js";
 import { ConfigError, loadProject } from "../src/config/load.js";
@@ -34,19 +34,7 @@ import {
   makeProject,
   type LogEvent,
 } from "./helpers.js";
-import {
-  freePort,
-  makeCertificates,
-  removeCertificates,
-  send,
-  type Certificates,
-} from "./net-helpers.js";
-
-let certs: Certificates;
-beforeAll(() => {
-  certs = makeCertificates();
-});
-afterAll(() => removeCertificates(certs));
+import { freePort, send } from "./net-helpers.js";
 
 const closers: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -141,29 +129,22 @@ async function holdPort(): Promise<{ port: number; server: Server }> {
 }
 
 describe("the probes block", () => {
-  it("is off unless set, listens on this machine by default, and needs TLS or plaintext", async () => {
+  it("is off unless set, listens on this machine by default, and says plaintext: true", async () => {
     const none = await loadProject(await project(""));
     expect(none.probes).toBeUndefined();
     const plain = await loadProject(await project("probes: { port: 9091, plaintext: true }\n"));
-    expect(plain.probes).toEqual({
-      host: "127.0.0.1",
-      port: 9091,
-      tls: undefined,
-      plaintext: true,
-    });
-    const root = await project(
-      "probes: { port: 9091, host: 0.0.0.0, tls: { cert: a.pem, key: a.key } }\n",
+    expect(plain.probes).toEqual({ host: "127.0.0.1", port: 9091 });
+    const wide = await loadProject(
+      await project("probes: { port: 9091, host: 0.0.0.0, plaintext: true }\n"),
     );
-    expect((await loadProject(root)).probes).toEqual({
-      host: "0.0.0.0",
-      port: 9091,
-      tls: { cert: join(root, "a.pem"), key: join(root, "a.key") },
-      plaintext: false,
-    });
+    expect(wide.probes).toEqual({ host: "0.0.0.0", port: 9091 });
+    await expect(loadProject(await project("probes: { port: 9091 }\n"))).rejects.toThrow(
+      "pathways.yaml: probes.plaintext: required: plaintext: true. The probe listener serves plain HTTP only: it answers one word and takes nothing in",
+    );
     for (const yaml of [
-      "probes: { port: 9091 }\n",
+      "probes: { port: 9091, plaintext: false }\n",
       "probes: { port: 9091, plaintext: true, auth: none }\n",
-      "probes: { port: 9091, tls: { cert: a.pem, key: a.key, ca: ca.pem } }\n",
+      "probes: { port: 9091, tls: { cert: a.pem, key: a.key } }\n",
     ]) {
       await expect(loadProject(await project(yaml))).rejects.toThrow(ConfigError);
     }
@@ -216,7 +197,7 @@ function fixedProbes(): Probes & { liveAnswer: boolean; readyAnswer: boolean } {
 describe("the probe listener", () => {
   it("answers /livez and /readyz with one word and no token, 404 elsewhere, 405 to a POST", async () => {
     const probes = fixedProbes();
-    const listener = new ProbeEndpoint({ host: "127.0.0.1", port: 0, tls: undefined, probes });
+    const listener = new ProbeEndpoint({ host: "127.0.0.1", port: 0, probes });
     expect(listener.port).toBeUndefined();
     await listener.start();
     closers.push(() => listener.stop());
@@ -253,41 +234,12 @@ describe("the probe listener", () => {
     expect(post.headers.allow).toBe("GET, HEAD");
   });
 
-  it("serves TLS from the probes block, which pathways probe asks without verifying", async () => {
-    const port = await freePort();
-    const config: ProbesConfig = {
-      host: "127.0.0.1",
-      port,
-      tls: { cert: certs.files.serverCert, key: certs.files.serverKey },
-      plaintext: false,
-    };
-    const listener = probeEndpointFor(config, fixedProbes());
-    await listener.start();
-    closers.push(() => listener.stop());
-    expect(await send(port, { method: "GET", path: "/livez", ca: certs.ca })).toMatchObject({
-      status: 200,
-      body: "live\n",
-    });
-    expect(await askProbe(config, { ready: true })).toEqual({ status: 200, word: "ready" });
-    expect(() =>
-      probeEndpointFor(
-        { ...config, tls: { cert: "missing.pem", key: "missing.key" } },
-        fixedProbes(),
-      ),
-    ).toThrow("pathways.yaml: probes.tls.cert: could not be read (ENOENT)");
-  });
-
   it("is asked on the loopback address when it listens on every address", async () => {
-    const listener = new ProbeEndpoint({
-      host: "0.0.0.0",
-      port: 0,
-      tls: undefined,
-      probes: fixedProbes(),
-    });
+    const listener = probeEndpointFor({ host: "0.0.0.0", port: 0 }, fixedProbes());
     await listener.start();
     closers.push(() => listener.stop());
     const port = listener.port ?? 0;
-    const config = { host: "0.0.0.0", port, tls: undefined, plaintext: true };
+    const config: ProbesConfig = { host: "0.0.0.0", port };
     expect(await askProbe(config, { ready: false })).toEqual({ status: 200, word: "live" });
     const closed = await freePort();
     const refused = await askProbe({ ...config, host: "::", port: closed }, { ready: false });
@@ -592,16 +544,6 @@ export default () => ({
     });
     // A single pass does not listen for probes at all.
     expect((await cli(["start", "--once", "-C", root])).code).toBe(EXIT.ok);
-  });
-
-  it("refuses the probe TLS files it cannot read, as a configuration error", async () => {
-    const root = await project(
-      `probes: { port: 1, tls: { cert: missing.pem, key: missing.key } }\n`,
-    );
-    expect(await cli(["start", "-C", root])).toMatchObject({
-      code: EXIT.config,
-      err: expect.stringContaining("pathways.yaml: probes.tls.cert: could not be read") as string,
-    });
   });
 });
 
