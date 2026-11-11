@@ -157,10 +157,43 @@ function ownFolder(dir: string): void {
     /* v8 ignore next: a folder that cannot be made is reported by its code */
     if ((error as { code?: unknown }).code !== "EEXIST") throw error;
   }
-  const stat = lstatSync(dir);
-  const uid = process.getuid?.();
-  if (!stat.isDirectory() || (uid !== undefined && stat.uid !== uid) || (stat.mode & 0o077) !== 0) {
-    throw new ControlError("unsafe-folder");
+  if (unsafeFolder(lstatSync(dir), process.getuid?.())) throw new ControlError("unsafe-folder");
+}
+
+/**
+ * Whether a socket folder, as `lstat` describes it, is unsafe for the user `uid`: not a folder (a
+ * link, say), owned by someone else, or open to group or others. `uid` is undefined where the
+ * system has none (Windows), and then ownership is not checked.
+ *
+ * @example
+ * ```ts
+ * unsafeFolder(lstatSync(dir), process.getuid?.()); // false for a 0700 folder of this user's
+ * ```
+ */
+export function unsafeFolder(
+  stat: { isDirectory(): boolean; readonly uid: number; readonly mode: number },
+  uid: number | undefined,
+): boolean {
+  return (
+    !stat.isDirectory() || (uid !== undefined && stat.uid !== uid) || (stat.mode & 0o077) !== 0
+  );
+}
+
+/**
+ * Removes the socket file at `path` that no engine answers on, left by one that died; one that is
+ * not there is no matter.
+ *
+ * @example
+ * ```ts
+ * if (!(await probe(path))) removeStale(path);
+ * ```
+ */
+export function removeStale(path: string): void {
+  try {
+    unlinkSync(path);
+  } catch (error) {
+    /* v8 ignore next: only a socket that is not there may stay */
+    if ((error as { code?: unknown }).code !== "ENOENT") throw error;
   }
 }
 
@@ -224,16 +257,10 @@ export class ControlServer {
    */
   async start(): Promise<void> {
     const { dir, path } = this.address;
-    if (dir !== undefined) {
-      ownFolder(dir);
-      if (await probe(path)) throw new ControlError("in-use");
-      try {
-        unlinkSync(path);
-      } catch (error) {
-        /* v8 ignore next: only a socket that is not there may stay */
-        if ((error as { code?: unknown }).code !== "ENOENT") throw error;
-      }
-    }
+    if (dir !== undefined) ownFolder(dir);
+    // A Windows pipe is probed too: an engine answering on it is named as one, as on a socket.
+    if (await probe(path)) throw new ControlError("in-use");
+    if (dir !== undefined) removeStale(path);
     const server = createServer((socket) => {
       this.serve(socket);
     });
@@ -243,7 +270,7 @@ export class ControlServer {
         server.listen(path, resolvePromise);
       });
     } catch (error) {
-      /* v8 ignore start: a Windows pipe another engine holds, or a socket made since the probe */
+      /* v8 ignore start: a socket or pipe another engine made since the probe */
       throw (error as { code?: unknown }).code === "EADDRINUSE"
         ? new ControlError("in-use")
         : error;

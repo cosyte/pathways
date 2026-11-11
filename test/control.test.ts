@@ -15,7 +15,9 @@ import {
   ControlServer,
   EngineNotRunning,
   probe,
+  removeStale,
   sendControl,
+  unsafeFolder,
   type ControlAddress,
   type ControlRequest,
 } from "../src/engine/control.js";
@@ -200,6 +202,36 @@ describe("ControlServer", () => {
       ok: true,
       report: { channel: "adt", state: "paused" },
     });
+  });
+
+  it("finds no engine where nothing listens, and clears a stale file on every system", async () => {
+    const at = await address();
+    // No socket file on Unix, no pipe on Windows: nothing answers.
+    expect(await probe(at.path)).toBe(false);
+    const base = await mkdtemp(join(tmpdir(), "pwc-"));
+    folders.push(base);
+    const stale = join(base, "stale.sock");
+    await writeFile(stale, "");
+    removeStale(stale);
+    await expect(stat(stale)).rejects.toMatchObject({ code: "ENOENT" });
+    // One that is not there is no matter.
+    expect(() => removeStale(stale)).not.toThrow();
+  });
+
+  it("refuses a socket folder that is not a folder, is another user's, or is open to others", () => {
+    const folder = (mode: number, uid = 1000, directory = true) => ({
+      isDirectory: () => directory,
+      uid,
+      mode,
+    });
+    expect(unsafeFolder(folder(0o40700), 1000)).toBe(false);
+    expect(unsafeFolder(folder(0o40700, 1000, false), 1000)).toBe(true);
+    expect(unsafeFolder(folder(0o40700, 1001), 1000)).toBe(true);
+    expect(unsafeFolder(folder(0o40750), 1000)).toBe(true);
+    expect(unsafeFolder(folder(0o40701), 1000)).toBe(true);
+    // With no user id, as on Windows, ownership is not checked; the mode still is.
+    expect(unsafeFolder(folder(0o40700, 0), undefined)).toBe(false);
+    expect(unsafeFolder(folder(0o40755, 0), undefined)).toBe(true);
   });
 
   it("refuses to start when another engine answers on the socket", async () => {
