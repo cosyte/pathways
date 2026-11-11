@@ -175,7 +175,7 @@ destination `ackTimeout`, and any destination `retry`.
 | `ackTimeout`        | duration              | `10s`   | how long an MLLP destination waits to connect, then for each ACK                                                                                             |
 | `retention`         | duration              | `30d`   | how long a done message is kept after its last activity                                                                                                      |
 | `resendFlag`        | boolean               | `true`  | write a marker before each send, so a resend after a crash is flagged; see [Delivery and errors](./delivery-and-errors.md#a-resend-after-a-crash-is-flagged) |
-| `pollInterval`      | duration              | `1s`    | how often the engine looks for new work; project only                                                                                                        |
+| `pollInterval`      | duration              | `1s`    | how often the engine looks for new work, and polls a source that sets no [`poll`](#poll-schedule); project only                                              |
 | `retentionInterval` | duration              | `1h`    | how often a running engine runs retention; project only                                                                                                      |
 | `retry`             | see [Retry](#retry)   | below   | how a failed delivery is retried                                                                                                                             |
 
@@ -291,7 +291,49 @@ A channel with an MLLP source or destination must have the format `hl7v2`.
 
 ### Sources
 
-Exactly one of `file`, `http`, `mllp` or `module`.
+Exactly one of `file`, `http`, `mllp` or `module`. A `file` or `module` source may add `poll` beside
+it.
+
+#### Poll schedule
+
+`poll` says when the engine polls this source. Without it, a pass runs every
+[`pollInterval`](#settings), the engine-wide setting, with a deadline of 5 minutes.
+
+```yaml title="channels/nightly-claims/channel.yaml"
+source:
+  file: { dir: ./in }
+  poll: { cron: "0 2 * * *", timezone: America/Chicago, deadline: 10m }
+destinations:
+  - file: { dir: ./out }
+```
+
+| Form                                   | Passes                                                               |
+| -------------------------------------- | -------------------------------------------------------------------- |
+| a duration, such as `30s`              | one at start, then each this long after the last one ended           |
+| `onStart`                              | one when the engine starts, and no other                             |
+| `{ every: 30s }`                       | as a duration                                                        |
+| `{ cron: "0 2 * * *", timezone: UTC }` | at each time the cron expression names, in `timezone`; none at start |
+| `{ onStart: true }`                    | as `onStart`                                                         |
+
+A mapping names exactly one of `every`, `cron` and `onStart`, and may add `deadline` (a duration,
+`5m` by default). `cron` takes five fields (minute, hour, day of month, month, day of week), parsed
+by [croner](https://github.com/Hexagon/croner); `timezone` is an IANA name such as
+`America/Chicago`, `UTC` by default, and goes only with `cron`. Each key of the mapping
+takes an environment reference.
+
+- A pass never overlaps itself: a pass that comes due while the last one's `poll` call has not
+  returned is skipped, logged as `poll-overlap`, and the next is scheduled as usual.
+- A pass that runs past its deadline is cut off, logged as `poll-deadline`: the source takes nothing
+  more in that pass (each later message is refused with the code `POLL_DEADLINE`, before it is
+  stored, so the source keeps it), and the signal the engine handed its `poll` aborts. Other
+  channels go on meanwhile: each source's pass runs beside the engine loop, never in its way.
+- A pass missed while the engine was down, or while the last pass ran, is not made up: after a
+  restart, an interval or `onStart` source passes at once and a `cron` source at its next time.
+- `pathways start --once` runs one pass of every source, whatever its `poll`.
+- A paused or stopped channel's source is not polled; a resumed one passes when its next pass is
+  due.
+- With an [engine lease](#engine-lease), only the engine that holds it polls; a standby polls
+  nothing until it takes the lease over.
 
 #### File source
 
@@ -383,9 +425,35 @@ destinations:
 | -------- | ------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `dryRun` | boolean | `false` | transform and record each output, mark its delivery `dry-run`, and never send it: no connector is built, so no TLS file is read and no connection opened, and none of its secrets is read or resolved at start, a provider's (`secret:`) included, so a missing or expired one does not stop the start. Takes an environment reference. When `dryRun` is read from an environment variable, setting that variable to `false` makes the destination send for real, and the audit log does not record that change |
 
+A `file` or `module` destination may also set `timeout`, a duration (`30s` by default): how long one
+delivery may take in all before it is cut off and retried. See
+[Every delivery has a deadline](#every-delivery-has-a-deadline).
+
 `pathways start --dry-run` runs every destination dry. Turning dry run on marks every pending delivery
 of that destination `dry-run`, including those queued or waiting for a retry before. See
 [Upgrade Pathways](./upgrade-pathways.md#watch-a-destination-before-it-sends).
+
+#### Every delivery has a deadline
+
+Each attempt, connecting, sending and waiting for the receiver to confirm, runs under one deadline.
+At the deadline the engine stops waiting, aborts the `signal` it handed the destination, and counts
+the attempt as failed with the code `DELIVERY_TIMEOUT`: it is retried by the destination's
+[`retry`](#retry) settings, as any other failure.
+
+| Destination | Deadline                                                                |
+| ----------- | ----------------------------------------------------------------------- |
+| `http`      | its `timeout` and one second                                            |
+| `mllp`      | twice its `ackTimeout` (one to connect, one for the ACK) and one second |
+| `file`      | its `timeout`, `30s` by default                                         |
+| `module`    | its `timeout`, `30s` by default                                         |
+
+The second of grace lets an HTTP or MLLP destination's own timeout, with its own code, come first.
+A receiver may have the message when an attempt is cut off, and a destination that does not honour
+the `signal` may still finish its send after the cut, so a message cut off at its deadline may
+arrive twice. The retry is not flagged as a possible duplicate (no `resend` on the outgoing message,
+no HTTP `resendHeader`). Each output carries a stable id, its message's id and its `seq`, so a
+receiver should drop a copy by that pair. See
+[Delivery and errors](./delivery-and-errors.md#drop-a-duplicate-at-the-receiver).
 
 #### File destination
 

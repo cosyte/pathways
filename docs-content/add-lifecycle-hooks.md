@@ -25,8 +25,8 @@ codes and times, never a message's content, so a hook can send them anywhere.
 | `delivery-redirected` | an HTTP destination answered a redirect; it is held and retried after `retryInMs` |
 | `delivery-rejected`   | a destination rejected an output for good                                         |
 | `delivery-exhausted`  | a delivery ran out of retries at its `retry.limit` or `maxAge`, and is failed     |
-| `source-down`         | a source could not start listening; it is tried again after `retryInMs`           |
-| `source-up`           | a source that was down is listening again                                         |
+| `source-down`         | a source could not start listening, or said it lost its connection; `retryInMs`   |
+| `source-up`           | a source that was down is listening, or connected, again                          |
 | `audit`               | an audit log entry was stored (engine-wide hooks only)                            |
 
 [`LifecycleEvent`](./api/README.md#lifecycleevent) in the reference lists each event's fields. A

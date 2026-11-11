@@ -346,7 +346,8 @@ describe("the engine's liveness and readiness", () => {
     await engine.start();
     closers.push(() => engine.stop());
     const bound = livenessBoundMs(loaded);
-    expect(bound).toBe(LIVE_GRACE_MS + 3_600_000 + 5_000);
+    // The file destination's 30 seconds a delivery may take, past the transform's 5.
+    expect(bound).toBe(LIVE_GRACE_MS + 3_600_000 + 30_000);
     // Before the loop runs, the engine is alive whatever the clock says.
     clock.now = 10 * bound;
     expect(engine.live()).toBe(true);
@@ -372,7 +373,8 @@ describe("the engine's liveness and readiness", () => {
         "source:\n  file: { dir: in }\ndestinations:\n  - http: { url: https://lab.example.test/, timeout: 45s }\n  - mllp: { host: lab.example.test, port: 2576, ackTimeout: 30s, plaintext: true }\n",
       ),
     );
-    // The MLLP destination's two waits and its second of grace: 61 seconds, past the HTTP 45.
+    // The MLLP destination's two waits and its second of grace: 61 seconds, past the HTTP 45 and
+    // its second.
     expect(livenessBoundMs(loaded)).toBe(LIVE_GRACE_MS + 2_000 + 61_000);
   });
 
