@@ -109,6 +109,7 @@
     "@types/better-sqlite3": "9.6.0",
     "@types/node": "^24.0.0",
     "@types/pg": "8.23.1",
+    "fast-check": "4.10.2",
     "mysql2": "3.24.6",
     "pg": "8.23.1",
     "simple-git-hooks": "2.14.0",

@@ -194,13 +194,79 @@ export async function decode(format: WorkerFormat, body: Uint8Array): Promise<un
   }
 }
 
-/** `JSON.parse`, refusing a number whose value differs from what the body wrote. */
+/**
+ * `JSON.parse`, refusing a number whose value differs from what the body wrote.
+ *
+ * The body is parsed once without a reviver, then its text is read once for its number literals,
+ * each checked by {@link exactNumber}. A reviver would be called for every value and costs far more
+ * than the parse. Two cases go on to the parse with a reviver, which decides them as it always did:
+ * a body with a number that is not exact, since a later duplicate key may have replaced the value it
+ * wrote and the reviver sees only the values the parse kept; and a body nested deeper than
+ * {@link SCAN_DEPTH}, which a reviver's walk may not reach the bottom of (it then fails as
+ * malformed, as it did).
+ */
 function parseJson(text: string): unknown {
+  let value: unknown;
+  try {
+    value = JSON.parse(text) as unknown;
+  } catch {
+    throw new JsonBodyError("MALFORMED_JSON", "the body is not valid JSON");
+  }
+  return numbersExact(text) ? value : parseJsonRevived(text);
+}
+
+/** How deep a body may nest and still be read without a reviver. */
+const SCAN_DEPTH = 256;
+
+/**
+ * Whether every number literal in `text`, which `JSON.parse` has accepted, is exact, in one pass over
+ * the text. `false` also for a body nested deeper than {@link SCAN_DEPTH}.
+ */
+function numbersExact(text: string): boolean {
+  const length = text.length;
+  let depth = 0;
+  for (let at = 0; at < length; at++) {
+    const code = text.charCodeAt(at);
+    if (code === 0x22) {
+      // A string: skip to its closing quote, past every escaped character.
+      for (at++; at < length; at++) {
+        const inner = text.charCodeAt(at);
+        if (inner === 0x5c) at++;
+        else if (inner === 0x22) break;
+      }
+    } else if (code === 0x5b || code === 0x7b) {
+      if (++depth > SCAN_DEPTH) return false;
+    } else if (code === 0x5d || code === 0x7d) {
+      depth--;
+    } else if (code === 0x2d || (code >= 0x30 && code <= 0x39)) {
+      const start = at;
+      while (at + 1 < length && isNumberCharacter(text.charCodeAt(at + 1))) at++;
+      const literal = text.slice(start, at + 1);
+      if (!exactNumber(literal, Number(literal))) return false;
+    }
+  }
+  return true;
+}
+
+/** A character a JSON number literal can hold after its first. */
+function isNumberCharacter(code: number): boolean {
+  return (
+    (code >= 0x30 && code <= 0x39) ||
+    code === 0x2e ||
+    code === 0x65 ||
+    code === 0x45 ||
+    code === 0x2b ||
+    code === 0x2d
+  );
+}
+
+/** `JSON.parse` with a reviver that checks each number against the literal that wrote it. */
+function parseJsonRevived(text: string): unknown {
   const reviver = (_key: string, value: unknown, context?: { source?: string }): unknown => {
     if (
       typeof value === "number" &&
       context?.source !== undefined &&
-      canonicalNumber(context.source) !== canonicalNumber(String(value))
+      !exactNumber(context.source, value)
     ) {
       throw new JsonBodyError(
         "INEXACT_JSON_NUMBER",
@@ -218,18 +284,79 @@ function parseJson(text: string): unknown {
 }
 
 /**
- * A JSON number literal as sign, significant digits and exponent, so `1.50`, `15e-1` and `1.5`
- * compare equal and `12345678901234567890` does not equal the double it rounds to.
+ * Whether `value`, read from the JSON number literal `literal`, holds exactly what it wrote: whether
+ * the two are the same sign, significant digits and exponent, so `1.50`, `15e-1` and `1.5` are the
+ * same and `12345678901234567890` is not the double it rounds to. Most literals are written the way
+ * JavaScript writes their value, and those need no more than one comparison.
+ *
+ * @example
+ * ```ts
+ * exactNumber("1.50", 1.5); // true
+ * exactNumber("12345678901234567890", 12345678901234567890); // false
+ * ```
+ */
+export function exactNumber(literal: string, value: number): boolean {
+  const written = String(value);
+  return written === literal || canonicalNumber(literal) === canonicalNumber(written);
+}
+
+/**
+ * A JSON number literal as sign, significant digits and exponent (`-15e-1` for `-1.50`), read in one
+ * pass; a text that is not a JSON number literal (`Infinity`) is returned as it is.
  */
 function canonicalNumber(literal: string): string {
-  const match = /^(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(literal);
-  if (match === null) return literal;
-  const [, sign = "", whole = "", fraction = "", exponent = "0"] = match;
-  const digits = `${whole}${fraction}`.replace(/^0+/, "");
-  if (digits === "") return "0";
-  const significant = digits.replace(/0+$/, "");
-  const scale = Number(exponent) - fraction.length + (digits.length - significant.length);
+  const length = literal.length;
+  let at = 0;
+  const sign = literal.charCodeAt(0) === 0x2d ? "-" : "";
+  if (sign !== "") at = 1;
+  const wholeStart = at;
+  while (at < length && isDigit(literal.charCodeAt(at))) at++;
+  const wholeEnd = at;
+  if (wholeEnd === wholeStart) return literal;
+  let fractionStart = at;
+  let fractionEnd = at;
+  if (at < length && literal.charCodeAt(at) === 0x2e) {
+    fractionStart = ++at;
+    while (at < length && isDigit(literal.charCodeAt(at))) at++;
+    fractionEnd = at;
+    if (fractionEnd === fractionStart) return literal;
+  }
+  let exponent = "0";
+  if (at < length && (literal.charCodeAt(at) === 0x65 || literal.charCodeAt(at) === 0x45)) {
+    const exponentStart = ++at;
+    if (at < length && (literal.charCodeAt(at) === 0x2b || literal.charCodeAt(at) === 0x2d)) at++;
+    const digitsStart = at;
+    while (at < length && isDigit(literal.charCodeAt(at))) at++;
+    if (at === digitsStart) return literal;
+    exponent = literal.slice(exponentStart, at);
+  }
+  if (at !== length) return literal;
+  // The digits of the whole part and the fraction, read as one run: the first and last that are not
+  // zero bound the significant digits.
+  const wholeLength = wholeEnd - wholeStart;
+  const fractionLength = fractionEnd - fractionStart;
+  const total = wholeLength + fractionLength;
+  const digit = (k: number): number =>
+    literal.charCodeAt(k < wholeLength ? wholeStart + k : fractionStart + k - wholeLength);
+  let first = 0;
+  while (first < total && digit(first) === 0x30) first++;
+  if (first === total) return "0";
+  let last = total - 1;
+  while (digit(last) === 0x30) last--;
+  const run = (from: number, to: number): string =>
+    to <= wholeLength
+      ? literal.slice(wholeStart + from, wholeStart + to)
+      : from >= wholeLength
+        ? literal.slice(fractionStart + from - wholeLength, fractionStart + to - wholeLength)
+        : literal.slice(wholeStart + from, wholeEnd) +
+          literal.slice(fractionStart, fractionStart + to - wholeLength);
+  const significant = run(first, last + 1);
+  const scale = Number(exponent) - fractionLength + (total - first - significant.length);
   return `${sign}${significant}e${scale}`;
+}
+
+function isDigit(code: number): boolean {
+  return code >= 0x30 && code <= 0x39;
 }
 
 /** A plain JSON object or array, as `JSON.parse` builds them, as opposed to an instance of a class. */
