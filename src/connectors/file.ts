@@ -1,24 +1,11 @@
 import { randomBytes } from "node:crypto";
-import { constants } from "node:fs";
-import {
-  link,
-  lstat,
-  mkdir,
-  open,
-  readdir,
-  readFile,
-  realpath,
-  rename,
-  rm,
-  unlink,
-  writeFile,
-} from "node:fs/promises";
-import { dirname, join, posix, resolve, sep } from "node:path";
+import { posix } from "node:path";
 import { createContext, Script } from "node:vm";
 
 import { DEFAULT_READ_TRIES, type PathPattern } from "../config/schema.js";
 import { faultPoint } from "../fault-points.js";
-import { copiesBodies, markCopiesBodies, ownsBuffer, release } from "../storage/ownership.js";
+import { copiesBodies, markCopiesBodies, release } from "../storage/ownership.js";
+import { type FileSystem, type Location, LocalFolder } from "./file-system.js";
 import type {
   DestinationConnector,
   MessageSink,
@@ -203,16 +190,11 @@ function matcher(pattern: PathPattern): (rel: string) => boolean {
   return test;
 }
 
-/** A file's device and inode, as `lstat` and the open file's `stat` give them. */
-interface FileId {
-  readonly dev: bigint;
-  readonly ino: bigint;
-}
-
-/** A file id as one string, for a set. */
-function idKey(id: FileId): string {
-  return `${String(id.dev)}:${String(id.ino)}`;
-}
+/**
+ * A file's id, as the location's `stat` and the open file's give it: on a local folder, its device
+ * and inode.
+ */
+type FileId = string;
 
 /** The error a claim gives for a file no longer inside the source folder, or no longer the same. */
 function moved(): Error {
@@ -242,43 +224,6 @@ function unsteady(): Error {
   return Object.assign(new Error("this file system changes a file's id when it moves"), {
     code: "ERR_PATHWAYS_FILE_ID_UNSTEADY",
   });
-}
-
-/**
- * Whether a file keeps its device and inode when it moves from `folder` into a folder inside it, on
- * the file system that holds `folder`. Moves an empty file of its own to find out, and removes both.
- */
-async function steadyIds(folder: string): Promise<boolean> {
-  const name = `probe-${randomBytes(8).toString("hex")}`;
-  const file = join(folder, name);
-  const inner = join(folder, `${name}.d`);
-  try {
-    await writeFile(file, "", { flag: "wx" });
-    const before = await lstat(file, { bigint: true });
-    await mkdir(inner);
-    await rename(file, join(inner, "probe"));
-    const after = await lstat(join(inner, "probe"), { bigint: true });
-    return before.dev === after.dev && before.ino === after.ino;
-  } finally {
-    await rm(file, { force: true });
-    await rm(inner, { recursive: true, force: true });
-  }
-}
-
-/**
- * Opens `path` with `flags` and flushes it to disk. On Linux and macOS the path is a folder, opened
- * to read, and `fsync` writes its entries, so a file moved into or out of it stays moved after a
- * power cut, not only after the process stops. On Windows it is a claimed file, opened to write:
- * Node's `fsync` there is `FlushFileBuffers`, which needs a handle with write access and writes the
- * file's metadata, its name among them, as well as its data.
- */
-async function flush(path: string, flags: "r" | "r+"): Promise<void> {
-  const handle = await open(path, flags);
-  try {
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
 }
 
 /** Options for a {@link FileSource}. */
@@ -337,6 +282,11 @@ export interface FileSourceOptions {
   readonly readTries?: number;
   /** Told of each file set aside, or that would have been with an `errorDir`. */
   readonly onFileFault?: (fault: FileFault) => void;
+  /**
+   * Where `dir` and `errorDir` are, and the claim rule that holds there. Default: a folder on this
+   * machine, a {@link LocalFolder}.
+   */
+  readonly location?: Location;
 }
 
 /**
@@ -378,6 +328,7 @@ export interface FileSourceOptions {
  */
 export class FileSource implements SourceConnector {
   private readonly options: FileSourceOptions;
+  private readonly fs: Location;
   private readonly include: readonly ((rel: string) => boolean)[];
   private readonly exclude: readonly ((rel: string) => boolean)[];
   /** The size and change time of each file the last pass found, for `stable`. */
@@ -406,6 +357,14 @@ export class FileSource implements SourceConnector {
    */
   constructor(options: FileSourceOptions) {
     this.options = options;
+    this.fs = options.location ?? new LocalFolder();
+    // Each claim is a rename to a name of this source's own: only a rename that happens whole, to
+    // one claimant, stores each file once.
+    if (!this.fs.capabilities.atomicRename) {
+      throw Object.assign(new Error("this location cannot rename a file in one step"), {
+        code: "ERR_PATHWAYS_FILE_NO_ATOMIC_RENAME",
+      });
+    }
     this.include = (options.include ?? []).map(matcher);
     this.exclude = (options.exclude ?? []).map(matcher);
   }
@@ -415,11 +374,12 @@ export class FileSource implements SourceConnector {
    * `sink`. A file is deleted (or moved into `processed/`) only once `sink` has stored it.
    */
   async poll(sink: MessageSink): Promise<void> {
-    const claims = join(this.options.dir, CLAIMED_DIR, this.options.channel);
-    await mkdir(claims, { recursive: true });
-    const unfinished = (await readdir(claims, { withFileTypes: true }))
-      .filter((entry) => entry.isFile())
-      .map((entry) => ({ name: entry.name, path: join(claims, entry.name) }));
+    const { fs } = this;
+    const claims = fs.join(this.options.dir, CLAIMED_DIR, this.options.channel);
+    await fs.mkdir(claims);
+    const unfinished = (await fs.list(claims))
+      .filter((entry) => entry.kind === "file")
+      .map((entry) => ({ name: entry.name, path: fs.join(claims, entry.name) }));
     // The refused files this pass still finds, claimed or not; the rest are forgotten.
     const refused = new Set<string>();
     // An earlier run may have stored these before it stopped: the store looks each key up.
@@ -439,7 +399,7 @@ export class FileSource implements SourceConnector {
     if (this.refused.size === 0) return false;
     let key: string;
     try {
-      key = idKey(await lstat(path, { bigint: true }));
+      key = (await this.fs.stat(path)).id;
     } catch {
       for (const kept of this.refused) refused.add(kept);
       return true;
@@ -462,27 +422,28 @@ export class FileSource implements SourceConnector {
    * `refused`, so a file a later swap leaves in the source folder is never taken.
    */
   private async relocate(from: string, to: string, id: FileId): Promise<void> {
-    await rename(from, to);
-    const now = await lstat(to, { bigint: true });
-    if (now.dev === id.dev && now.ino === id.ino) return;
-    this.refused.add(idKey(now));
+    const { fs } = this;
+    await fs.rename(from, to);
+    const now = (await fs.stat(to)).id;
+    if (now === id) return;
+    this.refused.add(now);
     const name = `refused-${randomBytes(8).toString("hex")}`;
-    const holding = join(this.options.dir, CLAIMED_DIR, name);
+    const holding = fs.join(this.options.dir, CLAIMED_DIR, name);
     try {
-      await rename(to, holding);
+      await fs.rename(to, holding);
     } catch {
       // Left at to, where its noted id keeps this run from storing it. A later run that finds it in
       // the claim folder stores it.
       throw held();
     }
     try {
-      await link(holding, from);
+      await fs.restore(holding, from);
     } catch {
       throw held();
     }
     faultPoint("mid-move-back");
     try {
-      await unlink(holding);
+      await fs.remove(holding);
     } catch {
       // Back at from, and still under its held name, which no pass reads.
     }
@@ -556,24 +517,6 @@ export class FileSource implements SourceConnector {
   }
 
   /**
-   * Whether `path` is in a folder that is `root` or under it once every link on the way is
-   * resolved, and is still the file `id` names. A folder on a file's path swapped for
-   * a link since the pass found it would otherwise lead an open or a move outside the source folder:
-   * `O_NOFOLLOW` refuses a link only in a path's last part. Each move is checked again after it is
-   * made, by {@link FileSource.relocate}, for a swap between this check and the move.
-   */
-  private async inside(path: string, root: string, id: FileId): Promise<boolean> {
-    try {
-      const folder = await realpath(dirname(path));
-      if (folder !== root && !folder.startsWith(join(root, sep))) return false;
-      const now = await lstat(path, { bigint: true });
-      return now.dev === id.dev && now.ino === id.ino;
-    } catch {
-      return false;
-    }
-  }
-
-  /**
    * The files the pass finds: regular files whose path matches, in `dir` and, with `recursive`, its
    * subfolders, never `.claimed/`, `processed/` or `errorDir`. With `doneFile`, the markers found
    * are returned apart. Creates `dir` if missing.
@@ -587,22 +530,22 @@ export class FileSource implements SourceConnector {
       errorDir,
       onReadError,
     } = this.options;
-    await mkdir(dir, { recursive: true });
+    const { fs } = this;
+    await fs.mkdir(dir);
     // Both with every link resolved, so an errorDir reached through a link into dir is passed over.
-    const root = await realpath(dir);
-    const errors =
-      errorDir === undefined ? undefined : await realpath(errorDir).catch(() => resolve(errorDir));
+    const root = await fs.root(dir);
+    const errors = errorDir === undefined ? undefined : await fs.canonical(errorDir);
     const candidates: Found[] = [];
     const markers = new Set<string>();
     const walk = async (folder: string, under: string): Promise<void> => {
-      for (const entry of await readdir(folder, { withFileTypes: true })) {
+      for (const entry of await fs.list(folder)) {
         const rel = `${under}${entry.name}`;
-        const path = join(folder, entry.name);
+        const path = fs.join(folder, entry.name);
         // The claim folder is passed over even when dot files are read.
         if (rel === CLAIMED_DIR || (ignoreDot && entry.name.startsWith("."))) continue;
-        if (entry.isDirectory()) {
+        if (entry.kind === "folder") {
           // A folder the walk enters is a real one, never a link, so its real path is root's plus rel.
-          if (!recursive || rel === PROCESSED_DIR || join(root, ...rel.split("/")) === errors) {
+          if (!recursive || rel === PROCESSED_DIR || fs.join(root, ...rel.split("/")) === errors) {
             continue;
           }
           // A subfolder that cannot be read is said, and the rest of the pass goes on.
@@ -613,7 +556,7 @@ export class FileSource implements SourceConnector {
           } catch (error) {
             onReadError?.(error);
           }
-        } else if (!entry.isFile()) {
+        } else if (entry.kind !== "file") {
           // A symbolic link, to a file or a folder, a pipe or a device: never read.
         } else if (doneFile !== undefined && rel.endsWith(doneFile)) {
           markers.add(rel);
@@ -634,14 +577,11 @@ export class FileSource implements SourceConnector {
     const tries = new Map<string, number>();
     const ready: Ready[] = [];
     for (const file of found) {
-      // lstat, not stat: a file swapped for a link meanwhile is refused when it is opened below.
-      const stats = await lstat(file.path, { bigint: true });
-      const size = Number(stats.size);
-      const mtimeMs = Number(stats.mtimeNs) / 1e6;
-      const id = { dev: stats.dev, ino: stats.ino };
+      // Never through a link: a file swapped for a link meanwhile is refused when it is opened below.
+      const { size, mtimeMs, id } = await this.fs.stat(file.path);
       // A file a move refused, left here by a later swap: said when it was refused, never taken.
-      if (this.refused.has(idKey(id))) {
-        refused.add(idKey(id));
+      if (this.refused.has(id)) {
+        refused.add(id);
         continue;
       }
       const state = `${String(size)}:${String(mtimeMs)}`;
@@ -663,18 +603,15 @@ export class FileSource implements SourceConnector {
   }
 
   /**
-   * Moves each ready file into the channel's claim folder, then flushes the moves to disk, once a
-   * pass that claims anything: on Linux and macOS the claim folder, `.claimed/`, the source folder
-   * and each subfolder a file left; on Windows each claimed file, under its claimed name.
+   * Moves each ready file into the channel's claim folder, then makes the moves durable, once a
+   * pass that claims anything, through the location's claim rule: on a local folder, on Linux and
+   * macOS it flushes the claim folder, `.claimed/`, the source folder and each subfolder a file left;
+   * on Windows each claimed file, under its claimed name.
    */
   private async claim(claims: string, refused: Set<string>): Promise<Claimed[]> {
     const { dir, now = Date.now, onReadError, doneFile } = this.options;
     const { maxSize = Infinity, maxPerPoll = Infinity } = this.options;
-    // Read on each pass, not at load, so the Windows path can be driven from any platform's tests.
-    const windows = process.platform === "win32";
-    // Never through a symbolic link: O_NOFOLLOW refuses one put in a file's place since it was found.
-    // Windows has no such flag, and Node gives it as undefined there.
-    const flags = windows ? constants.O_RDWR : constants.O_RDONLY | constants.O_NOFOLLOW;
+    const { fs } = this;
     const at = String(now()).padStart(15, "0");
     const taken: Claimed[] = [];
     const ready = await this.ready(now(), refused);
@@ -683,7 +620,7 @@ export class FileSource implements SourceConnector {
     // it moves (FAT and exFAT can), every claim would be refused, so none is tried. Asked once.
     if (this.steady === undefined) {
       try {
-        this.steady = await steadyIds(join(dir, CLAIMED_DIR));
+        this.steady = await fs.keepsIds(fs.join(dir, CLAIMED_DIR));
       } catch (error) {
         onReadError?.(error);
         return taken;
@@ -694,7 +631,7 @@ export class FileSource implements SourceConnector {
       return taken;
     }
     // After the walk, which made dir: every open and move is held to this folder.
-    const root = await realpath(dir);
+    const root = await fs.root(dir);
     for (const file of ready) {
       if (taken.length >= maxPerPoll) break;
       if (file.size > maxSize) {
@@ -706,12 +643,12 @@ export class FileSource implements SourceConnector {
         `${at}.${place}.${randomBytes(4).toString("hex")}-`,
         encodePath(file.rel),
       );
-      const path = join(claims, name);
+      const path = fs.join(claims, name);
       let handle;
       try {
         // Opened before the move, so a file that cannot be read stays where it is. On Windows it is
         // opened to write too, as flushing it below needs, so a file that cannot be flushed stays.
-        handle = await open(file.path, flags);
+        handle = await fs.open(file.path);
       } catch (error) {
         onReadError?.(error);
         await this.unreadable(file, root);
@@ -721,13 +658,13 @@ export class FileSource implements SourceConnector {
       let grown: boolean;
       let id: FileId;
       try {
-        const stats = await handle.stat({ bigint: true });
-        id = { dev: stats.dev, ino: stats.ino };
+        const stats = await handle.stat();
+        id = stats.id;
         // The open file must be the one at its path, under dir with no link on the way: a folder
         // swapped for a link would otherwise lead the open and the move outside dir.
-        if (!(await this.inside(file.path, root, id))) throw moved();
+        if (!(await fs.inside(file.path, root, id))) throw moved();
         // The open file's own size: a file that grew since it was found is held to maxSize too.
-        grown = Number(stats.size) > maxSize;
+        grown = stats.size > maxSize;
         if (!grown) {
           faultPoint("before-claim-move");
           await this.relocate(file.path, path, id);
@@ -744,33 +681,29 @@ export class FileSource implements SourceConnector {
       }
       taken.push({ name, path, rel: file.rel });
     }
-    if (windows) {
-      for (const file of taken) await flush(file.path, "r+");
-    } else if (taken.length > 0) {
-      await flush(claims, "r");
-      await flush(join(dir, CLAIMED_DIR), "r");
-      const left = new Set<string>();
-      for (const file of taken) left.add(dirname(join(dir, ...file.rel.split("/"))));
-      for (const folder of left) await flush(folder, "r");
-    }
+    const folders = new Set([claims, fs.join(dir, CLAIMED_DIR)]);
+    for (const file of taken) folders.add(fs.dirname(fs.join(dir, ...file.rel.split("/"))));
+    await fs.durable(
+      taken.map((file) => file.path),
+      [...folders],
+    );
     // Each marker goes once its file's claim is on disk, so a power cut cannot leave a file unmarked.
     // Never through a folder swapped for a link since: a marker outside dir is not ours to delete.
     // So it is moved into .claimed/ first, where the move is checked, and deleted only from there.
     if (doneFile !== undefined) {
       for (const file of taken) {
-        const marker = join(dir, `${file.rel}${doneFile}`);
-        const found = await lstat(marker, { bigint: true }).catch(() => undefined);
+        const marker = fs.join(dir, `${file.rel}${doneFile}`);
+        const found = await fs.stat(marker).catch(() => undefined);
         if (found === undefined) continue;
-        const id = { dev: found.dev, ino: found.ino };
-        if (!(await this.inside(marker, root, id))) continue;
-        const doomed = join(dir, CLAIMED_DIR, `marker-${randomBytes(8).toString("hex")}`);
+        if (!(await fs.inside(marker, root, found.id))) continue;
+        const doomed = fs.join(dir, CLAIMED_DIR, `marker-${randomBytes(8).toString("hex")}`);
         try {
-          await this.relocate(marker, doomed, id);
+          await this.relocate(marker, doomed, found.id);
         } catch (error) {
           onReadError?.(error);
           continue;
         }
-        await rm(doomed);
+        await fs.remove(doomed);
       }
     }
     return taken;
@@ -802,15 +735,16 @@ export class FileSource implements SourceConnector {
       onFileFault?.({ reason, moved: false });
       return;
     }
-    const target = join(errorDir, ...file.rel.split("/"));
+    const { fs } = this;
+    const target = fs.join(errorDir, ...file.rel.split("/"));
     try {
-      await mkdir(dirname(target), { recursive: true });
-      const taken = await lstat(target).then(
+      await fs.mkdir(fs.dirname(target));
+      const taken = await fs.stat(target).then(
         () => true,
         () => false,
       );
       if (taken) throw Object.assign(new Error("a file is already there"), { code: "EEXIST" });
-      if (!(await this.inside(file.path, root, id))) throw moved();
+      if (!(await fs.inside(file.path, root, id))) throw moved();
       await this.relocate(file.path, target, id);
     } catch (error) {
       onFileFault?.({ reason, moved: false, error });
@@ -826,12 +760,10 @@ export class FileSource implements SourceConnector {
    */
   private async store(file: SourceFile, sink: MessageSink, resumed: boolean): Promise<void> {
     const { dir, keepProcessed = false, onReadError } = this.options;
+    const { fs } = this;
     let body: Uint8Array;
     try {
-      // A plain Uint8Array over a buffer of its own, as before, without copying a file Node already
-      // read into one (a small file comes back as a slice of Node's shared pool, and is copied).
-      const read = await readFile(file.path);
-      body = ownsBuffer(read) ? new Uint8Array(read.buffer) : new Uint8Array(read);
+      body = await fs.read(file.path);
     } catch (error) {
       onReadError?.(error);
       return;
@@ -852,12 +784,12 @@ export class FileSource implements SourceConnector {
     // A sink that copied the body keeps none of it, and this source is done with it.
     if (copiesBodies(sink)) release(body);
     if (!keepProcessed) {
-      await unlink(file.path);
+      await fs.remove(file.path);
       return;
     }
-    const folder = join(dir, PROCESSED_DIR, ...parts.slice(0, -1));
-    await mkdir(folder, { recursive: true });
-    await rename(file.path, join(folder, fitted(`${String(id)}-`, String(parts.at(-1)))));
+    const folder = fs.join(dir, PROCESSED_DIR, ...parts.slice(0, -1));
+    await fs.mkdir(folder);
+    await fs.rename(file.path, fs.join(folder, fitted(`${String(id)}-`, String(parts.at(-1)))));
   }
 }
 
@@ -866,6 +798,8 @@ export interface FileDestinationOptions {
   readonly dir: string;
   /** The extension of the files written, without the dot. */
   readonly extension: string;
+  /** Where `dir` is. Default: a folder on this machine, a {@link LocalFolder}. */
+  readonly location?: FileSystem;
 }
 
 /**
@@ -891,11 +825,9 @@ export class FileDestination implements DestinationConnector {
 
   /** Writes one output as a file. */
   async deliver(message: OutgoingMessage): Promise<void> {
-    const { dir, extension } = this.options;
-    await mkdir(dir, { recursive: true });
+    const { dir, extension, location: fs = new LocalFolder() } = this.options;
+    await fs.mkdir(dir);
     const name = `${message.messageId}-${message.seq + 1}.${extension}`;
-    const temporary = join(dir, `.${name}.partial`);
-    await writeFile(temporary, message.body);
-    await rename(temporary, join(dir, name));
+    await fs.writeTemp(fs.join(dir, name), message.body);
   }
 }
