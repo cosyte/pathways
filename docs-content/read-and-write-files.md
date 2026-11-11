@@ -78,6 +78,23 @@ claimed. Give each channel a folder of its own when every file must reach one ch
 Write files into the folder by writing them elsewhere on the same disk and moving them in, or rely on
 `minAge` being longer than a write takes.
 
+### How a file is claimed, by kind of location
+
+The source's claim, order and recovery steps run the same way on every kind of location; what
+differs is how a file is claimed there, its claim rule. Each rule holds to one test: two engines
+polling one location at once store each file once.
+
+| Location                 | Claim rule                                                                                                                       | Status          |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------- | --------------- |
+| A folder on this machine | Rename to a unique claim name, checked after the move by the file's id; the moves are flushed to disk before anything is stored. | Available       |
+| SFTP                     | Rename to a unique claim name. A rename that finds the file gone means another engine claimed it first.                          | Planned         |
+| FTPS and WebDAV          | Decided with their support.                                                                                                      | Planned         |
+| S3 and Azure Blob        | An object store cannot rename an object, so the claim is not a rename. Decided with their support.                               | Planned         |
+| SMB                      | Not decided yet.                                                                                                                 | Not planned yet |
+
+A location the source reads must rename a file in one step, so that of two engines renaming one file
+only one succeeds.
+
 ### Put the folder on a file system that keeps file ids
 
 The source checks each move by the file's id, its device and inode number. FAT and exFAT, as on many
