@@ -182,13 +182,91 @@ export function removeCertificates(certificates: Certificates | undefined): void
   if (certificates !== undefined) rmSync(certificates.dir, { recursive: true, force: true });
 }
 
-/** A port nothing listens on right now, on 127.0.0.1. */
-export async function freePort(): Promise<number> {
-  const server = createNetServer();
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const { port } = server.address() as AddressInfo;
-  await new Promise<void>((resolve) => server.close(() => resolve()));
-  return port;
+/**
+ * A port a test may name where nothing is to listen: a connection to it is refused. A listener a test
+ * starts binds port 0, and a port the system hands out for port 0 is never below 1024, so no test in
+ * any worker can take this one between the test naming it and connecting to it, as it could a port
+ * found free and then closed.
+ */
+export const CLOSED_PORT = 1;
+
+/**
+ * `count` ports nothing listened on a moment ago, on 127.0.0.1, all different, for a configuration
+ * that must name its ports before anything binds them. Each is free only until something binds it:
+ * a listener in another test file's worker can take it first, so take them through
+ * {@link onPickedPorts}, which picks again when that happens. A listener a test starts itself binds
+ * port 0 and reads its port back instead.
+ */
+export async function pickPorts(count: number): Promise<number[]> {
+  const servers = Array.from({ length: count }, () => createNetServer());
+  try {
+    // Held together while they are read, so the system never hands out the same port twice.
+    for (const server of servers) {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    }
+    return servers.map((server) => (server.address() as AddressInfo).port);
+  } finally {
+    await Promise.all(
+      servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve()))),
+    );
+  }
+}
+
+/**
+ * Thrown by an attempt of {@link onPickedPorts} when a port picked for it was taken before the
+ * attempt bound it.
+ */
+export class PortTaken extends Error {
+  constructor() {
+    super("a port picked for the test was taken before the test bound it");
+    this.name = "PortTaken";
+  }
+}
+
+/** How {@link onPickedPorts} picks. */
+export interface PickOptions {
+  /** Picks `count` ports: {@link pickPorts} unless a test says otherwise. */
+  readonly pick?: (count: number) => Promise<readonly number[]>;
+  /** How many attempts it makes before it lets {@link PortTaken} through. Default 5. */
+  readonly tries?: number;
+}
+
+/**
+ * Runs `attempt` on `count` ports picked for it, and runs it again on new ones each time it throws
+ * {@link PortTaken}: a listener in another test file's worker took a port between its picking and
+ * the attempt binding it. Any other error ends it.
+ */
+export async function onPickedPorts<T>(
+  count: number,
+  attempt: (ports: readonly number[]) => Promise<T>,
+  options: PickOptions = {},
+): Promise<T> {
+  const { pick = pickPorts, tries = 5 } = options;
+  for (let tried = 1; ; tried += 1) {
+    const ports = await pick(count);
+    try {
+      return await attempt(ports);
+    } catch (error) {
+      if (!(error instanceof PortTaken) || tried >= tries) throw error;
+    }
+  }
+}
+
+/** What `pathways start` writes when its health endpoint or probe listener cannot have its port. */
+export const LISTENER_TAKEN = "could not listen (EADDRINUSE)";
+
+/**
+ * Runs `body`, the checks on a run of `pathways start` that listens on picked ports. When `body`
+ * throws, `said` stops the run and returns what it wrote to stderr: a run that said a listener could
+ * not have its port throws {@link PortTaken} instead, for {@link onPickedPorts} to pick again.
+ */
+export async function orTaken<T>(body: () => Promise<T>, said: () => Promise<string>): Promise<T> {
+  try {
+    return await body();
+  } catch (error) {
+    if ((await said()).includes(LISTENER_TAKEN)) throw new PortTaken();
+    throw error;
+  }
 }
 
 /** An answer to {@link send}. */
@@ -314,4 +392,21 @@ export function status(code: number): (request: IncomingMessage, response: Serve
     response.writeHead(code, { "Content-Type": "text/plain" });
     response.end("synthetic answer");
   };
+}
+
+/** What {@link sourceListening} needs of an engine. */
+export interface EngineOnPort {
+  health(): Promise<{ readonly channels: Readonly<Record<string, { readonly source: string }>> }>;
+  stop(): Promise<void>;
+}
+
+/**
+ * Returns when `channel`'s source listens on the port picked for it. When a listener in another
+ * test file's worker took that port first, the source is down and a request to the port would reach
+ * that listener instead: it stops the engine and throws {@link PortTaken}.
+ */
+export async function sourceListening(engine: EngineOnPort, channel: string): Promise<void> {
+  if ((await engine.health()).channels[channel]?.source !== "down") return;
+  await engine.stop();
+  throw new PortTaken();
 }

@@ -2,7 +2,7 @@
 // before any source opens and freed at a clean stop, a second engine refused with its holder named,
 // the lease lost and the engine stopped, a standby on a store with leases, and the lease commands.
 // The same on a real process and every database is in test/lease-processes.test.ts.
-import { createServer } from "node:net";
+import { createServer, type AddressInfo } from "node:net";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -21,7 +21,7 @@ import {
   makeProject,
   type LogEvent,
 } from "./helpers.js";
-import { freePort } from "./net-helpers.js";
+import { onPickedPorts, orTaken } from "./net-helpers.js";
 
 afterEach(cleanUp);
 
@@ -363,67 +363,94 @@ export default () => ({
   }
 
   it("runs a standby that opens no source, answers 503 standby, and takes over when the holder stops", async () => {
-    const [port, holderPort] = [await freePort(), await freePort()];
     const store = `storage: { module: ${LEASED_STORE_FILE} }\nlease:\n  ttl: 1s\ndefaults:\n  pollInterval: 20ms\n`;
-    const holderRoot = await project(store);
-    const standbyRoot = await project(
-      `${store}health: { port: ${String(port)}, plaintext: true, auth: none }\n`,
-    );
-    const health = async (): Promise<{ status: number; body: { status: string } }> => {
-      const response = await fetch(`http://127.0.0.1:${String(port)}/`);
-      return { status: response.status, body: (await response.json()) as { status: string } };
-    };
-    const stopHolder = new AbortController();
-    const stopStandby = new AbortController();
-    const holder = runCli(["start", "-C", holderRoot], { signal: stopHolder.signal });
-    // The standby starts once the holder has the lease: a standby that found it free would take it,
-    // and the holder, started second, would be refused.
-    await until(() => holder.events.some((e) => e.event === "lease-acquired"), "the holder").catch(
-      (error: unknown) => {
+    const stopStandby = await onPickedPorts(1, async ([port = 0]) => {
+      const holderRoot = await project(store);
+      const standbyRoot = await project(
+        `${store}health: { port: ${String(port)}, plaintext: true, auth: none }\n`,
+      );
+      const health = async (): Promise<{ status: number; body: { status: string } }> => {
+        const response = await fetch(`http://127.0.0.1:${String(port)}/`);
+        return { status: response.status, body: (await response.json()) as { status: string } };
+      };
+      const stopHolder = new AbortController();
+      const stopStandby = new AbortController();
+      const holder = runCli(["start", "-C", holderRoot], { signal: stopHolder.signal });
+      // The standby starts once the holder has the lease: a standby that found it free would take it,
+      // and the holder, started second, would be refused.
+      await until(
+        () => holder.events.some((e) => e.event === "lease-acquired"),
+        "the holder",
+      ).catch((error: unknown) => {
         stopHolder.abort();
         throw error;
-      },
-    );
-    const standby = runCli(["start", "--standby", "-C", standbyRoot], {
-      signal: stopStandby.signal,
-    });
-    try {
-      await until(() => standby.events.some((e) => e.event === "standby-waiting"), "the standby");
-      expect(await health()).toMatchObject({
-        status: 503,
-        body: { status: "standby", storage: "ok", role: "standby", leaseEpoch: null, channels: {} },
       });
-      // A standby reads no folder: its message waits in its inbox.
-      expect(await readdir(join(standbyRoot, "data/inbox"))).toContain("a01.hl7");
+      const standby = runCli(["start", "--standby", "-C", standbyRoot], {
+        signal: stopStandby.signal,
+      });
+      await orTaken(
+        async () => {
+          try {
+            await until(
+              () => standby.events.some((e) => e.event === "standby-waiting"),
+              "the standby",
+            );
+            expect(await health()).toMatchObject({
+              status: 503,
+              body: {
+                status: "standby",
+                storage: "ok",
+                role: "standby",
+                leaseEpoch: null,
+                channels: {},
+              },
+            });
+            // A standby reads no folder: its message waits in its inbox.
+            expect(await readdir(join(standbyRoot, "data/inbox"))).toContain("a01.hl7");
 
-      // A second standby that cannot listen for health stops, saying why.
-      const blocked = await project(
-        `${store}health: { port: ${String(holderPort)}, plaintext: true, auth: none }\n`,
-      );
-      const server = createServer();
-      await new Promise<void>((resolve) => server.listen(holderPort, "127.0.0.1", resolve));
-      try {
-        expect(await cli(["start", "--standby", "-C", blocked])).toMatchObject({
-          code: EXIT.failed,
-          err: "pathways: the health endpoint could not listen (EADDRINUSE).\n",
-        });
-      } finally {
-        server.close();
-      }
+            // A second standby that cannot listen for health stops, saying why.
+            const server = createServer();
+            await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+            const { port: holderPort } = server.address() as AddressInfo;
+            const blocked = await project(
+              `${store}health: { port: ${String(holderPort)}, plaintext: true, auth: none }\n`,
+            );
+            try {
+              expect(await cli(["start", "--standby", "-C", blocked])).toMatchObject({
+                code: EXIT.failed,
+                err: "pathways: the health endpoint could not listen (EADDRINUSE).\n",
+              });
+            } finally {
+              server.close();
+            }
 
-      stopHolder.abort();
-      expect((await holder.done).code).toBe(EXIT.ok);
-      await until(() => standby.events.some((e) => e.event === "lease-acquired"), "the takeover");
-      await until(
-        async () => (await readdir(join(standbyRoot, "data/out")).catch(() => [])).length === 1,
-        "the standby's delivery",
+            stopHolder.abort();
+            expect((await holder.done).code).toBe(EXIT.ok);
+            await until(
+              () => standby.events.some((e) => e.event === "lease-acquired"),
+              "the takeover",
+            );
+            await until(
+              async () =>
+                (await readdir(join(standbyRoot, "data/out")).catch(() => [])).length === 1,
+              "the standby's delivery",
+            );
+            expect((await health()).status).toBe(200);
+          } finally {
+            stopHolder.abort();
+            stopStandby.abort();
+          }
+          expect((await standby.done).code).toBe(EXIT.ok);
+        },
+        async () => {
+          stopHolder.abort();
+          stopStandby.abort();
+          await holder.done;
+          return (await standby.done).err;
+        },
       );
-      expect((await health()).status).toBe(200);
-    } finally {
-      stopHolder.abort();
-      stopStandby.abort();
-    }
-    expect((await standby.done).code).toBe(EXIT.ok);
+      return stopStandby;
+    });
 
     // A standby stopped before it takes the lease ends cleanly.
     const third = await project(store);

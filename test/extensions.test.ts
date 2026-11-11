@@ -38,7 +38,7 @@ import {
 } from "./helpers.js";
 import { controlIdOf, exchange, msaOf } from "./mllp-helpers.js";
 import { opened } from "./memory-store.js";
-import { freePort } from "./net-helpers.js";
+import { CLOSED_PORT, onPickedPorts, sourceListening } from "./net-helpers.js";
 
 const engines: Engine[] = [];
 const stores: MessageStore[] = [];
@@ -73,6 +73,20 @@ async function startEngine(
   engines.push(engine);
   await engine.start();
   return { root, engine, store, events, lines, clock };
+}
+
+/**
+ * {@link startEngine} with the channel's source on a port picked for it, picked again when a listener
+ * in another test file's worker takes it first.
+ */
+async function startOnPort(
+  files: (port: number) => Record<string, string>,
+): Promise<Running & { readonly port: number }> {
+  return onPickedPorts(1, async ([port = 0]) => {
+    const running = await startEngine(files(port));
+    await sourceListening(running.engine, "adt");
+    return { ...running, port };
+  });
 }
 
 /** Starts an engine on `files` and returns why it would not start. */
@@ -457,12 +471,11 @@ ${extra}`;
 
   it("answers each stored message with the ACK the module builds", async () => {
     const bench = freshBench();
-    const port = await freePort();
-    const { engine, store } = await startEngine({
+    const { port, engine, store } = await startOnPort((port) => ({
       "channels/adt/channel.yaml": channel(port),
       "channels/adt/ack.ts": CUSTOM_ACK,
       "channels/adt/transform.ts": LAB_TRANSFORM,
-    });
+    }));
     const { replies } = await exchange(port, [ADT_A01, ADT_A08], { replies: 2 });
     expect(replies.map(msaOf)).toEqual([
       ["AA", controlIdOf(ADT_A01)],
@@ -479,12 +492,11 @@ ${extra}`;
   });
 
   it("sends the default ACK when the builder runs past the channel's time limit", async () => {
-    const port = await freePort();
-    const { events } = await startEngine({
+    const { port, events } = await startOnPort((port) => ({
       "channels/adt/channel.yaml": channel(port, "timeout: 50ms"),
       "channels/adt/ack.ts": HANGING_ACK,
       "channels/adt/transform.ts": LAB_TRANSFORM,
-    });
+    }));
     const { replies } = await exchange(port, [ADT_A01], { replies: 1 });
     expect(replies.map(msaOf)).toEqual([["AA", controlIdOf(ADT_A01)]]);
     expect(replies[0]).not.toContain("CUSTOM");
@@ -494,9 +506,9 @@ ${extra}`;
   });
 
   it("refuses to start when the ACK builder module has no default export", async () => {
-    const port = await freePort();
+    // Refused before the source listens: nothing binds the port.
     const error = await refusal({
-      "channels/adt/channel.yaml": channel(port),
+      "channels/adt/channel.yaml": channel(CLOSED_PORT),
       "channels/adt/ack.ts": "export const ack = 1;\n",
       "channels/adt/transform.ts": LAB_TRANSFORM,
     });
