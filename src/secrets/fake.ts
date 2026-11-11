@@ -8,7 +8,7 @@ import {
 
 /**
  * One version of a secret a {@link fakeSecretProvider} holds: its value, and optionally its version's
- * name (by default its place in the list, from `"1"`) and when it expires.
+ * name (by default its place in the list, from `"1"`), when it expires and the identity that read it.
  *
  * @example
  * ```ts
@@ -19,6 +19,8 @@ export interface FakeSecret {
   readonly value: string;
   readonly version?: string | undefined;
   readonly expiresAt?: Date | undefined;
+  /** The principal it answers as having read it, as {@link ResolvedSecret.identity}. */
+  readonly identity?: string | undefined;
 }
 
 /** What a fake holds for one name: a value, a version, or every version with the current one last. */
@@ -95,6 +97,7 @@ export function fakeSecretProvider(
       value: pickField(found.value, ref.field, ref.name),
       version: found.version,
       ...(found.expiresAt === undefined ? {} : { expiresAt: found.expiresAt }),
+      ...(found.identity === undefined ? {} : { identity: found.identity }),
     };
   };
   for (const [name, entry] of Object.entries(secrets)) set(name, entry);

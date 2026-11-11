@@ -1432,7 +1432,7 @@ context.logger.warn({ event: "inbox-read-failed", code: "EACCES" });
 ### FakeSecret
 
 One version of a secret a [fakeSecretProvider](#fakesecretprovider-1) holds: its value, and optionally its version's
-name (by default its place in the list, from `"1"`) and when it expires.
+name (by default its place in the list, from `"1"`), when it expires and the identity that read it.
 
 #### Example
 
@@ -1445,6 +1445,12 @@ const secret: FakeSecret = { value: "synthetic-token", version: "v2" };
 ##### expiresAt?
 
 > `readonly` `optional` **expiresAt?**: `Date`
+
+##### identity?
+
+> `readonly` `optional` **identity?**: `string`
+
+The principal it answers as having read it, as [ResolvedSecret.identity](#identity-1).
 
 ##### value
 
@@ -3486,6 +3492,14 @@ const secret: ResolvedSecret = { value: "synthetic-token", version: "3", expires
 > `readonly` `optional` **expiresAt?**: `Date`
 
 When the value stops being good, for a lease or a short-lived credential.
+
+##### identity?
+
+> `readonly` `optional` **identity?**: `string`
+
+Who read it, when the provider can tell: the cloud principal its call ran as, such as a role's
+ARN, a managed identity's id or a service account's email. Never secret. `pathways secrets
+check` prints it, when it is printable ASCII with no space, 1 to 256 characters.
 
 ##### value
 
