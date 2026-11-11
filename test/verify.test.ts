@@ -289,6 +289,30 @@ describe("pathways verify, on stored messages", () => {
     }
   });
 
+  it("runs each stored message with the context the engine gave it: its id and the configuration", async () => {
+    // Stamps the configured facility into MSH-6 and the message's id into MSH-10.
+    const contextual = `
+interface Msg { setField(path: string, value: string): void }
+export default (msg: Msg, ctx: { messageId: number; config: { facility: string } }): Msg => {
+  msg.setField("MSH.6", ctx.config.facility);
+  msg.setField("MSH.10", \`SYNTH\${ctx.messageId}\`);
+  return msg;
+};
+`;
+    const root = await makeProject({
+      "test.key": `${generateKey()}\n`,
+      "pathways.yaml": `${KEYS}config:\n  facility: SYNTHLAB\n`,
+      "channels/adt/channel.yaml": CHANNEL,
+      "channels/adt/transform.ts": contextual,
+    });
+    await dropFile(join(root, "data/inbox/1.hl7"), ADT_A01);
+    await dropFile(join(root, "data/inbox/2.hl7"), ADT_A08);
+    expect((await runCli(["start", "--once", "-C", root])).code).toBe(EXIT.ok);
+    const result = await runCli(["verify", "-C", root]);
+    expect(result.out).toContain("adt, destination 0: 2 same, 0 different, 0 failed");
+    expect(result.code).toBe(EXIT.ok);
+  });
+
   it("creates no database file where there is none", async () => {
     const root = await makeProject({
       "test.key": `${generateKey()}\n`,
@@ -325,6 +349,26 @@ describe("pathways verify --samples", () => {
   it("stops on an invalid project as every command does", async () => {
     const root = await makeProject({ "channels/adt/channel.yaml": "source: {}\n" });
     expect((await runCli(["verify", "-C", root, "--samples", root])).code).toBe(EXIT.config);
+  });
+
+  it("fails each input, naming the variable, when the transform's configuration cannot be read", async () => {
+    const root = await makeProject({
+      "test.key": `${generateKey()}\n`,
+      "pathways.yaml": KEYS,
+      "channels/adt/channel.yaml": `${CHANNEL}config:\n  token: { env: SYNTHETIC_UNSET_VERIFY_TOKEN }\n`,
+      "channels/adt/transform.ts": TRANSFORM,
+      "samples/adt/a01.hl7": ADT_A01,
+      "samples/adt/a01.expected.hl7": "",
+    });
+    const result = await runCli(["verify", "-C", root, "--samples", join(root, "samples")]);
+    expect(result.code).toBe(EXIT.failed);
+    expect(result.out.split("\n").slice(1, 3)).toEqual([
+      "adt, destination 0: 0 same, 0 different, 1 failed",
+      expect.stringMatching(
+        /^ {2}sample a01\.hl7: failed, the transform's configuration could not be resolved: .*SYNTHETIC_UNSET_VERIFY_TOKEN is not set/,
+      ),
+    ]);
+    noContent(result);
   });
 
   it("compares each sample's output with its .expected file, with no store opened", async () => {

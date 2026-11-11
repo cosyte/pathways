@@ -1350,7 +1350,11 @@ async function verifySamples(
   if (project === undefined) return EXIT.config;
   return (
     (await knownChannel(project, parsed.channel, io)) ??
-    verifyCommand({ project, json, out: io.out, err: io.err }, parsed.selection, parsed.channel)
+    verifyCommand(
+      { project, json, out: io.out, err: io.err, env: io.env ?? process.env },
+      parsed.selection,
+      parsed.channel,
+    )
   );
 }
 

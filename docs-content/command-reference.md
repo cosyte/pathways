@@ -115,7 +115,10 @@ cleared) is skipped. Two outputs are the same only when they are the same bytes.
 It opens the database as `start --no-migrate` does: it applies no schema step, and refuses, naming
 both versions, a database that lacks a step the candidate's Pathways needs. The candidate's
 transforms run with this process's environment, as the engine's do, and what they write to the
-console goes to its output. It builds no destination, so it sends no message; `pathways.yaml`'s
+console goes to its output. Each transform reads its channel's `config:` as the engine does, and a
+stored message runs with its own id as `ctx.messageId` and no source facts, as a replay does; a
+sample runs with the context `pathways test` gives. On SQLite, where the database file does not
+exist, it stops and creates none. It builds no destination, so it sends no message; `pathways.yaml`'s
 engine-wide hooks receive its audit entries, as they do every command's.
 
 | Option             | Meaning                                                                                                                           |

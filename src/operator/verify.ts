@@ -2,11 +2,14 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { ChannelConfig, ProjectConfig } from "../config/schema.js";
+import { transformConfigFor } from "../config/transform-config.js";
+import type { Env } from "../connectors/endpoint.js";
 import {
   ChannelWorker,
   TransformLoadError,
   type TransformOutcome,
 } from "../engine/channel-worker.js";
+import type { FailureSummary, MessageContext } from "../engine/worker-entry.js";
 import { EXIT } from "../exit.js";
 import type { MessageStore, MessageSummary } from "../storage/store.js";
 import { describeFailure, expectedName, joinOutputs } from "../testing/run-tests.js";
@@ -44,6 +47,8 @@ export interface VerifyContext {
   readonly json: boolean;
   readonly out: (text: string) => void;
   readonly err: (text: string) => void;
+  /** Where the transforms' configuration reads its variables; `process.env` by default. */
+  readonly env?: Env | undefined;
 }
 
 /** One input's outcome on one channel. */
@@ -88,7 +93,7 @@ export async function verifyCommand(
     channel === undefined
       ? context.project.channels
       : context.project.channels.filter((c) => c.name === channel);
-  const runner = new Runner(context.project.channels);
+  const runner = new Runner(context.project, context.env ?? process.env);
   const results = new Map<string, Result[]>(channels.map((c) => [c.name, []]));
   let skipped = 0;
   let missing = 0;
@@ -123,39 +128,57 @@ export async function verifyCommand(
 /** The channels' workers, each started on first use and stopped at the end. */
 class Runner {
   private readonly configs: Map<string, ChannelConfig>;
-  private readonly workers = new Map<string, ChannelWorker | TransformLoadError>();
+  private readonly workers = new Map<string, ChannelWorker | FailureSummary>();
 
-  constructor(channels: readonly ChannelConfig[]) {
-    this.configs = new Map(channels.map((c) => [c.name, c]));
+  constructor(
+    private readonly project: ProjectConfig,
+    private readonly env: Env,
+  ) {
+    this.configs = new Map(project.channels.map((c) => [c.name, c]));
   }
 
   config(name: string): ChannelConfig | undefined {
     return this.configs.get(name);
   }
 
-  /** Runs one input through the channel's transform. */
-  async run(config: ChannelConfig, body: Uint8Array): Promise<TransformOutcome> {
+  /**
+   * Runs one input through the channel's transform, with the channel's configuration as the engine
+   * resolves it, and `context` as the message's (a sample's when none is given).
+   */
+  async run(
+    config: ChannelConfig,
+    body: Uint8Array,
+    context?: MessageContext,
+  ): Promise<TransformOutcome> {
     let worker = this.workers.get(config.name);
     if (worker === undefined) {
-      const started = new ChannelWorker({
-        channel: config.name,
-        transformFile: config.transform,
-        format: config.format,
-        timeoutMs: config.settings.timeoutMs,
-        memoryMb: config.settings.memoryMb,
-      });
-      try {
-        await started.start();
-        worker = started;
-      } catch (error) {
-        /* v8 ignore next: start() rejects only with TransformLoadError */
-        if (!(error instanceof TransformLoadError)) throw error;
-        worker = error;
-      }
+      worker = await this.start(config);
       this.workers.set(config.name, worker);
     }
-    if (worker instanceof TransformLoadError) return { ok: false, failure: worker.failure };
-    return worker.run(body);
+    if (!(worker instanceof ChannelWorker)) return { ok: false, failure: worker };
+    return worker.run(body, context === undefined ? {} : { context });
+  }
+
+  /** The channel's worker, started; or why its configuration or transform could not be had. */
+  private async start(config: ChannelConfig): Promise<ChannelWorker | FailureSummary> {
+    const resolved = transformConfigFor(this.project, config, this.env);
+    if (!("resolved" in resolved)) return resolved;
+    const started = new ChannelWorker({
+      channel: config.name,
+      transformFile: config.transform,
+      format: config.format,
+      timeoutMs: config.settings.timeoutMs,
+      memoryMb: config.settings.memoryMb,
+      config: resolved.resolved,
+    });
+    try {
+      await started.start();
+      return started;
+    } catch (error) {
+      /* v8 ignore next: start() rejects only with TransformLoadError */
+      if (!(error instanceof TransformLoadError)) throw error;
+      return error.failure;
+    }
   }
 
   async stop(): Promise<void> {
@@ -221,7 +244,18 @@ async function verifyBatch(stored: Stored, batch: readonly MessageSummary[]): Pr
     }
     list.push({
       message: message.id,
-      ...outcomeOf(config, await runner.run(config, body), recorded),
+      // The context of the run that recorded these outputs: generation 0 is the first run, and each
+      // replay or resend adds one. The source facts are not stored, as a replay has none.
+      ...outcomeOf(
+        config,
+        await runner.run(config, body, {
+          messageId: message.id,
+          attempt: message.generation + 1,
+          source: undefined,
+          meta: {},
+        }),
+        recorded,
+      ),
     });
   }
 }
