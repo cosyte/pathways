@@ -1,7 +1,9 @@
 import { readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import type { ChannelConfig } from "../config/schema.js";
+import type { ChannelConfig, ProjectConfig } from "../config/schema.js";
+import { transformConfigFor } from "../config/transform-config.js";
+import type { Env } from "../connectors/endpoint.js";
 import { ChannelWorker, TransformLoadError } from "../engine/channel-worker.js";
 import type { FailureSummary } from "../engine/worker-entry.js";
 
@@ -11,6 +13,13 @@ export interface ChannelTestOptions {
   readonly update: boolean;
   /** Writes one line of the report. */
   readonly out: (line: string) => void;
+  /**
+   * The project's `config:` block, which each channel's own goes over. Defaults to none: a
+   * channel's own block alone.
+   */
+  readonly project?: Pick<ProjectConfig, "config">;
+  /** Where the configuration reads its environment variables. Defaults to `process.env`. */
+  readonly env?: Env;
 }
 
 /** What a run of channel tests found. */
@@ -41,6 +50,9 @@ export function expectedName(input: string): string {
  * byte, whatever the channel's format. A message the transform filters out expects an empty file;
  * several outputs are joined by a newline.
  *
+ * Each transform gets the context of a message that is not stored (`messageId` 0, run 1, no source
+ * facts) with its channel's configuration, read from the environment as the engine reads it.
+ *
  * The report names files and failures, never content: a fixture is synthetic, but the same command
  * must be safe to point at anything.
  *
@@ -65,12 +77,23 @@ export async function runChannelTests(
       continue;
     }
 
+    const config = transformConfigFor(
+      { config: options.project?.config ?? {} },
+      channel,
+      options.env ?? process.env,
+    );
+    if (!("resolved" in config)) {
+      options.out(`FAIL ${channel.name}: ${describeFailure(config, channel)}`);
+      failed += inputs.length;
+      continue;
+    }
     const worker = new ChannelWorker({
       channel: channel.name,
       transformFile: channel.transform,
       format: channel.format,
       timeoutMs: channel.settings.timeoutMs,
       memoryMb: channel.settings.memoryMb,
+      config: config.resolved,
     });
     try {
       await worker.start();
@@ -193,6 +216,10 @@ export function describeFailure(failure: FailureSummary, channel: ChannelConfig)
   const where = failure.where === undefined ? "" : ` at ${failure.where}`;
   switch (failure.kind) {
     case "load":
+      // A configuration problem names its file, key and variable, never a value: safe to show.
+      if (failure.code === "TRANSFORM_CONFIG") {
+        return `the transform's configuration could not be resolved: ${failure.detail.split("\n").join("; ")}`;
+      }
       return `the transform could not be loaded (${failure.name}${where})`;
     case "parse":
       return `the input could not be parsed as ${channel.format} (${failure.code ?? failure.name})`;

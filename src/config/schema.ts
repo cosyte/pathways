@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { normalisePath } from "../connectors/http-path.js";
 import { LIFECYCLE_EVENTS, type LifecycleEventType } from "../extensions/events.js";
+import type { JsonValue } from "../transform.js";
 import { ENV_NAME, fromEnvironment, type EnvReference } from "./env-ref.js";
 
 export type { EnvReference } from "./env-ref.js";
@@ -610,6 +611,13 @@ const httpSource = restate(
         .optional(),
       response: httpSourceResponse.optional(),
       maxBytes: bytes.optional(),
+      contextHeaders: z
+        .array(z.string())
+        .meta({
+          description:
+            "Request headers the transform reads in ctx.source.headers, by name. Authorization, Proxy-Authorization and Cookie are never passed. Default: none.",
+        })
+        .optional(),
     })
     .meta({
       description:
@@ -632,9 +640,11 @@ function httpSourceChecks(
     readonly paths?: readonly string[] | undefined;
     readonly methods?: readonly string[] | undefined;
     readonly response?: z.output<typeof httpSourceResponse> | undefined;
+    readonly contextHeaders?: readonly string[] | undefined;
   },
   ctx: z.RefinementCtx,
 ): void {
+  contextHeaderChecks(value.contextHeaders ?? [], ctx);
   if (value.path !== undefined && value.paths !== undefined) {
     ctx.addIssue({
       code: "custom",
@@ -700,6 +710,37 @@ function httpSourceChecks(
     });
   }
   headerChecks(response.headers, MANAGED_RESPONSE_HEADERS, ["response", "headers"], ctx);
+}
+
+/**
+ * Request headers that carry a credential, which an HTTP source never passes to a transform, even
+ * when `contextHeaders` names one.
+ */
+export const NEVER_CONTEXT_HEADERS: ReadonlySet<string> = new Set([
+  "authorization",
+  "proxy-authorization",
+  "cookie",
+]);
+
+/** An HTTP source's `contextHeaders`: valid names, none twice, and none that carries a credential. */
+function contextHeaderChecks(names: readonly string[], ctx: z.RefinementCtx): void {
+  const seen = new Set<string>();
+  for (const [index, name] of names.entries()) {
+    const at = ["contextHeaders", index];
+    const lower = name.toLowerCase();
+    if (!HEADER_NAME.test(name)) {
+      ctx.addIssue({ code: "custom", path: at, message: "not a valid header name" });
+    } else if (NEVER_CONTEXT_HEADERS.has(lower)) {
+      ctx.addIssue({
+        code: "custom",
+        path: at,
+        message: "carries a credential, so it is never passed to the transform",
+      });
+    } else if (seen.has(lower)) {
+      ctx.addIssue({ code: "custom", path: at, message: "names a header twice" });
+    }
+    seen.add(lower);
+  }
 }
 
 /** What an HTTP client endpoint (an HTTP destination, a webhook hook) is configured with. */
@@ -1341,6 +1382,74 @@ const lease = z
       "The engine lease, which one engine per database holds, so a second is refused or waits as a standby.",
   });
 
+/** How deep a `config:` value may nest. */
+const CONFIG_DEPTH = 32;
+
+/**
+ * Checks one `config:` value: JSON only (a string, a finite number, a boolean, null, a list or a
+ * map), no deeper than {@link CONFIG_DEPTH}, and a map with an `env` key only as `{ env: NAME }` or
+ * `{ env: NAME, default: value }`, the default one value that is not a list or a map.
+ */
+function configValueChecks(
+  value: unknown,
+  path: readonly (string | number)[],
+  ctx: z.RefinementCtx,
+  depth = 0,
+): void {
+  const issue = (message: string): void => {
+    ctx.addIssue({ code: "custom", path: [...path], message });
+  };
+  if (depth > CONFIG_DEPTH) return issue(`nests deeper than ${CONFIG_DEPTH} levels`);
+  if (value === null || typeof value === "string" || typeof value === "boolean") return;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) issue("a number must be finite");
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const [index, item] of value.entries()) {
+      configValueChecks(item, [...path, index], ctx, depth + 1);
+    }
+    return;
+  }
+  if (typeof value !== "object" || Object.getPrototypeOf(value) !== Object.prototype) {
+    return issue("a string, number, boolean, null, list or map");
+  }
+  const entries = Object.entries(value);
+  if ("env" in value) {
+    const { env: name, ...rest } = value as { env: unknown; [key: string]: unknown };
+    const keys = Object.keys(rest);
+    const fallback = rest["default"];
+    const scalar =
+      fallback === null ||
+      typeof fallback === "string" ||
+      typeof fallback === "boolean" ||
+      (typeof fallback === "number" && Number.isFinite(fallback));
+    if (
+      typeof name !== "string" ||
+      !ENV_NAME.test(name) ||
+      keys.some((key) => key !== "default") ||
+      (keys.length === 1 && !scalar)
+    ) {
+      issue(
+        "{ env: NAME } reads an environment variable at start; it takes only a default, one value that is not a list or a map",
+      );
+    }
+    return;
+  }
+  for (const [key, item] of entries) configValueChecks(item, [...path, key], ctx, depth + 1);
+}
+
+/** A `config:` block: what a transform reads as `ctx.config`, keyed by name. */
+const transformConfig = z
+  .record(z.string(), z.unknown())
+  .meta({
+    description:
+      "What the transform reads as ctx.config: any YAML value by name, and { env: NAME } (or { env: NAME, default: value }) to read one from an environment variable at start. A channel's own config: replaces this one key by key.",
+  })
+  .superRefine((config, ctx) => {
+    for (const [key, value] of Object.entries(config)) configValueChecks(value, [key], ctx);
+  });
+
 /** How `pathways migrate` treats contract steps. */
 const migrationsBlock = z
   .strictObject({
@@ -1368,6 +1477,7 @@ export const projectSchema = z
     probes: probes.optional(),
     lease: lease.optional(),
     migrations: migrationsBlock.optional(),
+    config: transformConfig.optional(),
   })
   .meta({
     title: "pathways.yaml",
@@ -1478,6 +1588,7 @@ export const channelSchema = restate(
       ackTimeout: settingsShape.ackTimeout,
       retention: settingsShape.retention,
       resendFlag: settingsShape.resendFlag,
+      config: transformConfig.optional(),
       retry: settingsShape.retry,
     })
     .meta({
@@ -1828,6 +1939,8 @@ export interface HttpSource extends ListenerConfig {
   readonly methods: readonly ("POST" | "PUT")[];
   readonly response: HttpSourceResponseConfig;
   readonly maxBytes: number;
+  /** The request headers passed to the transform in `ctx.source.headers`, in lower case. */
+  readonly contextHeaders: readonly string[];
 }
 
 /**
@@ -2031,7 +2144,23 @@ export interface ChannelConfig {
   readonly settings: Settings;
   /** The channel's own hooks, which receive its events beside the engine-wide ones. */
   readonly hooks: readonly HookConfig[];
+  /**
+   * The channel's own `config:` block, as written: each `{ env: NAME }` is still a reference, read
+   * when the engine starts. Its keys replace those of the project's block.
+   */
+  readonly config: TransformConfigBlock;
 }
+
+/**
+ * A `config:` block as written, after its checks: JSON values by key, where a map whose one key is
+ * `env` names an environment variable to read at start.
+ *
+ * @example
+ * ```ts
+ * const block: TransformConfigBlock = { facility: "LAB", apiKey: { env: "LAB_API_KEY" } };
+ * ```
+ */
+export type TransformConfigBlock = Readonly<Record<string, JsonValue>>;
 
 /**
  * SQLite storage: one database file, opened by the bundled better-sqlite3 driver.
@@ -2176,6 +2305,8 @@ export interface ProjectConfig {
    * start` refuses to run without it; `pathways test` stores nothing and does not need it.
    */
   readonly encryption: EncryptionConfig | undefined;
+  /** The project's `config:` block, as written: what every channel's transform reads, by key. */
+  readonly config: TransformConfigBlock;
   /** The secret providers `secrets:` names; `env` and `file` are built in and not listed. */
   readonly secrets: readonly SecretProviderConfig[];
   readonly channels: readonly ChannelConfig[];

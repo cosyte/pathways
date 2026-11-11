@@ -114,9 +114,160 @@ export type MessageFor<F extends Format> = MessageTypes[F];
 export type TransformOutput<M> = M | string | readonly (M | string)[] | null | undefined;
 
 /**
+ * The configuration a transform reads as `ctx.config`: the `config:` block of `pathways.yaml`, with
+ * the channel's own `config:` block over it key by key, and each `{ env: NAME }` read from the
+ * engine's environment when it starts. It is empty here: name your keys and their types by
+ * declaration merging, once per project, and `ctx.config` is typed by them.
+ *
+ * @example
+ * ```ts
+ * declare module "@cosyte/pathways" {
+ *   interface TransformConfig {
+ *     readonly facility: string;
+ *     readonly labCodes: readonly string[];
+ *   }
+ * }
+ * ```
+ */
+// Empty on purpose: a project adds its keys by declaration merging, so an unnamed key does not type.
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type
+export interface TransformConfig {}
+
+/**
+ * What a file source knows about a message: the file's name as it was dropped, its size in bytes,
+ * and when it was stored.
+ *
+ * @example
+ * ```ts
+ * const name = (source: FileSourceFacts): string => source.name;
+ * ```
+ */
+export interface FileSourceFacts {
+  readonly kind: "file";
+  /** The file's name as it was dropped in the folder. It can carry a patient's name: never log it. */
+  readonly name: string;
+  /** The body's size in bytes. */
+  readonly size: number;
+  /** When the message was stored, as an ISO 8601 time. */
+  readonly receivedAt: string;
+}
+
+/**
+ * What an HTTP source knows about a message: the request's method, its path as the source matched
+ * it, the sender's address, and the headers the channel's `contextHeaders` names, by lower-case
+ * name. `Authorization`, `Proxy-Authorization` and `Cookie` are never among them.
+ *
+ * @example
+ * ```ts
+ * const requestId = (source: HttpSourceFacts): string | undefined => source.headers["x-request-id"];
+ * ```
+ */
+export interface HttpSourceFacts {
+  readonly kind: "http";
+  /** `POST` or `PUT`. */
+  readonly method: string;
+  /** The path the request was sent to, as the source matched it, without a query. */
+  readonly path: string;
+  /** The sender's IP address, when the connection still had one. */
+  readonly remoteAddress: string | undefined;
+  /** The listed headers the request carried, by lower-case name; several values joined by `, `. */
+  readonly headers: Readonly<Record<string, string>>;
+  /** When the message was stored, as an ISO 8601 time. */
+  readonly receivedAt: string;
+}
+
+/**
+ * What an MLLP source knows about a message: the sender's address and, over mutual TLS, the common
+ * name in the subject of the certificate the sender presented.
+ *
+ * @example
+ * ```ts
+ * const peer = (source: MllpSourceFacts): string => source.tlsPeerSubject ?? "unknown";
+ * ```
+ */
+export interface MllpSourceFacts {
+  readonly kind: "mllp";
+  /** The sender's IP address, when the connection had one. */
+  readonly remoteAddress: string | undefined;
+  /** The common name (CN) in the subject of the sender's TLS certificate, when it presented one. */
+  readonly tlsPeerSubject: string | undefined;
+  /** When the message was stored, as an ISO 8601 time. */
+  readonly receivedAt: string;
+}
+
+/**
+ * What a custom source knows about a message: whatever it passed as `source` to `sink.receive`.
+ *
+ * @example
+ * ```ts
+ * const queue = (source: ModuleSourceFacts): JsonValue | undefined => source.facts["queue"];
+ * ```
+ */
+export interface ModuleSourceFacts {
+  readonly kind: "module";
+  /** What the source passed, or `{}` when it passed nothing. */
+  readonly facts: Readonly<Record<string, JsonValue>>;
+  /** When the message was stored, as an ISO 8601 time. */
+  readonly receivedAt: string;
+}
+
+/**
+ * What the source knew about a message when it took it in, by the kind of source.
+ *
+ * @example
+ * ```ts
+ * const from = (source: SourceFacts): string | undefined =>
+ *   source.kind === "http" || source.kind === "mllp" ? source.remoteAddress : undefined;
+ * ```
+ */
+export type SourceFacts = FileSourceFacts | HttpSourceFacts | MllpSourceFacts | ModuleSourceFacts;
+
+/**
+ * The second argument a transform receives: a frozen plain object, built for each message.
+ *
+ * Nothing in it is logged, sent to a hook or shown on the health endpoint. A transform reads it; to
+ * change what is sent, it changes what it returns.
+ *
+ * @example
+ * ```ts
+ * import type { Transform } from "@cosyte/pathways";
+ *
+ * export default ((msg, ctx) => {
+ *   if (ctx?.source?.kind === "mllp" && ctx.source.tlsPeerSubject !== "lab.example.test") return null;
+ *   return msg;
+ * }) satisfies Transform;
+ * ```
+ */
+export interface TransformContext {
+  /** The stored message's id. 0 under `pathways test`, which stores nothing. */
+  readonly messageId: number;
+  /**
+   * Which run of the transform this is for the message: 1 the first time, and one more for each
+   * replay or resend before this one.
+   */
+  readonly attempt: number;
+  /**
+   * What the source knew about the message when it took it in. Undefined when that is not known:
+   * under `pathways test`, on a replay, and for a message taken in before the engine last started,
+   * since the facts are kept in memory until the message is transformed and not stored; and for the
+   * oldest of a channel's messages past the 4,096 whose facts the engine holds while they wait.
+   */
+  readonly source: SourceFacts | undefined;
+  /** A per-message map of flat values. Always empty in this release: nothing sets it yet. */
+  readonly meta: Readonly<Record<string, string | number | boolean>>;
+  /** The channel's configuration, resolved when the engine (or the command) started. */
+  readonly config: Readonly<TransformConfig>;
+}
+
+/**
  * A channel's transform: the default export of its `transform.ts`. It receives the parsed message
  * (an `Hl7Message` from `@cosyte/hl7` unless you name another type) and returns what to send. It
  * may be async.
+ *
+ * Its second argument, `ctx`, is a {@link TransformContext}: the message's id, which run this is,
+ * what its source knew, and the channel's configuration. The engine always passes it; it is optional
+ * in the type, so a transform that takes one argument is a `Transform` too, and a test can call one
+ * with the message alone.
  *
  * `Out` is what it returns, when that differs from what it receives: a transform from HL7 v2 to FHIR
  * is a `Transform<Hl7Message, FhirResource>`. A model from any of the four libraries is written by
@@ -135,6 +286,7 @@ export type TransformOutput<M> = M | string | readonly (M | string)[] | null | u
  */
 export type Transform<In = Hl7Message, Out = In> = (
   message: In,
+  ctx?: TransformContext,
 ) => TransformOutput<Out> | Promise<TransformOutput<Out>>;
 
 /**
