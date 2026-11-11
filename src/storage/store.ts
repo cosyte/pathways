@@ -1983,7 +1983,6 @@ export class Store implements MessageStore, ContentStore {
     };
     for (const row of rows) counts[row.status] = Number(row.count);
     return counts;
-    return counts;
   }
 
   /** Up to `limit` rows of `table` with an id above `after`, oldest first, as stored. */

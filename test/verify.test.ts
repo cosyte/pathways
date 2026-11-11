@@ -199,6 +199,16 @@ describe("pathways verify, on stored messages", () => {
     noContent(json);
   });
 
+  it("names a different number of outputs by the two counts", async () => {
+    const root = await stored();
+    await writeFile(join(root, "channels/adt/transform.ts"), "export default () => null;\n");
+    const result = await runCli(["verify", "-C", root, "--ids", "1"]);
+    expect(result.code).toBe(EXIT.failed);
+    expect(result.out).toContain(
+      "  message 1: different, 0 outputs from the transform, 1 output recorded",
+    );
+  });
+
   it("reports a transform that throws as failed, by its name, never its text", async () => {
     const root = await stored();
     await writeFile(join(root, "channels/adt/transform.ts"), THROWS);
@@ -274,6 +284,11 @@ describe("pathways verify, on stored messages", () => {
 });
 
 describe("pathways verify --samples", () => {
+  it("stops on an invalid project as every command does", async () => {
+    const root = await makeProject({ "channels/adt/channel.yaml": "source: {}\n" });
+    expect((await runCli(["verify", "-C", root, "--samples", root])).code).toBe(EXIT.config);
+  });
+
   it("compares each sample's output with its .expected file, with no store opened", async () => {
     const root = await makeProject({
       "test.key": `${generateKey()}\n`,
@@ -327,6 +342,25 @@ describe("pathways verify --samples", () => {
       },
       { sample: "lonely.hl7", outcome: "same" },
     ]);
+    // A sample that does not parse fails by its stage; one sample alone is named in the singular.
+    const one = join(root, "one");
+    await mkdir(join(one, "adt"), { recursive: true });
+    await writeFile(join(one, "adt/bad.hl7"), "not a message");
+    await writeFile(join(one, "adt/bad.expected.hl7"), "");
+    const bad = await runCli(["verify", "-C", root, "--samples", one]);
+    expect(bad.code).toBe(EXIT.failed);
+    expect(bad.out.split("\n").slice(0, 3)).toEqual([
+      "Verified 1 sample from the samples folder.",
+      "adt, destination 0: 0 same, 0 different, 1 failed",
+      expect.stringMatching(/^ {2}sample bad\.hl7: failed, the input could not be parsed as hl7v2/),
+    ]);
+    // A channel with no folder of samples has nothing to verify.
+    const none = await runCli(["verify", "-C", root, "--samples", join(root, "nowhere")]);
+    expect(none.code).toBe(EXIT.ok);
+    expect(none.out.split("\n").slice(0, 2)).toEqual([
+      "Verified 0 samples from the samples folder.",
+      "adt, destination 0: 0 same, 0 different, 0 failed",
+    ]);
     // No database was made: samples need no store.
     const { existsSync } = await import("node:fs");
     expect(existsSync(join(root, ".pathways/pathways.db"))).toBe(false);
@@ -370,6 +404,12 @@ describe("naming a difference", () => {
     expect(at([MSH, "pid|1"], [MSH, "pid|2"])).toBe("segment 2");
     // Custom delimiters, as the MSH declares them.
     expect(hl7Path("MSH#$*\\%#A\rPID#1##X$Y", "MSH#$*\\%#A\rPID#1##X$Z")).toBe("PID[1]-3.2");
+    // No MSH: the standard delimiters. An empty side: every segment is only in the other.
+    expect(hl7Path("PID|1|A", "PID|1|B")).toBe("PID[1]-2");
+    expect(hl7Path("PID|1", "")).toBe("PID[1], only in the transform's output");
+    expect(at([MSH, "PID|1||X|Y"], [MSH, "PID|1||X"])).toBe("PID[1]-4");
+    expect(at([MSH, "PID|1||A^B"], [MSH, "PID|1||A"])).toBe("PID[1]-3.2");
+    expect(at([MSH, "PID|1||A"], [MSH, "PID|1||A^B"])).toBe("PID[1]-3.2");
     // Only the line endings differ: no field does, so a byte offset names it.
     expect(hl7Path(`${MSH}\r`, `${MSH}\n`)).toBeUndefined();
     expect(locate("hl7v2", bytes(`${MSH}\r`), bytes(`${MSH}\n`))).toBe(`byte offset ${MSH.length}`);
@@ -381,6 +421,8 @@ describe("naming a difference", () => {
     );
     expect(jsonDifference('{"a":[1,2]}', '{"a":[1]}')).toBe("/a/1");
     expect(jsonDifference('{"a":1}', '{"a":1,"b":2}')).toBe("/b");
+    expect(jsonDifference('{"a":1,"b":2}', '{"a":1}')).toBe("/b");
+    expect(jsonDifference('{"a":[1],"b":1}', '{"a":[1],"b":2}')).toBe("/b");
     expect(jsonDifference('{"a/b~":1}', '{"a/b~":2}')).toBe("/a~1b~0");
     expect(jsonDifference("1", "2")).toBe("the whole document (/)");
     expect(jsonDifference('{"a":1}', "not json")).toBeUndefined();

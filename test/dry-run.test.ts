@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { readdir } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
 import { join } from "node:path";
@@ -6,9 +7,10 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { EXIT, run } from "../src/cli.js";
 import { loadProject, ConfigError } from "../src/config/load.js";
-import { Engine } from "../src/engine/engine.js";
+import { connectorsFor, Engine } from "../src/engine/engine.js";
+import { EncryptedStore } from "../src/encryption/encrypted-store.js";
 import { isEncrypted } from "../src/encryption/envelope.js";
-import { generateKey } from "../src/encryption/keys.js";
+import { generateKey, KEY_BYTES, LocalKeyProvider } from "../src/encryption/keys.js";
 import { Store, type MessageStore } from "../src/storage/store.js";
 import {
   ADT_A01,
@@ -119,6 +121,18 @@ describe("a destination that runs dry", () => {
       expect.objectContaining({ channel: "adt", destination: 0, delivery: 1 }),
     ]);
     expect(result.lines.join("")).not.toContain("TESTPATIENT");
+
+    let out = "";
+    await run(["status", "-C", root], {
+      out: (text) => {
+        out += text;
+      },
+      err: () => undefined,
+      logger: captureLogger().logger,
+    });
+    expect(out).toContain(
+      "  deliveries: 0 pending (0 retrying), 1 delivered, 0 failed, 0 cleared, 1 dry-run (recorded, not sent)",
+    );
   });
 
   it("is every destination with pathways start --dry-run, which says so at start", async () => {
@@ -160,6 +174,38 @@ describe("a destination that runs dry", () => {
     const engine = new Engine({ project: loaded, store: old, logger });
     await expect(engine.start()).rejects.toBeInstanceOf(ConfigError);
     await expect(engine.start()).rejects.toThrow(/markDryRun/);
+    // Encryption at rest over it has none either, so the same refusal holds through it.
+    const keys = new LocalKeyProvider([["k", randomBytes(KEY_BYTES)]], "k");
+    expect(new EncryptedStore(old, keys).markDryRun).toBeUndefined();
+    expect(typeof new EncryptedStore(store, keys).markDryRun).toBe("function");
+
+    // With no destination dry, such a store runs as before.
+    const sending = {
+      ...loaded,
+      channels: loaded.channels.map((c) => ({
+        ...c,
+        destinations: c.destinations.map(({ dryRun: _dry, ...d }) => d),
+      })),
+    };
+    const quiet = new Engine({
+      project: sending,
+      store: old,
+      logger,
+      connectors: () => ({ source: { poll: () => Promise.resolve() }, destinations: [] }),
+    });
+    await quiet.start();
+    await quiet.stop();
     await store.close();
+  });
+
+  it("gets a connector that refuses any message, so a defect cannot send one", async () => {
+    const root = await project(1, "    dryRun: true");
+    const [channel] = (await loadProject(root)).channels;
+    if (channel === undefined) throw new Error("no channel");
+    const { logger } = captureLogger();
+    const { destinations } = await connectorsFor(channel, { now: Date.now, logger, env: {} });
+    await expect(
+      destinations[0]?.deliver({ messageId: 1, seq: 0, body: new Uint8Array([1]) }),
+    ).rejects.toThrow("a destination that runs dry was handed a message");
   });
 });

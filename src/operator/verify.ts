@@ -196,9 +196,11 @@ async function verifyBatch(stored: Stored, batch: readonly MessageSummary[]): Pr
   const known = batch.filter((m) => runner.config(m.channel) !== undefined);
   for (const message of batch) {
     if (runner.config(message.channel) !== undefined) continue;
-    const list = results.get(message.channel) ?? [];
-    list.push({ message: message.id, outcome: "failed", reason: "no such channel in the project" });
-    results.set(message.channel, list);
+    listOf(results, message.channel).push({
+      message: message.id,
+      outcome: "failed",
+      reason: "no such channel in the project",
+    });
   }
   if (known.length === 0) return;
   // Written before any content is read; a log that cannot be written stops the command.
@@ -211,8 +213,7 @@ async function verifyBatch(stored: Stored, batch: readonly MessageSummary[]): Pr
       store.messageBody(message.id),
       store.outputs(message.id),
     ]);
-    const list = results.get(message.channel) ?? [];
-    results.set(message.channel, list);
+    const list = listOf(results, message.channel);
     /* v8 ignore next 4 -- the message was listed a moment ago; retention can delete it meanwhile */
     if (body === undefined) {
       list.push({ message: message.id, outcome: "failed", reason: "deleted while verify ran" });
@@ -253,10 +254,11 @@ async function verifyIds(
       const message = await stored.store.message(id);
       if (message === undefined) {
         missing += 1;
-        stored.results.set("", [
-          ...(stored.results.get("") ?? []),
-          { message: id, outcome: "failed", reason: "no such message" },
-        ]);
+        listOf(stored.results, "").push({
+          message: id,
+          outcome: "failed",
+          reason: "no such message",
+        });
       } else if (channel !== undefined && message.channel !== channel) {
         skipped += 1;
       } else if (!RECORDED.has(message.status)) {
@@ -291,8 +293,7 @@ async function verifySamples(
   } catch {
     return;
   }
-  const list = results.get(config.name) ?? [];
-  results.set(config.name, list);
+  const list = listOf(results, config.name);
   for (const name of names) {
     let expected: Uint8Array;
     try {
@@ -333,7 +334,7 @@ function report(
     (name) => !channels.some((config) => config.name === name),
   );
   for (const config of channels) {
-    const list = results.get(config.name) ?? [];
+    const list = listOf(results, config.name);
     for (const destination of config.destinations.keys()) {
       const tally = { same: 0, different: 0, failed: 0 };
       for (const result of list) tally[result.outcome] += 1;
@@ -341,11 +342,13 @@ function report(
       lines.push(
         `${config.name}, destination ${destination}: ${tally.same} same, ${tally.different} different, ${tally.failed} failed`,
       );
-      for (const result of list) if (result.outcome !== "same") lines.push(`  ${describe(result)}`);
+      for (const result of list) {
+        if (result.outcome !== "same") lines.push(`  ${describe(result)}`);
+      }
     }
   }
   for (const name of unlisted) {
-    const list = results.get(name) ?? [];
+    const list = listOf(results, name);
     rows.push({
       channel: name,
       destination: -1,
@@ -354,7 +357,8 @@ function report(
       failed: list.length,
       results: list,
     });
-    for (const result of list) {
+    // Each is a failure: a message of a channel the project lacks, or one that does not exist.
+    for (const result of list as Problem[]) {
       lines.push(`${name === "" ? "" : `${name}: `}${describe(result)}`);
     }
   }
@@ -380,8 +384,7 @@ function report(
 }
 
 function noun(selection: VerifySelection, n: number): string {
-  if (selection.kind === "samples") return n === 1 ? "sample" : "samples";
-  return n === 1 ? "message" : "messages";
+  return `${selection.kind === "samples" ? "sample" : "message"}${n === 1 ? "" : "s"}`;
 }
 
 function scope(selection: VerifySelection): string {
@@ -395,14 +398,23 @@ function scope(selection: VerifySelection): string {
   }
 }
 
-function describe(result: Result): string {
+/** An input that was not the same. */
+type Problem = Exclude<Result, { readonly outcome: "same" }>;
+
+/** One input that was not the same, by id or sample file: where it differs, or why it failed. */
+function describe(result: Problem): string {
   const what = "message" in result ? `message ${result.message}` : `sample ${result.sample}`;
-  switch (result.outcome) {
-    case "same":
-      return `${what}: same`;
-    case "different":
-      return `${what}: different, ${result.output === undefined ? "" : `output ${result.output} at `}${result.where}`;
-    case "failed":
-      return `${what}: failed, ${result.reason}`;
+  if (result.outcome === "failed") return `${what}: failed, ${result.reason}`;
+  const output = result.output === undefined ? "" : `output ${result.output} at `;
+  return `${what}: different, ${output}${result.where}`;
+}
+
+/** The results of `channel`, made empty the first time. */
+function listOf(results: Map<string, Result[]>, channel: string): Result[] {
+  let list = results.get(channel);
+  if (list === undefined) {
+    list = [];
+    results.set(channel, list);
   }
+  return list;
 }
