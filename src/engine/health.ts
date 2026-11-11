@@ -52,7 +52,7 @@ export type EngineHealth = Pick<HealthReport, "status" | "storage" | "channels">
  * @example
  * ```ts
  * const identity: EngineIdentity = {
- *   version: "0.0.1", schemaGeneration: 6, node: "3f9a1c2b7d4e5f60",
+ *   version: "0.0.1", schemaGeneration: 7, node: "3f9a1c2b7d4e5f60",
  *   role: "active", leaseEpoch: 3, draining: false,
  * };
  * ```
@@ -60,7 +60,7 @@ export type EngineHealth = Pick<HealthReport, "status" | "storage" | "channels">
 export interface EngineIdentity {
   /** The version of `@cosyte/pathways` the engine runs. */
   readonly version: string;
-  /** How many schema migrations this version brings a built-in store to; null for a custom store. */
+  /** The schema generation (number of schema steps) this version brings a built-in store to; null for a custom store. */
   readonly schemaGeneration: number | null;
   /** This process's node id: the one it holds the engine lease under. */
   readonly node: string;

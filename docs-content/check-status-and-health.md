@@ -55,7 +55,7 @@ A `GET` or `HEAD` on any path but `/livez` and `/readyz` answers with JSON:
   "status": "ok",
   "storage": "ok",
   "version": "0.0.1",
-  "schemaGeneration": 6,
+  "schemaGeneration": 7,
   "node": "3f9a1c2b7d4e5f60",
   "role": "active",
   "leaseEpoch": 3,
@@ -72,9 +72,11 @@ A `GET` or `HEAD` on any path but `/livez` and `/readyz` answers with JSON:
 ```
 
 Beside the status and the channels, the body says which engine answered: `version`, the version of
-`@cosyte/pathways` it runs; `schemaGeneration`, how many schema migrations that version brings the
-database to (`null` with a custom store); `node`, the node id it holds the engine lease under;
-`role`, `active` or `standby`, or `single` on a custom store without leases; `leaseEpoch`, the
+`@cosyte/pathways` it runs; `schemaGeneration`, the
+[schema generation](./store-messages-in-a-database.md#schema-changes-expand-and-contract) that
+version brings the database to, its number of schema steps (`null` with a custom store; the database
+itself can be at a later generation a newer Pathways moved it to); `node`, the node id it holds the
+engine lease under; `role`, `active` or `standby`, or `single` on a custom store without leases; `leaseEpoch`, the
 engine lease's epoch while it holds it, else `null`; and `draining`, `true` once it was told to stop
 and is closing its sources.
 

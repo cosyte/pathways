@@ -149,6 +149,21 @@ describe("the probes block", () => {
       await expect(loadProject(await project(yaml))).rejects.toThrow(ConfigError);
     }
   });
+
+  it("reads its port and host from the environment, but never plaintext", async () => {
+    const dir = await project(
+      "probes:\n  port: { env: PROBE_PORT }\n  host: { env: PROBE_HOST, default: 127.0.0.1 }\n  plaintext: true\n",
+    );
+    const read = await loadProject(dir, { env: { PROBE_PORT: "9091", PROBE_HOST: "0.0.0.0" } });
+    expect(read.probes).toEqual({ host: "0.0.0.0", port: 9091 });
+    const defaulted = await loadProject(dir, { env: { PROBE_PORT: "9092" } });
+    expect(defaulted.probes).toEqual({ host: "127.0.0.1", port: 9092 });
+    await expect(
+      loadProject(await project("probes: { port: 9091, plaintext: { env: PROBE_PLAIN } }\n"), {
+        env: { PROBE_PLAIN: "true" },
+      }),
+    ).rejects.toThrow(ConfigError);
+  });
 });
 
 describe("engineProbes", () => {

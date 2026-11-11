@@ -43,6 +43,7 @@ import {
   leaseReleaseCommand,
   leaseStatusCommand,
   listCommand,
+  migrateCommand,
   parseAction,
   parseId,
   parseLimit,
@@ -57,6 +58,7 @@ import {
 import { recordConfigChanges } from "./operator/config-audit.js";
 import { InitError, initProject, STARTER_CHANNEL, STARTER_KEY_FILE } from "./starter/init.js";
 import { openRawStore, openStore, startingKeys, type OpenStoreContext } from "./storage/open.js";
+import { SchemaVersionError } from "./storage/schema.js";
 import {
   isContentStore,
   leaseStore,
@@ -64,6 +66,7 @@ import {
   migrations,
   StorageError,
   type MessageStore,
+  type Store,
 } from "./storage/store.js";
 import { describeFailure, runChannelTests } from "./testing/run-tests.js";
 import { VERSION } from "./version.js";
@@ -104,7 +107,8 @@ Commands:
                       pathways.yaml's encryption: its keys, or none. Retention
                       runs at start and then every retentionInterval. Takes
                       the engine lease first: a second engine on the same
-                      database is refused
+                      database is refused. Applies the database's missing
+                      expand schema steps first, unless --no-migrate
   test [name...]      Run each channel's tests/ inputs through its transform
                       and compare the output with the saved .expected files
   validate            Check pathways.yaml and every channel.yaml as start
@@ -138,6 +142,9 @@ Commands:
   lease release --force
                       Free the engine lease of an engine whose host is gone,
                       so the next start takes it at once. Audited
+  migrate             Apply the schema steps this version has and the
+                      database lacks, each tagged expand or contract: expand
+                      steps always, contract steps with --contract. Audited
 
 The commands that read or change stored messages open the database as start
 does, so they need the same encryption keys.
@@ -152,13 +159,20 @@ Options:
       --ready           probe: ask /readyz in place of /livez
       --if-configured   probe: exit 0 when pathways.yaml has no probes block,
                         as the Docker image's health check does
+      --no-migrate      start: apply no schema step; refuse a database that
+                        lacks one this version needs
+      --contract        migrate: apply contract steps too, unless the schema
+                        changed within migrations.rollbackWindow. It does
+                        not see which versions other engines run: stop or
+                        upgrade them first
       --force           lease release: say the lease's host is gone
       --update          test: save the current outputs as the expected ones
       --print           validate: print the configuration as start reads it,
                         as JSON, with each setting read from the environment
                         and the variable it named; secrets stay references
       --json            status, messages, replay, clear, retention, audit,
-                        lease: print one JSON document instead of text
+                        lease, migrate: print one JSON document instead of
+                        text
       --channel <name>  messages, audit: only this channel
       --status <state>  messages: only this state: received, queued, retrying,
                         delivered, filtered, failed or cleared
@@ -171,10 +185,11 @@ Options:
       --content         messages show: print the content, which is PHI. The
                         view is written to the audit log first
       --resend          replay: send the stored outputs again, untransformed
-      --dry-run         retention: say what would be deleted, delete nothing
+      --dry-run         retention: say what would be deleted, delete nothing;
+                        migrate: say which steps would be applied, apply none
       --action <name>   audit: only this action: search, view, content-view,
-                        replay, resend, clear, retention, config or
-                        lease-release
+                        replay, resend, clear, retention, config,
+                        lease-release or migrate
       --message <id>    audit: only entries about this message
       --encrypt-plaintext
                         rekey: also encrypt what was stored while encryption
@@ -191,9 +206,10 @@ Exit codes: 0 done; 1 a test failed, the engine, a command or an extension
 module could not start or stopped on an error, init could not write the
 project, rekey left a value not under the current key, a replay, resend or
 clear was refused or the message failed again, another engine holds the lease,
-the engine lost its lease, there was no lease to release, or probe found the
-engine not alive or not ready (probe exits only 0 or 1); 2 the command line was
-not understood; 3 the configuration is invalid; 4 a message named does not exist.
+the engine lost its lease, there was no lease to release, the database schema
+is one this version will not run on or migrate, or probe found the engine not
+alive or not ready (probe exits only 0 or 1); 2 the command line was not
+understood; 3 the configuration is invalid; 4 a message named does not exist.
 `;
 
 /** Redaction paths for the engine's logger, in case a field that can hold content is ever logged. */
@@ -208,7 +224,7 @@ type OptionName = Exclude<keyof Values, "help" | "version" | "project">;
 /** The options each command takes, beyond --project, --help and --version. */
 const OPTIONS: Readonly<Record<string, readonly OptionName[]>> = {
   init: [],
-  start: ["once", "standby"],
+  start: ["once", "standby", "no-migrate"],
   test: ["update"],
   validate: ["print"],
   status: ["json"],
@@ -220,6 +236,7 @@ const OPTIONS: Readonly<Record<string, readonly OptionName[]>> = {
   rekey: ["encrypt-plaintext"],
   lease: ["json", "force"],
   probe: ["ready", "if-configured"],
+  migrate: ["json", "contract", "dry-run"],
 };
 
 /**
@@ -271,7 +288,15 @@ export async function run(argv: readonly string[], io: CliIo): Promise<number> {
     case "start":
       if (rest.length > 0) return usage(io);
       if (values.once === true && values.standby === true) return usage(io);
-      return start(projectDir, { once: values.once === true, standby: values.standby }, io);
+      return start(
+        projectDir,
+        {
+          once: values.once === true,
+          standby: values.standby,
+          noMigrate: values["no-migrate"] === true,
+        },
+        io,
+      );
     case "test":
       return test(projectDir, rest, values.update === true, io);
     case "validate":
@@ -395,6 +420,12 @@ function reportStoreError(error: unknown, io: CliIo): number {
     io.err(`pathways: ${error.message}\n`);
     return EXIT.failed;
   }
+  if (error instanceof SchemaVersionError) {
+    io.err(
+      `pathways: ${error.message}.${error.reason === "schema-too-old" ? " Run pathways migrate first, or start without --no-migrate." : ""}\n`,
+    );
+    return EXIT.failed;
+  }
   const refusal = error instanceof StorageError ? STORAGE_REFUSALS[error.reason] : undefined;
   const code = errorCode(error);
   io.err(
@@ -441,8 +472,9 @@ function auditFor(store: MessageStore, io: CliIo, onListenerError: (error: unkno
 }
 
 /**
- * How many schema migrations this version brings a built-in store to: the same on every database,
- * since each runs the same steps under the same names.
+ * The schema generation this version brings a built-in store to: its number of schema steps, the
+ * generation of its last step. The same on every database, since each runs the same steps under the
+ * same names.
  */
 const SCHEMA_GENERATION = Object.keys(migrations("sqlite")).length;
 
@@ -450,6 +482,8 @@ const SCHEMA_GENERATION = Object.keys(migrations("sqlite")).length;
 interface StartMode {
   readonly once: boolean;
   readonly standby: boolean | undefined;
+  /** Apply no schema step, and refuse a database that lacks one this version needs. */
+  readonly noMigrate: boolean;
 }
 
 async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<number> {
@@ -464,7 +498,10 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
   const env = io.env ?? process.env;
   const logger = io.logger ?? pino({ redact: REDACT });
   // Master keys are read now, at startup, like every other secret: a missing one stops the start.
-  const opened = await openWrapped(project, { env, logger }, io);
+  const context: OpenStoreContext = mode.noMigrate
+    ? { env, logger, migrate: "none" }
+    : { env, logger };
+  const opened = await openWrapped(project, context, io);
   if (typeof opened === "number") return opened;
   const { store } = opened;
   if (!opened.encrypted) logger.warn({ event: "unencrypted-storage" });
@@ -940,9 +977,9 @@ async function test(
 type OperatorRun = (context: OperatorContext) => Promise<number>;
 
 /**
- * The operator commands: status, messages, replay, clear, retention and audit. Parses and checks
- * the arguments first, so a mistake changes nothing and opens nothing; then loads the project,
- * opens its store and runs.
+ * The operator commands: status, messages, replay, clear, retention, audit, lease and migrate.
+ * Parses and checks the arguments first, so a mistake changes nothing and opens nothing; then loads
+ * the project, opens its store and runs.
  */
 async function operator(
   command: string,
@@ -958,7 +995,10 @@ async function operator(
   if (project === undefined) return EXIT.config;
   // Extensions log to stderr, so stdout holds only the report.
   const context = { env: io.env ?? process.env, logger: io.logger ?? pino(STDERR_LOG, stderr) };
-  const wrapped = await openWrapped(project, context, io);
+  const wrapped =
+    command === "migrate"
+      ? await openForMigrate(project, context, io)
+      : await openWrapped(project, context, io);
   if (typeof wrapped === "number") return wrapped;
   const { store } = wrapped;
   const audit = auditFor(store, io, (error) => {
@@ -1006,6 +1046,30 @@ async function operator(
     // Each hook gets up to its time limit to send what is queued; the command waits no longer.
     await hooks?.stop();
     await store.close();
+  }
+}
+
+/** What `migrate` says about a custom store, which keeps its own schema. */
+const MIGRATE_NEEDS_BUILT_IN_STORE =
+  "pathways: pathways.yaml: storage.module: migrate changes the schema of the built-in stores; a custom store keeps its own.\n";
+
+/**
+ * Opens the project's built-in store for `migrate`: below encryption, which a schema step does not
+ * need, and with the schema read and left as it is, so the command applies what it is asked to.
+ */
+async function openForMigrate(
+  project: ProjectConfig,
+  context: OpenStoreContext,
+  io: CliIo,
+): Promise<{ readonly store: MessageStore } | number> {
+  if (project.storage.kind === "module") {
+    io.err(MIGRATE_NEEDS_BUILT_IN_STORE);
+    return EXIT.failed;
+  }
+  try {
+    return { store: await openRawStore(project, { ...context, migrate: "inspect" }) };
+  } catch (error) {
+    return reportStoreError(error, io);
   }
 }
 
@@ -1078,6 +1142,13 @@ function parseOperator(
     case "retention":
       if (rest.length > 0) return usage(io);
       return (context) => retentionCommand(context, values["dry-run"] === true);
+    case "migrate": {
+      if (rest.length > 0) return usage(io);
+      const flags = { contract: values.contract === true, dryRun: values["dry-run"] === true };
+      // openForMigrate opens a built-in store, which is a Store.
+      return (context) =>
+        migrateCommand(context, (options) => (context.store as Store).migrate(options), flags);
+    }
     case "lease":
       if (rest.length !== 1) return usage(io);
       if (rest[0] === "status") {
@@ -1157,6 +1228,8 @@ function parseCli(argv: readonly string[]) {
       standby: { type: "boolean" },
       ready: { type: "boolean" },
       "if-configured": { type: "boolean" },
+      "no-migrate": { type: "boolean" },
+      contract: { type: "boolean" },
       force: { type: "boolean" },
       update: { type: "boolean" },
       print: { type: "boolean" },
