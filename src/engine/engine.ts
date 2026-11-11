@@ -1045,9 +1045,9 @@ export class Engine {
    * waits the poll interval between passes, or less when a source's pass is due sooner or one
    * ends. Retention runs after the first pass and then once every `retentionInterval`. A source's
    * `poll` that rejects before its deadline ends the run with that error, as it would a tick. Once
-   * `signal` aborts, a source's pass under way is cut off after what it is storing is stored, and a
-   * last pass takes what the sources took in through the transform and delivery, as the end of a
-   * tick does.
+   * `signal` aborts, a source's pass under way is cut off after what it is storing is stored, its
+   * `poll` call is waited for up to its deadline, and a last pass takes what the sources took in
+   * through the transform and delivery, as the end of a tick does.
    */
   async run(signal: AbortSignal): Promise<void> {
     const { pollIntervalMs, retentionIntervalMs } = this.options.project.settings;
@@ -1059,6 +1059,7 @@ export class Engine {
     for (const channel of this.channels) {
       channel.nextPollAt = nextPollAt(this.pollOf(channel).schedule, started, true);
     }
+    let ended = false;
     try {
       while (!signal.aborted) {
         await this.passes("due");
@@ -1076,21 +1077,35 @@ export class Engine {
         );
         this.raise(schedule);
       }
+      ended = true;
       await this.endPasses();
       this.raise(schedule);
       await this.passes("none");
     } finally {
       this.steppedAt = undefined;
       this.schedule = undefined;
-      await this.endPasses();
+      if (!ended) await this.endPasses();
     }
   }
 
-  /** Cuts each source's pass under way off, once what it is storing is stored. */
+  /**
+   * Cuts each source's pass under way off, once what it is storing is stored, and waits for its
+   * `poll` call to return, which the cut makes it do at its next message, up to its deadline.
+   */
   private async endPasses(): Promise<void> {
     for (const channel of this.channels) channel.cut?.abort();
     await Promise.all(this.channels.map((channel) => channel.polling ?? Promise.resolve()));
     await Promise.all(this.channels.flatMap((channel) => [...channel.receiving]));
+    const done = new AbortController();
+    await Promise.all(
+      this.channels.map((channel) =>
+        Promise.race([
+          channel.inFlight ?? Promise.resolve(),
+          this.wait(this.pollOf(channel).deadlineMs, done.signal),
+        ]),
+      ),
+    );
+    done.abort();
   }
 
   /** Throws the failure of a pass that ran beside {@link run}'s loop, if one failed. */

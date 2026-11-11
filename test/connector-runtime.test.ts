@@ -446,6 +446,9 @@ describe("a pass's deadline", () => {
     await eventually(() => slow.polledAt.length === 1 && clock.parked > 0);
     const storing = slow.sink?.receive(bytes("SYNTH-1"));
     stop.abort();
+    // Its poll call never returns: the run waits for it up to the pass's deadline, then ends.
+    await eventually(() => slow.signals[0]?.aborted === true && clock.parkedUntil(AT + 300_000));
+    clock.advance(300_000);
     await running;
     expect(await storing).toBeGreaterThan(0);
     // The last pass took it through to delivery, as the end of a tick would.
@@ -458,6 +461,33 @@ describe("a pass's deadline", () => {
     // Cut off by the stop, not by its deadline.
     expect(named(events, "poll-deadline")).toEqual([]);
     release();
+  });
+
+  it("ends a run as soon as a cut pass's poll call returns", async () => {
+    const clock = new FakeClock();
+    let polls = 0;
+    const quitting: SourceConnector = {
+      poll: (_sink, signal) => {
+        polls += 1;
+        return new Promise<void>((resolve) => {
+          signal?.addEventListener("abort", () => {
+            resolve();
+          });
+        });
+      },
+    };
+    const { engine } = await harness(
+      { quitting: channelYaml() },
+      { quitting: { source: quitting, destinations: [new Recorder()] } },
+      clock,
+    );
+    const stop = new AbortController();
+    const running = engine.run(stop.signal);
+    await eventually(() => polls === 1 && clock.parkedUntil(AT + 3_600_000));
+    stop.abort();
+    // No time passes: the call returned at the cut.
+    await running;
+    expect(clock.parked).toBe(0);
   });
 });
 
