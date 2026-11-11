@@ -1,10 +1,10 @@
-import { Cron } from "croner";
 import { z } from "zod";
 
 import { normalisePath } from "../connectors/http-path.js";
 import { FORMATS } from "../engine/worker-entry.js";
 import { LIFECYCLE_EVENTS, type LifecycleEventType } from "../extensions/events.js";
 import type { JsonValue } from "../transform.js";
+import { cronClass } from "./cron.js";
 import { ENV_NAME, fromEnvironment, type EnvReference } from "./env-ref.js";
 import { MAX_INDEX_BITS, MIN_INDEX_BITS } from "./meta-index.js";
 
@@ -1039,6 +1039,7 @@ function optionsWithModule(
 /** Whether `expression` is a cron expression of five fields, as the engine reads one. */
 function isCron(expression: string): boolean {
   try {
+    const Cron = cronClass();
     new Cron(expression, { mode: "5-part", paused: true });
     return true;
   } catch {

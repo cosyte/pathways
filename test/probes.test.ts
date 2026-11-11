@@ -1,7 +1,7 @@
 // The probes: /livez and /readyz on the opt-in probe listener (no token, one word, no channel names
 // or counts) and behind the health endpoint's authentication, the engine's liveness and readiness
 // behind them, the identity fields of the health body, and `pathways probe`.
-import { createServer, type Server, type Socket } from "node:net";
+import { createServer, type AddressInfo, type Server, type Socket } from "node:net";
 import { access, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -34,7 +34,7 @@ import {
   makeProject,
   type LogEvent,
 } from "./helpers.js";
-import { freePort, send } from "./net-helpers.js";
+import { CLOSED_PORT, onPickedPorts, orTaken, send } from "./net-helpers.js";
 
 const closers: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -116,11 +116,11 @@ async function get(
 
 /** Holds a port, as another program would. */
 async function holdPort(): Promise<{ port: number; server: Server }> {
-  const port = await freePort();
   // It never answers: a connection it takes stays open until the test ends.
   const sockets: Socket[] = [];
   const server = createServer((socket) => sockets.push(socket));
-  await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", resolve));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
   closers.push(async () => {
     for (const socket of sockets) socket.destroy();
     await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -256,7 +256,7 @@ describe("the probe listener", () => {
     const port = listener.port ?? 0;
     const config: ProbesConfig = { host: "0.0.0.0", port };
     expect(await askProbe(config, { ready: false })).toEqual({ status: 200, word: "live" });
-    const closed = await freePort();
+    const closed = CLOSED_PORT;
     const refused = await askProbe({ ...config, host: "::", port: closed }, { ready: false });
     expect(refused.status).toBeUndefined();
     const silent = await holdPort();
@@ -456,147 +456,190 @@ describe("the engine's liveness and readiness", () => {
 
 describe("pathways start with probes", () => {
   it("answers live while a source cannot listen, not ready, and says who it is in the health body", async () => {
-    const held = await holdPort();
-    const [probePort, healthPort] = [await freePort(), await freePort()];
-    const root = await project(
-      `probes: { port: ${String(probePort)}, plaintext: true }\nhealth: { port: ${String(healthPort)}, plaintext: true, auth: none }\n`,
-      `source:\n  http: { port: ${String(held.port)}, plaintext: true, auth: none }\ndestinations:\n  - file: { dir: ../../data/out }\n`,
-    );
-    const stop = new AbortController();
-    const started = runCli(["start", "-C", root], stop.signal);
-    try {
-      await until(async () => (await get(healthPort, "/")) !== undefined, "the health endpoint");
-      expect(await get(probePort, "/livez")).toEqual({ status: 200, body: "live\n" });
-      expect(await get(probePort, "/readyz")).toEqual({ status: 503, body: "unavailable\n" });
-      expect(await get(healthPort, "/livez")).toEqual({ status: 200, body: "live\n" });
-      expect(await get(healthPort, "/readyz")).toEqual({ status: 503, body: "unavailable\n" });
-      const report = JSON.parse((await get(healthPort, "/"))?.body ?? "") as HealthReport;
-      expect(report).toMatchObject({
-        status: "unavailable",
-        storage: "ok",
-        version: VERSION,
-        schemaGeneration: Object.keys(migrations("sqlite")).length,
-        role: "active",
-        leaseEpoch: 1,
-        draining: false,
-        channels: { adt: { source: "down" } },
-      });
-      expect(report.node).toMatch(/^[0-9a-f]{16}$/);
-      expect(Object.keys(report)).toEqual([
-        "status",
-        "storage",
-        "version",
-        "schemaGeneration",
-        "node",
-        "role",
-        "leaseEpoch",
-        "draining",
-        "channels",
-      ]);
-
-      expect(await cli(["probe", "-C", root])).toEqual({ code: EXIT.ok, out: "live\n", err: "" });
-      expect(await cli(["probe", "--ready", "-C", root])).toEqual({
-        code: EXIT.failed,
-        out: "unavailable\n",
-        err: "",
-      });
-      await new Promise<void>((resolve) => held.server.close(() => resolve()));
-      await until(
-        async () => (await get(probePort, "/readyz"))?.status === 200,
-        "the source to listen",
+    await onPickedPorts(2, async ([probePort = 0, healthPort = 0]) => {
+      const held = await holdPort();
+      const root = await project(
+        `probes: { port: ${String(probePort)}, plaintext: true }\nhealth: { port: ${String(healthPort)}, plaintext: true, auth: none }\n`,
+        `source:\n  http: { port: ${String(held.port)}, plaintext: true, auth: none }\ndestinations:\n  - file: { dir: ../../data/out }\n`,
       );
-      expect(await cli(["probe", "--ready", "-C", root])).toEqual({
-        code: EXIT.ok,
-        out: "ready\n",
-        err: "",
-      });
-    } finally {
-      stop.abort();
-    }
-    expect((await started.done).code).toBe(EXIT.ok);
-    expect(await get(probePort, "/livez")).toBeUndefined();
+      const stop = new AbortController();
+      const started = runCli(["start", "-C", root], stop.signal);
+      await orTaken(
+        async () => {
+          try {
+            await until(
+              async () => (await get(healthPort, "/")) !== undefined,
+              "the health endpoint",
+            );
+            expect(await get(probePort, "/livez")).toEqual({ status: 200, body: "live\n" });
+            expect(await get(probePort, "/readyz")).toEqual({ status: 503, body: "unavailable\n" });
+            expect(await get(healthPort, "/livez")).toEqual({ status: 200, body: "live\n" });
+            expect(await get(healthPort, "/readyz")).toEqual({
+              status: 503,
+              body: "unavailable\n",
+            });
+            const report = JSON.parse((await get(healthPort, "/"))?.body ?? "") as HealthReport;
+            expect(report).toMatchObject({
+              status: "unavailable",
+              storage: "ok",
+              version: VERSION,
+              schemaGeneration: Object.keys(migrations("sqlite")).length,
+              role: "active",
+              leaseEpoch: 1,
+              draining: false,
+              channels: { adt: { source: "down" } },
+            });
+            expect(report.node).toMatch(/^[0-9a-f]{16}$/);
+            expect(Object.keys(report)).toEqual([
+              "status",
+              "storage",
+              "version",
+              "schemaGeneration",
+              "node",
+              "role",
+              "leaseEpoch",
+              "draining",
+              "channels",
+            ]);
+
+            expect(await cli(["probe", "-C", root])).toEqual({
+              code: EXIT.ok,
+              out: "live\n",
+              err: "",
+            });
+            expect(await cli(["probe", "--ready", "-C", root])).toEqual({
+              code: EXIT.failed,
+              out: "unavailable\n",
+              err: "",
+            });
+            await new Promise<void>((resolve) => held.server.close(() => resolve()));
+            await until(
+              async () => (await get(probePort, "/readyz"))?.status === 200,
+              "the source to listen",
+            );
+            expect(await cli(["probe", "--ready", "-C", root])).toEqual({
+              code: EXIT.ok,
+              out: "ready\n",
+              err: "",
+            });
+          } finally {
+            stop.abort();
+          }
+          expect((await started.done).code).toBe(EXIT.ok);
+          expect(await get(probePort, "/livez")).toBeUndefined();
+        },
+        async () => {
+          stop.abort();
+          return (await started.done).err;
+        },
+      );
+    });
   }, 30_000);
 
   it("turns not ready, draining, as soon as it is told to stop, before its sources and probes close", async () => {
-    const probePort = await freePort();
-    const healthPort = await freePort();
-    // A destination that says when it starts a send, then takes its time over it.
-    const destination = `
-import { writeFile } from "node:fs/promises";
-export default () => ({
-  async deliver(): Promise<void> {
-    await writeFile(new URL("./sending", import.meta.url), "");
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
-  },
-});
-`;
-    const root = await project(
-      `probes: { port: ${String(probePort)}, plaintext: true }\nhealth: { port: ${String(healthPort)}, plaintext: true, auth: none }\ndefaults:\n  pollInterval: 20ms\n`,
-      "source:\n  file: { dir: ../../data/inbox, minAge: 0 }\ndestinations:\n  - module: ../../destination.ts\n",
-      { "destination.ts": destination },
-    );
-    const stop = new AbortController();
-    const started = runCli(["start", "-C", root], stop.signal);
-    try {
-      await until(async () => (await get(probePort, "/readyz"))?.status === 200, "ready");
-      await dropFileWhileRunning(join(root, "data/inbox/a01.hl7"), ADT_A01);
-      await until(
-        () =>
-          access(join(root, "sending")).then(
-            () => true,
-            () => false,
-          ),
-        "the send",
+    await onPickedPorts(2, async ([probePort = 0, healthPort = 0]) => {
+      // A destination that says when it starts a send, then takes its time over it.
+      const destination = `
+  import { writeFile } from "node:fs/promises";
+  export default () => ({
+    async deliver(): Promise<void> {
+      await writeFile(new URL("./sending", import.meta.url), "");
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+    },
+  });
+  `;
+      const root = await project(
+        `probes: { port: ${String(probePort)}, plaintext: true }\nhealth: { port: ${String(healthPort)}, plaintext: true, auth: none }\ndefaults:\n  pollInterval: 20ms\n`,
+        "source:\n  file: { dir: ../../data/inbox, minAge: 0 }\ndestinations:\n  - module: ../../destination.ts\n",
+        { "destination.ts": destination },
       );
-      stop.abort();
-      expect(await get(probePort, "/readyz")).toEqual({ status: 503, body: "draining\n" });
-      expect(await get(probePort, "/livez")).toEqual({ status: 200, body: "live\n" });
-      const report = JSON.parse((await get(healthPort, "/"))?.body ?? "") as HealthReport;
-      expect(report.draining).toBe(true);
-    } finally {
-      stop.abort();
-    }
-    expect((await started.done).code).toBe(EXIT.ok);
-    expect(started.events.map((e) => e.event)).toContain("delivered");
-    expect(await get(probePort, "/readyz")).toBeUndefined();
+      const stop = new AbortController();
+      const started = runCli(["start", "-C", root], stop.signal);
+      await orTaken(
+        async () => {
+          try {
+            await until(async () => (await get(probePort, "/readyz"))?.status === 200, "ready");
+            await dropFileWhileRunning(join(root, "data/inbox/a01.hl7"), ADT_A01);
+            await until(
+              () =>
+                access(join(root, "sending")).then(
+                  () => true,
+                  () => false,
+                ),
+              "the send",
+            );
+            stop.abort();
+            expect(await get(probePort, "/readyz")).toEqual({ status: 503, body: "draining\n" });
+            expect(await get(probePort, "/livez")).toEqual({ status: 200, body: "live\n" });
+            const report = JSON.parse((await get(healthPort, "/"))?.body ?? "") as HealthReport;
+            expect(report.draining).toBe(true);
+          } finally {
+            stop.abort();
+          }
+          expect((await started.done).code).toBe(EXIT.ok);
+          expect(started.events.map((e) => e.event)).toContain("delivered");
+          expect(await get(probePort, "/readyz")).toBeUndefined();
+        },
+        async () => {
+          stop.abort();
+          return (await started.done).err;
+        },
+      );
+    });
   }, 30_000);
 
   it("answers standby, not ready but live, while it waits for the engine lease", async () => {
-    const probePort = await freePort();
-    // A time to live no pause of a busy host outlasts: the holder keeps the lease until it stops,
-    // so the standby only ever waits. Each step waits for what the one before it said, not a clock.
-    const store = `storage: { module: ${LEASED_STORE_FILE} }\nlease:\n  ttl: 10m\n`;
-    const holderStop = new AbortController();
-    const holder = runCli(["start", "-C", await project(store)], holderStop.signal);
-    const standbyStop = new AbortController();
-    const healthPort = await freePort();
-    const standbyRoot = await project(
-      `${store}probes: { port: ${String(probePort)}, plaintext: true }\nhealth: { port: ${String(healthPort)}, plaintext: true, auth: none }\n`,
-    );
-    let standby: ReturnType<typeof runCli> | undefined;
-    try {
-      // The standby starts once the holder holds the lease, so it can never take it first.
-      await until(() => holder.events.some((e) => e.event === "lease-acquired"), "the holder");
-      standby = runCli(["start", "--standby", "-C", standbyRoot], standbyStop.signal);
-      const waiting = standby;
-      await until(() => waiting.events.some((e) => e.event === "standby-waiting"), "the standby");
-      expect(await get(probePort, "/readyz")).toEqual({ status: 503, body: "standby\n" });
-      expect(await get(probePort, "/livez")).toEqual({ status: 200, body: "live\n" });
-      const report = JSON.parse((await get(healthPort, "/"))?.body ?? "") as HealthReport;
-      expect(report).toMatchObject({
-        status: "standby",
-        role: "standby",
-        leaseEpoch: null,
-        schemaGeneration: null,
-        draining: false,
-        channels: {},
-      });
-    } finally {
-      holderStop.abort();
-      standbyStop.abort();
-    }
-    expect((await holder.done).code).toBe(EXIT.ok);
-    expect((await standby?.done)?.code).toBe(EXIT.ok);
+    await onPickedPorts(2, async ([probePort = 0, healthPort = 0]) => {
+      // A time to live no pause of a busy host outlasts: the holder keeps the lease until it stops,
+      // so the standby only ever waits. Each step waits for what the one before it said, not a clock.
+      const store = `storage: { module: ${LEASED_STORE_FILE} }\nlease:\n  ttl: 10m\n`;
+      const holderStop = new AbortController();
+      const holder = runCli(["start", "-C", await project(store)], holderStop.signal);
+      const standbyStop = new AbortController();
+      const standbyRoot = await project(
+        `${store}probes: { port: ${String(probePort)}, plaintext: true }\nhealth: { port: ${String(healthPort)}, plaintext: true, auth: none }\n`,
+      );
+      let standby: ReturnType<typeof runCli> | undefined;
+      await orTaken(
+        async () => {
+          try {
+            // The standby starts once the holder holds the lease, so it can never take it first.
+            await until(
+              () => holder.events.some((e) => e.event === "lease-acquired"),
+              "the holder",
+            );
+            standby = runCli(["start", "--standby", "-C", standbyRoot], standbyStop.signal);
+            const waiting = standby;
+            await until(
+              () => waiting.events.some((e) => e.event === "standby-waiting"),
+              "the standby",
+            );
+            expect(await get(probePort, "/readyz")).toEqual({ status: 503, body: "standby\n" });
+            expect(await get(probePort, "/livez")).toEqual({ status: 200, body: "live\n" });
+            const report = JSON.parse((await get(healthPort, "/"))?.body ?? "") as HealthReport;
+            expect(report).toMatchObject({
+              status: "standby",
+              role: "standby",
+              leaseEpoch: null,
+              schemaGeneration: null,
+              draining: false,
+              channels: {},
+            });
+          } finally {
+            holderStop.abort();
+            standbyStop.abort();
+          }
+          expect((await holder.done).code).toBe(EXIT.ok);
+          expect((await standby?.done)?.code).toBe(EXIT.ok);
+        },
+        async () => {
+          holderStop.abort();
+          standbyStop.abort();
+          await holder.done;
+          return (await standby?.done)?.err ?? "";
+        },
+      );
+    });
   }, 30_000);
 
   it("stops, saying why, when the probe port is taken", async () => {
@@ -615,21 +658,37 @@ export default () => ({
 
 describe("pathways start on a store without leases", () => {
   it("reports its role as single, with no lease epoch and no schema generation", async () => {
-    const healthPort = await freePort();
-    const root = await project(
-      `storage: { module: ${MEMORY_STORE_FILE} }\nhealth: { port: ${String(healthPort)}, plaintext: true, auth: none }\n`,
-    );
-    const stop = new AbortController();
-    const started = runCli(["start", "-C", root], stop.signal);
-    try {
-      await until(async () => (await get(healthPort, "/")) !== undefined, "the health endpoint");
-      const report = JSON.parse((await get(healthPort, "/"))?.body ?? "") as HealthReport;
-      expect(report).toMatchObject({ role: "single", leaseEpoch: null, schemaGeneration: null });
-      expect(report.node).toMatch(/^[0-9a-f]{16}$/);
-    } finally {
-      stop.abort();
-    }
-    expect((await started.done).code).toBe(EXIT.ok);
+    await onPickedPorts(1, async ([healthPort = 0]) => {
+      const root = await project(
+        `storage: { module: ${MEMORY_STORE_FILE} }\nhealth: { port: ${String(healthPort)}, plaintext: true, auth: none }\n`,
+      );
+      const stop = new AbortController();
+      const started = runCli(["start", "-C", root], stop.signal);
+      await orTaken(
+        async () => {
+          try {
+            await until(
+              async () => (await get(healthPort, "/")) !== undefined,
+              "the health endpoint",
+            );
+            const report = JSON.parse((await get(healthPort, "/"))?.body ?? "") as HealthReport;
+            expect(report).toMatchObject({
+              role: "single",
+              leaseEpoch: null,
+              schemaGeneration: null,
+            });
+            expect(report.node).toMatch(/^[0-9a-f]{16}$/);
+          } finally {
+            stop.abort();
+          }
+          expect((await started.done).code).toBe(EXIT.ok);
+        },
+        async () => {
+          stop.abort();
+          return (await started.done).err;
+        },
+      );
+    });
   });
 });
 
@@ -640,7 +699,7 @@ describe("pathways probe", () => {
       out: "",
       err: "pathways: pathways.yaml has no probes block, so there is nothing to ask.\n",
     });
-    const closed = await freePort();
+    const closed = CLOSED_PORT;
     expect(
       await cli([
         "probe",
@@ -683,7 +742,7 @@ describe("pathways probe", () => {
       out: "not-configured\n",
       err: "",
     });
-    const closed = await freePort();
+    const closed = CLOSED_PORT;
     const configured = await project(`probes: { port: ${String(closed)}, plaintext: true }\n`);
     expect(await cli(["probe", "--if-configured", "-C", configured])).toEqual({
       code: EXIT.failed,
