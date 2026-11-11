@@ -46,6 +46,8 @@ const STORE_METHOD_LIST = {
   releaseLease: false,
   leaseHolder: false,
   markDeliveredAndDropContent: false,
+  channelStates: false,
+  setChannelState: false,
   markDryRun: false,
 } satisfies Record<keyof MessageStore, boolean>;
 

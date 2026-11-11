@@ -561,25 +561,23 @@ export default () => ({
 
   it("answers standby, not ready but live, while it waits for the engine lease", async () => {
     const probePort = await freePort();
-    const store = `storage: { module: ${LEASED_STORE_FILE} }\nlease:\n  ttl: 1s\n`;
+    // A time to live no pause of a busy host outlasts: the holder keeps the lease until it stops,
+    // so the standby only ever waits. Each step waits for what the one before it said, not a clock.
+    const store = `storage: { module: ${LEASED_STORE_FILE} }\nlease:\n  ttl: 10m\n`;
     const holderStop = new AbortController();
     const holder = runCli(["start", "-C", await project(store)], holderStop.signal);
     const standbyStop = new AbortController();
     const healthPort = await freePort();
-    const standby = runCli(
-      [
-        "start",
-        "--standby",
-        "-C",
-        await project(
-          `${store}probes: { port: ${String(probePort)}, plaintext: true }\nhealth: { port: ${String(healthPort)}, plaintext: true, auth: none }\n`,
-        ),
-      ],
-      standbyStop.signal,
+    const standbyRoot = await project(
+      `${store}probes: { port: ${String(probePort)}, plaintext: true }\nhealth: { port: ${String(healthPort)}, plaintext: true, auth: none }\n`,
     );
+    let standby: ReturnType<typeof runCli> | undefined;
     try {
+      // The standby starts once the holder holds the lease, so it can never take it first.
       await until(() => holder.events.some((e) => e.event === "lease-acquired"), "the holder");
-      await until(() => standby.events.some((e) => e.event === "standby-waiting"), "the standby");
+      standby = runCli(["start", "--standby", "-C", standbyRoot], standbyStop.signal);
+      const waiting = standby;
+      await until(() => waiting.events.some((e) => e.event === "standby-waiting"), "the standby");
       expect(await get(probePort, "/readyz")).toEqual({ status: 503, body: "standby\n" });
       expect(await get(probePort, "/livez")).toEqual({ status: 200, body: "live\n" });
       const report = JSON.parse((await get(healthPort, "/"))?.body ?? "") as HealthReport;
@@ -596,7 +594,7 @@ export default () => ({
       standbyStop.abort();
     }
     expect((await holder.done).code).toBe(EXIT.ok);
-    expect((await standby.done).code).toBe(EXIT.ok);
+    expect((await standby?.done)?.code).toBe(EXIT.ok);
   }, 30_000);
 
   it("stops, saying why, when the probe port is taken", async () => {

@@ -29,8 +29,11 @@ worker, storage, and files out. It:
 It runs on SQLite by default, or on PostgreSQL, MySQL or SQL Server at an administrator URL, where it
 creates a database of its own and drops it afterwards.
 
-What dominates is durable commits: each message is stored, its outputs recorded, and its delivery
-marked, each in a transaction that reaches the disk. So the disk under the database matters more than
+What dominates is durable commits. With the default settings and one destination, each message takes
+four, each a transaction that reaches the disk: the message is stored, its outputs are recorded, its
+delivery is marked as sending before the send (the marker that flags a resend after a crash), and
+then marked delivered. Each further destination adds two more, and `resendFlag: false` saves the
+marker, one for each destination. So the disk under the database matters more than
 the CPU, and a figure from one machine is context for that machine, not a promise for another. The
 benchmark puts SQLite's file in the system temporary folder, often a memory-backed file system; compare
 a database server with its data on the same kind of disk, or say which disk each was on.

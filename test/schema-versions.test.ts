@@ -170,7 +170,7 @@ for (const database of TEST_DATABASES) {
       await olderSchema(storage, database);
       const error: unknown = await storage.open({ migrate: "none" }).catch((e: unknown) => e);
       expect((error as Error).message).toBe(
-        `the database schema is generation 6, last changed by Pathways 0.0.1; this is Pathways ${VERSION}, which needs generation 8`,
+        `the database schema is generation 6, last changed by Pathways 0.0.1; this is Pathways ${VERSION}, which needs generation 9`,
       );
       const db = await connect(storage);
       expect(await applied(db)).toHaveLength(6);

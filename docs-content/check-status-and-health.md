@@ -64,6 +64,7 @@ A `GET` or `HEAD` on any path but `/livez` and `/readyz` answers with JSON:
     "adt-to-lab": {
       "status": "retrying",
       "source": "up",
+      "state": "running",
       "messages": { "received": 0, "transformed": 41, "filtered": 3, "failed": 1, "cleared": 0 },
       "deliveries": { "pending": 2, "delivered": 39, "failed": 0, "cleared": 0, "retrying": 1 }
     }
@@ -85,6 +86,10 @@ cannot be read (`storage: "unreachable"`, and each channel's status `unknown`), 
 listen (its `source: "down"`; the engine keeps trying it). A destination that is down shows as a
 channel `retrying`, and the answer stays 200, because restarting the engine would not bring the
 destination back. Point a restart policy at the status code, and an alert at the channels.
+
+Each channel's `state` is `running`, or `paused` or `stopped` when an operator set it so with
+`pathways channel` (see [pause, stop and reload a channel](./pause-stop-and-reload-a-channel.md)).
+Neither is a fault: the answer stays 200, and the source of a paused channel shows `up`.
 
 A standby (`pathways start --standby`) answers 503 with `status: "standby"` and no channels until it
 takes the engine lease, so a readiness check routes nothing to it; point a liveness check at it only
