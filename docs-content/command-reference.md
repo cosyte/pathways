@@ -214,9 +214,11 @@ Applies the schema steps this version has and the database lacks, under the migr
 prints each with its generation and its tag:
 
 ```text
-Schema generation 6, last changed by Pathways 0.0.1; this is Pathways 0.0.2.
-Applied 1 step:
-  7  0007-schema-info  expand
+Schema generation 4, last changed by Pathways 0.0.1; this is Pathways 0.0.2.
+Applied 3 steps:
+  5  0005-send-markers  expand
+  6  0006-leases        expand
+  7  0007-schema-info   expand
 Now generation 7.
 ```
 

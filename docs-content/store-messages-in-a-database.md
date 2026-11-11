@@ -166,7 +166,7 @@ A release's code runs on its schema both before and after its own contract steps
 two moves: start the new version, which applies its expand steps, and contract later, once no older
 engine runs. Until then you can stop the new version and start the old one again on the same
 database, from this version on. Pathways 0.0.1 does not read `schema_info` and refuses a database a
-later version has opened, so going back to 0.0.1 needs a backup taken before the upgrade.
+later version has opened, so the only way back to 0.0.1 is a backup taken before the upgrade.
 [Upgrade Pathways](./upgrade-pathways.md) walks through it.
 
 When Pathways opens the database (`pathways start`, and every command that reads messages), it reads
@@ -185,7 +185,7 @@ With `pathways start --no-migrate`, Pathways applies nothing and refuses a schem
 step it needs, for a database that `pathways migrate` keeps up to date:
 
 ```text
-pathways: the database schema is generation 6, last changed by Pathways 0.0.1; this is Pathways 0.0.2, which needs generation 7. Run pathways migrate first, or start without --no-migrate.
+pathways: the database schema is generation 4, last changed by Pathways 0.0.1; this is Pathways 0.0.2, which needs generation 7. Run pathways migrate first, or start without --no-migrate.
 ```
 
 The migration lock is the database's own, taken through Kysely's migrator: a PostgreSQL advisory

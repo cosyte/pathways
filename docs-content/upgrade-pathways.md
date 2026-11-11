@@ -61,13 +61,14 @@ anything.
 
 ### Back to Pathways 0.0.1
 
-Pathways 0.0.1 does not read `schema_info`. It refuses a database that holds a step it does not
-know, so once this version or a later one has opened the database (with `pathways start` or any
-command that opens it), 0.0.1 stops with `the database schema could not be brought up to date`.
-Before your first upgrade from 0.0.1, take a backup of the database. To go back, stop every engine
-and restore that backup (messages stored after it are not in it), or remove by hand the
-`0007-schema-info` row from Kysely's `kysely_migration` table and drop the `schema_info` table, then
-start 0.0.1.
+Pathways 0.0.1 does not read `schema_info`, and knows schema steps `0001` to `0004` only. The first
+version after it applies `0005-send-markers`, `0006-leases` and `0007-schema-info` together when it
+opens a 0.0.1 database. Pathways 0.0.1 refuses a database that holds a step it does not know, so once
+a later version has opened the database (with `pathways start` or any command that opens it), 0.0.1
+stops with `the database schema could not be brought up to date`.
+
+The only way back to 0.0.1 is the backup taken before the upgrade: stop every engine, restore that
+backup, then start 0.0.1. Messages stored after the backup are not in it.
 
 ## Contract
 
