@@ -1855,7 +1855,7 @@ export class Store implements MessageStore, ContentStore {
       const messageId = Number(delivery.message_id);
       const dropped = await tx
         .updateTable("messages")
-        .set({ body: this.emptyBody(), error: null, content_dropped_at: at })
+        .set({ body: EMPTY_BODY[this.kind], error: null, content_dropped_at: at })
         .where("id", "=", messageId)
         .where("status", "=", "transformed")
         .where("content_dropped_at", "is", null)
@@ -1875,7 +1875,7 @@ export class Store implements MessageStore, ContentStore {
       if (dropped.numUpdatedRows === 0n) return false;
       await tx
         .updateTable("deliveries")
-        .set({ body: this.emptyBody(), last_error: null })
+        .set({ body: EMPTY_BODY[this.kind], last_error: null })
         .where("message_id", "=", messageId)
         .execute();
       return true;
@@ -2525,11 +2525,6 @@ export class Store implements MessageStore, ContentStore {
     return sql<SqlBool>`(${sql.ref("status")} = ${status} and ${lease})`;
   }
 
-  /** An empty body, as this database takes one. */
-  private emptyBody(): Uint8Array | RawBuilder<Uint8Array> {
-    return this.kind === "sqlserver" ? SQL_SERVER_EMPTY : EMPTY;
-  }
-
   /** Keeps a query's first row. */
   private first<TB extends keyof Tables, O>(
     query: SelectQueryBuilder<Tables, TB, O>,
@@ -2580,10 +2575,16 @@ export class Store implements MessageStore, ContentStore {
 const EMPTY = Buffer.alloc(0);
 
 /**
- * The same on SQL Server, as a literal: tedious declares a bound empty buffer with a maximum length
- * of 0, which the server refuses, and the refusal ends the transaction.
+ * An empty body, as each database takes one. On SQL Server it is a literal: tedious declares a
+ * bound empty buffer with a maximum length of 0, which the server refuses, and the refusal ends the
+ * transaction.
  */
-const SQL_SERVER_EMPTY = sql<Uint8Array>`0x`;
+const EMPTY_BODY: Readonly<Record<StorageKind, Uint8Array | RawBuilder<Uint8Array>>> = {
+  sqlite: EMPTY,
+  postgres: EMPTY,
+  mysql: EMPTY,
+  sqlserver: sql<Uint8Array>`0x`,
+};
 
 /**
  * A body as every driver binds it. mysql2 and Kysely's SQL Server driver recognise a `Buffer` as

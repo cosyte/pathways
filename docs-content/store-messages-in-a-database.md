@@ -88,7 +88,7 @@ erase at once what it deletes:
 - **PostgreSQL.** A delete or update leaves the old row version in the table as a dead row until
   `VACUUM` (autovacuum, by default) marks its space free. `VACUUM` does not overwrite that space, so the
   bytes stay until a new row reuses it, or `VACUUM FULL` rewrites the table. A body of more than about
-  2 KB lives in the table's TOAST table, which works the same way. The write-ahead log holds the row as
+  2 KB can be kept in the table's TOAST table instead, which works the same way. The write-ahead log holds the row as
   it was written until its segments are recycled, and archived segments keep it.
 - **MySQL and MariaDB (InnoDB).** A delete marks the row and a background purge removes it later; an
   update keeps the old version in the undo log until purge. Freed space is not overwritten. The redo

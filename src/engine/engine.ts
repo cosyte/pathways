@@ -930,8 +930,10 @@ export class Engine {
         // Delivered: freed now when the store handed it over and the destination kept none of it.
         if (copiesBodies(store) && copiesBodies(destination)) release(delivery.body);
         faultPoint("after-send-before-record");
-        if (config.settings.content === "dropAfterDelivery" && store.markDeliveredAndDropContent) {
-          const dropped = await store.markDeliveredAndDropContent(delivery.id, ...this.epoch());
+        if (config.settings.content === "dropAfterDelivery") {
+          // start() refused a store without the method for such a channel.
+          const dropping = store as Required<Pick<MessageStore, "markDeliveredAndDropContent">>;
+          const dropped = await dropping.markDeliveredAndDropContent(delivery.id, ...this.epoch());
           if (dropped) {
             logger.info({
               event: "content-dropped",
