@@ -86,6 +86,9 @@ const headerOptions: ScalingGateOptions<Uint8Array, HeaderReading> = {
   name: "@cosyte/pathways readHeader",
   parse: (payload) => readHeader(payload),
   weigh: (reading) => (reading.problem === undefined ? 1 : 0),
+  // 2,000 headers measured a clean base phase of 20.9 ms and 24 reports 16.5 ms on a runner, both
+  // over 10 ms. At 48 reports the self-check's quadratic pass took over a second, and its warmup did
+  // not settle inside its 5 s bound on a busy machine, so the size axis stays at 24.
   count: { n: 2_000, generate: (i) => bytesOf(adtMessage(i)) },
   size: {
     inputs: 24,
@@ -111,14 +114,17 @@ const jsonOptions: ScalingGateOptions<JsonInput, Promise<unknown>> = {
   name: "@cosyte/pathways decode, json",
   parse: decodeJson,
   weigh: () => 1,
-  // 2,000 records measured a base phase of 3.8 ms once the read checked numbers in one pass, under
-  // the 4 ms floor, so the count axis runs at 6,000.
-  count: { n: 6_000, generate: (i) => jsonInput(jsonRecord(i)) },
+  // Once the read checked numbers in one pass, 2,000 records measured a base phase of 3.8 ms, under
+  // the 4 ms floor, and 6,000 measured 11.1 ms on one runner: it runs at 12,000, for 10 ms or more
+  // on a slower one.
+  count: { n: 12_000, generate: (i) => jsonInput(jsonRecord(i)) },
   size: {
     // At 400 records against 1,600 the quadratic self-check measured a signal of 7.2, under the
     // ceiling of 8: the reviver's own cost per record is high enough that the hops need more
     // records to stand out: 1,000 against 4,000 measured 9.2, a margin of 1.15, so it runs at 1,600.
-    inputs: 3,
+    // Once the read checked numbers in one pass, 3 inputs measured a base phase of 7.0 ms on one
+    // runner and 3.9 ms on another, under the 4 ms floor: it runs at 12, for 10 ms or more.
+    inputs: 12,
     size: 1_600,
     generate: (i, records) => jsonInput(jsonRecords(i, records * RECORD_BYTES)),
   },
