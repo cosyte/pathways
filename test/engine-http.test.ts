@@ -366,6 +366,7 @@ describe("health", () => {
         adt: {
           status: "ok",
           source: "up",
+          state: "running",
           messages: { received: 0, transformed: 1, filtered: 0, failed: 0, cleared: 0 },
           deliveries: { pending: 0, delivered: 1, failed: 0, cleared: 0, retrying: 0 },
         },
@@ -401,7 +402,7 @@ describe("health", () => {
     expect(await engine.health()).toEqual({
       status: "unavailable",
       storage: "unreachable",
-      channels: { adt: { status: "unknown", source: "up" } },
+      channels: { adt: { status: "unknown", source: "up", state: "running" } },
     });
   });
 

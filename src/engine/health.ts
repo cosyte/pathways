@@ -10,7 +10,7 @@ import {
   type Env,
 } from "../connectors/endpoint.js";
 import type { ServerTlsMaterial } from "../connectors/tls.js";
-import type { DeliveryStatus, MessageStatus } from "../storage/store.js";
+import type { ChannelRunState, DeliveryStatus, MessageStatus } from "../storage/store.js";
 
 /**
  * One channel's state: `retrying` while a delivery waits to be tried again, else `failed` while it
@@ -23,6 +23,11 @@ export interface ChannelHealth {
   readonly status: ChannelStatus;
   /** `down` when the channel's source could not listen; the engine keeps trying. */
   readonly source: "up" | "down";
+  /**
+   * What an operator set the channel to with `pathways channel`: `paused` (its source takes
+   * nothing in) or `stopped` (nothing of it runs) are not faults, and leave the answer 200.
+   */
+  readonly state: ChannelRunState;
   /** Absent when storage could not be read. */
   readonly messages?: Readonly<Record<MessageStatus, number>>;
   /** Absent when storage could not be read. `retrying` counts pending deliveries that failed once. */

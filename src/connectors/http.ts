@@ -326,6 +326,7 @@ export class HttpDestination implements DestinationConnector {
         method: "POST",
         agent: this.agent,
         headers: { ...headers, ...flag, "Content-Length": message.body.byteLength },
+        ...(message.signal === undefined ? {} : { signal: message.signal }),
       });
       const timer = setTimeout(() => request.destroy(transientError("ETIMEDOUT")), timeoutMs);
       request.once("response", (response) => {

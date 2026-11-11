@@ -2,6 +2,7 @@ import type {
   AuditEntry,
   AuditInput,
   AuditQuery,
+  ChannelRunState,
   ClearResult,
   DeliveryStatus,
   ExpireResult,
@@ -24,7 +25,7 @@ import type {
   StoredMessage,
   StoreReceiveOptions,
 } from "../storage/store.js";
-import { leaseStore } from "../storage/store.js";
+import { channelStateStore, leaseStore } from "../storage/store.js";
 import { copiesBodies, markCopiesBodies, release } from "../storage/ownership.js";
 import {
   decrypt,
@@ -71,6 +72,9 @@ abstract class CodecStore implements MessageStore {
   readonly renewLease?: (name: string, epoch: number, ttlMs: number) => Promise<boolean>;
   readonly releaseLease?: (name: string, epoch?: number) => Promise<boolean>;
   readonly leaseHolder?: (name: string) => Promise<LeaseHolder | undefined>;
+  /** The channel state methods, straight through, present only when the store underneath has both. */
+  readonly channelStates?: () => Promise<Record<string, ChannelRunState>>;
+  readonly setChannelState?: (channel: string, state: ChannelRunState) => Promise<void>;
 
   protected constructor(inner: MessageStore, codec: Codec) {
     this.#inner = inner;
@@ -81,6 +85,11 @@ abstract class CodecStore implements MessageStore {
       this.renewLease = leases.renewLease;
       this.releaseLease = leases.releaseLease;
       this.leaseHolder = leases.leaseHolder;
+    }
+    const states = channelStateStore(inner);
+    if (states !== undefined) {
+      this.channelStates = states.channelStates;
+      this.setChannelState = states.setChannelState;
     }
     this.#innerCopies = copiesBodies(inner);
     // A codec that copies keeps no body it is handed and reads each into a new buffer; one that does

@@ -107,6 +107,16 @@ export class AuditLog {
     return entries;
   }
 
+  /**
+   * As {@link AuditLog.record}, naming `actor` instead of this log's own: for a command another
+   * process asked for, such as `pathways channel pause`, which names the user who ran it.
+   */
+  async recordAs(actor: string, ...inputs: readonly AuditInput[]): Promise<AuditEntry[]> {
+    const entries = await this.store.appendAudit(actor, inputs);
+    await this.emit(entries);
+    return entries;
+  }
+
   /** Tells the listeners of entries already stored, one entry at a time, in order. */
   async emit(entries: readonly AuditEntry[]): Promise<void> {
     for (const entry of entries) {

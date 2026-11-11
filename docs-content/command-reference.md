@@ -59,6 +59,10 @@ It first takes the engine lease, so a second engine on the same database is refu
 naming the holder. An engine that loses its lease stops sending and taking in at once and exits 1.
 See [one engine per database](./store-messages-in-a-database.md#one-engine-per-database).
 
+Once running it listens on a control socket for `pathways channel`, in a folder only its user can
+open; a start that finds another engine answering there for the same project refuses and exits 1.
+See [pause, stop and reload a channel](./pause-stop-and-reload-a-channel.md#the-control-socket).
+
 | Option      | Meaning                                                                                                                                                                 |
 | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--once`    | take in, transform and deliver what is waiting, then exit; no health endpoint, no retention                                                                             |
@@ -166,8 +170,9 @@ pathways audit [--action <name>] [--message <id>] [--channel <name>] [--since <t
 ```
 
 Reads the audit log, newest first. `--action` takes `search`, `view`, `content-view`, `replay`,
-`resend`, `clear`, `retention` or `config`; `--message` takes a message id; the other options are as
-for `messages`.
+`resend`, `clear`, `retention`, `config`, `lease-release`, `channel-pause`, `channel-resume`,
+`channel-stop`, `channel-halt` or `channel-reload`; `--message` takes a message id; the other
+options are as for `messages`.
 
 ## pathways rekey
 
@@ -198,15 +203,41 @@ host is gone, so the next start takes it at once instead of after it lapses, and
 to the audit log (`lease-release`); it exits 1 when the lease is already free. An engine still
 running under a lease freed this way stops at its next renewal.
 
+## pathways channel
+
+```text
+pathways channel pause <name> [--json]
+pathways channel resume <name> [--json]
+pathways channel stop <name> [--deadline <time>] [--json]
+pathways channel halt <name> [--deadline <time>] [--json]
+pathways channel reload <name> [--json]
+```
+
+Asks the engine running this project on this machine, through its control socket, to change one
+channel. `pause` stops the source taking messages in, while stored messages go on through the
+transform and delivery; `resume` runs the channel again; `stop` pauses it, ends its transforming and
+delivering after the message in hand, waits up to `--deadline` (30 seconds by default) and says what
+it left; `halt` does the same but cuts off the delivery in flight now; `reload` loads the channel's
+transform and settings anew and swaps them in between messages. A paused or stopped channel stays
+so across a restart, and on every engine on the same database. Each command is written to the audit
+log (`channel-pause` and the like) with the operating system user who ran it. When no engine
+answers, it says `engine not running` and exits 1. See
+[pause, stop and reload a channel](./pause-stop-and-reload-a-channel.md).
+
+| Option              | Meaning                                                                |
+| ------------------- | ---------------------------------------------------------------------- |
+| `--deadline <time>` | `stop`, `halt`: how long to wait for the work in flight, such as `30s` |
+| `--json`            | print the engine's report as one JSON document                         |
+
 ## Exit codes
 
-| Code | Meaning                                                                                                                                                                                                                                                                                                                                     |
-| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0    | done                                                                                                                                                                                                                                                                                                                                        |
-| 1    | a test failed; the engine, a command or an extension module could not start or stopped on an error; `init` could not write; `rekey` left a value not under the current key; a replay, resend or clear was refused, or the message failed again; another engine holds the lease, the engine lost its lease, or there was no lease to release |
-| 2    | the command line was not understood; nothing was done                                                                                                                                                                                                                                                                                       |
-| 3    | the configuration is invalid; nothing was done                                                                                                                                                                                                                                                                                              |
-| 4    | a message named does not exist; any others named were still acted on                                                                                                                                                                                                                                                                        |
+| Code | Meaning                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0    | done                                                                                                                                                                                                                                                                                                                                                                                                      |
+| 1    | a test failed; the engine, a command or an extension module could not start or stopped on an error; `init` could not write; `rekey` left a value not under the current key; a replay, resend or clear was refused, or the message failed again; another engine holds the lease, the engine lost its lease, or there was no lease to release; no engine runs the project, or a channel command was refused |
+| 2    | the command line was not understood; nothing was done                                                                                                                                                                                                                                                                                                                                                     |
+| 3    | the configuration is invalid; nothing was done                                                                                                                                                                                                                                                                                                                                                            |
+| 4    | a message named does not exist; any others named were still acted on                                                                                                                                                                                                                                                                                                                                      |
 
 ## Related
 

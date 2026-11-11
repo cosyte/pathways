@@ -194,12 +194,36 @@ interface LeasesTable {
   expires_at: Int64;
 }
 
+/**
+ * Each channel an operator paused or stopped, one row per channel: a channel with no row runs.
+ * Every engine on the database reads it at the top of each pass. Since 0007.
+ */
+interface ChannelStatesTable {
+  channel: string;
+  state: ChannelRunState;
+  /** When it was set, in epoch milliseconds by the database's clock. */
+  changed_at: Int64;
+}
+
 interface Tables {
   messages: MessagesTable;
   deliveries: DeliveriesTable;
   audit_log: AuditLogTable;
   leases: LeasesTable;
+  channel_states: ChannelStatesTable;
 }
+
+/**
+ * What an operator set a channel to: `running` (the default), `paused` (its source takes nothing
+ * in, while stored messages go on through the transform and delivery) or `stopped` (nothing of it
+ * runs). Kept in storage, so a restart, and every engine on the same database, honours it.
+ *
+ * @example
+ * ```ts
+ * const state: ChannelRunState = "paused";
+ * ```
+ */
+export type ChannelRunState = "running" | "paused" | "stopped";
 
 /**
  * What the engine tells storage about an incoming message. Every field is optional.
@@ -558,6 +582,8 @@ export interface ExpireResult {
  * - `retention`: a retention run and what it deleted;
  * - `config`: a change to the configuration, seen when the engine started.
  * - `lease-release`: `pathways lease release --force` freed the engine lease.
+ * - `channel-pause`, `channel-resume`, `channel-stop`, `channel-halt` and `channel-reload`: what
+ *   the `pathways channel` commands of the same names asked, with the user the client named.
  *
  * @example
  * ```ts
@@ -574,6 +600,11 @@ export const AUDIT_ACTIONS = [
   "retention",
   "config",
   "lease-release",
+  "channel-pause",
+  "channel-resume",
+  "channel-stop",
+  "channel-halt",
+  "channel-reload",
 ] as const;
 
 /**
@@ -766,6 +797,14 @@ export interface MessageStore {
   releaseLease?(name: string, epoch?: number): Promise<boolean>;
   /** The lease's last holder, or `undefined` when it was never taken. Optional, with {@link acquireLease}. */
   leaseHolder?(name: string): Promise<LeaseHolder | undefined>;
+  /**
+   * Every channel an operator paused or stopped, by name; a channel missing from it runs. Optional,
+   * with {@link setChannelState}: a store without them keeps a channel's state in the engine only,
+   * so a restart forgets it.
+   */
+  channelStates?(): Promise<Record<string, ChannelRunState>>;
+  /** Sets a channel's state; `running` removes its row. Optional, with {@link channelStates}. */
+  setChannelState?(channel: string, state: ChannelRunState): Promise<void>;
   /** How many messages of a channel stand at each status. The health endpoint reports these. */
   messageCounts(channel: string): Promise<Record<MessageStatus, number>>;
   /** How many deliveries of a channel stand at each status. */
@@ -915,6 +954,36 @@ export function leaseStore(store: MessageStore): LeaseStore | undefined {
     renewLease: (name, epoch, ttlMs) => leases.renewLease(name, epoch, ttlMs),
     releaseLease: (name, epoch) => leases.releaseLease(name, epoch),
     leaseHolder: (name) => leases.leaseHolder(name),
+  };
+}
+
+/**
+ * The channel state methods of {@link MessageStore}, both present.
+ *
+ * @example
+ * ```ts
+ * const states: ChannelStateStore | undefined = channelStateStore(store);
+ * ```
+ */
+export type ChannelStateStore = Required<Pick<MessageStore, "channelStates" | "setChannelState">>;
+
+/**
+ * `store`'s channel state methods, or `undefined` when it lacks either: such a store keeps a paused
+ * or stopped channel in the engine only. {@link Store} has them; a custom store may.
+ *
+ * @example
+ * ```ts
+ * const paused = (await channelStateStore(store)?.channelStates()) ?? {};
+ * ```
+ */
+export function channelStateStore(store: MessageStore): ChannelStateStore | undefined {
+  if (typeof store.channelStates !== "function" || typeof store.setChannelState !== "function") {
+    return undefined;
+  }
+  const states = store as MessageStore & ChannelStateStore;
+  return {
+    channelStates: () => states.channelStates(),
+    setChannelState: (channel, state) => states.setChannelState(channel, state),
   };
 }
 
@@ -1137,6 +1206,20 @@ export function migrations(kind: StorageKind): Record<string, Migration> {
           .addColumn("epoch", t.int64, (col) => col.notNull())
           .addColumn("since", t.int64, (col) => col.notNull())
           .addColumn("expires_at", t.int64, (col) => col.notNull())
+          .$call(t.table)
+          .execute();
+      },
+    },
+    "0007-channel-states": {
+      // Expand only: a new table, which an older Pathways never reads. A channel with no row runs,
+      // so the table starts empty. To roll it back, stop every engine and drop the table; every
+      // channel then runs, and nothing else refers to it.
+      async up(db: Kysely<unknown>): Promise<void> {
+        await db.schema
+          .createTable("channel_states")
+          .addColumn("channel", t.name, (col) => col.primaryKey())
+          .addColumn("state", t.status, (col) => col.notNull())
+          .addColumn("changed_at", t.int64, (col) => col.notNull())
           .$call(t.table)
           .execute();
       },
@@ -1888,6 +1971,37 @@ export class Store implements MessageStore, ContentStore {
       epoch: Number(row.epoch),
       expiresInMs: Number(row.expires_at) - Number(row.now),
     };
+  }
+
+  /** Every channel an operator paused or stopped. */
+  async channelStates(): Promise<Record<string, ChannelRunState>> {
+    const rows = await this.db.selectFrom("channel_states").select(["channel", "state"]).execute();
+    const states: Record<string, ChannelRunState> = {};
+    for (const row of rows) {
+      if (row.state === "paused" || row.state === "stopped") states[row.channel] = row.state;
+    }
+    return states;
+  }
+
+  /**
+   * Sets a channel's state in one transaction that writes before it reads: `running` deletes its
+   * row; else the row is changed, or made when there was none.
+   */
+  async setChannelState(channel: string, state: ChannelRunState): Promise<void> {
+    const now = DATABASE_NOW[this.kind];
+    await this.db.transaction().execute(async (tx) => {
+      if (state === "running") {
+        await tx.deleteFrom("channel_states").where("channel", "=", channel).execute();
+        return;
+      }
+      const changed = await tx
+        .updateTable("channel_states")
+        .set({ state, changed_at: now })
+        .where("channel", "=", channel)
+        .executeTakeFirst();
+      if (changed.numUpdatedRows > 0n) return;
+      await tx.insertInto("channel_states").values({ channel, state, changed_at: now }).execute();
+    });
   }
 
   /** How many messages of `channel` stand at each status. */

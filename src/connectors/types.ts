@@ -122,6 +122,13 @@ export interface OutgoingMessage {
    * `resendHeader`); it sends the message either way. Undefined on every other send.
    */
   readonly resend?: Resend | undefined;
+  /**
+   * Aborted when an operator halts the channel (`pathways channel halt`) while this send is in
+   * flight. A destination that honours it gives up the send at once; the engine stops waiting
+   * either way, records no outcome, and sends the message again after the channel resumes, flagged
+   * as a possible duplicate when the send was marked.
+   */
+  readonly signal?: AbortSignal | undefined;
 }
 
 /**

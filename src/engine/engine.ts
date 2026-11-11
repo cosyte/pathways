@@ -29,8 +29,14 @@ import type { ChannelContext } from "../extensions/types.js";
 import { AuditLog, auditEvent } from "../operator/audit.js";
 import { recordRetention, runRetention, type RetentionReport } from "../operator/retention.js";
 import { copiesBodies, markCopiesBodies, release } from "../storage/ownership.js";
-import type { MessageStore, ReceivedMessage } from "../storage/store.js";
-import { ChannelWorker, type TransformOutcome } from "./channel-worker.js";
+import {
+  channelStateStore,
+  type AuditAction,
+  type ChannelRunState,
+  type MessageStore,
+  type ReceivedMessage,
+} from "../storage/store.js";
+import { ChannelWorker, TransformLoadError, type TransformOutcome } from "./channel-worker.js";
 import type { EngineFence } from "./lease.js";
 import { channelStatus, type ChannelHealth, type HealthReport } from "./health.js";
 import type { FailureSummary } from "./worker-entry.js";
@@ -315,14 +321,78 @@ export interface EngineOptions {
 }
 
 interface RunningChannel {
-  readonly config: ChannelConfig;
-  readonly worker: ChannelWorker;
+  /** Replaced by a reload, between messages. */
+  config: ChannelConfig;
+  /** Replaced by a reload, between messages. */
+  worker: ChannelWorker;
   readonly connectors: ChannelConnectors;
   /** The channel's own hooks. */
   readonly hooks: HookSet;
   /** Set while the channel's source cannot listen: how often it has failed and when to try next. */
   down: { readonly attempts: number; readonly nextAt: number } | undefined;
+  /** What an operator set it to: a paused or stopped channel's source is closed. */
+  state: ChannelRunState;
+  /** Whether its listening source was started and not closed since. */
+  open: boolean;
+  /** Set while its source polls, so a pause can wait for the poll under way. */
+  polling: Promise<void> | undefined;
+  /** Set while a pass works on this channel, so a stop can wait for it. */
+  busy: Promise<void> | undefined;
+  /** Aborted by a halt, to cut off the delivery in flight; replaced once used. */
+  halt: AbortController;
+  /** Set while a stop waits for the channel's work in flight: a reload is refused meanwhile. */
+  draining: boolean;
+  /** The reloads, one after another. */
+  reloads: Promise<unknown>;
 }
+
+/**
+ * The commands `pathways channel` gives a running engine through its control socket.
+ *
+ * @example
+ * ```ts
+ * const command: ChannelCommand = "pause";
+ * ```
+ */
+export type ChannelCommand = "pause" | "resume" | "stop" | "halt" | "reload";
+
+/**
+ * What a channel command did: the channel's state after it and, for `stop` and `halt`, what it
+ * left. States and counts only, never content.
+ *
+ * - `drained`: `stop` and `halt` only, whether the work in flight ended within the deadline.
+ * - `left`: messages still to transform and deliveries still to send, which run after a resume.
+ * - `refused`: why nothing was done: `no-such-channel`, `draining` (a stop is under way, for a
+ *   reload), `invalid-config`, `not-configured` (the channel is gone from the configuration),
+ *   `needs-restart` (with `changed`: the settings a reload cannot apply, such as `source`), or
+ *   `transform-load-failed` (with `failure`: the error's name, never its text).
+ *
+ * @example
+ * ```ts
+ * const report: ChannelCommandReport = { channel: "adt", state: "paused" };
+ * ```
+ */
+export interface ChannelCommandReport {
+  readonly channel: string;
+  readonly state?: ChannelRunState;
+  readonly drained?: boolean;
+  readonly left?: { readonly toTransform: number; readonly toDeliver: number };
+  readonly refused?:
+    | "no-such-channel"
+    | "draining"
+    | "invalid-config"
+    | "not-configured"
+    | "needs-restart"
+    | "transform-load-failed";
+  readonly changed?: readonly string[];
+  readonly failure?: string;
+}
+
+/** How long `stop` waits for a channel's work in flight, unless told otherwise. */
+export const STOP_DEADLINE_MS = 30_000;
+
+/** The parts of a channel's configuration a reload cannot change: they need the engine restarted. */
+const RESTART_ONLY = ["source", "destinations", "format", "hooks"] as const;
 
 /**
  * The engine: for each channel, takes in new messages, runs them through the channel's transform,
@@ -399,6 +469,7 @@ export class Engine {
     const { project, logger } = this.options;
     const env = this.options.env ?? process.env;
     try {
+      const stored = await this.readStates();
       this.hooks = await HookSet.open(project.hooks, {
         file: "pathways.yaml",
         channel: undefined,
@@ -429,11 +500,26 @@ export class Engine {
           await hooks.stop();
           throw error;
         }
-        const channel: RunningChannel = { config, worker, connectors, hooks, down: undefined };
+        const channel: RunningChannel = {
+          config,
+          worker,
+          connectors,
+          hooks,
+          down: undefined,
+          state: stored?.[config.name] ?? "running",
+          open: false,
+          polling: undefined,
+          busy: undefined,
+          halt: new AbortController(),
+          draining: false,
+          reloads: Promise.resolve(),
+        };
         this.channels.push(channel);
         this.warnInsecure(config);
         await worker.start();
-        await this.startSource(channel);
+        // A channel paused or stopped before this start stays so: its source is not opened.
+        if (channel.state === "running") await this.startSource(channel);
+        else logger.info({ event: "channel-state", channel: config.name, state: channel.state });
       }
     } catch (error) {
       await this.stop();
@@ -441,17 +527,85 @@ export class Engine {
     }
   }
 
-  /** One pass over every channel: take in, transform, deliver. */
+  /**
+   * One pass over every channel: take in, transform, deliver. It first reads each channel's state
+   * from storage, so a pause, a resume or a stop given to another engine on the same database
+   * takes effect here within one pass. A paused channel's source takes nothing in while its stored
+   * messages go on through the transform and delivery; a stopped channel does nothing.
+   */
   async tick(): Promise<void> {
+    await this.syncStates();
     for (const channel of this.channels) {
       this.options.fence?.check();
-      if (channel.down !== undefined && channel.down.nextAt <= this.now()) {
-        await this.startSource(channel);
+      if (channel.state === "stopped") continue;
+      const pass = this.pass(channel);
+      channel.busy = settled(pass);
+      try {
+        await pass;
+      } finally {
+        channel.busy = undefined;
       }
-      await channel.connectors.source.poll?.(this.sinkFor(channel));
-      await this.transformAll(channel);
-      await this.deliverAll(channel);
     }
+  }
+
+  /** The state of each running channel, by name. */
+  channelStates(): Record<string, ChannelRunState> {
+    return Object.fromEntries(this.channels.map((c) => [c.config.name, c.state]));
+  }
+
+  /**
+   * Gives one channel a command, records it in the audit log naming `actor`, and says what it did.
+   *
+   * - `pause`: the source stops taking messages in (a listening one closes); stored messages go on
+   *   through the transform and delivery.
+   * - `resume`: the channel runs again, its source reopened.
+   * - `stop`: pauses, stops transforming and delivering after the message in hand, waits up to
+   *   `deadlineMs` for that, and reports what it left.
+   * - `halt`: as `stop`, but cuts off the delivery in flight at once, leaving it pending to be
+   *   sent again after a resume.
+   * - `reload`: swaps in `config`'s transform and settings, between messages, once a fresh worker
+   *   has loaded it; see {@link ChannelCommandReport} for when it is refused.
+   *
+   * The state is kept in storage when the store can, so a restart and every engine on the same
+   * database honour it.
+   */
+  async command(
+    command: ChannelCommand,
+    name: string,
+    options: {
+      readonly actor: string;
+      readonly deadlineMs?: number;
+      /** For `reload`: the channel's new configuration, or why there is none. */
+      readonly config?: ChannelConfig | "invalid-config" | "not-configured";
+    },
+  ): Promise<ChannelCommandReport> {
+    const channel = this.channels.find((c) => c.config.name === name);
+    if (channel === undefined) return { channel: name, refused: "no-such-channel" };
+    let report: ChannelCommandReport;
+    switch (command) {
+      case "pause":
+        await this.setState(channel, "paused");
+        report = { channel: name, state: channel.state };
+        break;
+      case "resume":
+        await this.setState(channel, "running");
+        report = { channel: name, state: channel.state };
+        break;
+      case "stop":
+      case "halt":
+        report = await this.drain(channel, command, options.deadlineMs ?? STOP_DEADLINE_MS);
+        break;
+      case "reload":
+        report = await this.reload(channel, options.config ?? "not-configured");
+        break;
+    }
+    await this.audit.recordAs(options.actor, {
+      action: `channel-${command}` satisfies AuditAction,
+      outcome: report.refused === undefined ? "ok" : "refused",
+      channel: name,
+      detail: auditDetail(report),
+    });
+    return report;
   }
 
   /**
@@ -522,6 +676,7 @@ export class Engine {
    */
   async health(): Promise<HealthReport> {
     const { project, store } = this.options;
+    const states = this.channelStates();
     const down = new Set(
       this.channels.filter((channel) => channel.down !== undefined).map((c) => c.config.name),
     );
@@ -539,6 +694,7 @@ export class Engine {
         channels[name] = {
           status: channelStatus(messages, deliveries),
           source: source(name),
+          state: states[name] ?? "running",
           messages,
           deliveries,
         };
@@ -546,7 +702,11 @@ export class Engine {
     } catch {
       storage = "unreachable";
       for (const { name } of project.channels) {
-        channels[name] = { status: "unknown", source: source(name) };
+        channels[name] = {
+          status: "unknown",
+          source: source(name),
+          state: states[name] ?? "running",
+        };
       }
     }
     const broken = storage !== "ok" || down.size > 0;
@@ -579,12 +739,167 @@ export class Engine {
     }
   }
 
+  /** One channel's part of a pass. */
+  private async pass(channel: RunningChannel): Promise<void> {
+    if (channel.state === "running") {
+      if (channel.down !== undefined && channel.down.nextAt <= this.now()) {
+        await this.startSource(channel);
+      }
+      const { source } = channel.connectors;
+      if (source.poll !== undefined) {
+        const poll = source.poll(this.sinkFor(channel));
+        channel.polling = settled(poll);
+        try {
+          await poll;
+        } finally {
+          channel.polling = undefined;
+        }
+      }
+    }
+    await this.transformAll(channel);
+    await this.deliverAll(channel);
+  }
+
+  /** Every channel's stored state, or `undefined` when the store keeps none. */
+  private async readStates(): Promise<Record<string, ChannelRunState> | undefined> {
+    return channelStateStore(this.options.store)?.channelStates();
+  }
+
+  /** Brings each channel to its stored state. A store that cannot be read leaves them as they are. */
+  private async syncStates(): Promise<void> {
+    let stored: Record<string, ChannelRunState> | undefined;
+    try {
+      stored = await this.readStates();
+    } catch (error) {
+      this.options.logger.warn({ event: "channel-states-unread", code: errorCode(error) });
+      return;
+    }
+    if (stored === undefined) return;
+    for (const channel of this.channels) {
+      await this.applyState(channel, stored[channel.config.name] ?? "running");
+    }
+  }
+
+  /** Stores a channel's new state, when the store keeps states, then applies it here. */
+  private async setState(channel: RunningChannel, state: ChannelRunState): Promise<void> {
+    await channelStateStore(this.options.store)?.setChannelState(channel.config.name, state);
+    await this.applyState(channel, state);
+  }
+
+  /** Opens or closes the channel's source to match `state`. */
+  private async applyState(channel: RunningChannel, state: ChannelRunState): Promise<void> {
+    if (channel.state === state) return;
+    channel.state = state;
+    this.options.logger.info({ event: "channel-state", channel: channel.config.name, state });
+    if (state === "running") {
+      await this.startSource(channel);
+      return;
+    }
+    // Paused or stopped: the source takes nothing more in. One that could not listen is not down
+    // any more, only paused, and is not tried again until a resume.
+    channel.down = undefined;
+    if (channel.open) {
+      channel.open = false;
+      await channel.connectors.source.stop?.();
+    }
+    // A poll under way finishes what it took in; none starts after it.
+    await channel.polling;
+  }
+
+  /**
+   * Stops a channel: closes its source, ends its pass after the message in hand (cutting off the
+   * delivery in flight for a halt), waits up to `deadlineMs` for that, and counts what is left.
+   */
+  private async drain(
+    channel: RunningChannel,
+    how: "stop" | "halt",
+    deadlineMs: number,
+  ): Promise<ChannelCommandReport> {
+    const { config } = channel;
+    channel.draining = true;
+    try {
+      await this.setState(channel, "stopped");
+      if (how === "halt") {
+        channel.halt.abort();
+        channel.halt = new AbortController();
+      }
+      const busy = channel.busy;
+      let drained = true;
+      if (busy !== undefined) {
+        const deadline = new AbortController();
+        drained = await Promise.race([
+          busy.then(() => true),
+          sleep(deadlineMs, false, { signal: deadline.signal }).catch(() => false),
+        ]);
+        deadline.abort();
+      }
+      const { store } = this.options;
+      const [messages, deliveries] = await Promise.all([
+        store.messageCounts(config.name),
+        store.deliveryCounts(config.name),
+      ]);
+      const left = { toTransform: messages.received, toDeliver: deliveries.pending };
+      return { channel: config.name, state: channel.state, drained, left };
+    } finally {
+      channel.draining = false;
+    }
+  }
+
+  /** Reloads a channel's transform and settings, one reload at a time. */
+  private reload(
+    channel: RunningChannel,
+    next: ChannelConfig | "invalid-config" | "not-configured",
+  ): Promise<ChannelCommandReport> {
+    const name = channel.config.name;
+    if (channel.draining) return Promise.resolve({ channel: name, refused: "draining" });
+    const run = channel.reloads.then(() => this.reloadNow(channel, next));
+    channel.reloads = run.catch(() => undefined);
+    return run;
+  }
+
+  private async reloadNow(
+    channel: RunningChannel,
+    next: ChannelConfig | "invalid-config" | "not-configured",
+  ): Promise<ChannelCommandReport> {
+    const name = channel.config.name;
+    if (typeof next === "string") return { channel: name, refused: next };
+    const changed = RESTART_ONLY.filter(
+      (key) => JSON.stringify(channel.config[key]) !== JSON.stringify(next[key]),
+    );
+    if (changed.length > 0) return { channel: name, refused: "needs-restart", changed };
+    const worker = new ChannelWorker({
+      channel: name,
+      transformFile: next.transform,
+      format: next.format,
+      timeoutMs: next.settings.timeoutMs,
+      memoryMb: next.settings.memoryMb,
+    });
+    try {
+      // A fresh worker, so the transform's module and every module it imports are read anew.
+      await worker.start();
+    } catch (error) {
+      await worker.stop();
+      /* v8 ignore next: start rejects only with TransformLoadError */
+      if (!(error instanceof TransformLoadError)) throw error;
+      return { channel: name, refused: "transform-load-failed", failure: error.failure.name };
+    }
+    // Swapped between messages: the pass reads the worker afresh for each one, and the old worker
+    // finishes the message it holds before it stops.
+    const old = channel.worker;
+    channel.worker = worker;
+    channel.config = next;
+    await old.stop();
+    this.options.logger.info({ event: "channel-reloaded", channel: name });
+    return { channel: name, state: channel.state };
+  }
+
   private async startSource(channel: RunningChannel): Promise<void> {
     const { source } = channel.connectors;
     if (source.start === undefined) return;
     const { logger } = this.options;
     try {
       await source.start(this.sinkFor(channel));
+      channel.open = true;
     } catch (error) {
       const attempts = (channel.down?.attempts ?? 0) + 1;
       const wait = retryDelay(attempts);
@@ -713,12 +1028,14 @@ export class Engine {
   }
 
   private async transformAll(channel: RunningChannel): Promise<void> {
-    const { config, worker } = channel;
     const { store, logger } = this.options;
     // A store that copies bodies hands each one over to whoever reads it, and keeps none it stores:
     // the body moves to the worker rather than being copied, and the outputs are freed once stored.
     const owned = copiesBodies(store);
     for (;;) {
+      // A stop ends the pass between messages; a reload swaps the worker and settings between them.
+      if (channel.state === "stopped") return;
+      const { config, worker } = channel;
       this.options.fence?.check();
       const next = await store.nextToTransform(config.name);
       if (next === undefined) return;
@@ -777,6 +1094,7 @@ export class Engine {
     const { store, logger } = this.options;
     for (const [index, destination] of connectors.destinations.entries()) {
       for (;;) {
+        if (channel.state === "stopped") return;
         const delivery = await store.nextDelivery(config.name, index);
         if (delivery === undefined || delivery.nextAttemptAt > this.now()) break;
         // Still marked: an attempt was handed over and its outcome never recorded, so it counts.
@@ -818,14 +1136,31 @@ export class Engine {
             ...this.epoch(),
           );
         }
+        const { signal } = channel.halt;
         try {
-          await destination.deliver({
-            messageId: delivery.messageId,
-            seq: delivery.seq,
-            body: delivery.body,
-            ...(resend === undefined ? {} : { resend }),
-          });
+          await untilAborted(
+            destination.deliver({
+              messageId: delivery.messageId,
+              seq: delivery.seq,
+              body: delivery.body,
+              ...(resend === undefined ? {} : { resend }),
+              signal,
+            }),
+            signal,
+          );
         } catch (error) {
+          if (signal.aborted) {
+            // Halted: no outcome is recorded, so the delivery stays pending, and its marker (when
+            // written) flags the next send as a possible duplicate, since the receiver may have it.
+            logger.warn({
+              event: "delivery-halted",
+              channel: config.name,
+              destination: index,
+              delivery: delivery.id,
+              attempt,
+            });
+            return;
+          }
           if (error instanceof DeliveryRejected) {
             await store.failDelivery(delivery.id, `rejected: ${error.reason}`, ...this.epoch());
             logger.warn({
@@ -933,6 +1268,55 @@ export class Engine {
 export function errorCode(error: unknown): string | undefined {
   const code = (error as { code?: unknown } | undefined)?.code;
   return typeof code === "string" ? code : undefined;
+}
+
+/**
+ * Settles as `work` does, or rejects as soon as `signal` aborts, leaving `work` to settle unheard.
+ */
+function untilAborted(work: Promise<void>, signal: AbortSignal): Promise<void> {
+  // The signal is read just before the send starts, with nothing awaited between, so it cannot
+  // have aborted yet: a halt replaces a used signal with a fresh one.
+  return new Promise((resolve, reject) => {
+    const onAbort = (): void => {
+      reject(new Error("the channel was halted"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(
+      () => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      },
+      (error: Error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+/** Waits for `work` to settle, either way: its own caller handles a rejection. */
+async function settled(work: Promise<void>): Promise<void> {
+  try {
+    await work;
+  } catch {
+    // Seen by the pass's own caller.
+  }
+}
+
+/** A command's report as an audit entry's particulars: states, counts and names only. */
+function auditDetail(
+  report: ChannelCommandReport,
+): Readonly<Record<string, string | number | boolean>> {
+  return {
+    ...(report.state === undefined ? {} : { state: report.state }),
+    ...(report.refused === undefined ? {} : { reason: report.refused }),
+    ...(report.drained === undefined ? {} : { drained: report.drained }),
+    ...(report.left === undefined
+      ? {}
+      : { toTransform: report.left.toTransform, toDeliver: report.left.toDeliver }),
+    ...(report.changed === undefined ? {} : { changed: report.changed.join(",") }),
+    ...(report.failure === undefined ? {} : { failure: report.failure }),
+  };
 }
 
 /** An error's name, or the type of what was thrown when it is not an error: never its text. */

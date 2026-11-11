@@ -30,6 +30,7 @@ text or a source file's name. Commands whose standard output is their report (`s
 | `delivery-retry`      | warn  | `channel`, `destination`, `delivery`, `attempt`, `retryInMs`, `code`                   | it is tried again after `retryInMs`                                                                     |
 | `delivery-redirected` | warn  | `channel`, `destination`, `delivery`, `attempt`, `retryInMs`, `status`, `locationHost` | an HTTP destination answered a 3xx; held, never followed, and tried again after `retryInMs` (5 minutes) |
 | `delivery-rejected`   | warn  | `channel`, `destination`, `delivery`, `reason`                                         | the destination rejected it for good                                                                    |
+| `delivery-halted`     | warn  | `channel`, `destination`, `delivery`, `attempt`                                        | `pathways channel halt` cut the send off; it stays pending and is sent again, flagged, after a resume   |
 
 A `transform-failed` line's `kind` is `load`, `parse`, `transform`, `output`, `timeout`, `memory` or
 `crash`. `where` is `file:line:column` in the transform, when it threw.
@@ -53,20 +54,23 @@ A `transform-failed` line's `kind` is `load`, `parse`, `transform`, `output`, `t
 
 ### Configuration and storage
 
-| Event                  | Meaning                                                                                        |
-| ---------------------- | ---------------------------------------------------------------------------------------------- |
-| `plaintext`            | an endpoint runs without TLS (`endpoint` says which); logged at every start                    |
-| `unauthenticated`      | a listening endpoint has neither a token nor `tls.ca`                                          |
-| `plaintext-copies`     | a file source keeps plaintext copies (`keepProcessed: true`)                                   |
-| `unencrypted-storage`  | `encryption: none`                                                                             |
-| `retention`            | a retention run, with the `messages` and `deliveries` it deleted                               |
-| `retention-failed`     | a retention run failed, by `code`; the next run tries again                                    |
-| `lease-acquired`       | the engine took the engine lease, with its `node` and `epoch`                                  |
-| `lease-lost`           | the engine lost its lease, with the `reason` and `epoch`; it stops and exits 1                 |
-| `lease-unsupported`    | a custom store has no lease methods: the engine runs unfenced, and a second one is not refused |
-| `lease-release-failed` | the lease could not be freed at a stop, by `code`; it lapses instead                           |
-| `standby`              | started as a standby, with its `node`                                                          |
-| `standby-waiting`      | a standby is waiting for the lease another engine holds (`holder`, `epoch`)                    |
+| Event                   | Meaning                                                                                        |
+| ----------------------- | ---------------------------------------------------------------------------------------------- |
+| `plaintext`             | an endpoint runs without TLS (`endpoint` says which); logged at every start                    |
+| `unauthenticated`       | a listening endpoint has neither a token nor `tls.ca`                                          |
+| `plaintext-copies`      | a file source keeps plaintext copies (`keepProcessed: true`)                                   |
+| `unencrypted-storage`   | `encryption: none`                                                                             |
+| `retention`             | a retention run, with the `messages` and `deliveries` it deleted                               |
+| `retention-failed`      | a retention run failed, by `code`; the next run tries again                                    |
+| `lease-acquired`        | the engine took the engine lease, with its `node` and `epoch`                                  |
+| `lease-lost`            | the engine lost its lease, with the `reason` and `epoch`; it stops and exits 1                 |
+| `lease-unsupported`     | a custom store has no lease methods: the engine runs unfenced, and a second one is not refused |
+| `lease-release-failed`  | the lease could not be freed at a stop, by `code`; it lapses instead                           |
+| `standby`               | started as a standby, with its `node`                                                          |
+| `standby-waiting`       | a standby is waiting for the lease another engine holds (`holder`, `epoch`)                    |
+| `channel-state`         | a channel's `state` changed (`running`, `paused` or `stopped`), here or on another engine      |
+| `channel-states-unread` | the channel states could not be read at the top of a pass, by `code`; the last ones stand      |
+| `channel-reloaded`      | `pathways channel reload` swapped in the channel's new transform and settings                  |
 
 ### Hooks and the audit log
 

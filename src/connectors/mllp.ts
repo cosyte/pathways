@@ -400,8 +400,10 @@ export class MllpDestination implements DestinationConnector {
     try {
       // The library times the ACK from when the write flushes. This deadline, a little later,
       // also covers a write that never flushes because the receiver stopped reading.
+      const deadline = AbortSignal.timeout(this.options.ackTimeoutMs + SEND_GRACE_MS);
       reply = await client.send(payload, {
-        signal: AbortSignal.timeout(this.options.ackTimeoutMs + SEND_GRACE_MS),
+        signal:
+          message.signal === undefined ? deadline : AbortSignal.any([deadline, message.signal]),
       });
     } catch (error) {
       this.reset();

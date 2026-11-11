@@ -143,6 +143,13 @@ The `leases` table comes with migration `0006-leases`, which only adds the table
 while deliveries are in flight, and an older Pathways never reads it. It has no rollback step; to
 remove it, stop every engine and drop the table.
 
+The `channel_states` table, migration `0007-channel-states`, holds each channel an operator paused or
+stopped (see [pause, stop and reload a channel](./pause-stop-and-reload-a-channel.md)); a channel
+with no row runs. It too only adds a table, and has no rollback step: dropping it, with every engine
+stopped, sets every channel running again. A custom store may implement `channelStates` and
+`setChannelState`; one without them keeps a channel's state in the engine only, and a restart
+forgets it.
+
 If the database becomes unreachable while the engine runs, the engine stops with exit code 1 and the
 driver's error code, for a supervisor (systemd, Docker, Kubernetes) to restart it. Nothing is lost: a
 message is acknowledged only once it is stored, and a delivery is recorded only once it is done.

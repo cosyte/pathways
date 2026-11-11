@@ -4,13 +4,27 @@ import { parseArgs } from "node:util";
 import { pino, type Logger } from "pino";
 
 import { ConfigError, loadProject } from "./config/load.js";
-import type { ProjectConfig } from "./config/schema.js";
+import { parseDuration, type ChannelConfig, type ProjectConfig } from "./config/schema.js";
 import type { Env } from "./connectors/endpoint.js";
 import { EncryptionError } from "./encryption/envelope.js";
 import { ENCRYPTION_REQUIRED, type KeyProvider } from "./encryption/keys.js";
 import { rekey, rekeyComplete, type RekeyCounts } from "./encryption/rekey.js";
 import { TransformLoadError } from "./engine/channel-worker.js";
-import { Engine, errorCode } from "./engine/engine.js";
+import {
+  controlAddress,
+  ControlError,
+  ControlServer,
+  EngineNotRunning,
+  sendControl,
+  CONTROL_VERSION,
+} from "./engine/control.js";
+import {
+  Engine,
+  errorCode,
+  STOP_DEADLINE_MS,
+  type ChannelCommand,
+  type ChannelCommandReport,
+} from "./engine/engine.js";
 import { healthEndpointFor, type HealthEndpoint, type HealthReport } from "./engine/health.js";
 import {
   describeHolder,
@@ -21,7 +35,7 @@ import {
 import { EXIT } from "./exit.js";
 import { HookSet } from "./extensions/hooks.js";
 import { ExtensionLoadError } from "./extensions/load.js";
-import { AuditLog, auditEvent, type AuditListener } from "./operator/audit.js";
+import { AuditLog, auditEvent, operatingSystemUser, type AuditListener } from "./operator/audit.js";
 import {
   auditCommand,
   clearCommand,
@@ -119,6 +133,18 @@ Commands:
   lease release --force
                       Free the engine lease of an engine whose host is gone,
                       so the next start takes it at once. Audited
+  channel pause <name>
+                      Ask the running engine to stop the channel's source
+                      taking messages in; stored ones go on to delivery
+  channel resume <name>
+                      Run a paused or stopped channel again
+  channel stop <name> Pause the channel, stop transforming and delivering
+                      after the message in hand, and say what it left
+  channel halt <name> As stop, but cut off the delivery in flight now; it is
+                      sent again, flagged, after a resume
+  channel reload <name>
+                      Load the channel's transform and settings anew in a
+                      fresh worker and swap it in between messages
 
 The commands that read or change stored messages open the database as start
 does, so they need the same encryption keys.
@@ -131,12 +157,15 @@ Options:
                         engine holding the lease stops, then take over.
                         Needs a database server
       --force           lease release: say the lease's host is gone
+      --deadline <time> channel stop, halt: how long to wait for the work in
+                        flight, such as 30s (default 30s)
       --update          test: save the current outputs as the expected ones
       --print           validate: print the configuration as start reads it,
                         as JSON, with each setting read from the environment
                         and the variable it named; secrets stay references
       --json            status, messages, replay, clear, retention, audit,
-                        lease: print one JSON document instead of text
+                        lease, channel: print one JSON document instead of
+                        text
       --channel <name>  messages, audit: only this channel
       --status <state>  messages: only this state: received, queued, retrying,
                         delivered, filtered, failed or cleared
@@ -151,8 +180,9 @@ Options:
       --resend          replay: send the stored outputs again, untransformed
       --dry-run         retention: say what would be deleted, delete nothing
       --action <name>   audit: only this action: search, view, content-view,
-                        replay, resend, clear, retention, config or
-                        lease-release
+                        replay, resend, clear, retention, config,
+                        lease-release, channel-pause, channel-resume,
+                        channel-stop, channel-halt or channel-reload
       --message <id>    audit: only entries about this message
       --encrypt-plaintext
                         rekey: also encrypt what was stored while encryption
@@ -162,14 +192,17 @@ Options:
 
 Every replay, resend, clear, search, view and content view is written to the
 audit log with the operating system user, as are retention runs and the
-configuration changes pathways start sees. The hooks in pathways.yaml receive
+configuration changes pathways start sees. A channel command is written with
+the user the command reports; the control socket's folder, open to that user
+alone, is what limits who can send one. The hooks in pathways.yaml receive
 each entry as an audit event.
 
 Exit codes: 0 done; 1 a test failed, the engine, a command or an extension
 module could not start or stopped on an error, init could not write the
 project, rekey left a value not under the current key, a replay, resend or
 clear was refused or the message failed again, another engine holds the lease,
-the engine lost its lease, or there was no lease to release; 2 the command line was not
+the engine lost its lease, there was no lease to release, no engine runs the
+project, or a channel command was refused; 2 the command line was not
 understood; 3 the configuration is invalid; 4 a message named does not exist.
 `;
 
@@ -196,6 +229,7 @@ const OPTIONS: Readonly<Record<string, readonly OptionName[]>> = {
   audit: ["json", "action", "message", "channel", "since", "until", "limit", "before"],
   rekey: ["encrypt-plaintext"],
   lease: ["json", "force"],
+  channel: ["json", "deadline"],
 };
 
 /**
@@ -256,6 +290,8 @@ export async function run(argv: readonly string[], io: CliIo): Promise<number> {
     case "rekey":
       if (rest.length > 0) return usage(io);
       return rekeyStore(projectDir, values["encrypt-plaintext"] === true, io);
+    case "channel":
+      return channelCommand(projectDir, rest, values, io);
     default:
       return operator(command, rest, values, projectDir, io);
   }
@@ -496,6 +532,7 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
     }
     return await runEngine(engine, project, store, audit, io, {
       once,
+      env,
       signal,
       lease,
       // A standby's endpoint is listening already.
@@ -593,6 +630,7 @@ async function runEngine(
   io: CliIo,
   run: {
     readonly once: boolean;
+    readonly env: Env;
     readonly signal: AbortSignal;
     readonly lease: EngineLease | undefined;
     readonly health: HealthEndpoint | undefined;
@@ -621,6 +659,7 @@ async function runEngine(
   }
   run.onActive();
 
+  let control: ControlServer | undefined;
   try {
     try {
       // After the engine has started, so its hooks receive these entries too.
@@ -628,6 +667,11 @@ async function runEngine(
     } catch {
       io.err("pathways: the audit log could not be written.\n");
       return EXIT.failed;
+    }
+    // The control socket `pathways channel` asks through. A single pass opens none.
+    if (!run.once) {
+      control = await openControl(engine, project, run.env, io);
+      if (control === undefined) return EXIT.failed;
     }
     if (!(await listenHealth(run.health, io))) return EXIT.failed;
     if (run.once) await engine.tick();
@@ -655,10 +699,147 @@ async function runEngine(
     io.err(`pathways: the engine stopped on an error${code === undefined ? "" : ` (${code})`}.\n`);
     return EXIT.failed;
   } finally {
+    await control?.stop();
     await engine.stop();
   }
   // The lease was lost between passes: the run ended at once, before the next check.
   if (run.lease?.lossReason !== undefined) return leaseLost(io, run.lease.lossReason);
+  return EXIT.ok;
+}
+
+/**
+ * Opens the project's control socket, answering each request with the engine's channel command.
+ * A reload reads the project's configuration anew. Says why and returns undefined when it cannot:
+ * another engine runs this project on this machine, or the socket's folder is not this user's.
+ */
+async function openControl(
+  engine: Engine,
+  project: ProjectConfig,
+  env: Env,
+  io: CliIo,
+): Promise<ControlServer | undefined> {
+  const reloadConfig = async (
+    name: string,
+  ): Promise<ChannelConfig | "invalid-config" | "not-configured"> => {
+    let next: ProjectConfig;
+    try {
+      next = await loadProject(project.root, { env });
+    } catch (error) {
+      /* v8 ignore next: loadProject rejects only with ConfigError */
+      if (!(error instanceof ConfigError)) throw error;
+      return "invalid-config";
+    }
+    return next.channels.find((channel) => channel.name === name) ?? "not-configured";
+  };
+  let server: ControlServer;
+  try {
+    server = new ControlServer(controlAddress(project.root), async (request) =>
+      engine.command(request.command, request.channel, {
+        actor: request.user,
+        ...(request.deadlineMs === undefined ? {} : { deadlineMs: request.deadlineMs }),
+        ...(request.command === "reload" ? { config: await reloadConfig(request.channel) } : {}),
+      }),
+    );
+    await server.start();
+  } catch (error) {
+    const reason = error instanceof ControlError ? error.reason : errorCode(error);
+    io.err(
+      reason === "in-use"
+        ? "pathways: another engine runs this project on this machine: its control socket answers.\n"
+        : `pathways: the control socket could not be opened (${reason ?? "error"}).\n`,
+    );
+    return undefined;
+  }
+  return server;
+}
+
+const CHANNEL_COMMANDS: readonly ChannelCommand[] = ["pause", "resume", "stop", "halt", "reload"];
+
+/** What `pathways channel` says when the engine refused a command. */
+const CHANNEL_REFUSALS: Readonly<Record<NonNullable<ChannelCommandReport["refused"]>, string>> = {
+  "no-such-channel": "the engine runs no channel of that name",
+  draining: "a stop is under way on that channel; reload it once it has stopped",
+  "invalid-config":
+    'the configuration is invalid, so the running one was kept; "pathways validate" says why',
+  "not-configured": "that channel is no longer in the configuration; the running one was kept",
+  "needs-restart": "these settings take effect only when the engine is restarted",
+  "transform-load-failed": "the new transform did not load, so the running one was kept",
+};
+
+/**
+ * `pathways channel <command> <name>`: asks the engine running this project, through its control
+ * socket, to pause, resume, stop, halt or reload one channel, naming the operating system user.
+ */
+async function channelCommand(
+  projectDir: string,
+  rest: readonly string[],
+  values: Values,
+  io: CliIo,
+): Promise<number> {
+  const [command, name, ...more] = rest;
+  if (
+    command === undefined ||
+    name === undefined ||
+    more.length > 0 ||
+    !CHANNEL_COMMANDS.includes(command as ChannelCommand)
+  ) {
+    return invalid(io, "channel takes a command (pause, resume, stop, halt or reload) and a name.");
+  }
+  if (!isChannelName(name))
+    return invalid(io, "a channel name is lowercase letters, digits and hyphens.");
+  const drains = command === "stop" || command === "halt";
+  if (values.deadline !== undefined && !drains) return usage(io);
+  const deadlineMs = values.deadline === undefined ? undefined : parseDuration(values.deadline);
+  if (values.deadline !== undefined && deadlineMs === undefined) {
+    return invalid(io, "--deadline takes a duration, such as 30s or 2m.");
+  }
+  let reply;
+  try {
+    reply = await sendControl(
+      controlAddress(projectDir),
+      {
+        v: CONTROL_VERSION,
+        command: command as ChannelCommand,
+        channel: name,
+        user: operatingSystemUser(),
+        ...(deadlineMs === undefined ? {} : { deadlineMs }),
+      },
+      (deadlineMs ?? (drains ? STOP_DEADLINE_MS : 0)) + 30_000,
+    );
+  } catch (error) {
+    if (error instanceof EngineNotRunning) {
+      io.err(
+        `pathways: engine not running: nothing answers on this project's control socket (${error.code}).\n`,
+      );
+      return EXIT.failed;
+    }
+    io.err(`pathways: the engine could not be asked (${errorCode(error) ?? "error"}).\n`);
+    return EXIT.failed;
+  }
+  if (!reply.ok) {
+    io.err(`pathways: the engine refused the request (${reply.error}).\n`);
+    return EXIT.failed;
+  }
+  const { report } = reply;
+  if (values.json === true) io.out(`${JSON.stringify(report)}\n`);
+  if (report.refused !== undefined) {
+    const changed = report.changed === undefined ? "" : `: ${report.changed.join(", ")}`;
+    const failure = report.failure === undefined ? "" : ` (${report.failure})`;
+    io.err(`pathways: channel ${name}: ${CHANNEL_REFUSALS[report.refused]}${changed}${failure}.\n`);
+    return EXIT.failed;
+  }
+  if (values.json !== true) {
+    const lines = [
+      `${name}: ${report.state ?? "running"}${command === "reload" ? " (reloaded)" : ""}`,
+    ];
+    if (report.drained === false) lines.push("  work was still in flight at the deadline");
+    if (report.left !== undefined) {
+      lines.push(
+        `  left: ${report.left.toTransform} to transform, ${report.left.toDeliver} to deliver, after a resume`,
+      );
+    }
+    io.out(`${lines.join("\n")}\n`);
+  }
   return EXIT.ok;
 }
 
@@ -1039,6 +1220,7 @@ function parseCli(argv: readonly string[]) {
       action: { type: "string" },
       message: { type: "string" },
       "encrypt-plaintext": { type: "boolean" },
+      deadline: { type: "string" },
     },
     allowPositionals: true,
     strict: true,
