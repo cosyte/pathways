@@ -18,6 +18,7 @@ import {
 
 import { ConfigError } from "../config/load.js";
 import type { DatabaseStorage, StorageKind } from "../config/schema.js";
+import type { MessageMeta, MetaCondition, MetaTag } from "../encryption/blind-index.js";
 import type { SecretReader } from "../secrets/resolve.js";
 import { faultPoint } from "../fault-points.js";
 import { dialectFor, type DriverImport } from "./dialects.js";
@@ -168,6 +169,27 @@ interface MessagesTable {
   content_hash: string | null;
   /** When the bodies were dropped after the last delivery; null while they are kept. Since 0008. */
   content_dropped_at: string | null;
+  /**
+   * The message's metadata as JSON, through the codec (encrypted, under encryption): null when it
+   * has none. Since 0010.
+   */
+  meta: string | null;
+}
+
+/**
+ * The index tags of each message's metadata: one row per message per index, written with the
+ * message and deleted with it. Since 0010.
+ */
+interface MetaIndexTable {
+  id: Id;
+  message_id: Int64;
+  channel: string;
+  /** The metadata key the index covers. */
+  index_name: string;
+  /** The master key id the tag's key was derived under. */
+  key_id: string;
+  /** The truncated HMAC, in lowercase hex. */
+  tag: string;
 }
 
 interface DeliveriesTable {
@@ -244,6 +266,7 @@ interface Tables {
   audit_log: AuditLogTable;
   leases: LeasesTable;
   channel_states: ChannelStatesTable;
+  meta_index: MetaIndexTable;
 }
 
 /**
@@ -298,6 +321,15 @@ export interface StoreReceiveOptions {
    * content after delivery), kept with the message's metadata after its body is dropped.
    */
   readonly contentHash?: string | undefined;
+  /**
+   * The message's metadata. A store wrapper (encryption at rest) turns it into `storedMeta` and
+   * `metaTags` before it reaches the store underneath; a store given it bare keeps it as JSON.
+   */
+  readonly meta?: MessageMeta | undefined;
+  /** The metadata as the store keeps it: JSON, encrypted under encryption. Set by a wrapper. */
+  readonly storedMeta?: string | undefined;
+  /** The metadata's index tags, stored with the message in the same transaction. Set by a wrapper. */
+  readonly metaTags?: readonly MetaTag[] | undefined;
 }
 
 /**
@@ -522,7 +554,96 @@ export interface MessageQuery {
   readonly until?: string | undefined;
   /** Only ids below this one: the `next` of the page before. */
   readonly before?: number | undefined;
+  /** Only these messages, by id. */
+  readonly ids?: readonly number[] | undefined;
   readonly limit: number;
+}
+
+/**
+ * Which messages {@link MessageStore.metaCandidates} returns: those of `channel` that carry, for
+ * every condition, one of its tags, newest first, with the other filters of a listing.
+ *
+ * @example
+ * ```ts
+ * const query: MetaCandidateQuery = { channel: "adt", conditions: [condition], limit: 100 };
+ * ```
+ */
+export interface MetaCandidateQuery {
+  readonly channel: string;
+  readonly conditions: readonly MetaCondition[];
+  readonly state?: MessageState | undefined;
+  /** Received at or after this time (ISO 8601, UTC). */
+  readonly since?: string | undefined;
+  /** Received before this time (ISO 8601, UTC). */
+  readonly until?: string | undefined;
+  /** Only ids below this one. */
+  readonly before?: number | undefined;
+  readonly limit: number;
+}
+
+/**
+ * A message whose index tags match a search, and its metadata as stored, which the search decrypts
+ * to confirm the match: tags are truncated, so a row can carry a tag and hold another value.
+ *
+ * @example
+ * ```ts
+ * const candidate: MetaCandidate = { id: 12, meta: storedJson };
+ * ```
+ */
+export interface MetaCandidate {
+  readonly id: number;
+  readonly meta: string;
+}
+
+/**
+ * One message's metadata and its index tags, as stored: what `pathways rekey` reads to re-encrypt
+ * the metadata and derive its tags again under the current key.
+ *
+ * @example
+ * ```ts
+ * const row: StoredMeta = { id: 12, channel: "adt", meta: storedJson, tags: [] };
+ * ```
+ */
+export interface StoredMeta {
+  readonly id: number;
+  readonly channel: string;
+  readonly meta: string;
+  readonly tags: readonly MetaTag[];
+}
+
+/**
+ * What `pathways rekey` needs from storage to rewrite metadata: every message's metadata and tags,
+ * and a way to replace them. {@link Store} implements it.
+ *
+ * @example
+ * ```ts
+ * for (const row of await store.storedMeta(0, 100)) await store.replaceMeta(row, next(row));
+ * ```
+ */
+export interface MetaStore {
+  /** Up to `limit` messages with metadata and an id above `after`, oldest first, as stored. */
+  storedMeta(after: number, limit: number): Promise<StoredMeta[]>;
+  /**
+   * Replaces a message's metadata and all its tags with `next`, in one transaction, only while the
+   * metadata is still what `current` read. Returns whether it did.
+   */
+  replaceMeta(
+    current: StoredMeta,
+    next: { readonly meta: string; readonly tags: readonly MetaTag[] },
+  ): Promise<boolean>;
+}
+
+/**
+ * Whether `store` also implements {@link MetaStore}, so `pathways rekey` can rewrite its metadata.
+ *
+ * @example
+ * ```ts
+ * if (isMetaStore(raw)) await rekey(raw, keys, { indexes });
+ * ```
+ */
+export function isMetaStore(store: object): store is MetaStore {
+  const candidate = store as Partial<MetaStore>;
+  return typeof candidate.storedMeta === "function" && typeof candidate.replaceMeta === "function";
 }
 
 /**
@@ -918,6 +1039,12 @@ export interface MessageStore {
   outputs(messageId: number): Promise<Uint8Array[]>;
   /** A page of messages, newest first, without bodies or errors. */
   listMessages(query: MessageQuery): Promise<Page<MessageSummary>>;
+  /**
+   * Up to `query.limit` messages that carry the tags `query` names, newest first, each with its
+   * metadata as stored, for a metadata search to confirm. Optional: a store without it cannot be
+   * searched by metadata.
+   */
+  metaCandidates?(query: MetaCandidateQuery): Promise<MetaCandidate[]>;
   /** A channel's retrying deliveries, oldest first, at most `limit`. */
   listRetrying(channel: string, limit: number): Promise<RetryingDelivery[]>;
   /**
@@ -1375,6 +1502,36 @@ export function migrations(kind: StorageKind): Record<string, SchemaStep> {
           .execute();
       },
     },
+    "0010-message-meta": {
+      // Expand only: a column that may be null and a new table, which an older Pathways never
+      // reads. An older Pathways that deletes a message leaves its tags behind; they name no
+      // message, so a search finds nothing by them. To roll it back, stop every engine and drop
+      // the table and the column; nothing else refers to them.
+      tag: "expand",
+      async up(db: Kysely<unknown>): Promise<void> {
+        await db.schema.alterTable("messages").addColumn("meta", t.detail).execute();
+        await db.schema
+          .createTable("meta_index")
+          .addColumn("id", t.key, t.numbered)
+          .addColumn("message_id", t.int64, (col) => col.notNull())
+          .addColumn("channel", t.name, (col) => col.notNull())
+          .addColumn("index_name", t.name, (col) => col.notNull())
+          .addColumn("key_id", t.name, (col) => col.notNull())
+          .addColumn("tag", t.status, (col) => col.notNull())
+          .$call(t.table)
+          .execute();
+        await db.schema
+          .createIndex("meta_index_by_tag")
+          .on("meta_index")
+          .columns(["channel", "index_name", "tag", "message_id"])
+          .execute();
+        await db.schema
+          .createIndex("meta_index_by_message")
+          .on("meta_index")
+          .columns(["message_id"])
+          .execute();
+      },
+    },
   };
 }
 
@@ -1647,7 +1804,7 @@ export class StorageError extends Error {
  * await store.close();
  * ```
  */
-export class Store implements MessageStore, ContentStore {
+export class Store implements MessageStore, ContentStore, MetaStore {
   private constructor(
     private readonly db: Kysely<Tables>,
     private readonly kind: StorageKind,
@@ -1772,7 +1929,10 @@ export class Store implements MessageStore, ContentStore {
   ): Promise<ReceivedMessage> {
     const at = this.now().toISOString();
     const { duplicateKey, idempotencyKey, resumed, failure, size, contentHash } = options;
-    const insert = (db: Kysely<Tables>): Promise<number> =>
+    const meta =
+      options.storedMeta ?? (options.meta === undefined ? null : JSON.stringify(options.meta));
+    const tags = options.metaTags ?? [];
+    const insertOnly = (db: Kysely<Tables>): Promise<number> =>
       this.insertMessage(db, {
         channel,
         received_at: at,
@@ -1786,11 +1946,19 @@ export class Store implements MessageStore, ContentStore {
         idempotency_key: idempotencyKey ?? null,
         content_hash: contentHash ?? null,
         content_dropped_at: null,
+        meta,
       });
+    // The tags go in with the message, in the same transaction.
+    const insert = async (db: Kysely<Tables>): Promise<number> => {
+      const id = await insertOnly(db);
+      await this.insertTags(db, id, channel, tags);
+      return id;
+    };
     // A message handed in for the first time cannot have been stored: its key is only recorded.
     const lookUp = resumed === true ? idempotencyKey : undefined;
     if (duplicateKey === undefined && lookUp === undefined) {
-      return { id: await insert(this.db), duplicateOf: undefined };
+      if (tags.length === 0) return { id: await insertOnly(this.db), duplicateOf: undefined };
+      return { id: await this.db.transaction().execute(insert), duplicateOf: undefined };
     }
     return this.db.transaction().execute(async (tx) => {
       const id = await insert(tx);
@@ -1805,6 +1973,7 @@ export class Store implements MessageStore, ContentStore {
           .$call((query) => this.first(query))
           .executeTakeFirst();
         if (stored !== undefined) {
+          await tx.deleteFrom("meta_index").where("message_id", "=", id).execute();
           await tx.deleteFrom("messages").where("id", "=", id).execute();
           return {
             id: Number(stored.id),
@@ -1926,8 +2095,10 @@ export class Store implements MessageStore, ContentStore {
 
   /** A page of messages, newest first, without bodies or errors. */
   async listMessages(query: MessageQuery): Promise<Page<MessageSummary>> {
-    const { channel, state, since, until, before, limit } = query;
+    const { channel, state, since, until, before, ids, limit } = query;
+    if (ids?.length === 0) return { items: [], next: undefined };
     let select = this.db.selectFrom("messages").select(SUMMARY_COLUMNS);
+    if (ids !== undefined) select = select.where("id", "in", [...ids]);
     if (channel !== undefined) select = select.where("channel", "=", channel);
     if (state !== undefined) select = select.where((eb) => stateIs(eb, state));
     if (since !== undefined) select = select.where("received_at", ">=", since);
@@ -1939,6 +2110,102 @@ export class Store implements MessageStore, ContentStore {
       .execute();
     const items = await this.summarize(rows.slice(0, limit));
     return { items, next: rows.length > limit ? items.at(-1)?.id : undefined };
+  }
+
+  /**
+   * Up to `query.limit` messages of the channel that carry, for each condition, one of its tags,
+   * newest first, each with its metadata as stored.
+   */
+  async metaCandidates(query: MetaCandidateQuery): Promise<MetaCandidate[]> {
+    const { channel, conditions, state, since, until, before, limit } = query;
+    let select = this.db
+      .selectFrom("messages")
+      .select(["id", "meta"])
+      .where("channel", "=", channel)
+      .where("meta", "is not", null);
+    for (const { index, tags } of conditions) {
+      select = select.where((eb) =>
+        eb.exists(
+          eb
+            .selectFrom("meta_index")
+            .select("meta_index.id")
+            .whereRef("meta_index.message_id", "=", "messages.id")
+            .where("meta_index.channel", "=", channel)
+            .where("meta_index.index_name", "=", index)
+            .where((m) =>
+              m.or(
+                tags.map(({ keyId, tag }) =>
+                  m.and([m("meta_index.key_id", "=", keyId), m("meta_index.tag", "=", tag)]),
+                ),
+              ),
+            ),
+        ),
+      );
+    }
+    if (state !== undefined) select = select.where((eb) => stateIs(eb, state));
+    if (since !== undefined) select = select.where("received_at", ">=", since);
+    if (until !== undefined) select = select.where("received_at", "<", until);
+    if (before !== undefined) select = select.where("id", "<", before);
+    const rows = await select
+      .orderBy("id", "desc")
+      .$call((q) => this.take(q, limit))
+      .execute();
+    // Selected where it is not null.
+    return rows.map((row) => ({ id: Number(row.id), meta: row.meta as string }));
+  }
+
+  /** Up to `limit` messages with metadata and an id above `after`, oldest first, with their tags. */
+  async storedMeta(after: number, limit: number): Promise<StoredMeta[]> {
+    const rows = await this.db
+      .selectFrom("messages")
+      .select(["id", "channel", "meta"])
+      .where("id", ">", after)
+      .where("meta", "is not", null)
+      .orderBy("id")
+      .$call((q) => this.take(q, limit))
+      .execute();
+    if (rows.length === 0) return [];
+    const tags = await this.db
+      .selectFrom("meta_index")
+      .select(["message_id", "index_name", "key_id", "tag"])
+      .where(
+        "message_id",
+        "in",
+        rows.map((row) => Number(row.id)),
+      )
+      .orderBy("id")
+      .execute();
+    return rows.map((row) => ({
+      id: Number(row.id),
+      channel: row.channel,
+      // Selected where it is not null.
+      meta: row.meta as string,
+      tags: tags
+        .filter((tag) => Number(tag.message_id) === Number(row.id))
+        .map((tag) => ({ index: tag.index_name, keyId: tag.key_id, tag: tag.tag })),
+    }));
+  }
+
+  /**
+   * Replaces a message's metadata and every tag of it, in one transaction, only while the metadata
+   * is still what `current` read. The update comes first: see receive() for why.
+   */
+  async replaceMeta(
+    current: StoredMeta,
+    next: { readonly meta: string; readonly tags: readonly MetaTag[] },
+  ): Promise<boolean> {
+    return this.db.transaction().execute(async (tx) => {
+      const updated = await tx
+        .updateTable("messages")
+        .set({ meta: next.meta })
+        .where("id", "=", current.id)
+        .where(sql<boolean>`${this.same("meta", current.meta)}`)
+        .executeTakeFirst();
+      if (updated.numUpdatedRows === 0n) return false;
+      await tx.deleteFrom("meta_index").where("message_id", "=", current.id).execute();
+      await this.insertTags(tx, current.id, current.channel, next.tags);
+      return true;
+    });
   }
 
   /** A channel's retrying deliveries, oldest first, at most `limit`. */
@@ -2618,6 +2885,16 @@ export class Store implements MessageStore, ContentStore {
           .where("id", "in", ids)
           .where((eb) => expirable(eb, cutoff))
           .execute();
+        await tx
+          .deleteFrom("meta_index")
+          .where("message_id", "in", (eb) =>
+            eb
+              .selectFrom("messages")
+              .select("messages.id")
+              .where("messages.id", "in", ids)
+              .where("messages.status", "=", EXPIRING),
+          )
+          .execute();
         const gone = await tx
           .deleteFrom("deliveries")
           .where("message_id", "in", (eb) =>
@@ -2677,6 +2954,21 @@ export class Store implements MessageStore, ContentStore {
       detail: row.detail === null ? {} : (JSON.parse(row.detail) as AuditDetail),
     }));
     return { items, next: rows.length > limit ? items.at(-1)?.id : undefined };
+  }
+
+  /** Inserts a message's index tags. */
+  private async insertTags(
+    db: Kysely<Tables>,
+    messageId: number,
+    channel: string,
+    tags: readonly MetaTag[],
+  ): Promise<void> {
+    for (const { index, keyId, tag } of tags) {
+      await db
+        .insertInto("meta_index")
+        .values({ message_id: messageId, channel, index_name: index, key_id: keyId, tag })
+        .execute();
+    }
   }
 
   /** Inserts one pending delivery per output per destination, in order; returns how many. */

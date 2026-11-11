@@ -2,6 +2,7 @@ import type { Logger } from "pino";
 
 import type { ProjectConfig } from "../config/schema.js";
 import type { Env } from "../connectors/endpoint.js";
+import { projectIndexes } from "../encryption/blind-index.js";
 import { EncryptedStore, UnencryptedStore } from "../encryption/encrypted-store.js";
 import { keysToStart, type KeyProvider } from "../encryption/keys.js";
 import { customKeyProvider, customStore } from "../extensions/build.js";
@@ -126,6 +127,7 @@ export async function openRawStore(
  * rest as SQLite: it only ever holds encrypted bodies and error texts.
  *
  * @throws {ExtensionLoadError} when a custom store's module, factory or result is wrong.
+ * @throws {ConfigError} when a channel has an `index:` block and `keys` cannot derive index keys.
  * @example
  * ```ts
  * const keys = await startingKeys(project, context);
@@ -138,5 +140,11 @@ export async function openStore(
 ): Promise<MessageStore> {
   const raw = await openRawStore(project, context);
   const { keys } = context;
-  return keys === undefined ? new UnencryptedStore(raw) : new EncryptedStore(raw, keys);
+  if (keys === undefined) return new UnencryptedStore(raw);
+  try {
+    return new EncryptedStore(raw, keys, projectIndexes(project));
+  } catch (error) {
+    await raw.close();
+    throw error;
+  }
 }

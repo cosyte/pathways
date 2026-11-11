@@ -50,6 +50,7 @@ export {
 } from "./connectors/ack.js";
 export { EncryptionError, type EncryptionErrorCode } from "./encryption/envelope.js";
 export type { KeyProvider, WrappedKey } from "./encryption/keys.js";
+export type { MessageMeta, MetaCondition, MetaTag } from "./encryption/blind-index.js";
 export {
   SecretError,
   type ResolvedSecret,
@@ -119,6 +120,9 @@ export type {
   ExpireResult,
   LeaseStore,
   MessageQuery,
+  MetaCandidate,
+  MetaCandidateQuery,
+  MetaStore,
   MessageState,
   MessageStatus,
   MessageStore,
@@ -137,6 +141,7 @@ export type {
   StoredContent,
   StoredDelivery,
   StoredMessage,
+  StoredMeta,
   StoreReceiveOptions,
 } from "./storage/store.js";
 export {
