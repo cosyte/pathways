@@ -8,8 +8,11 @@ import {
 import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 import type { Duplex } from "node:stream";
 
-import { Endpoint, refuse, reply } from "./endpoint.js";
+import { ackCharset, defaultAckBuilder, type AckRequest } from "./ack.js";
+import { Endpoint, refuse, refuseText, reply, replyText } from "./endpoint.js";
 import { failureOf, transientError } from "./http-core.js";
+import { hl7MediaType, normalisePath } from "./http-path.js";
+import { readHeader } from "./mllp.js";
 import { clientTlsOptions, type ClientTlsMaterial, type ServerTlsMaterial } from "./tls.js";
 import {
   DeliveryRejected,
@@ -19,13 +22,45 @@ import {
   type SourceConnector,
 } from "./types.js";
 
+/** A method an HTTP source can take a message by. */
+export type HttpSourceMethod = "POST" | "PUT";
+
+/**
+ * How an HTTP source answers a message it stored:
+ *
+ * - `id`: 202 with `{"id": <message id>}` as JSON (the default);
+ * - `ack`: HL7 over HTTP, 200 with the HL7 ACK in the request's media type;
+ * - `fixed`: the configured status, content type, headers and body, the same for every message.
+ */
+export type HttpSourceResponse =
+  | { readonly kind: "id" }
+  | { readonly kind: "ack" }
+  | {
+      readonly kind: "fixed";
+      /** A 2xx status. */
+      readonly status: number;
+      /** The `Content-Type` sent, or undefined to send none. */
+      readonly contentType: string | undefined;
+      /** Headers sent with every answer, already resolved from the environment. */
+      readonly headers: Readonly<Record<string, string>>;
+      /** The body sent with every answer, written in the configuration; never the message. */
+      readonly body: string;
+    };
+
 /** Options for an {@link HttpSource}. */
 export interface HttpSourceOptions {
   readonly host: string;
   /** The port to listen on; 0 picks a free one, which {@link HttpSource.port} then reports. */
   readonly port: number;
-  /** The path that takes messages. Any other path answers 404. */
-  readonly path: string;
+  /**
+   * The paths that take messages, each as {@link normalisePath} reads it. A request's path is read
+   * by the same rule and compared exactly; a path that breaks the rule answers 400, any other 404.
+   */
+  readonly paths: readonly string[];
+  /** The methods that take a message. Defaults to POST alone; `ack` mode takes POST alone. */
+  readonly methods?: readonly HttpSourceMethod[];
+  /** How a stored message is answered. Defaults to `id`. */
+  readonly response?: HttpSourceResponse;
   /** The largest body taken, in bytes. A larger one answers 413. */
   readonly maxBytes: number;
   /** TLS, or undefined for plaintext HTTP. */
@@ -34,20 +69,34 @@ export interface HttpSourceOptions {
   readonly token: string | undefined;
   /** Told the status of each request refused before storing (400, 401, 404, 405, 413, 415). */
   readonly onRefused?: (status: number) => void;
+  /**
+   * In `ack` mode, told of each message stored as failed because its header could not be used:
+   * its id and the problem's code, never its content.
+   */
+  readonly onUnreadable?: (messageId: number, problem: string) => void;
 }
 
+const STORE_FAILED = "the message could not be stored; send it again";
+
 /**
- * Takes messages over HTTPS: each POST body to `path` is one message. It answers 202 with the
- * stored message's id as JSON once the message is stored, and never echoes the body.
+ * Takes messages over HTTPS: each request body to one of `paths` is one message. Once the message
+ * is stored it answers as `response` says, by default 202 with the stored message's id as JSON. It
+ * never echoes the body.
  *
- * - 401 without the bearer token, 404 on another path, 405 for another method;
- * - 413 for a body over `maxBytes`, 415 for a compressed body, 400 for an empty one;
+ * - 400 for a path that breaks the path rule, or an empty body;
+ * - 401 without the bearer token, 404 on another path, 405 for another method, with `Allow`;
+ * - 413 for a body over `maxBytes`, 415 for a compressed body;
  * - 503 when the message could not be stored, so the sender sends it again.
+ *
+ * In `ack` mode it follows HL7 over HTTP: POST only, a `Content-Type` of `x-application/hl7-v2+er7`
+ * or `application/hl7-v2` (others answer 415), and once the message is stored, 200 with the ACK
+ * {@link defaultAckBuilder} builds, `AA`, or `AE` for a message whose header cannot be used, which
+ * is stored as failed. Every answer that is not 2xx is plain text, and a store failure gets no ACK.
  *
  * @example
  * ```ts
  * const source = new HttpSource({
- *   host: "127.0.0.1", port: 8443, path: "/", maxBytes: 10_485_760, tls, token,
+ *   host: "127.0.0.1", port: 8443, paths: ["/"], maxBytes: 10_485_760, tls, token,
  * });
  * await source.start({ receive: async (body) => store.receive("adt", body) });
  * await source.stop();
@@ -57,7 +106,7 @@ export class HttpSource implements SourceConnector {
   private readonly options: HttpSourceOptions;
   private endpoint: Endpoint | undefined;
 
-  /** @param options Where to listen, what to take, TLS and the token. */
+  /** @param options Where to listen, what to take, how to answer, TLS and the token. */
   constructor(options: HttpSourceOptions) {
     this.options = options;
   }
@@ -71,7 +120,14 @@ export class HttpSource implements SourceConnector {
   async start(sink: MessageSink): Promise<void> {
     const { host, port, tls, token, onRefused } = this.options;
     const endpoint = new Endpoint(
-      { host, port, tls, token, ...(onRefused === undefined ? {} : { onRefused }) },
+      {
+        host,
+        port,
+        tls,
+        token,
+        plainText: this.options.response?.kind === "ack",
+        ...(onRefused === undefined ? {} : { onRefused }),
+      },
       (request, response) => this.handle(request, response, sink),
     );
     await endpoint.listen();
@@ -90,16 +146,24 @@ export class HttpSource implements SourceConnector {
     response: ServerResponse,
     sink: MessageSink,
   ): Promise<void> {
-    const { path, maxBytes, onRefused } = this.options;
+    const { paths, maxBytes, onRefused } = this.options;
+    const answer = this.options.response ?? { kind: "id" };
+    const ack = answer.kind === "ack";
     const refused = (status: number, headers?: OutgoingHttpHeaders): void => {
-      refuse(response, status, headers);
+      (ack ? refuseText : refuse)(response, status, headers);
       onRefused?.(status);
     };
-    const [pathname] = String(request.url).split("?");
-    if (pathname !== path) return refused(404);
-    if (request.method !== "POST") return refused(405, { Allow: "POST" });
+    const pathname = normalisePath(String(request.url));
+    if (pathname === undefined) return refused(400);
+    if (!paths.includes(pathname)) return refused(404);
+    const methods: readonly string[] = ack ? ["POST"] : (this.options.methods ?? ["POST"]);
+    if (!methods.includes(String(request.method))) {
+      return refused(405, { Allow: methods.join(", ") });
+    }
     const encoding = request.headers["content-encoding"];
     if (encoding !== undefined && encoding.toLowerCase() !== "identity") return refused(415);
+    const mediaType = hl7MediaType(request.headers["content-type"]);
+    if (ack && mediaType === undefined) return refused(415);
     if (Number(request.headers["content-length"]) > maxBytes) return refused(413);
 
     const body = await readBody(request, maxBytes);
@@ -108,14 +172,57 @@ export class HttpSource implements SourceConnector {
     if (body === undefined) return;
     if (body.byteLength === 0) return refused(400);
 
+    if (answer.kind === "ack") return this.acknowledge(body, String(mediaType), response, sink);
     let id: number;
     try {
       id = await sink.receive(body);
     } catch {
-      reply(response, 503, { error: "the message could not be stored; send it again" });
+      reply(response, 503, { error: STORE_FAILED });
       return;
     }
-    reply(response, 202, { id });
+    if (answer.kind === "id") return reply(response, 202, { id });
+    response.writeHead(answer.status, {
+      "Cache-Control": "no-store",
+      ...(answer.contentType === undefined ? {} : { "Content-Type": answer.contentType }),
+      ...answer.headers,
+      "Content-Length": Buffer.byteLength(answer.body),
+    });
+    response.end(answer.body);
+  }
+
+  /**
+   * Stores an HL7 v2 message, then answers with its ACK: `AA`, or `AE` when its header cannot be
+   * used and it was stored as failed. When it cannot be stored, 503 in plain text and no ACK.
+   */
+  private async acknowledge(
+    body: Buffer,
+    mediaType: string,
+    response: ServerResponse,
+    sink: MessageSink,
+  ): Promise<void> {
+    const { header, problem, duplicateKey } = readHeader(body);
+    let messageId: number;
+    try {
+      messageId = await sink.receive(
+        body,
+        problem === undefined ? { duplicateKey } : { failure: `inbound: ${problem}` },
+      );
+    } catch {
+      replyText(response, 503, STORE_FAILED);
+      return;
+    }
+    if (problem !== undefined) this.options.onUnreadable?.(messageId, problem);
+    const request: AckRequest =
+      problem === undefined
+        ? { code: "AA", reason: "stored", problem, header, messageId }
+        : { code: "AE", reason: "unreadable", problem, header, messageId };
+    const ack = defaultAckBuilder(request);
+    response.writeHead(200, {
+      "Content-Type": `${mediaType}; charset=${ackCharset(request)}`,
+      "Content-Length": ack.byteLength,
+      "Cache-Control": "no-store",
+    });
+    response.end(ack);
   }
 }
 

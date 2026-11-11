@@ -119,8 +119,21 @@ export function defaultAckBuilder(request: AckRequest): Uint8Array {
     inbound,
     error === undefined ? { code: request.code } : { code: request.code, error },
   );
-  const latin1 = inbound.get("MSH.18")?.startsWith("8859") === true;
-  return Buffer.from(ack.toString(), latin1 ? "latin1" : "utf8");
+  return Buffer.from(ack.toString(), ackCharset(request) === "iso-8859-1" ? "latin1" : "utf8");
+}
+
+/**
+ * The character set {@link defaultAckBuilder} writes an ACK in: ISO 8859-1 when the inbound header
+ * declares an ISO 8859 character set in MSH-18, so MSA-2 echoes the control ID byte for byte, and
+ * UTF-8 otherwise. An HTTP source names it in the ACK's `Content-Type`.
+ *
+ * @example
+ * ```ts
+ * ackCharset({ code: "AA", reason: "stored", problem: undefined, header: undefined, messageId: 1 }); // "utf-8"
+ * ```
+ */
+export function ackCharset(request: AckRequest): "utf-8" | "iso-8859-1" {
+  return request.header?.get("MSH.18")?.startsWith("8859") === true ? "iso-8859-1" : "utf-8";
 }
 
 let library: typeof Hl7 | undefined;
