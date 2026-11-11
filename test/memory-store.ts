@@ -14,6 +14,7 @@ import type {
   MessageStatus,
   MessageStore,
   MessageSummary,
+  NextDeliveryOptions,
   Page,
   PendingDelivery,
   PendingMessage,
@@ -124,9 +125,18 @@ export class MemoryStore implements MessageStore {
     return Promise.resolve();
   }
 
-  nextDelivery(channel: string, destination: number): Promise<PendingDelivery | undefined> {
+  nextDelivery(
+    channel: string,
+    destination: number,
+    options: NextDeliveryOptions = {},
+  ): Promise<PendingDelivery | undefined> {
+    const { dueBy = Number.POSITIVE_INFINITY } = options;
     const row = this.deliveryRows.find(
-      (d) => d.channel === channel && d.destination === destination && d.status === "pending",
+      (d) =>
+        d.channel === channel &&
+        d.destination === destination &&
+        d.status === "pending" &&
+        d.nextAttemptAt <= dueBy,
     );
     if (row === undefined) return Promise.resolve(undefined);
     const { id, messageId, seq, body, attempts, nextAttemptAt, sending, interruptedAttempt } = row;

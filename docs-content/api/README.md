@@ -661,6 +661,7 @@ const key = (event: DeliveryEventBase): string => `${event.channel}/${event.dest
 #### Extended by
 
 - [`DeliveredEvent`](#deliveredevent)
+- [`DeliveryExhaustedEvent`](#deliveryexhaustedevent)
 - [`DeliveryRedirectedEvent`](#deliveryredirectedevent)
 - [`DeliveryRejectedEvent`](#deliveryrejectedevent)
 - [`DeliveryRetryEvent`](#deliveryretryevent)
@@ -675,7 +676,7 @@ When it happened, as an ISO 8601 time in UTC, such as `2026-11-07T12:00:00.000Z`
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`at`](#at-8)
+[`LifecycleEventBase`](#lifecycleeventbase).[`at`](#at-9)
 
 ##### attempt
 
@@ -691,7 +692,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-12)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-13)
 
 ##### deliveryId
 
@@ -721,11 +722,130 @@ Absent otherwise.
 
 ##### type
 
-> `readonly` **type**: `"received"` \| `"receive-failed"` \| `"transformed"` \| `"filtered"` \| `"transform-failed"` \| `"delivered"` \| `"delivery-retry"` \| `"delivery-redirected"` \| `"delivery-rejected"` \| `"source-down"` \| `"source-up"` \| `"audit"`
+> `readonly` **type**: `"received"` \| `"receive-failed"` \| `"transformed"` \| `"filtered"` \| `"transform-failed"` \| `"delivered"` \| `"delivery-retry"` \| `"delivery-redirected"` \| `"delivery-rejected"` \| `"delivery-exhausted"` \| `"source-down"` \| `"source-up"` \| `"audit"`
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-7)
+[`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-8)
+
+***
+
+### DeliveryExhaustedEvent
+
+A delivery ran out of retries: it had its `retry.limit` of attempts, or its next attempt would come
+later than `retry.maxAge` after it was queued. It is marked failed, its body kept for an operator
+to resend, and the destination moves on to the next. Only a destination whose retry settings set
+a limit or an age sends this.
+
+#### Example
+
+```ts
+if (event.type === "delivery-exhausted") page(`${event.channel}: gave up after ${event.attempt}`);
+```
+
+#### Extends
+
+- [`DeliveryEventBase`](#deliveryeventbase)
+
+#### Properties
+
+##### at
+
+> `readonly` **at**: `string`
+
+When it happened, as an ISO 8601 time in UTC, such as `2026-11-07T12:00:00.000Z`.
+
+###### Inherited from
+
+[`DeliveryEventBase`](#deliveryeventbase).[`at`](#at-3)
+
+##### attempt
+
+> `readonly` **attempt**: `number`
+
+Which attempt this was, from 1.
+
+###### Inherited from
+
+[`DeliveryEventBase`](#deliveryeventbase).[`attempt`](#attempt-1)
+
+##### channel
+
+> `readonly` **channel**: `string`
+
+The channel's name.
+
+###### Inherited from
+
+[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-6)
+
+##### code
+
+> `readonly` **code**: `string` \| `undefined`
+
+The last error's code, such as `ECONNREFUSED` or `HTTP_503`.
+
+##### deliveryId
+
+> `readonly` **deliveryId**: `number`
+
+###### Inherited from
+
+[`DeliveryEventBase`](#deliveryeventbase).[`deliveryId`](#deliveryid-1)
+
+##### destination
+
+> `readonly` **destination**: `number`
+
+The destination's place in the channel's `destinations:` list, from 0.
+
+###### Inherited from
+
+[`DeliveryEventBase`](#deliveryeventbase).[`destination`](#destination-1)
+
+##### messageId
+
+> `readonly` **messageId**: `number`
+
+###### Inherited from
+
+[`DeliveryEventBase`](#deliveryeventbase).[`messageId`](#messageid-6)
+
+##### name
+
+> `readonly` **name**: `string`
+
+The last error's name, such as `MllpDeliveryError`.
+
+##### reason
+
+> `readonly` **reason**: `"limit"` \| `"maxAge"`
+
+`limit` when it had its attempts, `maxAge` when it was too old to wait for another.
+
+##### resend?
+
+> `readonly` `optional` **resend?**: `object`
+
+Set when this attempt was a possible duplicate: an earlier one was cut off after the send, so
+the receiver may have the message already. `previousAttempts` counts the attempts before it.
+Absent otherwise.
+
+###### previousAttempts
+
+> `readonly` **previousAttempts**: `number`
+
+###### Inherited from
+
+[`DeliveryEventBase`](#deliveryeventbase).[`resend`](#resend-1)
+
+##### type
+
+> `readonly` **type**: `"delivery-exhausted"`
+
+###### Overrides
+
+[`DeliveryEventBase`](#deliveryeventbase).[`type`](#type-2)
 
 ***
 
@@ -1270,7 +1390,7 @@ When it happened, as an ISO 8601 time in UTC, such as `2026-11-07T12:00:00.000Z`
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`at`](#at-8)
+[`LifecycleEventBase`](#lifecycleeventbase).[`at`](#at-9)
 
 ##### channel
 
@@ -1280,7 +1400,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-12)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-13)
 
 ##### messageId
 
@@ -1292,7 +1412,7 @@ The channel's name.
 
 ###### Overrides
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-7)
+[`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-8)
 
 ***
 
@@ -1522,7 +1642,7 @@ The channel's name.
 
 ##### type
 
-> `readonly` **type**: `"received"` \| `"receive-failed"` \| `"transformed"` \| `"filtered"` \| `"transform-failed"` \| `"delivered"` \| `"delivery-retry"` \| `"delivery-redirected"` \| `"delivery-rejected"` \| `"source-down"` \| `"source-up"` \| `"audit"`
+> `readonly` **type**: `"received"` \| `"receive-failed"` \| `"transformed"` \| `"filtered"` \| `"transform-failed"` \| `"delivered"` \| `"delivery-retry"` \| `"delivery-redirected"` \| `"delivery-rejected"` \| `"delivery-exhausted"` \| `"source-down"` \| `"source-up"` \| `"audit"`
 
 ***
 
@@ -2155,7 +2275,7 @@ How many messages of a channel stand at each status. The health endpoint reports
 
 ##### nextDelivery()
 
-> **nextDelivery**(`channel`, `destination`): `Promise`\<[`PendingDelivery`](#pendingdelivery) \| `undefined`\>
+> **nextDelivery**(`channel`, `destination`, `options?`): `Promise`\<[`PendingDelivery`](#pendingdelivery) \| `undefined`\>
 
 ###### Parameters
 
@@ -2166,6 +2286,10 @@ How many messages of a channel stand at each status. The health endpoint reports
 ###### destination
 
 `number`
+
+###### options?
+
+[`NextDeliveryOptions`](#nextdeliveryoptions)
 
 ###### Returns
 
@@ -2490,6 +2614,29 @@ An X12 interchange, parsed with `@cosyte/x12`.
 
 ***
 
+### NextDeliveryOptions
+
+What [MessageStore.nextDelivery](#nextdelivery) looks for. Without `dueBy` it returns the oldest pending
+delivery, due or not, which keeps a destination in order.
+
+#### Example
+
+```ts
+const due = await store.nextDelivery("adt", 0, { dueBy: Date.now() });
+```
+
+#### Properties
+
+##### dueBy?
+
+> `readonly` `optional` **dueBy?**: `number`
+
+Only a delivery due by this time, in epoch milliseconds: the oldest whose `nextAttemptAt` is at
+or before it, passing over any still waiting for a retry. The engine asks this for a destination
+with `retry.rotate: true`. A store that ignores it keeps that destination in order.
+
+***
+
 ### OutgoingMessage
 
 One output of one message, on its way to one destination.
@@ -2514,7 +2661,7 @@ The id of the stored message this came from.
 
 ##### resend?
 
-> `readonly` `optional` **resend?**: [`Resend`](#resend-6)
+> `readonly` `optional` **resend?**: [`Resend`](#resend-7)
 
 Set when this is a possible duplicate: an earlier attempt was cut off after the send, so the
 receiver may have it already. A destination may tell the receiver so (an HTTP destination's
@@ -2657,7 +2804,7 @@ When it happened, as an ISO 8601 time in UTC, such as `2026-11-07T12:00:00.000Z`
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`at`](#at-8)
+[`LifecycleEventBase`](#lifecycleeventbase).[`at`](#at-9)
 
 ##### bytes
 
@@ -2673,7 +2820,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-12)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-13)
 
 ##### duplicateOf
 
@@ -2697,7 +2844,7 @@ True when the source stored it as failed, such as an MLLP message with no usable
 
 ###### Overrides
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-7)
+[`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-8)
 
 ***
 
@@ -2757,7 +2904,7 @@ When it happened, as an ISO 8601 time in UTC, such as `2026-11-07T12:00:00.000Z`
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`at`](#at-8)
+[`LifecycleEventBase`](#lifecycleeventbase).[`at`](#at-9)
 
 ##### channel
 
@@ -2767,7 +2914,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-12)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-13)
 
 ##### code
 
@@ -2787,7 +2934,7 @@ The error's name, such as `SqliteError`.
 
 ###### Overrides
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-7)
+[`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-8)
 
 ***
 
@@ -3006,7 +3153,7 @@ When it started, in epoch milliseconds.
 
 ###### Inherited from
 
-[`SendingMarker`](#sendingmarker).[`at`](#at-11)
+[`SendingMarker`](#sendingmarker).[`at`](#at-12)
 
 ##### attempt
 
@@ -3016,7 +3163,7 @@ The attempt's number, from 1.
 
 ###### Inherited from
 
-[`SendingMarker`](#sendingmarker).[`attempt`](#attempt-5)
+[`SendingMarker`](#sendingmarker).[`attempt`](#attempt-6)
 
 ##### interruptedAttempt?
 
@@ -3107,7 +3254,7 @@ When it happened, as an ISO 8601 time in UTC, such as `2026-11-07T12:00:00.000Z`
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`at`](#at-8)
+[`LifecycleEventBase`](#lifecycleeventbase).[`at`](#at-9)
 
 ##### attempt
 
@@ -3123,7 +3270,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-12)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-13)
 
 ##### code
 
@@ -3153,7 +3300,7 @@ When the next try is due, as an ISO 8601 time in UTC.
 
 ###### Overrides
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-7)
+[`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-8)
 
 ***
 
@@ -3181,7 +3328,7 @@ When it happened, as an ISO 8601 time in UTC, such as `2026-11-07T12:00:00.000Z`
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`at`](#at-8)
+[`LifecycleEventBase`](#lifecycleeventbase).[`at`](#at-9)
 
 ##### channel
 
@@ -3191,7 +3338,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-12)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-13)
 
 ##### type
 
@@ -3199,7 +3346,7 @@ The channel's name.
 
 ###### Overrides
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-7)
+[`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-8)
 
 ***
 
@@ -3320,7 +3467,7 @@ const message: StoredMessage | undefined = await store.message(12);
 
 ###### Inherited from
 
-[`MessageSummary`](#messagesummary).[`channel`](#channel-14)
+[`MessageSummary`](#messagesummary).[`channel`](#channel-15)
 
 ##### contentDroppedAt?
 
@@ -3520,7 +3667,7 @@ When it happened, as an ISO 8601 time in UTC, such as `2026-11-07T12:00:00.000Z`
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`at`](#at-8)
+[`LifecycleEventBase`](#lifecycleeventbase).[`at`](#at-9)
 
 ##### channel
 
@@ -3530,7 +3677,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-12)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-13)
 
 ##### messageId
 
@@ -3548,7 +3695,7 @@ How many outputs the transform returned.
 
 ###### Overrides
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-7)
+[`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-8)
 
 ***
 
@@ -3577,7 +3724,7 @@ When it happened, as an ISO 8601 time in UTC, such as `2026-11-07T12:00:00.000Z`
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`at`](#at-8)
+[`LifecycleEventBase`](#lifecycleeventbase).[`at`](#at-9)
 
 ##### channel
 
@@ -3587,7 +3734,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-12)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-13)
 
 ##### code
 
@@ -3617,7 +3764,7 @@ The error's name, such as `TypeError`.
 
 ###### Overrides
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-7)
+[`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-8)
 
 ##### where
 
@@ -4182,7 +4329,7 @@ const leases: LeaseStore | undefined = leaseStore(store);
 
 ### LifecycleEvent
 
-> **LifecycleEvent** = [`ReceivedEvent`](#receivedevent) \| [`ReceiveFailedEvent`](#receivefailedevent) \| [`TransformedEvent`](#transformedevent) \| [`FilteredEvent`](#filteredevent) \| [`TransformFailedEvent`](#transformfailedevent) \| [`DeliveredEvent`](#deliveredevent) \| [`DeliveryRetryEvent`](#deliveryretryevent) \| [`DeliveryRedirectedEvent`](#deliveryredirectedevent) \| [`DeliveryRejectedEvent`](#deliveryrejectedevent) \| [`SourceDownEvent`](#sourcedownevent) \| [`SourceUpEvent`](#sourceupevent) \| [`AuditEvent`](#auditevent)
+> **LifecycleEvent** = [`ReceivedEvent`](#receivedevent) \| [`ReceiveFailedEvent`](#receivefailedevent) \| [`TransformedEvent`](#transformedevent) \| [`FilteredEvent`](#filteredevent) \| [`TransformFailedEvent`](#transformfailedevent) \| [`DeliveredEvent`](#deliveredevent) \| [`DeliveryRetryEvent`](#deliveryretryevent) \| [`DeliveryRedirectedEvent`](#deliveryredirectedevent) \| [`DeliveryRejectedEvent`](#deliveryrejectedevent) \| [`DeliveryExhaustedEvent`](#deliveryexhaustedevent) \| [`SourceDownEvent`](#sourcedownevent) \| [`SourceUpEvent`](#sourceupevent) \| [`AuditEvent`](#auditevent)
 
 Any lifecycle event: switch on `type` to narrow it. Engine-wide hooks receive every channel's
 events and the audit log's; a channel's own hooks receive that channel's events.
@@ -4603,7 +4750,7 @@ const holder = await store.leaseHolder?.(ENGINE_LEASE);
 
 ### LIFECYCLE\_EVENTS
 
-> `const` **LIFECYCLE\_EVENTS**: readonly \[`"received"`, `"receive-failed"`, `"transformed"`, `"filtered"`, `"transform-failed"`, `"delivered"`, `"delivery-retry"`, `"delivery-redirected"`, `"delivery-rejected"`, `"source-down"`, `"source-up"`, `"audit"`\]
+> `const` **LIFECYCLE\_EVENTS**: readonly \[`"received"`, `"receive-failed"`, `"transformed"`, `"filtered"`, `"transform-failed"`, `"delivered"`, `"delivery-retry"`, `"delivery-redirected"`, `"delivery-rejected"`, `"delivery-exhausted"`, `"source-down"`, `"source-up"`, `"audit"`\]
 
 Every lifecycle event's `type`, in the order a message meets them. A hook entry's `events:` list in
 the YAML names some of these to receive only those.
