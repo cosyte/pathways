@@ -8,6 +8,7 @@ import { ConfigError, loadProject } from "./config/load.js";
 import { parseDuration, type ChannelConfig, type ProjectConfig } from "./config/schema.js";
 import type { Env } from "./connectors/endpoint.js";
 import { EncryptionError } from "./encryption/envelope.js";
+import { checkIndexKeys, projectIndexes } from "./encryption/blind-index.js";
 import { ENCRYPTION_REQUIRED, type KeyProvider } from "./encryption/keys.js";
 import { rekey, rekeyComplete, type RekeyCounts } from "./encryption/rekey.js";
 import { TransformLoadError } from "./engine/channel-worker.js";
@@ -67,6 +68,7 @@ import {
   parseTime,
   replayCommand,
   retentionCommand,
+  searchCommand,
   showCommand,
   statusCommand,
   type OperatorContext,
@@ -152,7 +154,9 @@ Commands:
   status [name...]    Each channel's counts, retrying deliveries and failed
                       messages, read from the database
   messages            List stored messages, newest first: ids, states, times,
-                      sizes and duplicate flags, never content
+                      sizes and duplicate flags, never content. With
+                      --where, those whose ctx.meta holds a value, by the
+                      channel's index: block
   messages show <id>  One message and its deliveries; its content only with
                       --content
   replay <id...>      Run each message through its channel's transform again
@@ -235,6 +239,12 @@ Options:
       --until <time>    messages, audit: before this time
       --limit <n>       messages, audit: at most n rows (default ${DEFAULT_LIMIT}, at most 1000)
       --before <id>     messages, audit: the next page, as the last one says
+      --where <key=value>
+                        messages: only those whose ctx.meta key holds value,
+                        compared as text. The key must be in the channel's
+                        index: block, and --channel is needed. Repeat it to
+                        need every pair. The value is never printed or
+                        written to the audit log
       --content         messages show: print the content, which is PHI. The
                         view is written to the audit log first
       --resend          replay: send the stored outputs again, untransformed
@@ -291,7 +301,7 @@ const OPTIONS: Readonly<Record<string, readonly OptionName[]>> = {
   validate: ["print"],
   secrets: ["json"],
   status: ["json"],
-  messages: ["json", "channel", "status", "since", "until", "limit", "before", "content"],
+  messages: ["json", "channel", "status", "since", "until", "limit", "before", "content", "where"],
   replay: ["json", "resend"],
   clear: ["json"],
   retention: ["json", "dry-run"],
@@ -614,6 +624,9 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
   }
   const env = io.env ?? process.env;
   const logger = io.logger ?? pino({ redact: REDACT });
+  for (const warning of project.warnings ?? []) {
+    logger.warn({ event: "config-warning", warning });
+  }
   // Every secret is read now, at startup, master keys among them: a missing one stops the start. A
   // destination that runs dry never sends, so its secrets are not read and cannot stop it.
   const secrets = await secretsOrExit(
@@ -1140,6 +1153,7 @@ async function validate(projectDir: string, print: boolean, io: CliIo): Promise<
     io.out(`${JSON.stringify(project, replacer, 2)}\n`);
     return EXIT.ok;
   }
+  for (const warning of project.warnings ?? []) io.err(`pathways: warning: ${warning}\n`);
   const names = project.channels.map((channel) => channel.name);
   io.out(
     `pathways: the configuration is valid: ${names.length} channel${names.length === 1 ? "" : "s"} (${names.join(", ")}).\n`,
@@ -1247,9 +1261,18 @@ async function rekeyStore(
     io.err(REKEY_NEEDS_CONTENT_STORE);
     return EXIT.failed;
   }
+  const indexes = projectIndexes(project);
+  try {
+    checkIndexKeys(keys, indexes);
+  } catch (error) {
+    await store.close();
+    // It throws only ConfigError: the key provider cannot derive index keys.
+    reportConfigError(error as ConfigError, io);
+    return EXIT.config;
+  }
   let counts: RekeyCounts;
   try {
-    counts = await rekey(store, keys, { encryptPlaintext });
+    counts = await rekey(store, keys, { encryptPlaintext, indexes });
   } finally {
     await store.close();
   }
@@ -1259,7 +1282,11 @@ async function rekeyStore(
       `encrypted, stored while encryption was none: ${counts.encrypted}\n` +
       `left unencrypted: ${counts.unencrypted}\n` +
       `unreadable: ${counts.unreadable}\n` +
-      `changed while rekey ran: ${counts.changed}\n`,
+      `changed while rekey ran: ${counts.changed}\n` +
+      // Only a project with an index: block, or one that had one, ever retags.
+      (counts.retagged > 0
+        ? `messages whose index tags were derived again: ${counts.retagged}\n`
+        : ""),
   );
   if (counts.unencrypted > 0) {
     io.err(
@@ -1467,7 +1494,15 @@ function parseOperator(
       return (context) => statusCommand(context, rest);
     case "messages": {
       if (rest[0] === "show") {
-        const listing = ["channel", "status", "since", "until", "limit", "before"] as const;
+        const listing = [
+          "channel",
+          "status",
+          "since",
+          "until",
+          "limit",
+          "before",
+          "where",
+        ] as const;
         if (rest.length !== 2 || listing.some((name) => values[name] !== undefined)) {
           return usage(io);
         }
@@ -1482,6 +1517,15 @@ function parseOperator(
       const state = values.status === undefined ? undefined : parseState(values.status);
       if (values.status !== undefined && state === undefined) {
         return invalid(io, "--status takes a message state.");
+      }
+      if (values.where !== undefined) {
+        const where = parseWhere(values.where);
+        if (where === undefined) {
+          return invalid(io, "--where takes key=value, the key a ctx.meta key.");
+        }
+        const { channel } = filters;
+        if (channel === undefined) return invalid(io, "--where needs --channel.");
+        return (context) => searchCommand(context, { ...filters, channel, state, where });
       }
       return (context) => listCommand(context, { ...filters, state });
     }
@@ -1618,6 +1662,21 @@ async function verifySamples(
   );
 }
 
+/**
+ * `--where` pairs, parsed: each split at its first `=`, the key a `ctx.meta` key name. Undefined
+ * when one is not a pair.
+ */
+function parseWhere(pairs: readonly string[]): [string, string][] | undefined {
+  const where: [string, string][] = [];
+  for (const pair of pairs) {
+    const at = pair.indexOf("=");
+    const key = pair.slice(0, Math.max(at, 0));
+    if (at < 0 || !/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(key)) return undefined;
+    where.push([key, pair.slice(at + 1)]);
+  }
+  return where;
+}
+
 /** The filters `messages` and `audit` share, parsed, or the exit code of a usage error. */
 function parseListing(
   values: Values,
@@ -1687,6 +1746,7 @@ function parseCli(argv: readonly string[]) {
       deadline: { type: "string" },
       ids: { type: "string" },
       samples: { type: "string" },
+      where: { type: "string", multiple: true },
     },
     allowPositionals: true,
     strict: true,

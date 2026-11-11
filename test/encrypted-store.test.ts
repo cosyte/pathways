@@ -311,6 +311,7 @@ for (const database of TEST_DATABASES) {
         unencrypted: 0,
         unreadable: 0,
         changed: 0,
+        retagged: 0,
       };
 
       it("re-encrypts every value under the current key, so the old key can be retired", async () => {

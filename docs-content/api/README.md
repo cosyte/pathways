@@ -1813,7 +1813,38 @@ const kms: KeyProvider = {
 
 The id of the master key that wraps new data keys.
 
+##### keyIds?
+
+> `readonly` `optional` **keyIds?**: readonly `string`[]
+
+Every master key id the provider holds, the current one among them: a metadata search derives
+its index tags under each, so rows tagged under an older key are still found. Optional; without
+it, a search runs under the current key alone.
+
 #### Methods
+
+##### deriveIndexKey()?
+
+> `optional` **deriveIndexKey**(`keyId`, `info`): `Promise`\<`Uint8Array`\<`ArrayBufferLike`\>\>
+
+Derives a 32-byte key for one searchable index from the master key `keyId`, with HKDF-SHA-256
+and `info` naming the index. Optional: a provider whose master keys never leave a key service
+cannot derive one, and a channel with an `index:` block then refuses to start on it. The
+returned buffer is the caller's, which overwrites it with zeros once it is done.
+
+###### Parameters
+
+###### keyId
+
+`string`
+
+###### info
+
+`Uint8Array`
+
+###### Returns
+
+`Promise`\<`Uint8Array`\<`ArrayBufferLike`\>\>
 
 ##### unwrapKey()
 
@@ -2074,6 +2105,12 @@ Only ids below this one: the `next` of the page before.
 ##### channel?
 
 > `readonly` `optional` **channel?**: `string`
+
+##### ids?
+
+> `readonly` `optional` **ids?**: readonly `number`[]
+
+Only these messages, by id.
 
 ##### limit
 
@@ -2546,7 +2583,8 @@ Fenced by `epoch` when it is given.
 [markDelivered](#markdelivered), and when that was the last delivery of the message's current generation
 still to be delivered, also drops the bodies of the message and of all its deliveries in the
 same transaction, keeping its metadata: ids, times, statuses, sizes, the content hash and the
-possible-duplicate flag. Keeps every body while any delivery of the current generation has
+possible-duplicate flag. Its `ctx.meta` and that metadata's index tags go with the bodies, since
+they hold identifiers. Keeps every body while any delivery of the current generation has
 failed or waits to be tried again. Resolves to whether it dropped them. Fenced by `epoch` when
 it is given. Optional: a channel with `storage.content: dropAfterDelivery` needs it, and the
 engine refuses to start such a channel on a store without it.
@@ -2661,6 +2699,24 @@ How many messages of a channel stand at each status. The health endpoint reports
 ###### Returns
 
 `Promise`\<`Record`\<[`MessageStatus`](#messagestatus), `number`\>\>
+
+##### metaCandidates()?
+
+> `optional` **metaCandidates**(`query`): `Promise`\<[`MetaCandidate`](#metacandidate)[]\>
+
+Up to `query.limit` messages that carry the tags `query` names, newest first, each with its
+metadata as stored, for a metadata search to confirm. Optional: a store without it cannot be
+searched by metadata.
+
+###### Parameters
+
+###### query
+
+[`MetaCandidateQuery`](#metacandidatequery)
+
+###### Returns
+
+`Promise`\<[`MetaCandidate`](#metacandidate)[]\>
 
 ##### nextDelivery()
 
@@ -2970,6 +3026,190 @@ The status and the current deliveries, as an operator sees them.
 > `readonly` **updatedAt**: `string`
 
 When the message last changed: transformed, failed, replayed or cleared.
+
+***
+
+### MetaCandidate
+
+A message whose index tags match a search, and its metadata as stored, which the search decrypts
+to confirm the match: tags are truncated, so a row can carry a tag and hold another value.
+
+#### Example
+
+```ts
+const candidate: MetaCandidate = { id: 12, meta: storedJson };
+```
+
+#### Properties
+
+##### id
+
+> `readonly` **id**: `number`
+
+##### meta
+
+> `readonly` **meta**: `string`
+
+***
+
+### MetaCandidateQuery
+
+Which messages [MessageStore.metaCandidates](#metacandidates) returns: those of `channel` that carry, for
+every condition, one of its tags, newest first, with the other filters of a listing.
+
+#### Example
+
+```ts
+const query: MetaCandidateQuery = { channel: "adt", conditions: [condition], limit: 100 };
+```
+
+#### Properties
+
+##### before?
+
+> `readonly` `optional` **before?**: `number`
+
+Only ids below this one.
+
+##### channel
+
+> `readonly` **channel**: `string`
+
+##### conditions
+
+> `readonly` **conditions**: readonly [`MetaCondition`](#metacondition)[]
+
+##### limit
+
+> `readonly` **limit**: `number`
+
+##### since?
+
+> `readonly` `optional` **since?**: `string`
+
+Received at or after this time (ISO 8601, UTC).
+
+##### state?
+
+> `readonly` `optional` **state?**: `"received"` \| `"filtered"` \| `"delivered"` \| `"failed"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
+
+##### until?
+
+> `readonly` `optional` **until?**: `string`
+
+Received before this time (ISO 8601, UTC).
+
+***
+
+### MetaCondition
+
+What a metadata search looks up for one condition: the index, and its tag under each master key
+id the provider holds. A row matches the condition when it carries any of them.
+
+#### Example
+
+```ts
+const condition: MetaCondition = { index: "mrn", tags: [{ keyId: "prod-2026", tag: "a3f0" }] };
+```
+
+#### Properties
+
+##### index
+
+> `readonly` **index**: `string`
+
+##### tags
+
+> `readonly` **tags**: readonly `object`[]
+
+***
+
+### MetaStore
+
+What `pathways rekey` needs from storage to rewrite metadata: every message's metadata and tags,
+and a way to replace them. Store implements it.
+
+#### Example
+
+```ts
+for (const row of await store.storedMeta(0, 100)) await store.replaceMeta(row, next(row));
+```
+
+#### Methods
+
+##### replaceMeta()
+
+> **replaceMeta**(`current`, `next`): `Promise`\<`boolean`\>
+
+Replaces a message's metadata and all its tags with `next`, in one transaction, only while the
+metadata is still what `current` read. Returns whether it did.
+
+###### Parameters
+
+###### current
+
+[`StoredMeta`](#storedmeta-1)
+
+###### next
+
+###### meta
+
+`string`
+
+###### tags
+
+readonly [`MetaTag`](#metatag)[]
+
+###### Returns
+
+`Promise`\<`boolean`\>
+
+##### storedMeta()
+
+> **storedMeta**(`after`, `limit`): `Promise`\<[`StoredMeta`](#storedmeta-1)[]\>
+
+Up to `limit` messages with metadata and an id above `after`, oldest first, as stored.
+
+###### Parameters
+
+###### after
+
+`number`
+
+###### limit
+
+`number`
+
+###### Returns
+
+`Promise`\<[`StoredMeta`](#storedmeta-1)[]\>
+
+***
+
+### MetaTag
+
+One index tag, as storage keeps it: the index (the metadata key it covers), the master key id it
+was derived under, and the tag, the first `bits` bits of an HMAC-SHA-256 in lowercase hex.
+
+#### Example
+
+```ts
+const tag: MetaTag = { index: "mrn", keyId: "prod-2026", tag: "a3f0" };
+```
+
+#### Properties
+
+##### index
+
+> `readonly` **index**: `string`
+
+##### keyId
+
+> `readonly` **keyId**: `string`
+
+##### tag
+
+> `readonly` **tag**: `string`
 
 ***
 
@@ -4180,6 +4420,37 @@ When the message last changed: transformed, failed, replayed or cleared.
 
 ***
 
+### StoredMeta
+
+One message's metadata and its index tags, as stored: what `pathways rekey` reads to re-encrypt
+the metadata and derive its tags again under the current key.
+
+#### Example
+
+```ts
+const row: StoredMeta = { id: 12, channel: "adt", meta: storedJson, tags: [] };
+```
+
+#### Properties
+
+##### channel
+
+> `readonly` **channel**: `string`
+
+##### id
+
+> `readonly` **id**: `number`
+
+##### meta
+
+> `readonly` **meta**: `string`
+
+##### tags
+
+> `readonly` **tags**: readonly [`MetaTag`](#metatag)[]
+
+***
+
 ### StoreReceiveOptions
 
 What the engine tells storage about an incoming message. Every field is optional.
@@ -4223,6 +4494,19 @@ same key, nothing is stored and that message's id comes back with `alreadyStored
 that stored a message and then stopped before it could acknowledge it hands it in again on
 restart, and it is stored once.
 
+##### meta?
+
+> `readonly` `optional` **meta?**: `Readonly`\<`Record`\<`string`, `string` \| `number` \| `boolean`\>\>
+
+The message's metadata. A store wrapper (encryption at rest) turns it into `storedMeta` and
+`metaTags` before it reaches the store underneath; a store given it bare keeps it as JSON.
+
+##### metaTags?
+
+> `readonly` `optional` **metaTags?**: readonly [`MetaTag`](#metatag)[]
+
+The metadata's index tags, stored with the message in the same transaction. Set by a wrapper.
+
 ##### resumed?
 
 > `readonly` `optional` **resumed?**: `boolean`
@@ -4236,6 +4520,12 @@ only then is the key looked up.
 
 The body's size in bytes as it arrived; defaults to `body.byteLength`. A storage layer that
 changes the body on its way in, such as encryption, passes the original size along.
+
+##### storedMeta?
+
+> `readonly` `optional` **storedMeta?**: `string`
+
+The metadata as the store keeps it: JSON, encrypted under encryption. Set by a wrapper.
 
 ***
 
@@ -5143,6 +5433,22 @@ The message a channel of format `F` hands its transform.
 
 ```ts
 type Document = MessageFor<"ccda">; // CcdaDocument
+```
+
+***
+
+### MessageMeta
+
+> **MessageMeta** = `Readonly`\<`Record`\<`string`, `string` \| `number` \| `boolean`\>\>
+
+A message's metadata: flat values by key, as `ctx.meta` holds them. Stored encrypted with the
+message; the keys a channel's `index:` block names are also stored as truncated index tags, so a
+search can find them without decrypting every row.
+
+#### Example
+
+```ts
+const meta: MessageMeta = { mrn: "SYN-000123", visit: 2 };
 ```
 
 ***

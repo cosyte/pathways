@@ -102,6 +102,11 @@ received, which the engine works out as it stores the message. `pathways message
 hash and when the content was dropped. Each delivery's last error text goes with the bodies, since
 encryption treats it as content too; its attempts count stays.
 
+The message's `ctx.meta` goes with the bodies too, and so do the tags of every index over it
+([search messages by metadata](./search-messages-by-metadata.md)), in the same transaction: they
+hold identifiers such as a medical record number. A message whose content is dropped can no longer
+be found with `pathways messages --where`.
+
 The hash is plain SHA-256 with no key, and it is stored unencrypted, even with encryption at rest.
 Anyone who can read the database and can guess a message's exact text, which for a short or
 predictable message may not be hard, can hash the guess and confirm whether that message passed

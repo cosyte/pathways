@@ -15,8 +15,15 @@ import {
   type DeliveryTally,
   type MessageState,
   type MessageStore,
+  type MessageSummary,
+  type Page,
   type StoredDelivery,
 } from "../storage/store.js";
+import {
+  canSearchMeta,
+  MetaSearchError,
+  type MetaSearchPage,
+} from "../encryption/encrypted-store.js";
 import {
   clearMessages,
   replayMessages,
@@ -313,7 +320,94 @@ export async function listCommand(
       ...(until === undefined ? {} : { until }),
     },
   });
+  printMessages(context, page);
+  return EXIT.ok;
+}
 
+/**
+ * The filters `pathways messages --where` takes, parsed: a listing's, with the channel required and
+ * the `ctx.meta` pairs to match.
+ *
+ * @example
+ * ```ts
+ * const filters: SearchFilters = { channel: "adt", where: [["mrn", "SYN-000123"]], limit: 50 };
+ * ```
+ */
+export interface SearchFilters extends MessageFilters {
+  readonly channel: string;
+  /** Each pair a `ctx.meta` key the channel indexes and the value it must hold, as text. */
+  readonly where: readonly (readonly [string, string])[];
+}
+
+/**
+ * `pathways messages --where key=value`: the channel's messages whose `ctx.meta` holds every pair,
+ * newest first, found by the channel's index tags and confirmed by decrypting each row's metadata.
+ * Writes a `search` entry to the audit log first, with the keys searched and the filters, never a
+ * value, and does not search when it cannot be written. A key the channel does not index is a
+ * usage error, exit 2.
+ *
+ * @example
+ * ```ts
+ * const code = await searchCommand(context, { channel: "adt", where: [["mrn", "SYN-000123"]], limit: 50 });
+ * ```
+ */
+export async function searchCommand(
+  context: OperatorContext,
+  filters: SearchFilters,
+): Promise<number> {
+  const { project, store, audit } = context;
+  const { channel, where, state, since, until } = filters;
+  const config = project.channels.find((candidate) => candidate.name === channel);
+  if (config === undefined) {
+    return noSuchChannel(
+      context,
+      project.channels.map((candidate) => candidate.name),
+    );
+  }
+  const indexed = (config.indexes ?? []).map((index) => index.key);
+  const keys = [...new Set(where.map(([key]) => key))];
+  if (keys.some((key) => !indexed.includes(key))) {
+    context.err(
+      indexed.length === 0
+        ? "pathways: --where reads a channel's index: block, and this channel has none.\n"
+        : `pathways: --where takes a key this channel indexes: ${indexed.join(", ")}.\n`,
+    );
+    return EXIT.usage;
+  }
+  if (!canSearchMeta(store)) {
+    context.err("pathways: this store cannot be searched by metadata.\n");
+    return EXIT.failed;
+  }
+  // Audited before any row is read and decrypted, as a content view is: no entry, no search.
+  try {
+    await audit.record({
+      action: "search",
+      channel,
+      detail: {
+        where: keys.join(","),
+        ...(state === undefined ? {} : { state }),
+        ...(since === undefined ? {} : { since }),
+        ...(until === undefined ? {} : { until }),
+      },
+    });
+  } catch {
+    context.err("pathways: the audit log could not be written, so the search did not run.\n");
+    return EXIT.failed;
+  }
+  let page: MetaSearchPage;
+  try {
+    page = await store.findByMeta({ ...filters, where });
+  } catch (error) {
+    if (!(error instanceof MetaSearchError)) throw error;
+    context.err("pathways: this store cannot be searched by metadata.\n");
+    return EXIT.failed;
+  }
+  printMessages(context, page);
+  return EXIT.ok;
+}
+
+/** A page of messages, as `messages` prints it: a table, or with `--json` one document. */
+function printMessages(context: OperatorContext, page: Page<MessageSummary>): void {
   const lines =
     page.items.length === 0
       ? ["No messages match."]
@@ -331,7 +425,6 @@ export async function listCommand(
         ]);
   if (page.next !== undefined) lines.push(`More: add --before ${page.next} for the next page.`);
   print(context, { messages: page.items, next: page.next ?? null }, lines);
-  return EXIT.ok;
 }
 
 /**

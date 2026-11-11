@@ -74,6 +74,8 @@ health:
   are not read from the environment: turning TLS, encryption or authentication off stays in the
   file, where the audit sees it. Nor are the names in an HTTP source's `contextHeaders`: which
   request headers reach a transform stays in the file, where a credential header is refused at load.
+  Nor is a channel's `index:` block: which `ctx.meta` keys are stored as searchable tags, and how
+  many bits each keeps, stays in the file, where the audit sees it.
 - `pathways validate --print` prints the configuration as `start` reads it, with every setting the
   environment gave and the variable it named; see
   [Command reference](./command-reference.md#pathways-validate). The query string of a URL read
@@ -271,18 +273,19 @@ by key. See [Use the message context](./use-the-message-context.md).
 
 ## channel.yaml
 
-| Key                                                              | Type                                                    | Default                          |
-| ---------------------------------------------------------------- | ------------------------------------------------------- | -------------------------------- |
-| `name`                                                           | lowercase letters, digits and hyphens                   | the folder's name; must match it |
-| `format`                                                         | `hl7v2`, `fhir`, `x12`, `ccda`, `json` or `text`        | `hl7v2`                          |
-| `source`                                                         | exactly one [source](#sources)                          | required                         |
-| `transform`                                                      | path to the transform module                            | none: messages pass through      |
-| `destinations`                                                   | a list of at least one [destination](#destinations)     | required                         |
-| `hooks`                                                          | a list of [hooks](#hooks)                               | none                             |
-| `storage`                                                        | `{ content: keep }` or `{ content: dropAfterDelivery }` | the project's `storage.content`  |
-| `config`                                                         | see [Transform configuration](#transform-configuration) | the project's, key by key        |
-| `timeout`, `memory`, `onStoreFailure`, `ackTimeout`, `retention` | see [Settings](#settings)                               | the project's                    |
-| `resendFlag`, `retry`                                            | see [Settings](#settings)                               | the project's                    |
+| Key                                                              | Type                                                                                                                                                      | Default                          |
+| ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- |
+| `name`                                                           | lowercase letters, digits and hyphens                                                                                                                     | the folder's name; must match it |
+| `format`                                                         | `hl7v2`, `fhir`, `x12`, `ccda`, `json` or `text`                                                                                                          | `hl7v2`                          |
+| `source`                                                         | exactly one [source](#sources)                                                                                                                            | required                         |
+| `transform`                                                      | path to the transform module                                                                                                                              | none: messages pass through      |
+| `destinations`                                                   | a list of at least one [destination](#destinations)                                                                                                       | required                         |
+| `hooks`                                                          | a list of [hooks](#hooks)                                                                                                                                 | none                             |
+| `storage`                                                        | `{ content: keep }` or `{ content: dropAfterDelivery }`                                                                                                   | the project's `storage.content`  |
+| `config`                                                         | see [Transform configuration](#transform-configuration)                                                                                                   | the project's, key by key        |
+| `index`                                                          | a list of `ctx.meta` keys, each a key or `{ key, bits }`; `bits` 4 to 32, default 12; see [Search messages by metadata](./search-messages-by-metadata.md) | none                             |
+| `timeout`, `memory`, `onStoreFailure`, `ackTimeout`, `retention` | see [Settings](#settings)                                                                                                                                 | the project's                    |
+| `resendFlag`, `retry`                                            | see [Settings](#settings)                                                                                                                                 | the project's                    |
 
 A channel with an MLLP source or destination must have the format `hl7v2`.
 

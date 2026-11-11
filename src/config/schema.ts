@@ -6,6 +6,7 @@ import { FORMATS } from "../engine/worker-entry.js";
 import { LIFECYCLE_EVENTS, type LifecycleEventType } from "../extensions/events.js";
 import type { JsonValue } from "../transform.js";
 import { ENV_NAME, fromEnvironment, type EnvReference } from "./env-ref.js";
+import { MAX_INDEX_BITS, MIN_INDEX_BITS } from "./meta-index.js";
 
 export type { EnvReference } from "./env-ref.js";
 
@@ -1822,6 +1823,37 @@ const destination = restate(
   restateKinds(DESTINATION_KINDS),
 );
 
+/** The name of a `ctx.meta` key an index covers. */
+const META_KEY = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
+
+/** One entry of a channel's `index:` list: a `ctx.meta` key, alone or with its bit length. */
+const metaIndex = z.union([
+  z
+    .string()
+    .regex(META_KEY, "a ctx.meta key: a letter, then letters, digits, _, . or -, at most 64")
+    .meta({
+      description: "A ctx.meta key to index, keeping the default 12 bits of each tag.",
+    }),
+  z
+    .strictObject({
+      key: z
+        .string()
+        .regex(META_KEY, "a ctx.meta key: a letter, then letters, digits, _, . or -, at most 64")
+        .meta({ description: "The ctx.meta key to index." }),
+      bits: z
+        .number()
+        .int()
+        .min(MIN_INDEX_BITS)
+        .max(MAX_INDEX_BITS)
+        .meta({
+          description:
+            "How many bits of each HMAC tag to keep, 4 to 32. Default 12: about one row in 4,096 that does not match shares a value's tag.",
+        })
+        .optional(),
+    })
+    .meta({ description: "A ctx.meta key to index, with its tag's bit length." }),
+]);
+
 /** `channels/<name>/channel.yaml`. */
 export const channelSchema = restate(
   z
@@ -1870,6 +1902,23 @@ export const channelSchema = restate(
         .strictObject({ content: content.optional() })
         .meta({
           description: "What is kept of this channel's messages: overrides pathways.yaml's.",
+        })
+        .optional(),
+      index: z
+        .array(metaIndex)
+        .meta({
+          description:
+            "The ctx.meta keys to make searchable with pathways messages --where: each value is stored as a truncated HMAC-SHA-256 tag under a key of its own. Needs encryption keys.",
+        })
+        .superRefine((entries, ctx) => {
+          const seen = new Set<string>();
+          for (const [index, entry] of entries.entries()) {
+            const key = typeof entry === "string" ? entry : entry.key;
+            if (seen.has(key)) {
+              ctx.addIssue({ code: "custom", path: [index], message: `${key} is indexed twice` });
+            }
+            seen.add(key);
+          }
         })
         .optional(),
     })
@@ -2520,6 +2569,25 @@ export interface ChannelConfig {
    * when the engine starts. Its keys replace those of the project's block.
    */
   readonly config: TransformConfigBlock;
+  /**
+   * The `ctx.meta` keys stored as searchable index tags, from the channel's `index:` block. Set
+   * only when the block names at least one.
+   */
+  readonly indexes?: readonly MetaIndexConfig[] | undefined;
+}
+
+/**
+ * One searchable index of a channel: the `ctx.meta` key it covers, and how many bits of each
+ * HMAC-SHA-256 tag it keeps.
+ *
+ * @example
+ * ```ts
+ * const index: MetaIndexConfig = { key: "mrn", bits: 12 };
+ * ```
+ */
+export interface MetaIndexConfig {
+  readonly key: string;
+  readonly bits: number;
 }
 
 /**
@@ -2687,4 +2755,10 @@ export interface ProjectConfig {
    * `undefined` in a configuration built by hand rather than loaded.
    */
   readonly environment?: readonly EnvReference[] | undefined;
+  /**
+   * What loading found worth saying that does not stop a start, one line each, naming the file and
+   * the key: an index on a `ctx.meta` key whose values are few or guessable. Set only when there is
+   * one.
+   */
+  readonly warnings?: readonly string[] | undefined;
 }

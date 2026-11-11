@@ -2,6 +2,7 @@ import {
   createCipheriv,
   createDecipheriv,
   createSecretKey,
+  hkdf,
   randomBytes,
   type KeyObject,
 } from "node:crypto";
@@ -61,6 +62,19 @@ export interface KeyProvider {
    * `ERR_PATHWAYS_INTEGRITY` when the wrapped key fails its check.
    */
   unwrapKey(keyId: string, wrapped: Uint8Array): Promise<Uint8Array>;
+  /**
+   * Every master key id the provider holds, the current one among them: a metadata search derives
+   * its index tags under each, so rows tagged under an older key are still found. Optional; without
+   * it, a search runs under the current key alone.
+   */
+  readonly keyIds?: readonly string[];
+  /**
+   * Derives a 32-byte key for one searchable index from the master key `keyId`, with HKDF-SHA-256
+   * and `info` naming the index. Optional: a provider whose master keys never leave a key service
+   * cannot derive one, and a channel with an `index:` block then refuses to start on it. The
+   * returned buffer is the caller's, which overwrites it with zeros once it is done.
+   */
+  deriveIndexKey?(keyId: string, info: Uint8Array): Promise<Uint8Array>;
 }
 
 /**
@@ -80,6 +94,9 @@ const BASE64_KEY = /^[A-Za-z0-9+/]{43}=$/;
 const WRAP_NONCE_BYTES = 12;
 const WRAP_TAG_BYTES = 16;
 const WRAPPED_BYTES = WRAP_NONCE_BYTES + KEY_BYTES + WRAP_TAG_BYTES;
+
+/** The HKDF salt of every index key: fixed, so the same master key and index give the same key. */
+const INDEX_SALT = Buffer.from("pathways blind index", "latin1");
 
 /**
  * A new master key: 32 random bytes in base64, as a key file or environment variable holds one.
@@ -152,6 +169,29 @@ export class LocalKeyProvider implements KeyProvider {
   /** Unwraps a data key that the master key `keyId` wrapped. */
   unwrapKey(keyId: string, wrapped: Uint8Array): Promise<Uint8Array> {
     return new Promise((resolve) => resolve(this.unwrapNow(keyId, wrapped)));
+  }
+
+  /** Every master key id this provider holds. */
+  get keyIds(): readonly string[] {
+    return [...this.#keys.keys()];
+  }
+
+  /**
+   * Derives a 32-byte index key from the master key `keyId` with HKDF-SHA-256, `info` naming the
+   * index. Rejects with `ERR_PATHWAYS_UNKNOWN_KEY` when it holds no key `keyId`.
+   */
+  deriveIndexKey(keyId: string, info: Uint8Array): Promise<Uint8Array> {
+    const key = this.#keys.get(keyId);
+    if (key === undefined) {
+      return Promise.reject(new EncryptionError("ERR_PATHWAYS_UNKNOWN_KEY", keyId));
+    }
+    return new Promise((resolve, reject) => {
+      hkdf("sha256", key, INDEX_SALT, info, KEY_BYTES, (error, derived) => {
+        /* v8 ignore next: HKDF of a 32-byte key to 32 bytes does not fail */
+        if (error !== null) reject(error);
+        else resolve(Buffer.from(derived));
+      });
+    });
   }
 
   private wrapNow(dataKey: Uint8Array): WrappedKey {

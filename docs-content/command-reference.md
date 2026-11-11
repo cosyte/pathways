@@ -191,21 +191,23 @@ Each channel's state, counts, retrying deliveries and failed messages, from the 
 
 ```text
 pathways messages [--channel <name>] [--status <state>] [--since <time>] [--until <time>] [--limit <n>] [--before <id>] [--json]
+pathways messages --channel <name> --where <key=value> [--where <key=value>...] [--status <state>] [--since <time>] [--until <time>] [--limit <n>] [--before <id>] [--json]
 pathways messages show <id> [--content] [--json]
 ```
 
 Lists stored messages, newest first, with ids, states, times, sizes and duplicate flags, never
 content; or shows one message and its deliveries. Each search and view is audited.
 
-| Option             | Meaning                                                                                                                    |
-| ------------------ | -------------------------------------------------------------------------------------------------------------------------- |
-| `--channel <name>` | only this channel                                                                                                          |
-| `--status <state>` | only this state: `received`, `queued`, `retrying`, `delivered`, `dry-run`, `filtered`, `failed` or `cleared`               |
-| `--since <time>`   | from this time: `2026-11-07`, `2026-11-07T12:00:00Z` (UTC unless a zone is given), or a duration ago such as `24h` or `7d` |
-| `--until <time>`   | before this time, in the same forms                                                                                        |
-| `--limit <n>`      | at most `n` rows, 1 to 1,000; default 50                                                                                   |
-| `--before <id>`    | the next page, as the last line of the previous one says                                                                   |
-| `--content`        | `show` only: print the content, which is PHI; the view is audited first                                                    |
+| Option                | Meaning                                                                                                                                                                                                                                   |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--channel <name>`    | only this channel                                                                                                                                                                                                                         |
+| `--status <state>`    | only this state: `received`, `queued`, `retrying`, `delivered`, `dry-run`, `filtered`, `failed` or `cleared`                                                                                                                              |
+| `--since <time>`      | from this time: `2026-11-07`, `2026-11-07T12:00:00Z` (UTC unless a zone is given), or a duration ago such as `24h` or `7d`                                                                                                                |
+| `--until <time>`      | before this time, in the same forms                                                                                                                                                                                                       |
+| `--limit <n>`         | at most `n` rows, 1 to 1,000; default 50                                                                                                                                                                                                  |
+| `--before <id>`       | the next page, as the last line of the previous one says                                                                                                                                                                                  |
+| `--where <key=value>` | only messages whose `ctx.meta` key holds the value, as text; the key must be in the channel's `index:` block and `--channel` is needed; repeat it to need every pair. See [Search messages by metadata](./search-messages-by-metadata.md) |
+| `--content`           | `show` only: print the content, which is PHI; the view is audited first                                                                                                                                                                   |
 
 ## pathways replay
 
@@ -260,9 +262,11 @@ message id; the other options are as for `messages`.
 pathways rekey [--encrypt-plaintext]
 ```
 
-Re-encrypts every stored body and error text under the current master key, so older keys can be
-retired. Prints how many values it re-encrypted, found already current, encrypted from plaintext, left
-unencrypted, could not read, and skipped because they changed while it ran. Safe beside a running
+Re-encrypts every stored body, error text and message metadata under the current master key, so
+older keys can be retired, and derives each message's metadata index tags again under the current
+key and the channels' `index:` blocks. Prints how many values it re-encrypted, found already current, encrypted from plaintext, left
+unencrypted, could not read, and skipped because they changed while it ran, and, when any, how many
+messages' index tags it derived again. Safe beside a running
 engine. On SQLite, rekey then empties the write-ahead log into the database file, and exits 1 if a
 read still under way after five seconds keeps it from doing so; once it exits 0, an older key can go.
 On a database server or a custom store, rekey also says on stderr that the store may still hold
