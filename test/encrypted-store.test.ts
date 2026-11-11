@@ -123,6 +123,13 @@ for (const database of TEST_DATABASES) {
           expect(delivery).toMatchObject({ messageId: id, seq: 0, attempts: 0, nextAttemptAt: 0 });
           expect(text(delivery?.body ?? new Uint8Array())).toBe("out-1");
         }
+        // Asked for one due by a time, it passes the question on: a retry waiting is passed over.
+        const waiting = await store.nextDelivery("adt", 0);
+        await store.scheduleRetry(waiting?.id ?? -1, 1, 5_000, "delivery: ECONNRESET");
+        const due = await store.nextDelivery("adt", 0, { dueBy: 4_999 });
+        expect(due).toMatchObject({ messageId: id, seq: 1, attempts: 0 });
+        expect(text(due?.body ?? new Uint8Array())).toBe("out-2");
+        await store.scheduleRetry(waiting?.id ?? -1, 0, 0, "delivery: ECONNRESET");
         expect(await store.messageCounts("adt")).toMatchObject({ received: 1, transformed: 1 });
         expect(await store.deliveryCounts("adt")).toEqual({
           pending: 4,

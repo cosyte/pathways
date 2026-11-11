@@ -126,7 +126,9 @@ A `MessageStore` from a module keeps the marker the engine writes before each se
 stores the attempt and its start, `nextDelivery` returns it as `sending`, and `markDelivered`,
 `scheduleRetry` and `failDelivery` clear it in the same write as their outcome. That is how a resend
 after a crash is flagged; see
-[Delivery and errors](./delivery-and-errors.md#a-resend-after-a-crash-is-flagged).
+[Delivery and errors](./delivery-and-errors.md#a-resend-after-a-crash-is-flagged). For a destination
+with `retry.rotate: true`, the engine asks `nextDelivery` for the oldest delivery due by now
+(`{ dueBy }`); a store that ignores the option keeps that destination in order.
 
 #### Database server
 
@@ -143,9 +145,9 @@ See [Store messages in a database server](./store-messages-in-a-database.md).
 
 ### Settings
 
-`defaults:` in `pathways.yaml` sets these for every channel. A channel overrides the first six at the
-top level of its `channel.yaml`; an MLLP source overrides `onStoreFailure`, and an MLLP destination
-`ackTimeout`.
+`defaults:` in `pathways.yaml` sets these for every channel. A channel overrides the first six, and
+`retry`, at the top level of its `channel.yaml`; an MLLP source overrides `onStoreFailure`, an MLLP
+destination `ackTimeout`, and any destination `retry`.
 
 | Key                 | Type                  | Default | Meaning                                                                                                                                                      |
 | ------------------- | --------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -157,6 +159,25 @@ top level of its `channel.yaml`; an MLLP source overrides `onStoreFailure`, and 
 | `resendFlag`        | boolean               | `true`  | write a marker before each send, so a resend after a crash is flagged; see [Delivery and errors](./delivery-and-errors.md#a-resend-after-a-crash-is-flagged) |
 | `pollInterval`      | duration              | `1s`    | how often the engine looks for new work; project only                                                                                                        |
 | `retentionInterval` | duration              | `1h`    | how often a running engine runs retention; project only                                                                                                      |
+| `retry`             | see [Retry](#retry)   | below   | how a failed delivery is retried                                                                                                                             |
+
+#### Retry
+
+A `retry:` block, in `defaults:`, a channel, or a destination. The narrowest that sets a key wins,
+key by key. Each key may be read from the environment, `none` included, as
+`limit: { env: RETRY_LIMIT, default: none }`; `first` is checked against `max` on the values read.
+See [Delivery and errors](./delivery-and-errors.md#set-retries-per-destination).
+
+| Key         | Type                                    | Default  | Meaning                                                                                  |
+| ----------- | --------------------------------------- | -------- | ---------------------------------------------------------------------------------------- |
+| `first`     | duration, at least `1ms`                | `1s`     | the first retry's wait; no longer than `max`                                             |
+| `max`       | duration, at least `1ms`                | `5m`     | the longest wait, whatever a `Retry-After` asks; a held redirect waits this long         |
+| `factor`    | a number from 1 to 100                  | `2`      | how much longer each wait is than the one before                                         |
+| `jitter`    | `none` or `full`                        | `none`   | `full` waits a random time between 0 and the wait                                        |
+| `limit`     | a whole number of at least 1, or `none` | `none`   | the most attempts a delivery gets, the first included, before `onExhaust`                |
+| `maxAge`    | duration of at least `1ms`, or `none`   | `none`   | how long after it was queued a delivery may still be retried, before `onExhaust`         |
+| `onExhaust` | `failed`                                | `failed` | mark the delivery failed, its body kept for a resend, and move on                        |
+| `rotate`    | boolean                                 | `false`  | let later deliveries go ahead of one waiting for a retry; breaks the destination's order |
 
 ### Hooks
 
@@ -177,8 +198,8 @@ and each may add:
 | `timeout` | duration above zero                 | `5s`        |
 
 The event names are `received`, `receive-failed`, `transformed`, `filtered`, `transform-failed`,
-`delivered`, `delivery-retry`, `delivery-redirected`, `delivery-rejected`, `source-down`, `source-up`
-and `audit`. See
+`delivered`, `delivery-retry`, `delivery-redirected`, `delivery-rejected`, `delivery-exhausted`,
+`source-down`, `source-up` and `audit`. See
 [Add lifecycle hooks](./add-lifecycle-hooks.md).
 
 ### Health endpoint
@@ -217,6 +238,7 @@ How `pathways migrate --contract` treats contract steps. See
 | `destinations`                                                   | a list of at least one [destination](#destinations) | required                         |
 | `hooks`                                                          | a list of [hooks](#hooks)                           | none                             |
 | `timeout`, `memory`, `onStoreFailure`, `ackTimeout`, `retention` | see [Settings](#settings)                           | the project's                    |
+| `resendFlag`, `retry`                                            | see [Settings](#settings)                           | the project's                    |
 
 A channel with an MLLP source or destination must have the format `hl7v2`.
 
@@ -267,7 +289,16 @@ how a path is matched and how each response answers.
 
 ### Destinations
 
-Each entry is exactly one of `file`, `http`, `mllp` or `module`.
+Each entry is exactly one of `file`, `http`, `mllp` or `module`, and may add a [`retry`](#retry)
+block of its own, beside that key:
+
+```yaml title="channels/results-out/channel.yaml"
+source:
+  file: { dir: ./in }
+destinations:
+  - http: { url: "https://lab.example.test/results" }
+    retry: { limit: 10, jitter: full }
+```
 
 #### File destination
 
@@ -294,10 +325,10 @@ off by a stop. Its value is the number of attempts before, such as `1`. It may n
 headers above, `Content-Type`, or a name `headers` sets. See
 [Delivery and errors](./delivery-and-errors.md#a-resend-after-a-crash-is-flagged).
 
-There is no key for retries: a 2xx is delivered; a 408, 425, 429, 5xx, a network error or no answer
-within `timeout` is retried, waiting longer when a 429 or a 503 asks with `Retry-After`, never more
-than 5 minutes; a 3xx is held, never followed, and retried every 5 minutes; a 101 or any other 4xx
-fails the delivery for good. Any other 1xx is an interim answer: the attempt waits for the final
+A 2xx is delivered; a 408, 425, 429, 5xx, a network error or no answer within `timeout` is retried,
+waiting longer when a 429 or a 503 asks with `Retry-After`, never more than `retry.max` (5 minutes
+by default); a 3xx is held, never followed, and retried every `retry.max`; a 101 or any other 4xx
+fails the delivery for good. The destination's [`retry`](#retry) block sets the waits and any limit. Any other 1xx is an interim answer: the attempt waits for the final
 answer after it, and is retried when none comes within `timeout` or the connection closes. See [Send and receive over HTTP](./send-and-receive-http.md).
 
 #### MLLP destination
