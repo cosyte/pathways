@@ -1,8 +1,8 @@
-// Copies the database server drivers, and every package they load, out of a full pnpm install, for
-// the Docker image. The drivers (package.json's peerDependencies) are optional peers, so the
-// image's production install leaves them out; the image carries all of them, so it runs against any
-// database Pathways supports. They come from the full install that builds the image, at exactly the
-// versions the lockfile pins and the tests ran.
+// Copies the database server drivers and the SFTP client, and every package they load, out of a full
+// pnpm install, for the Docker image. They (package.json's peerDependencies) are optional peers, so
+// the image's production install leaves them out; the image carries all of them, so it runs against
+// any database Pathways supports and reads SFTP. They come from the full install that builds the
+// image, at exactly the versions the lockfile pins and the tests ran.
 //
 // Usage: node scripts/copy-drivers.ts <from> <to>
 //
@@ -15,11 +15,12 @@ import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /**
- * The names of a project's peerDependencies: the database drivers Pathways leaves to the project.
+ * The names of a project's peerDependencies: the database drivers and the SFTP client Pathways
+ * leaves to the project.
  *
  * @example
  * ```ts
- * await driverNames("."); // ["mysql2", "pg", "tarn", "tedious"]
+ * await driverNames("."); // ["mysql2", "pg", "ssh2", "tarn", "tedious"]
  * ```
  */
 export async function driverNames(project: string): Promise<string[]> {

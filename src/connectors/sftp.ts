@@ -19,6 +19,12 @@ export const WEAK_ALGORITHMS = SFTP_WEAK_ALGORITHMS;
 /** One of {@link WEAK_ALGORITHMS}, which a channel turns back on by name. */
 export type WeakAlgorithm = (typeof WEAK_ALGORITHMS)[number];
 
+/**
+ * The package an SFTP location runs on, an optional peer dependency pinned to one version, which
+ * the Docker image carries with the database drivers.
+ */
+export const SFTP_PACKAGE = "ssh2";
+
 /** The default for {@link SftpOptions.connectTimeoutMs}: 20 seconds. */
 export const DEFAULT_SFTP_CONNECT_TIMEOUT_MS = 20_000;
 

@@ -4,7 +4,7 @@
  *
  * The cases run on a small pnpm layout written by hand (scoped packages, a cycle, a package nobody
  * asked for), on the command line as the Dockerfile calls it, and on this repository's own install,
- * whose peers must be exactly the drivers src/storage/dialects.ts imports.
+ * whose peers must be exactly the drivers src/storage/dialects.ts imports and the SFTP client.
  */
 import { spawnSync } from "node:child_process";
 import { lstat, mkdir, mkdtemp, readdir, readlink, rm, symlink, writeFile } from "node:fs/promises";
@@ -15,6 +15,7 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { copyDrivers, driverNames, main, storeEntries } from "../../scripts/copy-drivers.js";
+import { SFTP_PACKAGE } from "../../src/connectors/sftp.js";
 import { DRIVER_PACKAGES } from "../../src/storage/dialects.js";
 
 const SCRIPT = join(process.cwd(), "scripts/copy-drivers.ts");
@@ -155,8 +156,8 @@ describe.skipIf(process.platform === "win32")("copy-drivers", () => {
     expect(empty.stderr).toContain("ENOENT");
   });
 
-  it("copies exactly the drivers dialects.ts imports: this package's peers", async () => {
-    const drivers = Object.values(DRIVER_PACKAGES).flat().sort();
+  it("copies exactly this package's peers: the drivers dialects.ts imports, and the SFTP client", async () => {
+    const drivers = [...Object.values(DRIVER_PACKAGES).flat(), SFTP_PACKAGE].sort();
     expect(await driverNames(process.cwd())).toEqual(drivers);
     const entries = await storeEntries(join(process.cwd(), "node_modules"), drivers);
     for (const name of drivers) {

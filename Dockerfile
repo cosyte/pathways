@@ -70,10 +70,12 @@ RUN npm install --global "$(node -p 'require("./package.json").packageManager')"
 # confirm that a binary is there. The other scripts are esbuild's, which pnpm already skips here,
 # and this package's own `prepare`, which installs git hooks.
 #
-# The database server drivers are optional peer dependencies, which a production install leaves
-# out. scripts/copy-drivers.ts copies each one package.json's peerDependencies names, with every
-# package it loads, from this full install into /drivers, at the versions the lockfile pins. They are
-# pure JavaScript, so the copy made on the builder's platform loads on every target.
+# The database server drivers and the SFTP client (ssh2) are optional peer dependencies, which a
+# production install leaves out. scripts/copy-drivers.ts copies each one package.json's
+# peerDependencies names, with every package it loads, from this full install into /drivers, at the
+# versions the lockfile pins. They are pure JavaScript (ssh2's optional native add-ons are never
+# installed or built, as pnpm-workspace.yaml says), so the copy made on the builder's platform loads
+# on every target.
 FROM build-toolchain AS build
 RUN pnpm install --frozen-lockfile --ignore-scripts
 COPY scripts/copy-drivers.ts ./scripts/
