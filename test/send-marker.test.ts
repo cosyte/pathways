@@ -335,61 +335,68 @@ describe("A delivery cut off by a stop", () => {
     // is an error thrown around the store's write, which no part of the engine catches.
     const project = await textProject();
     await fc.assert(
-      fc.asyncProperty(
-        fc.integer({ min: 1, max: 4 }),
-        fc.nat({ max: 15 }),
-        async (count, killAt) => {
-          freshBench();
-          const store = await Store.open(":memory:");
-          stores.push(store);
-          const io = scripted();
-          for (let i = 0; i < count; i += 1) io.inbox.push(`note ${String(i)}`);
-          let step = 0;
-          const stop = (): void => {
-            if (step === killAt) {
-              step += 1;
-              throw new Error("the process stopped");
-            }
-            step += 1;
-          };
-          const killing = new Proxy(store, {
-            get(target, property, receiver) {
-              const value = Reflect.get(target, property, receiver) as unknown;
-              if (typeof value !== "function") return value;
-              if (property !== "markSending" && property !== "markDelivered") {
-                return (value as (...a: unknown[]) => unknown).bind(target);
+      fc
+        .asyncProperty(
+          fc.integer({ min: 1, max: 4 }),
+          fc.nat({ max: 15 }),
+          async (count, killAt) => {
+            freshBench();
+            const store = await Store.open(":memory:");
+            stores.push(store);
+            const io = scripted();
+            for (let i = 0; i < count; i += 1) io.inbox.push(`note ${String(i)}`);
+            let step = 0;
+            const stop = (): void => {
+              if (step === killAt) {
+                step += 1;
+                throw new Error("the process stopped");
               }
-              return async (...args: unknown[]): Promise<unknown> => {
-                stop();
-                const result = await (value as (...a: unknown[]) => Promise<unknown>).apply(
-                  target,
-                  args,
-                );
-                stop();
-                return result;
-              };
-            },
-          }) as MessageStore;
-          const first = await engineOn(project, killing, io);
-          await first.engine.tick().catch(() => undefined);
-          await first.engine.stop();
-          const second = await engineOn(project, store, io);
-          await second.engine.tick();
-          await second.engine.stop();
+              step += 1;
+            };
+            const killing = new Proxy(store, {
+              get(target, property, receiver) {
+                const value = Reflect.get(target, property, receiver) as unknown;
+                if (typeof value !== "function") return value;
+                if (property !== "markSending" && property !== "markDelivered") {
+                  return (value as (...a: unknown[]) => unknown).bind(target);
+                }
+                return async (...args: unknown[]): Promise<unknown> => {
+                  stop();
+                  const result = await (value as (...a: unknown[]) => Promise<unknown>).apply(
+                    target,
+                    args,
+                  );
+                  stop();
+                  return result;
+                };
+              },
+            }) as MessageStore;
+            const first = await engineOn(project, killing, io);
+            await first.engine.tick().catch(() => undefined);
+            await first.engine.stop();
+            const second = await engineOn(project, store, io);
+            await second.engine.tick();
+            await second.engine.stop();
 
-          const stored = Array.from({ length: count }, (_, i) => i + 1);
-          expect([...new Set(io.sent.map((s) => s.messageId))].sort()).toEqual(stored);
-          for (const id of stored) {
-            const copies = io.sent.filter((s) => s.messageId === id);
-            expect(copies.filter((s) => s.resend === undefined).length).toBeLessThanOrEqual(1);
-            expect(copies.length).toBeLessThanOrEqual(2);
-          }
-          expect(await store.deliveryCounts("notes")).toMatchObject({
-            pending: 0,
-            delivered: count,
-          });
-        },
-      ),
+            const stored = Array.from({ length: count }, (_, i) => i + 1);
+            expect([...new Set(io.sent.map((s) => s.messageId))].sort()).toEqual(stored);
+            for (const id of stored) {
+              const copies = io.sent.filter((s) => s.messageId === id);
+              expect(copies.filter((s) => s.resend === undefined).length).toBeLessThanOrEqual(1);
+              expect(copies.length).toBeLessThanOrEqual(2);
+            }
+            expect(await store.deliveryCounts("notes")).toMatchObject({
+              pending: 0,
+              delivered: count,
+            });
+          },
+        )
+        .afterEach(async () => {
+          // Each run's engines and store are let go as it ends, inside the test's own time limit,
+          // so nothing piles up for the file's afterEach on a slow runner.
+          await Promise.all(engines.splice(0).map((engine) => engine.stop()));
+          await Promise.all(stores.splice(0).map((store) => store.close()));
+        }),
       { numRuns: 20 },
     );
   }, 120_000);
