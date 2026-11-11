@@ -72,7 +72,8 @@ health:
   and it takes no `default`. `plaintext`,
   `encryption: none`, `auth: none`, a channel's `name` and `format`, and a block (`tls`, `options`)
   are not read from the environment: turning TLS, encryption or authentication off stays in the
-  file, where the audit sees it.
+  file, where the audit sees it. Nor are the names in an HTTP source's `contextHeaders`: which
+  request headers reach a transform stays in the file, where a credential header is refused at load.
 - `pathways validate --print` prints the configuration as `start` reads it, with every setting the
   environment gave and the variable it named; see
   [Command reference](./command-reference.md#pathways-validate). The query string of a URL read
@@ -82,17 +83,18 @@ health:
 
 ## pathways.yaml
 
-| Key          | Type                                    | Default                         |
-| ------------ | --------------------------------------- | ------------------------------- |
-| `encryption` | see [Encryption](#encryption)           | none: `start` refuses           |
-| `secrets`    | see [Secrets](#secrets)                 | `env` and `file` only           |
-| `storage`    | see [Storage](#storage)                 | SQLite, `.pathways/pathways.db` |
-| `defaults`   | see [Settings](#settings)               | the defaults below              |
-| `hooks`      | a list of [hooks](#hooks)               | none                            |
-| `health`     | see [Health endpoint](#health-endpoint) | no health endpoint              |
-| `probes`     | see [Probe listener](#probe-listener)   | no probe listener               |
-| `lease`      | see [Engine lease](#engine-lease)       | a 15s lease, no standby         |
-| `migrations` | see [Migrations](#migrations)           | no rollback window              |
+| Key          | Type                                                    | Default                         |
+| ------------ | ------------------------------------------------------- | ------------------------------- |
+| `encryption` | see [Encryption](#encryption)                           | none: `start` refuses           |
+| `secrets`    | see [Secrets](#secrets)                                 | `env` and `file` only           |
+| `storage`    | see [Storage](#storage)                                 | SQLite, `.pathways/pathways.db` |
+| `defaults`   | see [Settings](#settings)                               | the defaults below              |
+| `hooks`      | a list of [hooks](#hooks)                               | none                            |
+| `health`     | see [Health endpoint](#health-endpoint)                 | no health endpoint              |
+| `probes`     | see [Probe listener](#probe-listener)                   | no probe listener               |
+| `lease`      | see [Engine lease](#engine-lease)                       | a 15s lease, no standby         |
+| `migrations` | see [Migrations](#migrations)                           | no rollback window              |
+| `config`     | see [Transform configuration](#transform-configuration) | none                            |
 
 ### Encryption
 
@@ -248,18 +250,29 @@ How `pathways migrate --contract` treats contract steps. See
 | ---------------- | -------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------- |
 | `rollbackWindow` | duration | `0`     | how long after the schema last changed contract steps are refused, so the version before can still be started again; `0` refuses none |
 
+### Transform configuration
+
+What every channel's transform reads as `ctx.config`: a mapping of names to any YAML value (a
+string, a finite number, a boolean, null, a list or a mapping). A mapping with the key `env`,
+`{ env: NAME }` or `{ env: NAME, default: value }`, is read from that environment variable when the
+engine starts, never when the configuration loads; a variable that is not set, or is empty, takes the
+`default`, one value that is not a list or a mapping, and with none stops the start with its name,
+never a value. A channel's own `config` replaces this one key
+by key. See [Use the message context](./use-the-message-context.md).
+
 ## channel.yaml
 
-| Key                                                              | Type                                                | Default                          |
-| ---------------------------------------------------------------- | --------------------------------------------------- | -------------------------------- |
-| `name`                                                           | lowercase letters, digits and hyphens               | the folder's name; must match it |
-| `format`                                                         | `hl7v2`, `fhir`, `x12`, `ccda`, `json` or `text`    | `hl7v2`                          |
-| `source`                                                         | exactly one [source](#sources)                      | required                         |
-| `transform`                                                      | path to the transform module                        | none: messages pass through      |
-| `destinations`                                                   | a list of at least one [destination](#destinations) | required                         |
-| `hooks`                                                          | a list of [hooks](#hooks)                           | none                             |
-| `timeout`, `memory`, `onStoreFailure`, `ackTimeout`, `retention` | see [Settings](#settings)                           | the project's                    |
-| `resendFlag`, `retry`                                            | see [Settings](#settings)                           | the project's                    |
+| Key                                                              | Type                                                    | Default                          |
+| ---------------------------------------------------------------- | ------------------------------------------------------- | -------------------------------- |
+| `name`                                                           | lowercase letters, digits and hyphens                   | the folder's name; must match it |
+| `format`                                                         | `hl7v2`, `fhir`, `x12`, `ccda`, `json` or `text`        | `hl7v2`                          |
+| `source`                                                         | exactly one [source](#sources)                          | required                         |
+| `transform`                                                      | path to the transform module                            | none: messages pass through      |
+| `destinations`                                                   | a list of at least one [destination](#destinations)     | required                         |
+| `hooks`                                                          | a list of [hooks](#hooks)                               | none                             |
+| `config`                                                         | see [Transform configuration](#transform-configuration) | the project's, key by key        |
+| `timeout`, `memory`, `onStoreFailure`, `ackTimeout`, `retention` | see [Settings](#settings)                               | the project's                    |
+| `resendFlag`, `retry`                                            | see [Settings](#settings)                               | the project's                    |
 
 A channel with an MLLP source or destination must have the format `hl7v2`.
 
@@ -307,19 +320,23 @@ shows each in use.
 
 A [listener](#listener), and:
 
-| Key        | Type                                               | Default         |
-| ---------- | -------------------------------------------------- | --------------- |
-| `path`     | starting with `/`                                  | `/`             |
-| `paths`    | a list of paths, in place of `path`                | `[path]`        |
-| `methods`  | a list of `POST` and `PUT`                         | `[POST]`        |
-| `response` | `ack`, or `{ status, contentType, headers, body }` | 202 with the id |
-| `maxBytes` | byte size                                          | `10MB`          |
+| Key              | Type                                               | Default         |
+| ---------------- | -------------------------------------------------- | --------------- |
+| `path`           | starting with `/`                                  | `/`             |
+| `paths`          | a list of paths, in place of `path`                | `[path]`        |
+| `methods`        | a list of `POST` and `PUT`                         | `[POST]`        |
+| `response`       | `ack`, or `{ status, contentType, headers, body }` | 202 with the id |
+| `maxBytes`       | byte size                                          | `10MB`          |
+| `contextHeaders` | a list of header names                             | none            |
 
 Its token is read from `PATHWAYS_HTTP_TOKEN` when `auth` is not set. `response: ack` needs the format
 `hl7v2` and takes POST alone. A fixed `response` has a 2xx `status`, an optional `contentType`,
 `headers` by the [HTTP destination](#http-destination)'s rules, and a `body` of at most 4,096
 characters. See [Send and receive over HTTP](./send-and-receive-http.md#answer-with-an-hl7-ack) for
-how a path is matched and how each response answers.
+how a path is matched and how each response answers. `contextHeaders` names the request headers the
+transform reads in `ctx.source.headers`; `Authorization`, `Proxy-Authorization` and `Cookie` are
+refused there, and never passed. Any other header listed is passed as it came, a credential such as
+an API key header included.
 
 #### MLLP source
 

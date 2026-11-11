@@ -21,10 +21,15 @@ import { captureLogger, cleanUp, dropFile, makeProject, usePlatform } from "./he
 
 afterEach(cleanUp);
 
-/** What a sink was handed, in order: each body as text and its idempotency key. */
+/**
+ * What a sink was handed, in order: each body as text, its idempotency key, the source facts the file
+ * source passed and the body's size in bytes, which the engine adds to them as `size`.
+ */
 interface Received {
   readonly body: string;
   readonly key: string | undefined;
+  readonly source: ReceiveOptions["source"];
+  readonly size: number;
 }
 
 /** A sink that stores every message, numbering them from 1. */
@@ -32,11 +37,23 @@ function sinkOf(): { sink: MessageSink; received: Received[] } {
   const received: Received[] = [];
   const sink: MessageSink = {
     receive(body: Uint8Array, options: ReceiveOptions = {}) {
-      received.push({ body: new TextDecoder().decode(body), key: options.idempotencyKey });
+      received.push({
+        body: new TextDecoder().decode(body),
+        key: options.idempotencyKey,
+        source: options.source,
+        size: body.byteLength,
+      });
       return Promise.resolve(received.length);
     },
   };
   return { sink, received };
+}
+
+/** The facts each file a pass takes carries: its name as the source passed it, and its size. */
+async function factsOf(source: FileSource): Promise<{ source: unknown; size: number }[]> {
+  const { sink, received } = sinkOf();
+  await source.poll(sink);
+  return received.map((r) => ({ source: r.source, size: r.size }));
 }
 
 async function inbox(): Promise<string> {
@@ -498,6 +515,130 @@ describe.each([
       }
     },
   );
+
+  it("passes each file it takes its path from dir and its size, through each option that takes one", async () => {
+    const dir = await inbox();
+    for (const [name, body] of [
+      ["a.hl7", "1"],
+      ["sub/b.hl7", "22"],
+      ["sub/deep/c.hl7", "333"],
+      [".dot/d.hl7", "4444"],
+      ["x/100%.hl7", "55555"],
+      ["x/a%2Fb.hl7", "666666"],
+      ["skip/e.hl7", "7"],
+      ["f.txt", "8"],
+    ] as const) {
+      await dropFile(join(dir, name), body);
+    }
+    const source = sourceOn(dir, {
+      recursive: true,
+      ignoreDot: false,
+      include: [{ glob: "**/*.hl7" }, { regex: "^\\.dot/" }],
+      exclude: [{ glob: "skip/**" }],
+      minSize: 1,
+      maxSize: 6,
+      keepProcessed: true,
+    });
+    expect(await factsOf(source)).toEqual([
+      { source: { name: ".dot/d.hl7" }, size: 4 },
+      { source: { name: "a.hl7" }, size: 1 },
+      { source: { name: "sub/b.hl7" }, size: 2 },
+      { source: { name: "sub/deep/c.hl7" }, size: 3 },
+      { source: { name: "x/100%.hl7" }, size: 5 },
+      { source: { name: "x/a%2Fb.hl7" }, size: 6 },
+    ]);
+    // Without recursion a name is the file's own, as before.
+    const flat = await inbox();
+    await dropFile(join(flat, "100%.hl7"), "flat");
+    expect(await factsOf(sourceOn(flat))).toEqual([{ source: { name: "100%.hl7" }, size: 4 }]);
+  });
+
+  it("passes the same facts through stable, doneFile, maxPerPoll and sortBy: mtime", async () => {
+    const dir = await inbox();
+    for (const [name, seconds] of [
+      ["sub/a.hl7", 10],
+      ["sub/b.hl7", 30],
+      ["c.hl7", 20],
+    ] as const) {
+      await dropFile(join(dir, name), name);
+      await dropFile(join(dir, `${name}.done`), "");
+      await age(join(dir, name), seconds);
+    }
+    const source = sourceOn(dir, {
+      recursive: true,
+      stable: true,
+      doneFile: ".done",
+      maxPerPoll: 2,
+      sortBy: "mtime",
+    });
+    // The first pass has nothing to compare with.
+    expect(await factsOf(source)).toEqual([]);
+    expect(await factsOf(source)).toEqual([
+      { source: { name: "sub/b.hl7" }, size: 9 },
+      { source: { name: "c.hl7" }, size: 5 },
+    ]);
+    expect(await factsOf(source)).toEqual([{ source: { name: "sub/a.hl7" }, size: 9 }]);
+  });
+
+  it("hands in nothing, so no facts, for a file it sets aside or leaves", async () => {
+    const dir = await inbox();
+    const errorDir = join(dir, "errors");
+    await dropFile(join(dir, "a", "big.hl7"), "12345");
+    await dropFile(join(dir, "empty.hl7"), "");
+    await dropFile(join(dir, "fits.hl7"), "1");
+    await dropFile(join(dir, "grows.hl7"), "1234");
+    await dropFile(join(dir, "skip", "x.hl7"), "x");
+    const faults: FileFault[] = [];
+    const options: Partial<FileSourceOptions> = {
+      recursive: true,
+      maxSize: 4,
+      exclude: [{ glob: "skip/**" }],
+      onFileFault: (fault) => {
+        faults.push(fault);
+        // grows.hl7 grows past maxSize after the pass found it, and is held to it by the open file.
+        if (faults.length === 1) appendFileSync(join(dir, "grows.hl7"), "5");
+      },
+    };
+    // Without errorDir the large files are left; only fits.hl7 is taken.
+    expect(await factsOf(sourceOn(dir, options))).toEqual([
+      { source: { name: "fits.hl7" }, size: 1 },
+    ]);
+    expect(faults).toEqual([
+      { reason: "too-large", moved: false },
+      { reason: "too-large", moved: false },
+    ]);
+    faults.length = 0;
+    await dropFile(join(dir, "grows.hl7"), "1234");
+    // With errorDir they are set aside, and nothing is handed in.
+    expect(await factsOf(sourceOn(dir, { ...options, errorDir }))).toEqual([]);
+    expect(faults).toEqual([
+      { reason: "too-large", moved: true },
+      { reason: "too-large", moved: true },
+    ]);
+    expect(await tree(dir)).toEqual([
+      "empty.hl7",
+      "errors/a/big.hl7",
+      "errors/grows.hl7",
+      "skip/x.hl7",
+    ]);
+    // A file with no marker yet, or seen once by a stable source, is left too.
+    await dropFile(join(dir, "waiting.hl7"), "w");
+    expect(await factsOf(sourceOn(dir, { doneFile: ".ok" }))).toEqual([]);
+    expect(await factsOf(sourceOn(dir, { stable: true }))).toEqual([]);
+    expect(await tree(dir)).toContain("waiting.hl7");
+  });
+
+  it("passes a claim's path from dir as its name when it resumes one, and a flat one as it is", async () => {
+    const dir = await inbox();
+    const claims = join(dir, CLAIMED_DIR, channel);
+    await mkdir(claims, { recursive: true });
+    await dropFile(join(claims, "000001700000001.00000000.0000000a-sub%2F100%25.hl7"), "nested");
+    await dropFile(join(claims, "000001700000001.00000001.0000000a-..%2Fout.hl7"), "climber");
+    expect(await factsOf(sourceOn(dir))).toEqual([
+      { source: { name: "sub/100%.hl7" }, size: 6 },
+      { source: { name: "..%2Fout.hl7" }, size: 7 },
+    ]);
+  });
 
   it("keeps a hand-made claim whose path would leave processed/ flat, under its own name", async () => {
     const dir = await inbox();

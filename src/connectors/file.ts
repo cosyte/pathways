@@ -645,19 +645,25 @@ export class FileSource implements SourceConnector {
       onReadError?.(error);
       return;
     }
-    const id = await sink.receive(body, { idempotencyKey: `file:${file.name}`, resumed });
-    // A sink that copied the body keeps none of it, and this source is done with it.
-    if (copiesBodies(sink)) release(body);
-    if (!keepProcessed) {
-      await unlink(file.path);
-      return;
-    }
+    // The name as it was dropped, as its path from the source folder, which the transform reads in
+    // ctx.source and nothing logs.
     const original = CLAIM_NAME.exec(file.name)?.[1] ?? file.name;
     const segments = decodePath(original).split("/");
     // A claim made by hand could name a path that leaves processed/: it keeps its name, flat.
     const parts = segments.some((part) => part === "" || part === "." || part === "..")
       ? [original]
       : segments;
+    const id = await sink.receive(body, {
+      idempotencyKey: `file:${file.name}`,
+      resumed,
+      source: { name: parts.join("/") },
+    });
+    // A sink that copied the body keeps none of it, and this source is done with it.
+    if (copiesBodies(sink)) release(body);
+    if (!keepProcessed) {
+      await unlink(file.path);
+      return;
+    }
     const folder = join(dir, PROCESSED_DIR, ...parts.slice(0, -1));
     await mkdir(folder, { recursive: true });
     await rename(file.path, join(folder, fitted(`${String(id)}-`, String(parts.at(-1)))));

@@ -8,6 +8,8 @@ import {
 import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 import type { Duplex } from "node:stream";
 
+import { NEVER_CONTEXT_HEADERS } from "../config/schema.js";
+import type { JsonValue } from "../transform.js";
 import { ackCharset, defaultAckBuilder, type AckRequest } from "./ack.js";
 import { Endpoint, refuse, refuseText, reply, replyText } from "./endpoint.js";
 import { failureOf, transientError } from "./http-core.js";
@@ -63,6 +65,12 @@ export interface HttpSourceOptions {
   readonly response?: HttpSourceResponse;
   /** The largest body taken, in bytes. A larger one answers 413. */
   readonly maxBytes: number;
+  /**
+   * The request headers, by lower-case name, passed to the transform in `ctx.source.headers`.
+   * `authorization`, `proxy-authorization` and `cookie` are never passed, even when named here.
+   * Defaults to none.
+   */
+  readonly contextHeaders?: readonly string[];
   /** TLS, or undefined for plaintext HTTP. */
   readonly tls: ServerTlsMaterial | undefined;
   /** The bearer token every request must carry, or undefined to require none. */
@@ -172,10 +180,13 @@ export class HttpSource implements SourceConnector {
     if (body === undefined) return;
     if (body.byteLength === 0) return refused(400);
 
-    if (answer.kind === "ack") return this.acknowledge(body, String(mediaType), response, sink);
+    const source = this.facts(request, pathname);
+    if (answer.kind === "ack") {
+      return this.acknowledge(body, String(mediaType), response, sink, source);
+    }
     let id: number;
     try {
-      id = await sink.receive(body);
+      id = await sink.receive(body, { source });
     } catch {
       reply(response, 503, { error: STORE_FAILED });
       return;
@@ -199,13 +210,14 @@ export class HttpSource implements SourceConnector {
     mediaType: string,
     response: ServerResponse,
     sink: MessageSink,
+    source: Readonly<Record<string, JsonValue>>,
   ): Promise<void> {
     const { header, problem, duplicateKey } = readHeader(body);
     let messageId: number;
     try {
       messageId = await sink.receive(
         body,
-        problem === undefined ? { duplicateKey } : { failure: `inbound: ${problem}` },
+        problem === undefined ? { duplicateKey, source } : { failure: `inbound: ${problem}` },
       );
     } catch {
       replyText(response, 503, STORE_FAILED);
@@ -223,6 +235,28 @@ export class HttpSource implements SourceConnector {
       "Cache-Control": "no-store",
     });
     response.end(ack);
+  }
+
+  /**
+   * What the transform reads in `ctx.source` about a request: its method, its path as matched, the
+   * sender's address, and the headers `contextHeaders` names, never one that carries a credential.
+   */
+  private facts(request: IncomingMessage, path: string): Readonly<Record<string, JsonValue>> {
+    const headers: Record<string, string> = {};
+    for (const name of this.options.contextHeaders ?? []) {
+      const lower = name.toLowerCase();
+      const values = request.headersDistinct[lower];
+      if (values === undefined || NEVER_CONTEXT_HEADERS.has(lower)) continue;
+      headers[lower] = values.join(", ");
+    }
+    const { remoteAddress } = request.socket;
+    return {
+      method: String(request.method),
+      path,
+      /* v8 ignore next: the socket keeps its address until it closes, and the body was just read */
+      ...(remoteAddress === undefined ? {} : { remoteAddress }),
+      headers,
+    };
   }
 }
 
