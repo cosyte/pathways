@@ -49,7 +49,7 @@ storage:
 4. Put the connection URL in the environment variable when you start Pathways:
 
 ```bash
-export PATHWAYS_DATABASE_URL="postgres://pathways:$DB_PASSWORD@db.example.com:5432/pathways"
+export PATHWAYS_DATABASE_URL="postgres://pathways:$DB_PASSWORD@example.com:5432/pathways"
 npx pathways start
 ```
 
