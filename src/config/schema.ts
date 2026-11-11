@@ -98,6 +98,7 @@ const settingsShape = {
   onStoreFailure: onStoreFailure.optional(),
   ackTimeout: duration.optional(),
   retention: duration.optional(),
+  resendFlag: z.boolean().optional(),
   retentionInterval: duration.optional(),
 };
 
@@ -569,6 +570,7 @@ export const channelSchema = z
     onStoreFailure: settingsShape.onStoreFailure,
     ackTimeout: settingsShape.ackTimeout,
     retention: settingsShape.retention,
+    resendFlag: settingsShape.resendFlag,
   })
   .superRefine((channel, ctx) => {
     // MLLP frames HL7 v2 and its ACKs are HL7 v2 messages, so an MLLP endpoint needs that format.
@@ -602,6 +604,11 @@ export interface Settings {
    * they are replayed or cleared.
    */
   readonly retentionMs: number;
+  /**
+   * Whether the engine writes the marker before each send, so a resend after a crash is flagged
+   * as a possible duplicate. `false` saves one write per attempt, and such a resend goes unflagged.
+   */
+  readonly resendFlag: boolean;
   /** How often `pathways start` runs retention, in milliseconds. Engine-wide. */
   readonly retentionIntervalMs: number;
 }
@@ -614,6 +621,7 @@ export const DEFAULT_SETTINGS: Settings = {
   onStoreFailure: "close",
   ackTimeoutMs: 10_000,
   retentionMs: 30 * 86_400_000,
+  resendFlag: true,
   retentionIntervalMs: 3_600_000,
 };
 

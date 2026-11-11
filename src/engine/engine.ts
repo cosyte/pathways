@@ -762,11 +762,15 @@ export class Engine {
             interruptedAttempt: interrupted,
           });
         }
-        await store.markSending(delivery.id, {
-          attempt,
-          at: this.now(),
-          ...(interrupted === undefined ? {} : { interruptedAttempt: interrupted }),
-        });
+        // With `resendFlag: false` no marker is written, so a crash after this send goes unflagged;
+        // the one cut off is still noted, so a delivery already found marked keeps its flag.
+        if (config.settings.resendFlag || interrupted !== undefined) {
+          await store.markSending(delivery.id, {
+            attempt,
+            at: this.now(),
+            ...(interrupted === undefined ? {} : { interruptedAttempt: interrupted }),
+          });
+        }
         try {
           await destination.deliver({
             messageId: delivery.messageId,

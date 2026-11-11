@@ -44,6 +44,12 @@ What the receiver sees depends on the destination:
 
 A delivery cut off before its marker was written was never handed over, and is sent as usual.
 
+The marker costs one more write per attempt. On a GitHub runner, `pathways start --once` with
+SQLite took about 5% longer for a single 1 MiB message with it, and about 1.5% longer for 100 small
+HL7 v2 messages. A channel that would rather save it sets `resendFlag: false` (in `defaults:` or its
+`channel.yaml`); then no marker is written, and a resend after a crash goes out unflagged, as it did
+before.
+
 ## Taking a message in
 
 - **MLLP** answers `AA` only once the message is stored. If it cannot be stored, it sends no ACK and

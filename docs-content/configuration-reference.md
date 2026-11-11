@@ -80,19 +80,20 @@ See [Store messages in a database server](./store-messages-in-a-database.md).
 
 ### Settings
 
-`defaults:` in `pathways.yaml` sets these for every channel. A channel overrides the first five at the
+`defaults:` in `pathways.yaml` sets these for every channel. A channel overrides the first six at the
 top level of its `channel.yaml`; an MLLP source overrides `onStoreFailure`, and an MLLP destination
 `ackTimeout`.
 
-| Key                 | Type                  | Default | Meaning                                                          |
-| ------------------- | --------------------- | ------- | ---------------------------------------------------------------- |
-| `timeout`           | duration              | `5s`    | how long one message's transform may run                         |
-| `memory`            | memory size           | `256MB` | the memory cap of a channel's transform worker                   |
-| `onStoreFailure`    | `close`, `AE` or `AR` | `close` | what an MLLP source answers when a message cannot be stored      |
-| `ackTimeout`        | duration              | `10s`   | how long an MLLP destination waits to connect, then for each ACK |
-| `retention`         | duration              | `30d`   | how long a done message is kept after its last activity          |
-| `pollInterval`      | duration              | `1s`    | how often the engine looks for new work; project only            |
-| `retentionInterval` | duration              | `1h`    | how often a running engine runs retention; project only          |
+| Key                 | Type                  | Default | Meaning                                                                                                                                                      |
+| ------------------- | --------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `timeout`           | duration              | `5s`    | how long one message's transform may run                                                                                                                     |
+| `memory`            | memory size           | `256MB` | the memory cap of a channel's transform worker                                                                                                               |
+| `onStoreFailure`    | `close`, `AE` or `AR` | `close` | what an MLLP source answers when a message cannot be stored                                                                                                  |
+| `ackTimeout`        | duration              | `10s`   | how long an MLLP destination waits to connect, then for each ACK                                                                                             |
+| `retention`         | duration              | `30d`   | how long a done message is kept after its last activity                                                                                                      |
+| `resendFlag`        | boolean               | `true`  | write a marker before each send, so a resend after a crash is flagged; see [Delivery and errors](./delivery-and-errors.md#a-resend-after-a-crash-is-flagged) |
+| `pollInterval`      | duration              | `1s`    | how often the engine looks for new work; project only                                                                                                        |
+| `retentionInterval` | duration              | `1h`    | how often a running engine runs retention; project only                                                                                                      |
 
 ### Hooks
 

@@ -62,13 +62,14 @@ async function opener(database: TestDatabase): Promise<() => Promise<Store>> {
 }
 
 /** One text channel, passed straight through, with the recording hook on every event. */
-async function textProject(): Promise<ProjectConfig> {
+async function textProject(extra = ""): Promise<ProjectConfig> {
   const root = await makeProject({
     "hooks/record.ts": RECORD_HOOK,
     "pathways.yaml": "hooks:\n  - module: ./hooks/record.ts\n    options: { key: all }\n",
     "channels/notes/channel.yaml":
       "format: text\nsource:\n  file: { dir: ../../data/inbox }\ntransform: ./transform.ts\n" +
-      "destinations:\n  - file: { dir: ../../data/out }\n",
+      "destinations:\n  - file: { dir: ../../data/out }\n" +
+      extra,
     "channels/notes/transform.ts": "export default (text: string): string => text;\n",
   });
   return loadProject(root);
@@ -260,6 +261,22 @@ function freshBenchEvents(): { type?: string; messageId?: number }[] {
 }
 
 describe("A delivery cut off by a stop", () => {
+  it("goes unflagged on a channel with resendFlag: false, which writes no marker", async () => {
+    freshBench();
+    const project = await textProject("resendFlag: false\n");
+    expect(project.channels[0]?.settings.resendFlag).toBe(false);
+    const open = await opener(TEST_DATABASES[0] as TestDatabase);
+    const io = scripted();
+    io.inbox.push("only");
+    const crashed = await engineOn(project, stoppingAt(await open(), "markDelivered"), io);
+    await expect(crashed.engine.tick()).rejects.toThrow("the process stopped");
+    await crashed.engine.stop();
+    const restarted = await engineOn(project, await open(), io);
+    await restarted.engine.tick();
+    expect(io.sent.map((s) => s.resend)).toEqual([undefined, undefined]);
+    expect(restarted.events.filter((e) => e.event === "possible-duplicate")).toEqual([]);
+  });
+
   it("keeps its flag on every later attempt, and counts the one cut off among them", async () => {
     freshBench();
     const project = await textProject();
