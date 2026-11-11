@@ -241,6 +241,40 @@ describe("pathways start on a custom store", () => {
     expect((await cli(["lease", "release", "--force", "-C", root])).code).toBe(EXIT.failed);
   });
 
+  it("stops between passes when its renewal is refused, once its work is recorded", async () => {
+    const root = await project(
+      `storage: { module: ${LEASED_STORE_FILE} }\nlease:\n  ttl: 1s\ndefaults:\n  pollInterval: 20ms\n`,
+    );
+    const stop = new AbortController();
+    const engine = runCli(["start", "-C", root], { signal: stop.signal });
+    try {
+      await until(() => engine.events.some((e) => e.event === "delivered"), "the delivery");
+      const leased = (await import(pathToFileURL(LEASED_STORE_FILE).href)) as {
+        engineLease: () => { epoch: number };
+      };
+      leased.engineLease().epoch += 1;
+      const ended = await engine.done;
+      expect(ended.code).toBe(EXIT.failed);
+      expect(ended.err).toContain("the engine lease was lost (renewal-refused)");
+    } finally {
+      stop.abort();
+      await engine.done;
+    }
+  });
+
+  it("starts as a standby when pathways.yaml says so, except for a single pass", async () => {
+    const yaml = `storage: { module: ${LEASED_STORE_FILE} }\nlease:\n  standby: true\n`;
+    const once = await cli(["start", "--once", "-C", await project(yaml)]);
+    expect(once.code).toBe(EXIT.ok);
+    expect(once.events.map((e) => e.event)).not.toContain("standby");
+    const stopped = new AbortController();
+    stopped.abort();
+    const standby = await runCli(["start", "-C", await project(yaml)], { signal: stopped.signal })
+      .done;
+    expect(standby.code).toBe(EXIT.ok);
+    expect(standby.events.map((e) => e.event)).toContain("standby");
+  });
+
   it("says so and exits 1 when the lease cannot be asked for, and runs on when it cannot be freed", async () => {
     for (const [acquire, shown] of [
       ["code", " (ECONNRESET)"],
