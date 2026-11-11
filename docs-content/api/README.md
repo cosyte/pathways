@@ -526,7 +526,7 @@ Where to read credentials and other settings from: `process.env` when the engine
 
 ##### format
 
-> `readonly` **format**: `"hl7v2"` \| `"fhir"` \| `"x12"` \| `"ccda"` \| `"json"` \| `"text"`
+> `readonly` **format**: `"hl7v2"` \| `"json"` \| `"fhir"` \| `"x12"` \| `"ccda"` \| `"text"`
 
 ##### logger
 
@@ -2973,56 +2973,6 @@ When the message last changed: transformed, failed, replayed or cleared.
 
 ***
 
-### MessageTypes
-
-The message each format hands a transform, by the `format` a channel declares.
-
-#### Example
-
-```ts
-type Claim = MessageTypes["x12"]; // X12Interchange
-```
-
-#### Properties
-
-##### ccda
-
-> **ccda**: `CcdaDocument`
-
-A C-CDA document, parsed with `@cosyte/ccda`.
-
-##### fhir
-
-> **fhir**: `FhirComplex`
-
-FHIR R4 JSON, parsed with `@cosyte/fhir`.
-
-##### hl7v2
-
-> **hl7v2**: `Hl7Message`
-
-HL7 v2, parsed with `@cosyte/hl7`.
-
-##### json
-
-> **json**: [`JsonValue`](#jsonvalue)
-
-Any JSON value. A string a `json` transform returns is sent as it is, not JSON-quoted.
-
-##### text
-
-> **text**: `string`
-
-The body as a string.
-
-##### x12
-
-> **x12**: `X12Interchange`
-
-An X12 interchange, parsed with `@cosyte/x12`.
-
-***
-
 ### MllpSourceFacts
 
 What an MLLP source knows about a message: the sender's address and, over mutual TLS, the common
@@ -5226,6 +5176,23 @@ const done = (status: MessageStatus): boolean => status === "transformed" || sta
 
 ***
 
+### MessageTypes
+
+> **MessageTypes** = `{ [F in Format]: FormatModel<F> }`
+
+The message each format hands a transform, by the `format` a channel declares, read from the
+format registry: `hl7v2` an [Hl7Message](#hl7message), `fhir` a [FhirResource](#fhirresource), `x12` an
+[X12Interchange](#x12interchange), `ccda` a [CcdaDocument](#ccdadocument), `json` a [JsonValue](#jsonvalue) (a string a
+`json` transform returns is sent as it is, not JSON-quoted), and `text` the body as a string.
+
+#### Example
+
+```ts
+type Claim = MessageTypes["x12"]; // X12Interchange
+```
+
+***
+
 ### RefusalReason
 
 > **RefusalReason** = `"not-found"` \| `"changed"` \| `"pending"` \| `"not-failed"` \| `"content-dropped"`
@@ -5588,10 +5555,11 @@ export default ((interchange) =>
 
 ### TransformOutput
 
-> **TransformOutput**\<`M`\> = `M` \| `string` \| readonly (`M` \| `string`)[] \| `null` \| `undefined`
+> **TransformOutput**\<`M`\> = `M` \| `string` \| `Uint8Array` \| readonly (`M` \| `string` \| `Uint8Array`)[] \| `null` \| `undefined`
 
-What a transform may return: a message or a string to send on, several of them, or `null` (or
-nothing) to filter the message out.
+What a transform may return: a message, a string or bytes to send on, several of them, or `null`
+(or nothing) to filter the message out. A string is sent as UTF-8; bytes (a `Uint8Array`, which a
+`Buffer` is) are sent as they are, so a body in another charset keeps its bytes.
 
 #### Type Parameters
 
@@ -5603,6 +5571,7 @@ nothing) to filter the message out.
 
 ```ts
 const filtered: TransformOutput<string> = null;
+const bytes: TransformOutput<string> = Buffer.from("MSH|^~\\&|LAB", "latin1");
 ```
 
 ***
