@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { constants } from "node:fs";
 import {
+  link,
   lstat,
   mkdir,
   open,
@@ -147,6 +148,15 @@ const SLOW_TRIES = 3;
 /** The most passes a path set aside by {@link SLOW_TRIES} waits before it is tried again. */
 const SLOW_WAIT_MAX = 64;
 
+/**
+ * The most time the pattern runs of one pass may take together, in milliseconds. Without it, a writer
+ * who drops many names built to run long costs {@link REGEX_TIME_LIMIT_MS} each, on every pass. Once
+ * a pass has spent this long, the paths it has not run yet wait for the next pass, and each pass runs
+ * the paths that have waited longest first, so a file dropped among such names is still reached. A
+ * path's result is kept while its file is there, so a run is spent on each path once, not each pass.
+ */
+export const PATTERN_TIME_PER_PASS_MS = 500;
+
 /** A path a pattern ran too long on: the runs in a row that did, and the passes left to wait. */
 interface Slow {
   readonly runs: number;
@@ -194,6 +204,11 @@ interface FileId {
   readonly ino: bigint;
 }
 
+/** A file id as one string, for a set. */
+function idKey(id: FileId): string {
+  return `${String(id.dev)}:${String(id.ino)}`;
+}
+
 /** The error a claim gives for a file no longer inside the source folder, or no longer the same. */
 function moved(): Error {
   return Object.assign(new Error("the file left the source folder or was replaced"), {
@@ -202,17 +217,45 @@ function moved(): Error {
 }
 
 /**
- * Moves the file `id` names from `from` to `to`, and checks after the move that the file now at `to`
- * is that one. A folder on `from` swapped for a link between the last check and the move would move
- * a file from outside the source folder: then it goes back where it came from and the move is
- * refused, with {@link moved}'s error.
+ * The error for a file a move took in that is not the one checked, and that could not be moved back
+ * where it came from: it waits in `.claimed/` under a `refused-` name, never stored.
  */
-async function relocate(from: string, to: string, id: FileId): Promise<void> {
-  await rename(from, to);
-  const now = await lstat(to, { bigint: true });
-  if (now.dev === id.dev && now.ino === id.ino) return;
-  await rename(to, from);
-  throw moved();
+function held(): Error {
+  return Object.assign(new Error("a refused file could not be moved back, and is held"), {
+    code: "ERR_PATHWAYS_FILE_HELD",
+  });
+}
+
+/**
+ * The error for a folder whose file system gives a file a new id when it moves between folders, as
+ * FAT and exFAT can: the check after each move could not tell a file from another, so nothing is
+ * claimed.
+ */
+function unsteady(): Error {
+  return Object.assign(new Error("this file system changes a file's id when it moves"), {
+    code: "ERR_PATHWAYS_FILE_ID_UNSTEADY",
+  });
+}
+
+/**
+ * Whether a file keeps its device and inode when it moves from `folder` into a folder inside it, on
+ * the file system that holds `folder`. Moves an empty file of its own to find out, and removes both.
+ */
+async function steadyIds(folder: string): Promise<boolean> {
+  const name = `probe-${randomBytes(8).toString("hex")}`;
+  const file = join(folder, name);
+  const inner = join(folder, `${name}.d`);
+  try {
+    await writeFile(file, "", { flag: "wx" });
+    const before = await lstat(file, { bigint: true });
+    await mkdir(inner);
+    await rename(file, join(inner, "probe"));
+    const after = await lstat(join(inner, "probe"), { bigint: true });
+    return before.dev === after.dev && before.ino === after.ino;
+  } finally {
+    await rm(file, { force: true });
+    await rm(inner, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -336,6 +379,19 @@ export class FileSource implements SourceConnector {
   private tries = new Map<string, number>();
   /** Paths a pattern ran too long on, so one set aside costs a run only now and then. */
   private slow = new Map<string, Slow>();
+  /** Whether each path found last pass passes `include` and `exclude`, once a run has said. */
+  private known = new Map<string, boolean>();
+  /** The pass each path still waiting for a run joined the line in, for {@link PATTERN_TIME_PER_PASS_MS}. */
+  private turns = new Map<string, number>();
+  /** The passes made, to number each pass's place in the line. */
+  private passes = 0;
+  /**
+   * The ids of files a move took in that were not the ones checked: never claimed or stored by this
+   * source while a pass still finds them, wherever a later race leaves them.
+   */
+  private refused = new Set<string>();
+  /** Whether the folder's file system keeps a file's id when it moves, once a claim has asked. */
+  private steady: boolean | undefined;
 
   /**
    * @param options The folder to read, the channel it is read for, how long a file must sit before
@@ -357,32 +413,129 @@ export class FileSource implements SourceConnector {
     const unfinished = (await readdir(claims, { withFileTypes: true }))
       .filter((entry) => entry.isFile())
       .map((entry) => ({ name: entry.name, path: join(claims, entry.name) }));
+    // The refused files this pass still finds, claimed or not; the rest are forgotten.
+    const refused = new Set<string>();
     // An earlier run may have stored these before it stopped: the store looks each key up.
-    for (const file of byName(unfinished)) await this.store(file, sink, true);
-    for (const file of await this.claim(claims)) await this.store(file, sink, false);
+    for (const file of byName(unfinished)) {
+      if (await this.isRefused(file.path, refused)) continue;
+      await this.store(file, sink, true);
+    }
+    for (const file of await this.claim(claims, refused)) await this.store(file, sink, false);
+  }
+
+  /** Whether the file at `path` is one a move refused; if so, it is kept in `refused`. */
+  private async isRefused(path: string, refused: Set<string>): Promise<boolean> {
+    if (this.refused.size === 0) return false;
+    const stats = await lstat(path, { bigint: true }).catch(() => undefined);
+    if (stats === undefined || !this.refused.has(idKey(stats))) return false;
+    refused.add(idKey(stats));
+    return true;
   }
 
   /**
-   * Whether a path from the source folder passes `include` and `exclude`. A path a pattern ran too
-   * long on passes neither this pass, so it is left, and is noted in `slow`: it is tried again on the
-   * next pass, and after {@link SLOW_TRIES} timeouts in a row only after a wait, as that says.
+   * Moves the file `id` names from `from` to `to`, and checks after the move that the file now at
+   * `to` is that one. A folder on `from` swapped for a link between the last check and the move
+   * would move a file from outside the source folder: then the move is refused, with
+   * {@link moved}'s error, and the file goes back to `from` by a hard link and an unlink, never by a
+   * rename, which would replace a file put at `from` since. A file that cannot go back (one is
+   * there, or the folder is gone) moves into `.claimed/` under a `refused-` name, out of every
+   * folder a pass reads, with {@link held}'s error. Either way its id is noted in `refused`, so a
+   * file a later swap leaves in the source folder is never taken.
    */
-  private matches(rel: string, slow: Map<string, Slow>): boolean {
-    const last = this.slow.get(rel);
-    if (last !== undefined && last.wait > 0) {
-      slow.set(rel, { runs: last.runs, wait: last.wait - 1 });
-      return false;
+  private async relocate(from: string, to: string, id: FileId): Promise<void> {
+    await rename(from, to);
+    const now = await lstat(to, { bigint: true });
+    if (now.dev === id.dev && now.ino === id.ino) return;
+    this.refused.add(idKey(now));
+    try {
+      await link(to, from);
+    } catch {
+      await this.hold(to);
+      throw held();
     }
     try {
-      const included = this.include.length === 0 || this.include.some((test) => test(rel));
-      return included && !this.exclude.some((test) => test(rel));
-    } catch (error) {
-      this.options.onReadError?.(error);
-      const runs = (last?.runs ?? 0) + 1;
-      const wait = runs < SLOW_TRIES ? 0 : Math.min(2 ** (runs - SLOW_TRIES), SLOW_WAIT_MAX);
-      slow.set(rel, { runs, wait });
-      return false;
+      await unlink(to);
+    } catch {
+      // Back at from, and still at to: the copy at to is held, so a claim of it is never stored.
+      await this.hold(to);
+      throw held();
     }
+    throw moved();
+  }
+
+  /**
+   * Moves a refused file into `.claimed/` under a `refused-` name of its own, where no pass reads.
+   * A move that fails leaves it, and its noted id keeps it from being stored.
+   */
+  private async hold(path: string): Promise<void> {
+    const name = `refused-${randomBytes(8).toString("hex")}`;
+    await rename(path, join(this.options.dir, CLAIMED_DIR, name)).catch(() => undefined);
+  }
+
+  /**
+   * The found files whose path passes `include` and `exclude`, at most
+   * {@link PATTERN_TIME_PER_PASS_MS} of runs a pass. A path's result is kept while its file is
+   * there. A path a pattern ran too long on passes neither this pass, so it is left, and is noted in
+   * `slow`: it is tried again on the next pass, and after {@link SLOW_TRIES} timeouts in a row only
+   * after a wait, as that says. Paths the pass had no time left for wait for the next, in the order
+   * they joined the line.
+   */
+  private judge(candidates: readonly Found[]): Found[] {
+    if (this.include.length === 0 && this.exclude.length === 0) return [...candidates];
+    this.passes += 1;
+    const pass = this.passes;
+    const known = new Map<string, boolean>();
+    const turns = new Map<string, number>();
+    const slow = new Map<string, Slow>();
+    const found: Found[] = [];
+    const line: Found[] = [];
+    for (const file of candidates) {
+      const result = this.known.get(file.rel);
+      if (result !== undefined) {
+        known.set(file.rel, result);
+        if (result) found.push(file);
+        continue;
+      }
+      turns.set(file.rel, this.turns.get(file.rel) ?? pass);
+      const last = this.slow.get(file.rel);
+      if (last !== undefined && last.wait > 0) {
+        slow.set(file.rel, { runs: last.runs, wait: last.wait - 1 });
+        continue;
+      }
+      line.push(file);
+    }
+    // Sorting is stable, so paths that joined in one pass keep the order the walk found them in.
+    line.sort((a, b) => Number(turns.get(a.rel)) - Number(turns.get(b.rel)));
+    let spent = 0;
+    for (const file of line) {
+      const last = this.slow.get(file.rel);
+      if (spent >= PATTERN_TIME_PER_PASS_MS) {
+        if (last !== undefined) slow.set(file.rel, last);
+        continue;
+      }
+      const started = performance.now();
+      try {
+        const included = this.include.length === 0 || this.include.some((test) => test(file.rel));
+        const result = included && !this.exclude.some((test) => test(file.rel));
+        known.set(file.rel, result);
+        turns.delete(file.rel);
+        if (result) found.push(file);
+      } catch (error) {
+        this.options.onReadError?.(error);
+        const runs = (last?.runs ?? 0) + 1;
+        const wait = runs < SLOW_TRIES ? 0 : Math.min(2 ** (runs - SLOW_TRIES), SLOW_WAIT_MAX);
+        slow.set(file.rel, { runs, wait });
+        // To the back of the line, behind every path waiting now: those go first next pass.
+        turns.set(file.rel, pass + 1);
+      } finally {
+        spent += performance.now() - started;
+      }
+    }
+    // Only paths found this pass are remembered, as with `seen`.
+    this.known = known;
+    this.turns = turns;
+    this.slow = slow;
+    return found;
   }
 
   /**
@@ -390,7 +543,7 @@ export class FileSource implements SourceConnector {
    * resolved, and is still the file `id` names. A folder on a file's path swapped for
    * a link since the pass found it would otherwise lead an open or a move outside the source folder:
    * `O_NOFOLLOW` refuses a link only in a path's last part. Each move is checked again after it is
-   * made, by {@link relocate}, for a swap between this check and the move.
+   * made, by {@link FileSource.relocate}, for a swap between this check and the move.
    */
   private async inside(path: string, root: string, id: FileId): Promise<boolean> {
     try {
@@ -422,9 +575,8 @@ export class FileSource implements SourceConnector {
     const root = await realpath(dir);
     const errors =
       errorDir === undefined ? undefined : await realpath(errorDir).catch(() => resolve(errorDir));
-    const found: Found[] = [];
+    const candidates: Found[] = [];
     const markers = new Set<string>();
-    const slow = new Map<string, Slow>();
     const walk = async (folder: string, under: string): Promise<void> => {
       for (const entry of await readdir(folder, { withFileTypes: true })) {
         const rel = `${under}${entry.name}`;
@@ -448,19 +600,17 @@ export class FileSource implements SourceConnector {
           // A symbolic link, to a file or a folder, a pipe or a device: never read.
         } else if (doneFile !== undefined && rel.endsWith(doneFile)) {
           markers.add(rel);
-        } else if (this.matches(rel, slow)) {
-          found.push({ rel, path });
+        } else {
+          candidates.push({ rel, path });
         }
       }
     };
     await walk(dir, "");
-    // Only paths found this pass are remembered, as with `seen`.
-    this.slow = slow;
-    return { found, markers };
+    return { found: this.judge(candidates), markers };
   }
 
   /** The files ready to be claimed this pass, in the order they are to be claimed. */
-  private async ready(now: number): Promise<Ready[]> {
+  private async ready(now: number, refused: Set<string>): Promise<Ready[]> {
     const { minAgeMs, minSize = 1, stable = false, doneFile, sortBy = "name" } = this.options;
     const { found, markers } = await this.find();
     const seen = new Map<string, string>();
@@ -472,6 +622,11 @@ export class FileSource implements SourceConnector {
       const size = Number(stats.size);
       const mtimeMs = Number(stats.mtimeNs) / 1e6;
       const id = { dev: stats.dev, ino: stats.ino };
+      // A file a move refused, left here by a later swap: said when it was refused, never taken.
+      if (this.refused.has(idKey(id))) {
+        refused.add(idKey(id));
+        continue;
+      }
       const state = `${String(size)}:${String(mtimeMs)}`;
       const unchanged = this.seen.get(file.rel) === state;
       seen.set(file.rel, state);
@@ -484,6 +639,7 @@ export class FileSource implements SourceConnector {
     // Only files found this pass are remembered, so a file that left is forgotten.
     this.seen = seen;
     this.tries = tries;
+    this.refused = refused;
     return ready.sort(
       (a, b) => (sortBy === "mtime" ? a.mtimeMs - b.mtimeMs : 0) || compare(a.rel, b.rel),
     );
@@ -494,7 +650,7 @@ export class FileSource implements SourceConnector {
    * pass that claims anything: on Linux and macOS the claim folder, `.claimed/`, the source folder
    * and each subfolder a file left; on Windows each claimed file, under its claimed name.
    */
-  private async claim(claims: string): Promise<Claimed[]> {
+  private async claim(claims: string, refused: Set<string>): Promise<Claimed[]> {
     const { dir, now = Date.now, onReadError, doneFile } = this.options;
     const { maxSize = Infinity, maxPerPoll = Infinity } = this.options;
     // Read on each pass, not at load, so the Windows path can be driven from any platform's tests.
@@ -504,7 +660,22 @@ export class FileSource implements SourceConnector {
     const flags = windows ? constants.O_RDWR : constants.O_RDONLY | constants.O_NOFOLLOW;
     const at = String(now()).padStart(15, "0");
     const taken: Claimed[] = [];
-    const ready = await this.ready(now());
+    const ready = await this.ready(now(), refused);
+    if (ready.length === 0) return taken;
+    // The check after each move compares file ids: on a file system that changes a file's id when
+    // it moves (FAT and exFAT can), every claim would be refused, so none is tried. Asked once.
+    if (this.steady === undefined) {
+      try {
+        this.steady = await steadyIds(join(dir, CLAIMED_DIR));
+      } catch (error) {
+        onReadError?.(error);
+        return taken;
+      }
+    }
+    if (!this.steady) {
+      onReadError?.(unsteady());
+      return taken;
+    }
     // After the walk, which made dir: every open and move is held to this folder.
     const root = await realpath(dir);
     for (const file of ready) {
@@ -540,7 +711,7 @@ export class FileSource implements SourceConnector {
         if (!(await this.inside(file.path, root, id))) throw moved();
         // The open file's own size: a file that grew since it was found is held to maxSize too.
         grown = Number(stats.size) > maxSize;
-        if (!grown) await relocate(file.path, path, id);
+        if (!grown) await this.relocate(file.path, path, id);
       } catch (error) {
         onReadError?.(error);
         continue;
@@ -574,7 +745,7 @@ export class FileSource implements SourceConnector {
         if (!(await this.inside(marker, root, id))) continue;
         const doomed = join(dir, CLAIMED_DIR, `marker-${randomBytes(8).toString("hex")}`);
         try {
-          await relocate(marker, doomed, id);
+          await this.relocate(marker, doomed, id);
         } catch (error) {
           onReadError?.(error);
           continue;
@@ -620,7 +791,7 @@ export class FileSource implements SourceConnector {
       );
       if (taken) throw Object.assign(new Error("a file is already there"), { code: "EEXIST" });
       if (!(await this.inside(file.path, root, id))) throw moved();
-      await relocate(file.path, target, id);
+      await this.relocate(file.path, target, id);
     } catch (error) {
       onFileFault?.({ reason, moved: false, error });
       return;
