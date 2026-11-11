@@ -1,5 +1,5 @@
 import { access, readdir, readFile } from "node:fs/promises";
-import { join, relative, resolve } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 
 import { parse as parseYaml, YAMLParseError } from "yaml";
 import type { z } from "zod";
@@ -82,7 +82,9 @@ export async function loadProject(root: string): Promise<ProjectConfig> {
   const projectRoot = resolve(root);
   const problems: string[] = [];
   // The project folder itself shows as ".", so a problem never repeats the path the caller typed.
-  const show = (file: string): string => relative(projectRoot, file) || ".";
+  // Folders are joined with "/" on every system, Windows too, so a problem reads as the docs and the
+  // YAML write the path.
+  const show = (file: string): string => relative(projectRoot, file).split(sep).join("/") || ".";
 
   const projectFile = join(projectRoot, "pathways.yaml");
   let project: ProjectYaml = {};

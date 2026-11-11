@@ -1,5 +1,6 @@
-import { basename } from "node:path";
-import { pathToFileURL } from "node:url";
+import { realpathSync } from "node:fs";
+import { basename, normalize } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 // Loads a user's extension module in the engine's own thread, as the worker loads a transform: a
 // plain `import()`, so Node's own type stripping reads TypeScript and nothing is compiled. Each check
@@ -198,15 +199,39 @@ function describeType(value: unknown): string {
   return typeof value;
 }
 
-/** `name:line:column` of the first stack frame inside `file`, if there is one. */
+/**
+ * `name:line:column` of the first stack frame inside `file`, if there is one. A frame names its file
+ * as a path or a file URL, and Node loads a module from its real path, so a frame names that path
+ * when the configured one runs through a link (macOS's temporary folder is one). So each frame's file
+ * is read as a path, with the system's own separators, and matched against `file` and its real path.
+ * The transform worker holds the same rule in `src/engine/worker-entry.ts`, which imports nothing of
+ * the package's own.
+ */
 function locate(error: unknown, file: string): string | undefined {
   if (!(error instanceof Error) || error.stack === undefined) return undefined;
-  const href = pathToFileURL(file).href;
+  const names = new Set([normalize(file)]);
+  try {
+    // Both: the native one also expands a Windows short name (RUNNER~1) that the other keeps.
+    names.add(realpathSync(file)).add(realpathSync.native(file));
+  } catch {
+    // The file is gone since it loaded: the configured path is all there is to match.
+  }
   for (const line of error.stack.split("\n")) {
     const match = /\(?((?:file:\/\/)?[^\s()]+):(\d+):(\d+)\)?\s*$/.exec(line.trim());
     if (match === null) continue;
     const [, at, row, column] = match;
-    if (at === href || at === file) return `${basename(file)}:${row}:${column}`;
+    if (names.has(framePath(String(at)))) return `${basename(file)}:${row}:${column}`;
   }
   return undefined;
+}
+
+/** A stack frame's file as a path with the system's separators: a file URL is turned into one. */
+function framePath(file: string): string {
+  if (!file.startsWith("file:")) return normalize(file);
+  try {
+    return fileURLToPath(file);
+  } catch {
+    // A file URL no path can be made of here, such as one naming another host: matches nothing.
+    return file;
+  }
 }

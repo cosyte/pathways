@@ -1,4 +1,5 @@
-import { chmod, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { chmod, mkdir, open, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -76,6 +77,13 @@ const original = (claim: string | undefined): string => String(claim).slice(34);
 
 /** Is the test run as root, who can open any file whatever its mode? */
 const root = process.getuid?.() === 0;
+
+/**
+ * Is the test run on Windows itself, not a platform faked to read "win32"? There a mode sets only a
+ * file's read-only attribute: it cannot make a file unreadable, nor stop a file in a folder being
+ * moved, so the tests that lock a file or folder by its mode cannot lock anything.
+ */
+const windows = process.platform === "win32";
 
 // Every behavior holds on both of the file source's paths: the one it takes on this platform, and
 // the one it takes on Windows, which flushes each claimed file in place of the folders.
@@ -271,7 +279,9 @@ describe.each([
     expect(await readdir(claimsOf(dir, "lab"))).toEqual([]);
   });
 
-  it.skipIf(root)(
+  // Skipped as root, who can change any folder, and on Windows, where a folder's mode does not stop
+  // a file in it being moved: only its access control list can.
+  it.skipIf(root || windows)(
     "leaves a file it cannot claim where it is, and says so, then carries on",
     async () => {
       const dir = await inbox();
@@ -299,7 +309,8 @@ describe.each([
     },
   );
 
-  it.skipIf(root)(
+  // Skipped as root, who can read any file, and on Windows, where no mode makes a file unreadable.
+  it.skipIf(root || windows)(
     "leaves a file it cannot read where it is, and says so, then carries on",
     async () => {
       const dir = await inbox();
@@ -328,7 +339,8 @@ describe.each([
     },
   );
 
-  it.skipIf(root)(
+  // Skipped as root, who can read any file, and on Windows, where no mode makes a file unreadable.
+  it.skipIf(root || windows)(
     "keeps a claimed file it cannot read for the next pass, and says so, then carries on",
     async () => {
       const dir = await inbox();
@@ -376,8 +388,10 @@ describe.each([
 });
 
 describe("FileSource, a file it cannot open to write", () => {
+  // Skipped as root, who can write any file. On Windows this runs natively: the mode below sets the
+  // file's read-only attribute, which is what stops the claim there.
   it.skipIf(root)(
-    "is claimed on Linux and macOS, and on Windows stays where it is, said, until it can be flushed",
+    "stays where it is on Windows, said, until it can be flushed, then is claimed",
     async () => {
       const dir = await inbox();
       await dropFile(join(dir, "a.hl7"), "read-only");
@@ -396,23 +410,145 @@ describe("FileSource, a file it cannot open to write", () => {
       const restore = usePlatform("win32");
       try {
         await source.poll(sink);
-      } finally {
-        restore();
-      }
-      expect(received).toEqual([]);
-      expect(errors).toHaveLength(1);
-      expect(["EACCES", "EPERM"]).toContain((errors[0] as { code?: unknown }).code);
-      expect((await readdir(dir)).sort()).toEqual([CLAIMED_DIR, "a.hl7"]);
+        expect(received).toEqual([]);
+        expect(errors).toHaveLength(1);
+        expect(["EACCES", "EPERM"]).toContain((errors[0] as { code?: unknown }).code);
+        expect((await readdir(dir)).sort()).toEqual([CLAIMED_DIR, "a.hl7"]);
 
-      // Linux and macOS flush the folders instead, and need only read the file.
-      const linux = usePlatform("linux");
-      try {
+        // Once it can be written, the next pass claims and stores it.
+        await chmod(join(dir, "a.hl7"), 0o644);
         await source.poll(sink);
       } finally {
-        linux();
+        restore();
       }
       expect(received.map((r) => r.body)).toEqual(["read-only"]);
       expect(await readdir(dir)).toEqual([CLAIMED_DIR]);
     },
   );
+
+  // Skipped as root, who can write any file, and on Windows itself, which cannot flush a folder as
+  // the Linux and macOS path does: Node's fsync there needs a handle opened to write.
+  it.skipIf(root || windows)("is claimed on Linux and macOS, which need only read it", async () => {
+    const dir = await inbox();
+    await dropFile(join(dir, "a.hl7"), "read-only");
+    await chmod(join(dir, "a.hl7"), 0o444);
+    const errors: unknown[] = [];
+    const { sink, received } = idempotentSink();
+    const linux = usePlatform("linux");
+    try {
+      await new FileSource({
+        dir,
+        channel,
+        minAgeMs: 0,
+        onReadError: (error) => errors.push(error),
+      }).poll(sink);
+    } finally {
+      linux();
+    }
+    expect(errors).toEqual([]);
+    expect(received.map((r) => r.body)).toEqual(["read-only"]);
+    expect(await readdir(dir)).toEqual([CLAIMED_DIR]);
+  });
+});
+
+// On the system the tests run on, with nothing faked: CI runs these on Linux, Windows and macOS.
+describe("FileSource, natively", () => {
+  it("claims a file another handle holds open, as a writer that shares its access does", async () => {
+    const dir = await inbox();
+    await dropFile(join(dir, "a.hl7"), "held");
+    // Node opens a file sharing read, write and delete access on Windows, as most writers do, so
+    // the file can be moved and deleted while this handle is open.
+    const holder = await open(join(dir, "a.hl7"), "r+");
+    const errors: unknown[] = [];
+    const { sink, received } = idempotentSink();
+    try {
+      await new FileSource({
+        dir,
+        channel,
+        minAgeMs: 0,
+        onReadError: (error) => errors.push(error),
+      }).poll(sink);
+    } finally {
+      await holder.close();
+    }
+    expect(errors).toEqual([]);
+    expect(received.map((r) => r.body)).toEqual(["held"]);
+    expect(await readdir(dir)).toEqual([CLAIMED_DIR]);
+    expect(await readdir(claimsOf(dir))).toEqual([]);
+  });
+
+  // Windows only: Linux and macOS have no share modes, so another process's open handle never
+  // stops a file being moved there, and there is nothing to test.
+  it.skipIf(!windows)(
+    "leaves a file another program holds open without sharing it, says so, and claims it once let go",
+    async () => {
+      const dir = await inbox();
+      const file = join(dir, "a.hl7");
+      await dropFile(file, "locked");
+      // PowerShell opens it sharing nothing, as some writers do, and holds it until its input ends.
+      const holder = spawn(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          `$f = [System.IO.File]::Open('${file}', 'Open', 'ReadWrite', 'None'); ` +
+            "[Console]::Out.WriteLine('held'); [Console]::In.ReadLine() | Out-Null; $f.Close()",
+        ],
+        { stdio: ["pipe", "pipe", "ignore"] },
+      );
+      const exited = new Promise<void>((resolve) => holder.once("exit", () => resolve()));
+      await new Promise<void>((resolve, reject) => {
+        holder.stdout.on("data", (chunk: Buffer) => {
+          if (chunk.toString().includes("held")) resolve();
+        });
+        void exited.then(() => reject(new Error("the holder stopped before it held the file")));
+      });
+      const errors: unknown[] = [];
+      const { sink, received } = idempotentSink();
+      const source = new FileSource({
+        dir,
+        channel,
+        minAgeMs: 0,
+        onReadError: (error) => errors.push(error),
+      });
+      try {
+        await source.poll(sink);
+      } finally {
+        holder.stdin.end("\n");
+        await exited;
+      }
+      expect(received).toEqual([]);
+      expect(errors).toHaveLength(1);
+      expect(["EBUSY", "EPERM", "EACCES"]).toContain((errors[0] as { code?: unknown }).code);
+      expect((await readdir(dir)).sort()).toEqual([CLAIMED_DIR, "a.hl7"]);
+
+      await source.poll(sink);
+      expect(received.map((r) => r.body)).toEqual(["locked"]);
+      expect(await readdir(dir)).toEqual([CLAIMED_DIR]);
+    },
+    30_000,
+  );
+
+  // Windows limits a path to 260 characters unless it is passed on in its long form, which Node's
+  // file system calls do. Elsewhere the limit is far longer; the test holds on every system.
+  it("reads, claims and keeps a file whose full path is longer than 260 characters", async () => {
+    const dir = join(await inbox(), "d".repeat(100), "e".repeat(100));
+    const name = `${"f".repeat(60)}.hl7`;
+    expect(join(dir, CLAIMED_DIR, channel, name).length).toBeGreaterThan(260);
+    await dropFile(join(dir, name), "deep");
+    const errors: unknown[] = [];
+    const { sink, received } = idempotentSink();
+    await new FileSource({
+      dir,
+      channel,
+      minAgeMs: 0,
+      keepProcessed: true,
+      onReadError: (error) => errors.push(error),
+    }).poll(sink);
+    expect(errors).toEqual([]);
+    expect(received.map((r) => r.body)).toEqual(["deep"]);
+    expect(await readFile(join(dir, PROCESSED_DIR, `1-${name}`), "utf8")).toBe("deep");
+    expect(await readdir(claimsOf(dir))).toEqual([]);
+  });
 });

@@ -1,4 +1,5 @@
 import { cosyteVitest } from "@cosyte/vitest-config";
+import { configDefaults } from "vitest/config";
 
 /**
  * Vitest config for `@cosyte/pathways` from the shared @cosyte/vitest-config standard, with the
@@ -13,6 +14,15 @@ export default cosyteVitest({
     globals: false,
     environment: "node",
     include: ["test/**/*.test.ts", "src/**/*.test.ts"],
+    // Skipped on Windows: test/scripts/phi-scan.test.ts starts the scanner through
+    // node_modules/.bin/tsx, which is a shell script there (the runnable link is tsx.cmd), so every
+    // case fails to start. The reason lives here, not in that file: it holds the scanner's own
+    // realistic test values, which a scan of the file by path refuses to let through, so it is
+    // changed only with them. The scan itself runs on Windows CI too (`pnpm phi-scan` in verify).
+    exclude: [
+      ...configDefaults.exclude,
+      ...(process.platform === "win32" ? ["test/scripts/phi-scan.test.ts"] : []),
+    ],
     testTimeout: 10_000,
     hookTimeout: 10_000,
   },

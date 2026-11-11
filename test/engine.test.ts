@@ -344,18 +344,22 @@ describe("Engine", () => {
     expect(stopped).toBe(true);
   });
 
-  it("leaves a file it cannot read where it is, and says so without naming it", async () => {
-    const { root, engine, events } = await setUp();
-    const file = data(root, "inbox", "TESTPATIENT.hl7");
-    await dropFile(file, ADT_A01);
-    await chmod(file, 0o000);
-    await engine.tick();
-    await chmod(file, 0o644);
-    expect(await readdir(data(root, "inbox"))).toEqual([CLAIMED_DIR, "TESTPATIENT.hl7"]);
-    const warning = events.find((e) => e.event === "source-read-failed");
-    expect(warning).toMatchObject({ channel: "adt", code: "EACCES" });
-    expect(JSON.stringify(warning)).not.toContain("TESTPATIENT");
-  });
+  // Skipped on Windows, where no mode makes a file unreadable.
+  it.skipIf(process.platform === "win32")(
+    "leaves a file it cannot read where it is, and says so without naming it",
+    async () => {
+      const { root, engine, events } = await setUp();
+      const file = data(root, "inbox", "TESTPATIENT.hl7");
+      await dropFile(file, ADT_A01);
+      await chmod(file, 0o000);
+      await engine.tick();
+      await chmod(file, 0o644);
+      expect(await readdir(data(root, "inbox"))).toEqual([CLAIMED_DIR, "TESTPATIENT.hl7"]);
+      const warning = events.find((e) => e.event === "source-read-failed");
+      expect(warning).toMatchObject({ channel: "adt", code: "EACCES" });
+      expect(JSON.stringify(warning)).not.toContain("TESTPATIENT");
+    },
+  );
 
   it("refuses to start a channel whose transform will not load, and stops the rest", async () => {
     await expect(setUp("export const nothing = 1;\n")).rejects.toBeInstanceOf(TransformLoadError);

@@ -61,7 +61,12 @@ const resolve = (specifier: string): string | undefined =>
   specifier === "@cosyte/pathways" ? distEntry : undefined;
 
 beforeAll(() => {
-  execFileSync("pnpm", ["build"], { cwd: ROOT, stdio: "ignore" });
+  // pnpm is a .cmd shim on Windows, which only a shell can start.
+  execFileSync("pnpm", ["build"], {
+    cwd: ROOT,
+    stdio: "ignore",
+    shell: process.platform === "win32",
+  });
 }, 180_000);
 
 afterEach(removeProjects);
@@ -825,7 +830,7 @@ async function freePort(): Promise<number> {
 
 describe("check status and health", () => {
   it(
-    "serves the health body the page shows, and stops cleanly on SIGTERM",
+    "serves the health body the page shows, and stops cleanly on SIGTERM where there is one",
     async () => {
       const dir = await starterProject();
       const port = await freePort();
@@ -842,7 +847,9 @@ describe("check status and health", () => {
           }
         }
       } finally {
-        expect(await engine.stop()).toBe(0);
+        const code = await engine.stop();
+        // Windows: ended at once, so its exit code says nothing (test/engine-stop.test.ts).
+        if (process.platform !== "win32") expect(code).toBe(0);
       }
       const shown = JSON.parse(
         fences(page("check-status-and-health.md")).find((fence) => fence.lang === "json")?.body ??

@@ -120,7 +120,11 @@ export function cliAsync(
   return new Promise((resolve) => child.once("close", (code) => resolve({ code, out, err })));
 }
 
-/** Starts `pathways start` in `cwd` and returns a way to stop it with SIGTERM and read its exit code. */
+/**
+ * Starts `pathways start` in `cwd` and returns a way to stop it and read its exit code: SIGTERM, or
+ * on Windows, which has no SIGTERM, an immediate end (Node's kill there ends a process whatever the
+ * signal).
+ */
 export function startEngine(
   cwd: string,
   env: Readonly<Record<string, string>> = {},
@@ -133,7 +137,7 @@ export function startEngine(
   const exited = new Promise<number | null>((resolve) => child.once("exit", resolve));
   return {
     stop: async () => {
-      child.kill("SIGTERM");
+      child.kill(process.platform === "win32" ? "SIGKILL" : "SIGTERM");
       return exited;
     },
   };

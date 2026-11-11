@@ -228,7 +228,7 @@ describe("replayMessages", () => {
       "channels/adt/transform.ts": LAB_TRANSFORM,
     });
     const project = await loadProject(root);
-    // The real command in its own process, as an operator runs it: SIGTERM reaches it directly.
+    // The real command in its own process, as an operator runs it: a signal reaches it directly.
     const engine = spawn(
       process.execPath,
       ["--import", "tsx", join(import.meta.dirname, "../src/bin/pathways.ts"), "start", "-C", root],
@@ -299,8 +299,13 @@ describe("replayMessages", () => {
       );
       expect(replays).toHaveLength(15);
     } finally {
-      engine.kill("SIGTERM");
-      expect(await exited).toBe(0);
+      // Windows has no SIGTERM, and Node's kill ends a process there at once whatever the signal,
+      // so there it is ended hard and its exit code says nothing; test/engine-stop.test.ts covers
+      // stopping on each system.
+      const windows = process.platform === "win32";
+      engine.kill(windows ? "SIGKILL" : "SIGTERM");
+      const code = await exited;
+      if (!windows) expect(code).toBe(0);
     }
     expect(stderr).toBe("");
   }, 60_000);
@@ -692,21 +697,24 @@ describe("configuration changes", () => {
     expect(entries.every((e) => e.actor === "tester")).toBe(true);
   });
 
-  it("fingerprints a file it cannot read as unreadable", async () => {
-    // Root reads any file whatever its mode, so there is nothing to check as root.
-    if (process.getuid?.() === 0) return;
-    const root = await makeProject({
-      "channels/adt/channel.yaml": CHANNEL,
-      "channels/adt/transform.ts": LAB_TRANSFORM,
-    });
-    const project = await loadProject(root);
-    await chmod(join(root, "channels/adt/transform.ts"), 0o000);
-    try {
-      expect((await configFingerprints(project)).get("adt")).toMatchObject({
-        transform: "unreadable",
+  // Root reads any file whatever its mode, and on Windows no mode makes a file unreadable, so there
+  // is nothing to check as root or on Windows.
+  it.skipIf(process.getuid?.() === 0 || process.platform === "win32")(
+    "fingerprints a file it cannot read as unreadable",
+    async () => {
+      const root = await makeProject({
+        "channels/adt/channel.yaml": CHANNEL,
+        "channels/adt/transform.ts": LAB_TRANSFORM,
       });
-    } finally {
-      await chmod(join(root, "channels/adt/transform.ts"), 0o644);
-    }
-  });
+      const project = await loadProject(root);
+      await chmod(join(root, "channels/adt/transform.ts"), 0o000);
+      try {
+        expect((await configFingerprints(project)).get("adt")).toMatchObject({
+          transform: "unreadable",
+        });
+      } finally {
+        await chmod(join(root, "channels/adt/transform.ts"), 0o644);
+      }
+    },
+  );
 });

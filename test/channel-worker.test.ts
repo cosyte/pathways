@@ -1,5 +1,7 @@
 import { symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -184,14 +186,16 @@ describe("ChannelWorker", () => {
   });
 
   it("refuses to start when the worker itself cannot start", async () => {
-    const worker = await workerFor(undefined, { workerUrl: new URL("file:///nowhere/worker.mjs") });
+    // An absolute path on every system: a URL with no drive letter is not one on Windows.
+    const missing = pathToFileURL(join(tmpdir(), "pathways-nowhere", "worker.mjs"));
+    const worker = await workerFor(undefined, { workerUrl: missing });
     await expect(worker.start()).rejects.toBeInstanceOf(TransformLoadError);
   });
 
   it("reports a worker that exits before saying it is ready", async () => {
     const root = await makeProject({ "exit.mjs": "process.exit(4);\n" });
     const worker = await workerFor(undefined, {
-      workerUrl: new URL(`file://${join(root, "exit.mjs")}`),
+      workerUrl: pathToFileURL(join(root, "exit.mjs")),
     });
     await expect(worker.start()).rejects.toMatchObject({ failure: { kind: "crash" } });
   });

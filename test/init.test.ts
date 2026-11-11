@@ -1,5 +1,6 @@
 import { chmod, copyFile, mkdir, readdir, readFile, stat, utimes } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -41,7 +42,12 @@ async function snapshot(dir: string): Promise<Record<string, string>> {
   const files: Record<string, string> = {};
   for (const entry of entries.filter((e) => e.isFile())) {
     const path = join(entry.parentPath, entry.name);
-    files[path.slice(dir.length + 1)] = await readFile(path, "utf8");
+    files[
+      path
+        .slice(dir.length + 1)
+        .split(sep)
+        .join("/")
+    ] = await readFile(path, "utf8");
   }
   return files;
 }
@@ -60,6 +66,9 @@ const STARTER_FILES = [
 ];
 
 const CHANNEL = "channels/adt-to-lab";
+
+/** Is the test run on Windows, where a file's mode does not limit who can read or write it? */
+const windows = process.platform === "win32";
 
 /** What `pathways init` adds on Windows, where a file's mode does not keep the key private. */
 const ON_WINDOWS =
@@ -176,7 +185,16 @@ describe("pathways init", () => {
     }
   });
 
-  it("generates a development key of the project's own, readable by its owner only, and configures it", async () => {
+  // Windows: a mode there sets only the read-only attribute, so the folder's access control list
+  // is the control, as init says (the test above). Linux and macOS enforce the mode.
+  it.skipIf(windows)("makes the development key readable by its owner only", async () => {
+    const target = await makeProject({});
+    await initProject(target);
+    expect((await stat(join(target, STARTER_KEY_FILE))).mode & 0o777).toBe(0o600);
+    expect((await stat(join(target, ".pathways"))).mode & 0o077).toBe(0);
+  });
+
+  it("generates a development key of the project's own, and configures it", async () => {
     const [first, second] = [await makeProject({}), await makeProject({})];
     await initProject(first);
     await initProject(second);
@@ -184,8 +202,6 @@ describe("pathways init", () => {
     expect(keyText).toMatch(/^[A-Za-z0-9+/]{43}=\n$/);
     expect(decodeKey(keyText)?.byteLength).toBe(32);
     expect(await readFile(join(second, STARTER_KEY_FILE), "utf8")).not.toBe(keyText);
-    expect((await stat(join(first, STARTER_KEY_FILE))).mode & 0o777).toBe(0o600);
-    expect((await stat(join(first, ".pathways"))).mode & 0o077).toBe(0);
 
     const project = await loadProject(first);
     expect(project.encryption).toEqual({
@@ -220,7 +236,9 @@ describe("pathways init", () => {
     expect(await snapshot(root)).toEqual({ "SYNTHETIC-SECRET.txt": "keep me" });
   });
 
-  it("reports a folder it cannot write with the error code only", async () => {
+  // Windows: a folder's mode does not stop a file being written into it; only its access control
+  // list can.
+  it.skipIf(windows)("reports a folder it cannot write with the error code only", async () => {
     const root = await makeProject({});
     const locked = join(root, "locked");
     await mkdir(locked);
@@ -287,8 +305,12 @@ describe("initProject", () => {
   });
 
   it("finds the templates two folders above the module, built or not", () => {
-    expect(defaultTemplateDir("file:///app/dist/bin/pathways.mjs")).toBe("/app/templates/starter/");
-    expect(defaultTemplateDir("file:///repo/src/starter/init.ts")).toBe("/repo/templates/starter/");
+    // Absolute on every system: on Windows, a root folder on the current drive.
+    const [app, repo] = [resolve("/app"), resolve("/repo")];
+    const url = (path: string): string => pathToFileURL(path).href;
+    const starter = (root: string): string => `${join(root, "templates", "starter")}${sep}`;
+    expect(defaultTemplateDir(url(join(app, "dist/bin/pathways.mjs")))).toBe(starter(app));
+    expect(defaultTemplateDir(url(join(repo, "src/starter/init.ts")))).toBe(starter(repo));
   });
 
   it("keeps the template for the starter's package.json version-free", async () => {

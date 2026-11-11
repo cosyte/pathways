@@ -312,6 +312,12 @@ describe("loadTransform and summarize", () => {
     const noStack = new Error("x");
     delete noStack.stack;
     expect(summarize(noStack, "/nowhere/transform.ts")).not.toHaveProperty("where");
+    // A frame in a file URL no path can be made of is no match: one naming another host, which
+    // Linux and macOS refuse, and one with no drive, which Windows refuses.
+    const remote = new Error("x");
+    remote.stack =
+      "Error: x\n    at file://remote-host/share/transform.ts:2:3\n    at file:///share/transform.ts:2:3";
+    expect(summarize(remote, "/nowhere/transform.ts")).not.toHaveProperty("where");
   });
 });
 

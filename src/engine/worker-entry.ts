@@ -10,8 +10,9 @@
 // a channel reads one format, so a worker loads the parser for its own format when it starts and any
 // other library only when a transform hands back that library's model.
 import { realpathSync } from "node:fs";
+import { normalize } from "node:path";
 import { isMainThread, parentPort, workerData } from "node:worker_threads";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import type * as Ccda from "@cosyte/ccda";
 import type * as Fhir from "@cosyte/fhir";
@@ -524,17 +525,20 @@ export function summarize(error: unknown, transformFile?: string): FailureSummar
 }
 
 /**
- * `file:line:column` of the first stack frame inside the transform module, if there is one. Node
- * loads a module from its real path, so a frame names that path when the configured one runs through
- * a link: macOS's temporary folder (`/var` is `/private/var`), or a project reached through a link.
- * So a frame matches the configured path or the real one, as a path or a file URL.
+ * `file:line:column` of the first stack frame inside the transform module, if there is one. A frame
+ * names its file as a path or a file URL, and Node loads a module from its real path, so a frame
+ * names that path when the configured one runs through a link: macOS's temporary folder (`/var` is
+ * `/private/var`), or a project reached through a link. So each frame's file is read as a path, with
+ * the system's own separators, and matched against the configured path and the real one.
+ * `src/extensions/load.ts` holds the same rule for extension modules: this file imports nothing of
+ * the package's own.
  */
 function locate(error: unknown, transformFile: string): string | undefined {
   if (!(error instanceof Error) || error.stack === undefined) return undefined;
-  const names = new Set([transformFile, pathToFileURL(transformFile).href]);
+  const names = new Set([normalize(transformFile)]);
   try {
-    const real = realpathSync(transformFile);
-    names.add(real).add(pathToFileURL(real).href);
+    // Both: the native one also expands a Windows short name (RUNNER~1) that the other keeps.
+    names.add(realpathSync(transformFile)).add(realpathSync.native(transformFile));
   } catch {
     // The file is gone since it loaded: the configured path is all there is to match.
   }
@@ -542,13 +546,24 @@ function locate(error: unknown, transformFile: string): string | undefined {
     const match = /\(?((?:file:\/\/)?[^\s()]+):(\d+):(\d+)\)?\s*$/.exec(line.trim());
     if (match === null) continue;
     const [, file, row, column] = match;
-    if (names.has(String(file))) {
+    if (names.has(framePath(String(file)))) {
       /* v8 ignore next -- split returns at least one piece, so pop() always finds one */
       const name = transformFile.split(/[\\/]/).pop() ?? transformFile;
       return `${name}:${row}:${column}`;
     }
   }
   return undefined;
+}
+
+/** A stack frame's file as a path with the system's separators: a file URL is turned into one. */
+function framePath(file: string): string {
+  if (!file.startsWith("file:")) return normalize(file);
+  try {
+    return fileURLToPath(file);
+  } catch {
+    // A file URL no path can be made of here, such as one naming another host: matches nothing.
+    return file;
+  }
 }
 
 /**
