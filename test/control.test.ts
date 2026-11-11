@@ -57,6 +57,14 @@ const request: ControlRequest = {
   user: "test-operator",
 };
 
+/** A server listening at `at` that answers nothing, in a folder made for it. */
+async function rawServerAt(at: ControlAddress): Promise<Server> {
+  await mkdir(at.dir ?? "", { mode: 0o700, recursive: true });
+  const server = createServer((socket) => socket.destroy());
+  await new Promise<void>((resolve) => server.listen(at.path, resolve));
+  return server;
+}
+
 /** Sends `text` raw and returns what comes back before the engine closes the connection. */
 function raw(path: string, text: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -123,6 +131,13 @@ describe("controlAddress", () => {
     expect(Buffer.byteLength(mac.path)).toBeLessThanOrEqual(103);
   });
 
+  it("holds another Unix system to the smaller limit", () => {
+    const edge = `/${"x".repeat(70)}`;
+    expect(
+      controlAddress("/srv/one", { platform: "freebsd", uid: 7, runtimeDir: "", tmpdir: edge }).dir,
+    ).toBe("/tmp/pathways-7");
+  });
+
   it("names a pipe by the project hash on Windows", () => {
     const pipe = controlAddress("/srv/one", { platform: "win32" });
     expect(pipe.dir).toBeUndefined();
@@ -146,6 +161,8 @@ describe.skipIf(!unix)("ControlServer", () => {
     await chmod(at.dir ?? "", 0o755);
     const server = new ControlServer(at, () => Promise.resolve({ channel: "adt" }));
     await expect(server.start()).rejects.toMatchObject({ reason: "unsafe-folder" });
+    // Never started, so there is nothing to stop.
+    await server.stop();
   });
 
   it("clears a stale socket left by an engine that died, and listens", async () => {
@@ -212,6 +229,7 @@ describe.skipIf(!unix)("ControlServer", () => {
     const reply = async (text: string): Promise<unknown> =>
       JSON.parse(await raw(at.path, text)) as unknown;
     expect(await reply("not json\n")).toEqual({ v: 1, ok: false, error: "bad-request" });
+    expect(await reply("42\n")).toEqual({ v: 1, ok: false, error: "bad-request" });
     expect(await reply(`${JSON.stringify({ ...request, command: "drop" })}\n`)).toMatchObject({
       error: "bad-request",
     });
@@ -224,6 +242,58 @@ describe.skipIf(!unix)("ControlServer", () => {
     const failed = await raw(at.path, `${JSON.stringify(request)}\n`);
     expect(JSON.parse(failed)).toMatchObject({ error: "failed" });
     expect(failed).not.toContain("TESTPATIENT");
+  });
+
+  it("reads a request that arrives in pieces", async () => {
+    const at = await address();
+    const server = new ControlServer(at, (given) => Promise.resolve({ channel: given.channel }));
+    servers.push(server);
+    await server.start();
+    const line = `${JSON.stringify(request)}\n`;
+    const reply = await new Promise<string>((resolve, reject) => {
+      const socket = createConnection(at.path);
+      let received = "";
+      socket.setEncoding("utf8");
+      socket.on("data", (chunk: string) => (received += chunk));
+      socket.on("error", reject);
+      socket.on("close", () => {
+        resolve(received);
+      });
+      socket.on("connect", () => {
+        socket.write(line.slice(0, 10));
+        setTimeout(() => socket.write(line.slice(10)), 50);
+      });
+    });
+    expect(JSON.parse(reply)).toEqual({ v: 1, ok: true, report: { channel: "adt" } });
+  });
+
+  it("reports a socket it may not connect to, and does not take it over", async () => {
+    const root = await makeProject({});
+    const runtime = await mkdtemp("/tmp/pwc-");
+    folders.push(runtime);
+    const env = { XDG_RUNTIME_DIR: runtime };
+    const at = controlAddress(root, { runtimeDir: runtime });
+    const blocked = await rawServerAt(at);
+    await chmod(at.path, 0o000);
+    try {
+      await expect(probe(at.path)).rejects.toMatchObject({ code: "EACCES" });
+      await expect(sendControl(at, request, 5_000)).rejects.toMatchObject({ code: "EACCES" });
+      await expect(
+        new ControlServer(at, () => Promise.resolve({ channel: "adt" })).start(),
+      ).rejects.toMatchObject({ code: "EACCES" });
+      let err = "";
+      const code = await run(["channel", "pause", "adt", "-C", root], {
+        out: () => undefined,
+        err: (text) => (err += text),
+        env,
+      });
+      expect({ code, err }).toEqual({
+        code: EXIT.failed,
+        err: "pathways: the engine could not be asked (EACCES).\n",
+      });
+    } finally {
+      await new Promise((resolve) => blocked.close(resolve));
+    }
   });
 
   it("closes a connection that sends nothing", async () => {
@@ -420,6 +490,15 @@ destinations:
         out: "adt: paused (reloaded)\n",
         err: "",
       });
+      expect(await ask(root, "reload", "nope")).toMatchObject({
+        code: EXIT.failed,
+        err: "pathways: channel nope: the engine runs no channel of that name.\n",
+      });
+      expect(await ask(root, "stop", "adt", "--deadline", "2s")).toMatchObject({
+        code: EXIT.ok,
+        out: expect.stringMatching(/^adt: stopped\n/) as unknown,
+      });
+      expect(await ask(root, "stop", "adt")).toMatchObject({ code: EXIT.ok });
       expect(await ask(root, "resume", "adt")).toEqual({
         code: EXIT.ok,
         out: "adt: running\n",
@@ -436,6 +515,27 @@ destinations:
     expect(await running).toBe(EXIT.ok);
     expect(startErr).toBe("");
   }, 30_000);
+
+  it.skipIf(!unix)("refuses to start when the socket's folder is open to others", async () => {
+    const root = await project();
+    const runtime = await mkdtemp("/tmp/pwc-");
+    folders.push(runtime);
+    const { dir } = controlAddress(root, { runtimeDir: runtime });
+    await mkdir(dir ?? "", { mode: 0o700 });
+    await chmod(dir ?? "", 0o755);
+    let err = "";
+    const code = await run(["start", "-C", root], {
+      out: () => undefined,
+      err: (text) => (err += text),
+      logger: captureLogger().logger,
+      env: { XDG_RUNTIME_DIR: runtime },
+      signal: new AbortController().signal,
+    });
+    expect({ code, err }).toEqual({
+      code: EXIT.failed,
+      err: "pathways: the control socket could not be opened (unsafe-folder).\n",
+    });
+  });
 
   it.skipIf(!unix)(
     "refuses to start when another engine answers on the project's control socket",

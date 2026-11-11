@@ -128,6 +128,7 @@ export function controlAddress(root: string, system: ControlSystem = {}): Contro
   }
   const hash = createHash("sha256").update(full).digest("hex").slice(0, 16);
   if (platform === "win32") return { dir: undefined, path: `\\\\.\\pipe\\pathways-${hash}` };
+  /* v8 ignore next: every Unix system has a uid */
   const uid = system.uid ?? process.getuid?.() ?? 0;
   const limit = SOCKET_PATH_LIMIT[platform] ?? DEFAULT_SOCKET_PATH_LIMIT;
   const runtime = system.runtimeDir ?? process.env["XDG_RUNTIME_DIR"];
@@ -182,8 +183,7 @@ export function probe(path: string): Promise<boolean> {
     socket.once("error", (error: Error & { code?: unknown }) => {
       socket.destroy();
       if (error.code === "ECONNREFUSED" || error.code === "ENOENT") resolvePromise(false);
-      /* v8 ignore next: any other error, such as EACCES, is the caller's to report */ else
-        reject(error);
+      else reject(error);
     });
   });
 }
@@ -243,10 +243,11 @@ export class ControlServer {
         server.listen(path, resolvePromise);
       });
     } catch (error) {
-      // A Windows pipe another engine holds, or a socket made between the probe and here.
+      /* v8 ignore start: a Windows pipe another engine holds, or a socket made since the probe */
       throw (error as { code?: unknown }).code === "EADDRINUSE"
         ? new ControlError("in-use")
         : error;
+      /* v8 ignore stop */
     }
     /* v8 ignore next: a listening server's errors are its connections', each handled on its own */
     server.on("error", () => undefined);
@@ -392,6 +393,7 @@ export function sendControl(
     socket.once("error", (error: Error & { code?: unknown }) => {
       clearTimeout(timer);
       socket.destroy();
+      /* v8 ignore next: socket errors carry a code */
       const code = typeof error.code === "string" ? error.code : undefined;
       if (code === "ECONNREFUSED" || code === "ENOENT") reject(new EngineNotRunning(code));
       else reject(error);

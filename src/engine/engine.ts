@@ -694,6 +694,7 @@ export class Engine {
         channels[name] = {
           status: channelStatus(messages, deliveries),
           source: source(name),
+          /* v8 ignore next: a channel not started yet, or stopped with the engine, runs by default */
           state: states[name] ?? "running",
           messages,
           deliveries,
@@ -705,6 +706,7 @@ export class Engine {
         channels[name] = {
           status: "unknown",
           source: source(name),
+          /* v8 ignore next: as above */
           state: states[name] ?? "running",
         };
       }
@@ -853,7 +855,7 @@ export class Engine {
     const name = channel.config.name;
     if (channel.draining) return Promise.resolve({ channel: name, refused: "draining" });
     const run = channel.reloads.then(() => this.reloadNow(channel, next));
-    channel.reloads = run.catch(() => undefined);
+    channel.reloads = settled(run);
     return run;
   }
 
@@ -1295,7 +1297,7 @@ function untilAborted(work: Promise<void>, signal: AbortSignal): Promise<void> {
 }
 
 /** Waits for `work` to settle, either way: its own caller handles a rejection. */
-async function settled(work: Promise<void>): Promise<void> {
+async function settled(work: Promise<unknown>): Promise<void> {
   try {
     await work;
   } catch {

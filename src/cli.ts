@@ -769,7 +769,7 @@ async function openControl(
   };
   let server: ControlServer;
   try {
-    server = new ControlServer(controlAddress(project.root), async (request) =>
+    server = new ControlServer(controlAddress(project.root, controlSystem(env)), async (request) =>
       engine.command(request.command, request.channel, {
         actor: request.user,
         ...(request.deadlineMs === undefined ? {} : { deadlineMs: request.deadlineMs }),
@@ -787,6 +787,11 @@ async function openControl(
     return undefined;
   }
   return server;
+}
+
+/** Where the control socket's folder goes, from the environment the CLI was given. */
+function controlSystem(env: Env): { readonly runtimeDir: string } {
+  return { runtimeDir: env["XDG_RUNTIME_DIR"] ?? "" };
 }
 
 const CHANNEL_COMMANDS: readonly ChannelCommand[] = ["pause", "resume", "stop", "halt", "reload"];
@@ -832,7 +837,7 @@ async function channelCommand(
   let reply;
   try {
     reply = await sendControl(
-      controlAddress(projectDir),
+      controlAddress(projectDir, controlSystem(io.env ?? process.env)),
       {
         v: CONTROL_VERSION,
         command: command as ChannelCommand,

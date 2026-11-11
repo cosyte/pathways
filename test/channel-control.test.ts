@@ -83,15 +83,25 @@ class TestSource implements SourceConnector {
  */
 class TestDestination implements DestinationConnector {
   readonly delivered: OutgoingMessage[] = [];
-  readonly plan: ("ok" | "fail" | "hold")[] = [];
+  readonly plan: ("ok" | "fail" | "hold" | "wait")[] = [];
   sends = 0;
   private onSend: (() => void) | undefined;
+  /** Ends a `wait` send, delivered. */
+  release: () => void = () => undefined;
 
   deliver(message: OutgoingMessage): Promise<void> {
     this.sends += 1;
     const step = this.plan.shift() ?? "ok";
     this.onSend?.();
     if (step === "fail") return Promise.reject(new Error("refused"));
+    if (step === "wait") {
+      return new Promise((resolve) => {
+        this.release = () => {
+          this.delivered.push(message);
+          resolve();
+        };
+      });
+    }
     if (step === "hold") {
       return new Promise((_resolve, reject) => {
         message.signal?.addEventListener("abort", () => {
@@ -433,6 +443,70 @@ for (const database of TEST_DATABASES) {
         code: "ETEST",
       });
       expect(JSON.stringify(events)).not.toContain("TESTPATIENT");
+    });
+
+    it("stops an idle channel at once, and ends a pass between deliveries and between transforms", async () => {
+      const { store, destination, engineOn } = await setUp(database);
+      const { engine, source } = await engineOn(store);
+      expect(await engine.command("stop", "adt", actor)).toEqual({
+        channel: "adt",
+        state: "stopped",
+        drained: true,
+        left: { toTransform: 0, toDeliver: 0 },
+      });
+      await engine.command("resume", "adt", actor);
+
+      // A delivery in flight finishes; the next waits for a resume.
+      destination.plan.push("wait");
+      await source.sink?.receive(body());
+      await source.sink?.receive(body());
+      const sent = destination.sent();
+      const pass = engine.tick();
+      await sent;
+      const stopping = engine.command("stop", "adt", { ...actor, deadlineMs: 5_000 });
+      destination.release();
+      expect(await stopping).toEqual({
+        channel: "adt",
+        state: "stopped",
+        drained: true,
+        left: { toTransform: 0, toDeliver: 1 },
+      });
+      await pass;
+      expect(destination.delivered).toHaveLength(1);
+    });
+
+    it("ends a pass between transforms when stopped", async () => {
+      const slow = `
+export default (msg: unknown): unknown => {
+  const until = Date.now() + 300;
+  while (Date.now() < until) { /* a slow transform */ }
+  return msg;
+};
+`;
+      const { store, destination, engineOn } = await setUp(database, slow);
+      const { engine, source } = await engineOn(store);
+      await source.sink?.receive(body());
+      await source.sink?.receive(body());
+      const pass = engine.tick();
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const stopped = await engine.command("stop", "adt", { ...actor, deadlineMs: 5_000 });
+      await pass;
+      expect(stopped).toEqual({
+        channel: "adt",
+        state: "stopped",
+        drained: true,
+        left: { toTransform: 1, toDeliver: 1 },
+      });
+      expect(destination.sends).toBe(0);
+    });
+
+    it("refuses a reload given no configuration", async () => {
+      const { store, engineOn } = await setUp(database);
+      const { engine } = await engineOn(store);
+      expect(await engine.command("reload", "adt", actor)).toEqual({
+        channel: "adt",
+        refused: "not-configured",
+      });
     });
 
     it("answers a command for a channel it does not run", async () => {
