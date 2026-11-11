@@ -274,8 +274,10 @@ export interface DeliveryExhaustedEvent extends DeliveryEventBase {
 }
 
 /**
- * A source could not start listening (its port is taken, say). The engine tries again after
- * `retryInMs` and reports this again on each failed try, counting up `attempt`.
+ * A source could not start listening (its port is taken, say), or a running source said it lost its
+ * connection (`MessageSink.sourceDown`; then `name` is `SourceDown`). A listener is tried again after
+ * `retryInMs`; a source that lost its connection is told to wait that long. Each is reported again
+ * on each failure in a row, counting up `attempt`.
  *
  * @example
  * ```ts
@@ -289,14 +291,14 @@ export interface SourceDownEvent extends LifecycleEventBase {
   readonly retryInMs: number;
   /** When the next try is due, as an ISO 8601 time in UTC. */
   readonly retryAt: string;
-  /** The error's name, such as `Error`. */
+  /** The error's name, such as `Error`, or `SourceDown` when the source said it lost its connection. */
   readonly name: string;
-  /** The error's code, such as `EADDRINUSE`. */
+  /** The error's code, such as `EADDRINUSE`, or the code the source passed, such as `ECONNRESET`. */
   readonly code: string | undefined;
 }
 
 /**
- * A source that was down is listening again. A source that starts on the first try reports nothing.
+ * A source that was down is listening, or connected, again. A source that starts on the first try reports nothing.
  *
  * @example
  * ```ts

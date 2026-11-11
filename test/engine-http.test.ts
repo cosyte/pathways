@@ -1,3 +1,5 @@
+import { createServer, type AddressInfo } from "node:net";
+
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import { ConfigError, loadProject } from "../src/config/load.js";
@@ -74,36 +76,56 @@ interface Setup {
 /** A channel taking HTTPS with a bearer token and sending to a lab over HTTPS. */
 async function setUp(
   labAnswer: number,
-  options: { env?: Record<string, string>; source?: string; destination?: string } = {},
+  options: {
+    env?: Record<string, string>;
+    /** The source's block, or how to write it for the port picked for it. */
+    source?: string | ((port: number) => string);
+    destination?: string;
+    /** Picks the source's port: {@link freePort} unless a test says otherwise. */
+    pick?: () => Promise<number>;
+  } = {},
 ): Promise<Setup> {
   const lab = await receiver(status(labAnswer), { cert: certs.serverCert, key: certs.serverKey });
   receivers.push(lab);
-  const port = await freePort();
-  const source =
+  const write =
     options.source ??
-    `http: { port: ${port}, path: /adt, tls: { cert: ${certs.files.serverCert}, key: ${certs.files.serverKey} } }`;
+    ((port: number) =>
+      `http: { port: ${String(port)}, path: /adt, tls: { cert: ${certs.files.serverCert}, key: ${certs.files.serverKey} } }`);
   const destination =
     options.destination ??
     `http: { url: "${lab.url}", headers: { Authorization: { env: LAB_AUTH } }, tls: { ca: ${certs.files.ca} } }`;
-  const root = await makeProject({
-    "channels/adt/channel.yaml": `source:\n  ${source}\ntransform: ./transform.ts\ndestinations:\n  - ${destination}\n`,
-    "channels/adt/transform.ts": LAB_TRANSFORM,
-  });
-  const project = await loadProject(root);
-  const store = await Store.open(project.databaseFile);
-  stores.push(store);
-  const { logger, events, lines } = captureLogger();
-  const clock = { now: Date.now() };
-  const engine = new Engine({
-    project,
-    store,
-    logger,
-    now: () => clock.now,
-    env: options.env ?? { PATHWAYS_HTTP_TOKEN: TOKEN, LAB_AUTH },
-  });
-  engines.push(engine);
-  await engine.start();
-  return { engine, store, events, lines, clock, port, lab };
+  for (let attempt = 1; ; attempt += 1) {
+    const port = await (options.pick ?? freePort)();
+    const source = typeof write === "string" ? write : write(port);
+    const root = await makeProject({
+      "channels/adt/channel.yaml": `source:\n  ${source}\ntransform: ./transform.ts\ndestinations:\n  - ${destination}\n`,
+      "channels/adt/transform.ts": LAB_TRANSFORM,
+    });
+    const project = await loadProject(root);
+    const store = await Store.open(project.databaseFile);
+    stores.push(store);
+    const { logger, events, lines } = captureLogger();
+    const clock = { now: Date.now() };
+    const engine = new Engine({
+      project,
+      store,
+      logger,
+      now: () => clock.now,
+      env: options.env ?? { PATHWAYS_HTTP_TOKEN: TOKEN, LAB_AUTH },
+    });
+    engines.push(engine);
+    await engine.start();
+    // freePort closes the port it found before the source binds it, and a test file in another
+    // worker can take it in between: the source is then down, and a request to the port reaches
+    // that file's listener instead. A port picked here is picked again; a block a test wrote
+    // itself, or a fifth try, is kept as it is.
+    const taken =
+      typeof write !== "string" &&
+      attempt < 5 &&
+      (await engine.health()).channels["adt"]?.source === "down";
+    if (!taken) return { engine, store, events, lines, clock, port, lab };
+    await engine.stop();
+  }
 }
 
 function post(port: number, body = ADT_A01, token = TOKEN): ReturnType<typeof send> {
@@ -116,6 +138,19 @@ function post(port: number, body = ADT_A01, token = TOKEN): ReturnType<typeof se
 }
 
 describe("an HTTP channel in the engine", () => {
+  it("is set up on another port when the one picked is taken before the source listens", async () => {
+    // A listener in another test file's worker, which drops every connection, takes the port
+    // between freePort closing it and the source binding it.
+    const taken = createServer((socket) => socket.destroy());
+    await new Promise<void>((resolve) => taken.listen(0, "127.0.0.1", resolve));
+    closers.push(() => new Promise((resolve) => taken.close(() => resolve())));
+    const { port: held } = taken.address() as AddressInfo;
+    const picks = [held];
+    const { port } = await setUp(200, { pick: () => Promise.resolve(picks.shift() ?? freePort()) });
+    expect(port).not.toBe(held);
+    expect((await post(port)).status).toBe(202);
+  });
+
   it("takes a message over HTTPS, transforms it, and POSTs the output over HTTPS", async () => {
     const { engine, store, lab, port, lines, events } = await setUp(200);
     const answer = await post(port);
@@ -143,10 +178,10 @@ describe("an HTTP channel in the engine", () => {
   });
 
   it("in ack mode stores the message, then answers with its ACK, and logs an unreadable one", async () => {
-    const port = await freePort();
     const tls = `tls: { cert: ${certs.files.serverCert}, key: ${certs.files.serverKey} }`;
-    const { store, events, lines } = await setUp(200, {
-      source: `http: { port: ${port}, paths: [/adt, /hl7], response: ack, ${tls} }`,
+    const { store, events, lines, port } = await setUp(200, {
+      source: (port) =>
+        `http: { port: ${String(port)}, paths: [/adt, /hl7], response: ack, ${tls} }`,
     });
     const hl7 = (path: string, body: string): ReturnType<typeof send> =>
       send(port, {
@@ -177,12 +212,12 @@ describe("an HTTP channel in the engine", () => {
   });
 
   it("answers with the configured response, its secret header read from the environment", async () => {
-    const port = await freePort();
     const tls = `tls: { cert: ${certs.files.serverCert}, key: ${certs.files.serverKey} }`;
     const response =
       "response: { status: 200, contentType: text/plain, headers: { X-Receiver-Key: { env: RECEIVER_KEY } }, body: OK }";
-    const { lab } = await setUp(200, {
-      source: `http: { port: ${port}, path: /adt, methods: [PUT], ${response}, ${tls} }`,
+    const { lab, port } = await setUp(200, {
+      source: (port) =>
+        `http: { port: ${String(port)}, path: /adt, methods: [PUT], ${response}, ${tls} }`,
       env: { PATHWAYS_HTTP_TOKEN: TOKEN, LAB_AUTH, RECEIVER_KEY: "synthetic-receiver-key" },
     });
     const answer = await send(port, {
@@ -250,9 +285,8 @@ describe("an HTTP channel in the engine", () => {
   it("warns once at startup of a plaintext or unauthenticated endpoint, naming the channel", async () => {
     const lab = await receiver(status(200));
     receivers.push(lab);
-    const port = await freePort();
-    const { events } = await setUp(200, {
-      source: `http: { port: ${port}, plaintext: true, auth: none }`,
+    const { events, port } = await setUp(200, {
+      source: (port) => `http: { port: ${String(port)}, plaintext: true, auth: none }`,
       destination: `http: { url: "${lab.url}", plaintext: true }`,
       env: {},
     });

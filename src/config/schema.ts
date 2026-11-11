@@ -1,3 +1,4 @@
+import { Cron } from "croner";
 import { z } from "zod";
 
 import { normalisePath } from "../connectors/http-path.js";
@@ -1035,6 +1036,88 @@ function optionsWithModule(
   }
 }
 
+/** Whether `expression` is a cron expression of five fields, as the engine reads one. */
+function isCron(expression: string): boolean {
+  try {
+    new Cron(expression, { mode: "5-part", paused: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Whether `zone` is a time zone this Node knows, such as `UTC` or `America/Chicago`. */
+function isTimeZone(zone: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: zone });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** A poll interval or deadline: a duration of at least 1ms. */
+const pollDuration = (description: string) =>
+  duration(description, { ms: 1, message: 'a duration of at least 1ms, such as "30s"' });
+
+/** The keys of a `poll:` mapping that say when a pass is due; exactly one is set. */
+const POLL_SCHEDULES = ["every", "cron", "onStart"] as const;
+
+/**
+ * A polled source's `poll:`: an interval (`30s`), `onStart` for one pass at start, or a mapping
+ * with exactly one of `every`, `cron` (with `timezone`) or `onStart: true`, and a `deadline`.
+ */
+const pollBlock = z
+  .union([
+    z.literal("onStart").meta({ description: "One pass when the engine starts, and no other." }),
+    pollDuration(
+      "A pass this long after the last one ended: a duration such as 30s, or a number of milliseconds.",
+    ),
+    z
+      .strictObject({
+        every: pollDuration(
+          "A pass this long after the last one ended: a duration such as 30s, or a number of milliseconds.",
+        ).optional(),
+        cron: envable(
+          z.string().refine(isCron, 'a cron expression of five fields, such as "0 2 * * *"').meta({
+            description:
+              "A pass at each time this cron expression of five fields names (minute, hour, day of month, month, day of week), such as 0 2 * * *.",
+          }),
+        ).optional(),
+        timezone: envable(
+          z.string().refine(isTimeZone, "a time zone name, such as UTC or America/Chicago").meta({
+            description:
+              "The time zone cron reads its times in, such as America/Chicago. Default UTC.",
+          }),
+        ).optional(),
+        onStart: envable(
+          z.literal(true).meta({ description: "One pass when the engine starts, and no other." }),
+        ).optional(),
+        deadline: pollDuration(
+          "How long one pass may run before it is cut off and its source takes nothing more in: a duration such as 2m, or a number of milliseconds. Default 5m.",
+        ).optional(),
+      })
+      .superRefine((value, ctx) => {
+        const named = POLL_SCHEDULES.filter((key) => value[key] !== undefined);
+        if (named.length !== 1) {
+          ctx.addIssue({
+            code: "custom",
+            message: `name exactly one of: ${POLL_SCHEDULES.join(", ")}`,
+          });
+        }
+        if (value.timezone !== undefined && value.cron === undefined) {
+          ctx.addIssue({ code: "custom", path: ["timezone"], message: "goes with cron" });
+        }
+      }),
+  ])
+  .meta({
+    description:
+      "When this source is polled: an interval such as 30s, onStart, or { every | cron (with timezone) | onStart: true, deadline }. A pass missed while the engine was down is not made up. Only with file or module. Default: the engine-wide pollInterval, with a 5m deadline.",
+  });
+
+/** The source kinds the engine polls, which are the only ones `poll:` goes with. */
+const POLLED_SOURCES = ["file", "module"] as const;
+
 /** A custom module's options: any YAML mapping, handed to the module's factory as it is. */
 const moduleOptions = z.record(z.string(), z.unknown()).meta({
   description: "Any mapping, handed to the module's factory as it is. Only with module.",
@@ -1672,12 +1755,23 @@ const source = restate(
       mllp: mllpSource.optional(),
       module: modulePath.optional(),
       options: moduleOptions.optional(),
+      poll: pollBlock.optional(),
     })
     .meta({
       description: "Where messages come from: exactly one of file, http, mllp or module.",
     })
     .superRefine(oneKind(SOURCE_KINDS))
-    .superRefine(optionsWithModule),
+    .superRefine(optionsWithModule)
+    .superRefine((value, ctx) => {
+      if (value.poll === undefined || POLLED_SOURCES.some((kind) => value[kind] !== undefined)) {
+        return;
+      }
+      ctx.addIssue({
+        code: "custom",
+        path: ["poll"],
+        message: "goes with file or module: http and mllp listen rather than poll",
+      });
+    }),
   restateKinds(SOURCE_KINDS),
 );
 
@@ -1698,6 +1792,10 @@ const destination = restate(
       module: modulePath.optional(),
       options: moduleOptions.optional(),
       retry: settingsShape.retry,
+      timeout: duration(
+        "How long one delivery to a file or module destination may take in all before it is cut off and retried: a duration such as 30s, or a number of milliseconds. Default 30s. An http destination sets its own timeout, and an mllp one its ackTimeout.",
+        { ms: 1, message: 'a duration of at least 1ms, such as "30s"' },
+      ).optional(),
       dryRun: envable(
         z.boolean().meta({
           description:
@@ -1710,7 +1808,18 @@ const destination = restate(
         "One destination: exactly one of file, http, mllp or module, its own retry settings, and dryRun.",
     })
     .superRefine(oneKind(DESTINATION_KINDS))
-    .superRefine(optionsWithModule),
+    .superRefine(optionsWithModule)
+    .superRefine((value, ctx) => {
+      if (value.timeout === undefined || (value.http === undefined && value.mllp === undefined)) {
+        return;
+      }
+      ctx.addIssue({
+        code: "custom",
+        path: ["timeout"],
+        message:
+          "goes with file or module: an http destination sets timeout in its block, and an mllp one ackTimeout",
+      });
+    }),
   restateKinds(DESTINATION_KINDS),
 );
 
@@ -2393,9 +2502,49 @@ export type DestinationConfig = (
   FileDestination | HttpDestination | MllpDestination | ModuleConnector
 ) & {
   readonly retry?: RetryPolicy;
+  /**
+   * For a file or module destination whose block sets `timeout`: how long one delivery may take in
+   * all, in milliseconds. Unset, it is {@link DEFAULT_DELIVERY_TIMEOUT_MS}. An HTTP destination's
+   * `timeoutMs` is its own.
+   */
+  readonly timeoutMs?: number | undefined;
   /** True when the destination runs dry: each output recorded, marked `dry-run`, never sent. */
   readonly dryRun?: boolean | undefined;
 };
+
+/**
+ * When a polled source's passes are due: every `everyMs` after the last pass ended, at each time a
+ * cron expression of five fields names in `timezone` (an IANA name, `UTC` by default), or once when
+ * the engine starts.
+ *
+ * @example
+ * ```ts
+ * const nightly: PollSchedule = { kind: "cron", expression: "0 2 * * *", timezone: "America/Chicago" };
+ * ```
+ */
+export type PollSchedule =
+  | { readonly kind: "interval"; readonly everyMs: number }
+  | { readonly kind: "cron"; readonly expression: string; readonly timezone: string }
+  | { readonly kind: "onStart" };
+
+/**
+ * A polled source's schedule, and how long one pass may run before the engine cuts it off.
+ *
+ * @example
+ * ```ts
+ * const poll: PollConfig = { schedule: { kind: "onStart" }, deadlineMs: 300_000 };
+ * ```
+ */
+export interface PollConfig {
+  readonly schedule: PollSchedule;
+  readonly deadlineMs: number;
+}
+
+/** How long one pass of a polled source may run by default before it is cut off: 5 minutes. */
+export const DEFAULT_POLL_DEADLINE_MS = 300_000;
+
+/** How long one delivery to a file or module destination may take by default: 30 seconds. */
+export const DEFAULT_DELIVERY_TIMEOUT_MS = 30_000;
 
 /** One channel, loaded, validated and resolved. */
 export interface ChannelConfig {
@@ -2410,6 +2559,11 @@ export interface ChannelConfig {
   readonly settings: Settings;
   /** The channel's own hooks, which receive its events beside the engine-wide ones. */
   readonly hooks: readonly HookConfig[];
+  /**
+   * When its source is polled, from the source's `poll:`; unset, a pass every `pollIntervalMs` with
+   * a deadline of {@link DEFAULT_POLL_DEADLINE_MS}. Read only for a source that polls.
+   */
+  readonly poll?: PollConfig | undefined;
   /**
    * The channel's own `config:` block, as written: each `{ env: NAME }` is still a reference, read
    * when the engine starts. Its keys replace those of the project's block.

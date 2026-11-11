@@ -22,6 +22,7 @@ import {
   DEFAULT_LEASE_TTL_MS,
   DEFAULT_MAX_BYTES,
   DEFAULT_MIN_AGE_MS,
+  DEFAULT_POLL_DEADLINE_MS,
   DEFAULT_READ_TRIES,
   DEFAULT_POOL_IDLE_TIMEOUT_MS,
   DEFAULT_POOL_MAX,
@@ -41,6 +42,7 @@ import {
   type ModuleConnector,
   type OnStoreFailure,
   type PathPattern,
+  type PollConfig,
   type ProjectConfig,
   type RetryPolicy,
   type SecretProviderConfig,
@@ -58,6 +60,7 @@ type DestinationYaml = ChannelYaml["destinations"][number];
 type HookYaml = NonNullable<ChannelYaml["hooks"]>[number];
 type HttpClientYaml = NonNullable<DestinationYaml["http"]>;
 type RetryYaml = NonNullable<ChannelYaml["retry"]>;
+type PollYaml = NonNullable<ChannelYaml["source"]["poll"]>;
 
 /**
  * A project that could not be loaded. `problems` name the file and the key at fault; they hold no
@@ -316,6 +319,8 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
       destinations,
       settings: channelSettings,
       hooks: channelHooks,
+      // Set only when the source has a poll:, so a channel without one resolves as it always has.
+      ...(channel.source.poll === undefined ? {} : { poll: resolvePoll(channel.source.poll) }),
       // The schema checked each value is JSON.
       config: (channel.config ?? {}) as TransformConfigBlock,
       ...(indexes.length > 0 ? { indexes } : {}),
@@ -540,6 +545,24 @@ function resolveSource(
   };
 }
 
+/** A source's `poll:`, resolved: its schedule, and its deadline or the default. */
+function resolvePoll(poll: PollYaml): PollConfig {
+  if (poll === "onStart")
+    return { schedule: { kind: "onStart" }, deadlineMs: DEFAULT_POLL_DEADLINE_MS };
+  if (typeof poll === "number") {
+    return { schedule: { kind: "interval", everyMs: poll }, deadlineMs: DEFAULT_POLL_DEADLINE_MS };
+  }
+  const deadlineMs = poll.deadline ?? DEFAULT_POLL_DEADLINE_MS;
+  if (poll.every !== undefined)
+    return { schedule: { kind: "interval", everyMs: poll.every }, deadlineMs };
+  if (poll.cron !== undefined) {
+    const timezone = poll.timezone ?? "UTC";
+    return { schedule: { kind: "cron", expression: poll.cron, timezone }, deadlineMs };
+  }
+  // The schema lets exactly one of every, cron and onStart through.
+  return { schedule: { kind: "onStart" }, deadlineMs };
+}
+
 /** A file source's `include` or `exclude` as written, each glob made a `{ glob }`. */
 function patterns(
   written: readonly (string | { readonly regex: string })[] | undefined,
@@ -558,7 +581,12 @@ function resolveDestination(
   dir: string,
   settings: Settings,
 ): ChannelConfig["destinations"][number] {
-  const resolved = resolveConnector(destination, dir, settings);
+  const connector = resolveConnector(destination, dir, settings);
+  // Set only when the block has a timeout:, which the schema lets through for file and module alone.
+  const resolved =
+    destination.timeout === undefined
+      ? connector
+      : { ...connector, timeoutMs: destination.timeout };
   if (destination.retry === undefined) return resolved;
   return { ...resolved, retry: mergeRetry(settings.retry, destination.retry) };
 }

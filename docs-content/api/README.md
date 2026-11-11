@@ -2136,13 +2136,19 @@ Received before this time (ISO 8601, UTC).
 
 ### MessageSink
 
-What a source hands each incoming message to.
+What a source hands each incoming message to, and tells when its connection drops and comes back.
 
 #### Example
 
 ```ts
 const id = await sink.receive(body); // durable once this resolves
 await acknowledge(id);
+
+socket.on("close", () => {
+  const wait = sink.sourceDown?.("ECONNRESET") ?? 1_000;
+  setTimeout(reconnect, wait);
+});
+socket.on("ready", () => sink.sourceUp?.());
 ```
 
 #### Methods
@@ -2170,6 +2176,42 @@ losing a message. If it rejects, do not acknowledge; the sender should send agai
 ###### Returns
 
 `Promise`\<`number`\>
+
+##### sourceDown()?
+
+> `optional` **sourceDown**(`code`): `number`
+
+Says the source lost what it reads from (a broker, a remote server, a socket it dialled) and
+cannot take messages in until it is back. Until [sourceUp](#sourceup), the health endpoint shows
+the channel's source `down` and answers 503, readiness fails, and the hooks are sent a
+`source-down` event with `name: "SourceDown"`. `code` is a short code such as `ECONNRESET`
+(letters, digits and `_.:-`, at most 64 characters), never an error's text: anything else is
+kept as `UNSPECIFIED`.
+
+Returns how long to wait before trying to connect again, in milliseconds: 1 second, doubling
+with each report in a row, to 5 minutes. The engine's own sink always has this method; it is
+optional so a sink a test builds by hand need not.
+
+###### Parameters
+
+###### code
+
+`string`
+
+###### Returns
+
+`number`
+
+##### sourceUp()?
+
+> `optional` **sourceUp**(): `void`
+
+Says a source that reported [sourceDown](#sourcedown) is connected again: health shows it `up`, and
+the hooks are sent a `source-up` event. Nothing happens when it was not down.
+
+###### Returns
+
+`void`
 
 ***
 
@@ -3957,15 +3999,16 @@ The attempt found cut off, kept on the delivery so every later send of it is fla
 ### SourceConnector
 
 Brings messages in. A source that polls (a folder, an inbox) implements `poll`, which the engine
-calls on every pass. A source that listens (MLLP, HTTP) implements `start` and `stop`. A custom
+calls on each pass its schedule makes due (the channel's `poll:`, or the engine-wide
+`pollInterval`). A source that listens (MLLP, HTTP) implements `start` and `stop`. A custom
 source's module builds one with a `SourceFactory`.
 
 #### Example
 
 ```ts
 const source: SourceConnector = {
-  async poll(sink) {
-    for (const body of await takeWaiting()) await sink.receive(body);
+  async poll(sink, signal) {
+    for (const body of await takeWaiting({ signal })) await sink.receive(body);
   },
 };
 ```
@@ -3974,13 +4017,23 @@ const source: SourceConnector = {
 
 ##### poll()?
 
-> `optional` **poll**(`sink`): `Promise`\<`void`\>
+> `optional` **poll**(`sink`, `signal?`): `Promise`\<`void`\>
+
+One pass: takes in what is waiting, each message through `sink`. The engine never starts a pass
+while the last one's call has not returned. At the pass's deadline (`poll: { deadline }`, 5
+minutes by default) the engine stops waiting: `signal` aborts, which a source may pass to its
+client to give up a hung listing or query, and `sink.receive` refuses every later message with
+the code `POLL_DEADLINE`, so the source keeps it for the next pass.
 
 ###### Parameters
 
 ###### sink
 
 [`MessageSink`](#messagesink)
+
+###### signal?
+
+`AbortSignal`
 
 ###### Returns
 
@@ -4012,8 +4065,10 @@ const source: SourceConnector = {
 
 ### SourceDownEvent
 
-A source could not start listening (its port is taken, say). The engine tries again after
-`retryInMs` and reports this again on each failed try, counting up `attempt`.
+A source could not start listening (its port is taken, say), or a running source said it lost its
+connection (`MessageSink.sourceDown`; then `name` is `SourceDown`). A listener is tried again after
+`retryInMs`; a source that lost its connection is told to wait that long. Each is reported again
+on each failure in a row, counting up `attempt`.
 
 #### Example
 
@@ -4057,13 +4112,13 @@ The channel's name.
 
 > `readonly` **code**: `string` \| `undefined`
 
-The error's code, such as `EADDRINUSE`.
+The error's code, such as `EADDRINUSE`, or the code the source passed, such as `ECONNRESET`.
 
 ##### name
 
 > `readonly` **name**: `string`
 
-The error's name, such as `Error`.
+The error's name, such as `Error`, or `SourceDown` when the source said it lost its connection.
 
 ##### retryAt
 
@@ -4087,7 +4142,7 @@ When the next try is due, as an ISO 8601 time in UTC.
 
 ### SourceUpEvent
 
-A source that was down is listening again. A source that starts on the first try reports nothing.
+A source that was down is listening, or connected, again. A source that starts on the first try reports nothing.
 
 #### Example
 

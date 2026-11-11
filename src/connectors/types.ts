@@ -60,12 +60,18 @@ export interface ReceiveOptions {
 }
 
 /**
- * What a source hands each incoming message to.
+ * What a source hands each incoming message to, and tells when its connection drops and comes back.
  *
  * @example
  * ```ts
  * const id = await sink.receive(body); // durable once this resolves
  * await acknowledge(id);
+ *
+ * socket.on("close", () => {
+ *   const wait = sink.sourceDown?.("ECONNRESET") ?? 1_000;
+ *   setTimeout(reconnect, wait);
+ * });
+ * socket.on("ready", () => sink.sourceUp?.());
  * ```
  */
 export interface MessageSink {
@@ -77,24 +83,50 @@ export interface MessageSink {
    * `options` is optional, so a source that passes only `body` keeps working unchanged.
    */
   receive(body: Uint8Array, options?: ReceiveOptions): Promise<number>;
+  /**
+   * Says the source lost what it reads from (a broker, a remote server, a socket it dialled) and
+   * cannot take messages in until it is back. Until {@link sourceUp}, the health endpoint shows
+   * the channel's source `down` and answers 503, readiness fails, and the hooks are sent a
+   * `source-down` event with `name: "SourceDown"`. `code` is a short code such as `ECONNRESET`
+   * (letters, digits and `_.:-`, at most 64 characters), never an error's text: anything else is
+   * kept as `UNSPECIFIED`.
+   *
+   * Returns how long to wait before trying to connect again, in milliseconds: 1 second, doubling
+   * with each report in a row, to 5 minutes. The engine's own sink always has this method; it is
+   * optional so a sink a test builds by hand need not.
+   */
+  sourceDown?(code: string): number;
+  /**
+   * Says a source that reported {@link sourceDown} is connected again: health shows it `up`, and
+   * the hooks are sent a `source-up` event. Nothing happens when it was not down.
+   */
+  sourceUp?(): void;
 }
 
 /**
  * Brings messages in. A source that polls (a folder, an inbox) implements `poll`, which the engine
- * calls on every pass. A source that listens (MLLP, HTTP) implements `start` and `stop`. A custom
+ * calls on each pass its schedule makes due (the channel's `poll:`, or the engine-wide
+ * `pollInterval`). A source that listens (MLLP, HTTP) implements `start` and `stop`. A custom
  * source's module builds one with a `SourceFactory`.
  *
  * @example
  * ```ts
  * const source: SourceConnector = {
- *   async poll(sink) {
- *     for (const body of await takeWaiting()) await sink.receive(body);
+ *   async poll(sink, signal) {
+ *     for (const body of await takeWaiting({ signal })) await sink.receive(body);
  *   },
  * };
  * ```
  */
 export interface SourceConnector {
-  poll?(sink: MessageSink): Promise<void>;
+  /**
+   * One pass: takes in what is waiting, each message through `sink`. The engine never starts a pass
+   * while the last one's call has not returned. At the pass's deadline (`poll: { deadline }`, 5
+   * minutes by default) the engine stops waiting: `signal` aborts, which a source may pass to its
+   * client to give up a hung listing or query, and `sink.receive` refuses every later message with
+   * the code `POLL_DEADLINE`, so the source keeps it for the next pass.
+   */
+  poll?(sink: MessageSink, signal?: AbortSignal): Promise<void>;
   start?(sink: MessageSink): Promise<void>;
   stop?(): Promise<void>;
 }
