@@ -62,6 +62,7 @@ import { InitError, initProject, STARTER_CHANNEL, STARTER_KEY_FILE } from "./sta
 import { checkSecrets, formatSecretCheck } from "./secrets/check.js";
 import { resolveSecrets, type Secrets } from "./secrets/resolve.js";
 import type { DrySkip, SecretScope } from "./secrets/sources.js";
+import { emptySqliteLog } from "./storage/dialects.js";
 import { openRawStore, openStore, startingKeys, type OpenStoreContext } from "./storage/open.js";
 import { SchemaVersionError } from "./storage/schema.js";
 import {
@@ -148,7 +149,10 @@ Commands:
   audit               Read the audit log, newest first
   rekey               Re-encrypt every stored message under the current key
                       of pathways.yaml's encryption, so older keys can be
-                      retired
+                      retired: on SQLite once it exits 0, on a database
+                      server once it no longer keeps earlier row versions,
+                      and on either only once no copy or backup from before
+                      rekey may be restored
   probe [--ready] [--if-configured]
                       Ask the running engine's probe listener (pathways.yaml's
                       probes block) whether it is alive, or with --ready
@@ -1002,6 +1006,21 @@ const REKEY_NEEDS_KEYS =
 const REKEY_NEEDS_CONTENT_STORE =
   "pathways: pathways.yaml: storage.module: rekey needs a store that also implements ContentStore (storedContent and replaceContent).\n";
 
+/**
+ * What `rekey` adds when every value is under the current key but the store is not SQLite. On
+ * SQLite, rekey then empties the write-ahead log into the file, whose freed space `secure_delete`
+ * zeroes, so the live database's files hold no earlier version; a database server keeps earlier row
+ * versions a while (see `Store.replaceContent`), and a custom store may too, so there an older key
+ * still guards them and is not yet safe to retire. On any store, a copy or backup made before rekey
+ * still holds every value under the older key.
+ */
+const REKEY_KEEPS_EARLIER_VERSIONS =
+  "pathways: every value is under the current key, but this store is not SQLite, so it may still hold earlier versions of the rewritten rows under the older keys (a database server keeps them in its logs, free space, replicas and backups). Keep each older key until it no longer does.\n";
+
+/** What `rekey` adds on SQLite when a read under way keeps the write-ahead log from being emptied. */
+const REKEY_LOG_HELD =
+  "pathways: every value is under the current key, but a connection still reading the database keeps the earlier versions in its write-ahead log; run rekey again once that read is done.\n";
+
 async function rekeyStore(
   projectDir: string,
   encryptPlaintext: boolean,
@@ -1061,7 +1080,14 @@ async function rekeyStore(
   if (counts.changed > 0) {
     io.err("pathways: some values changed while rekey ran; run it again.\n");
   }
-  return rekeyComplete(counts) ? EXIT.ok : EXIT.failed;
+  if (!rekeyComplete(counts)) return EXIT.failed;
+  if (project.storage.kind !== "sqlite") {
+    io.err(REKEY_KEEPS_EARLIER_VERSIONS);
+  } else if (!emptySqliteLog(project.storage.file)) {
+    io.err(REKEY_LOG_HELD);
+    return EXIT.failed;
+  }
+  return EXIT.ok;
 }
 
 async function test(
