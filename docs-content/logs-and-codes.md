@@ -42,6 +42,7 @@ A `transform-failed` line's `kind` is `load`, `parse`, `transform`, `output`, `t
 | `source-started`                                                   | a source that was down is listening again                                               |
 | `source-read-failed`                                               | a file source could not claim or read a file; it stays for the next pass                |
 | `http-refused`                                                     | an HTTP source or the health endpoint refused a request, with its `status`              |
+| `http-unreadable`                                                  | an HTTP source answering with ACKs stored a message as failed, with its `problem`       |
 | `mllp-listening`                                                   | an MLLP source is listening, on `port`, with `tls` true or false                        |
 | `mllp-store-failed`                                                | an MLLP message could not be stored; `onStoreFailure` says what was answered            |
 | `mllp-unreadable`                                                  | an MLLP message was stored as failed, with its `problem`                                |

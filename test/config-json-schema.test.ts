@@ -235,6 +235,21 @@ const REFUSED: readonly (readonly [string, Kind, string])[] = [
     ),
   ],
   ["a channel name with capitals", "channel", channel("name: ADT\n")],
+  [
+    "an HTTP source with both path and paths",
+    "channel",
+    "source:\n  http: { port: 8080, plaintext: true, path: /a, paths: [/b] }\ndestinations:\n  - file: { dir: ./out }\n",
+  ],
+  [
+    "an HTTP source method other than POST or PUT",
+    "channel",
+    "source:\n  http: { port: 8080, plaintext: true, methods: [GET] }\ndestinations:\n  - file: { dir: ./out }\n",
+  ],
+  [
+    "an HTTP source response status that is not 2xx",
+    "channel",
+    "source:\n  http: { port: 8080, plaintext: true, response: { status: 302 } }\ndestinations:\n  - file: { dir: ./out }\n",
+  ],
 ];
 
 describe("a document with one rule broken", () => {
@@ -270,6 +285,18 @@ const ACCEPTED: readonly (readonly [string, Kind, string])[] = [
       "- mllp: { host: a.example.test, port: 2575, tls: { ca: ./ca.pem } }\n" +
         "  - mllp: { host: b.example.test, port: 2575, tls: {} }",
     ),
+  ],
+  [
+    "an HTTP source on several paths with PUT and a fixed response",
+    "channel",
+    "source:\n  http:\n    port: 8080\n    plaintext: true\n    paths: [/adt, /lab/]\n    methods: [POST, PUT]\n" +
+      "    response: { status: 200, contentType: text/plain, headers: { X-Receiver: pathways, X-Key: { env: KEY } }, body: OK }\n" +
+      "destinations:\n  - file: { dir: ./out }\n",
+  ],
+  [
+    "an HTTP source answering with an HL7 ACK",
+    "channel",
+    "source:\n  http: { port: 8080, plaintext: true, path: /hl7, response: ack }\ndestinations:\n  - file: { dir: ./out }\n",
   ],
   [
     "an MLLP source on a channel that says hl7v2",

@@ -222,12 +222,19 @@ Exactly one of `file`, `http`, `mllp` or `module`.
 
 A [listener](#listener), and:
 
-| Key        | Type              | Default |
-| ---------- | ----------------- | ------- |
-| `path`     | starting with `/` | `/`     |
-| `maxBytes` | byte size         | `10MB`  |
+| Key        | Type                                               | Default         |
+| ---------- | -------------------------------------------------- | --------------- |
+| `path`     | starting with `/`                                  | `/`             |
+| `paths`    | a list of paths, in place of `path`                | `[path]`        |
+| `methods`  | a list of `POST` and `PUT`                         | `[POST]`        |
+| `response` | `ack`, or `{ status, contentType, headers, body }` | 202 with the id |
+| `maxBytes` | byte size                                          | `10MB`          |
 
-Its token is read from `PATHWAYS_HTTP_TOKEN` when `auth` is not set.
+Its token is read from `PATHWAYS_HTTP_TOKEN` when `auth` is not set. `response: ack` needs the format
+`hl7v2` and takes POST alone. A fixed `response` has a 2xx `status`, an optional `contentType`,
+`headers` by the [HTTP destination](#http-destination)'s rules, and a `body` of at most 4,096
+characters. See [Send and receive over HTTP](./send-and-receive-http.md#answer-with-an-hl7-ack) for
+how a path is matched and how each response answers.
 
 #### MLLP source
 
