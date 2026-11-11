@@ -1,14 +1,23 @@
 name: Databases
 
 # The whole test suite under coverage with every database Pathways stores messages in: SQLite, and
-# PostgreSQL, MySQL, MariaDB and SQL Server as service containers. The storage suites run once per
-# database; the shared `ci / verify` job runs them on SQLite alone, since it has no servers.
+# PostgreSQL, MySQL, MariaDB and SQL Server as service containers. The storage, engine, replay,
+# rekey, retention and audit suites run once per database, each test on a database of its own, and
+# the crash tests stop a real engine process at each fault point on each of them. The shared
+# `ci / verify` job runs them on SQLite alone, since it has no servers.
 #
-# Coverage here gates at the same 90% as `ci / verify`, and counts the code only a server reaches
-# (its column types, its insert, its driver's settings), which `ci / verify` cannot.
+# One job per server, side by side, so each stays well inside its time limit; each also runs the
+# SQLite half, which is the same in every job. With PATHWAYS_TEST_DATABASES naming its server, a
+# job whose URL is missing fails instead of skipping that server's suites.
 #
-# Its context is `databases`. It is its own workflow, outside ci.yml's shared `ci` job, so it never
-# changes the contexts that job reports. Never rename the workflow's job: the ruleset names it.
+# Coverage in each job gates at the same floors as `ci / verify`, which vitest.config.ts sets (99%
+# of lines, branches and statements, 100% of functions), and counts the code only that job's server
+# reaches (its column types, its insert, its driver's settings), which `ci / verify` cannot.
+#
+# Its context is `databases`: the last job, which passes only when every server's job passed. It is
+# its own workflow, outside ci.yml's shared `ci` job, so it never changes the contexts that job
+# reports. Never rename that job: the ruleset names it. The servers' jobs report as
+# `databases (<server>)`, which no ruleset names.
 #
 # Each image is pinned by digest, with its tag and version in the comment above it. To move one,
 # look up the tag's current digest and change the two together. The SQL Server image is published
@@ -33,71 +42,75 @@ permissions:
   contents: read
 
 jobs:
-  databases:
-    name: databases
+  server:
+    name: databases (${{ matrix.database }})
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # postgres:17 (PostgreSQL 17.11), pinned 2026-11-07.
+          - database: postgres
+            image: postgres@sha256:ff87138949ad9a46f32ff23bd6852b52ce024a13dffe9b4087be98292cdd3b4f
+            ports: "5432:5432"
+            options: >-
+              --health-cmd "pg_isready -U postgres"
+              --health-interval 5s
+              --health-timeout 5s
+              --health-retries 30
+          # mysql:8.4 (MySQL 8.4.13), pinned 2026-11-07. Pinging over TCP fails until the init
+          # scripts are done, since the image's first, temporary server listens on no port.
+          - database: mysql
+            image: mysql@sha256:a81d043930e51745522bd5c430961cf8286f0a23f0a9a2a6e0108f7ea71b0902
+            ports: "3306:3306"
+            options: >-
+              --health-cmd "mysqladmin ping --host 127.0.0.1 --silent"
+              --health-interval 5s
+              --health-timeout 5s
+              --health-retries 30
+          # mariadb:11 (MariaDB 11.8.9), pinned 2026-11-07.
+          - database: mariadb
+            image: mariadb@sha256:c4124d1afa875e47f2892edf26b482fa54f796e2f342d3717a04ca091a22a9bd
+            ports: "3307:3306"
+            options: >-
+              --health-cmd "healthcheck.sh --connect --innodb_initialized"
+              --health-interval 5s
+              --health-timeout 5s
+              --health-retries 30
+          # mcr.microsoft.com/mssql/server:2022-latest (SQL Server 2022 CU27 GDR, 16.0.4305.5),
+          # pinned 2026-11-07.
+          - database: sqlserver
+            image: mcr.microsoft.com/mssql/server@sha256:cf8f0ab2ebe61feec2eed2629061a07d247f791c2a8ddda74a4ac9f06a291718
+            ports: "1433:1433"
+            options: >-
+              --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P Pathways-CI-0000 -Q 'SELECT 1' -b -o /dev/null"
+              --health-interval 10s
+              --health-timeout 10s
+              --health-retries 30
     services:
-      # postgres:17 (PostgreSQL 17.11), pinned 2026-11-07.
-      postgres:
-        image: postgres@sha256:ff87138949ad9a46f32ff23bd6852b52ce024a13dffe9b4087be98292cdd3b4f
+      # One server per job. Each image reads only its own variables and ignores the others'.
+      server:
+        image: ${{ matrix.image }}
         env:
           POSTGRES_PASSWORD: Pathways-CI-0000
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 30
-      # mysql:8.4 (MySQL 8.4.13), pinned 2026-11-07. Pinging over TCP fails until the init scripts
-      # are done, since the image's first, temporary server listens on no port.
-      mysql:
-        image: mysql@sha256:a81d043930e51745522bd5c430961cf8286f0a23f0a9a2a6e0108f7ea71b0902
-        env:
           MYSQL_ROOT_PASSWORD: Pathways-CI-0000
-        ports:
-          - 3306:3306
-        options: >-
-          --health-cmd "mysqladmin ping --host 127.0.0.1 --silent"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 30
-      # mariadb:11 (MariaDB 11.8.9), pinned 2026-11-07.
-      mariadb:
-        image: mariadb@sha256:c4124d1afa875e47f2892edf26b482fa54f796e2f342d3717a04ca091a22a9bd
-        env:
           MARIADB_ROOT_PASSWORD: Pathways-CI-0000
-        ports:
-          - 3307:3306
-        options: >-
-          --health-cmd "healthcheck.sh --connect --innodb_initialized"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 30
-      # mcr.microsoft.com/mssql/server:2022-latest (SQL Server 2022 CU27 GDR, 16.0.4305.5), pinned
-      # 2026-11-07.
-      sqlserver:
-        image: mcr.microsoft.com/mssql/server@sha256:cf8f0ab2ebe61feec2eed2629061a07d247f791c2a8ddda74a4ac9f06a291718
-        env:
           ACCEPT_EULA: "Y"
           MSSQL_SA_PASSWORD: Pathways-CI-0000
         ports:
-          - 1433:1433
-        options: >-
-          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P Pathways-CI-0000 -Q 'SELECT 1' -b -o /dev/null"
-          --health-interval 10s
-          --health-timeout 10s
-          --health-retries 30
+          - ${{ matrix.ports }}
+        options: ${{ matrix.options }}
     env:
       # Each is an administrator's URL naming a database that exists: the suites create and drop a
-      # database of their own per test. With PATHWAYS_TEST_ALL_DATABASES, a missing URL fails the run
-      # instead of skipping that database's suites.
-      PATHWAYS_TEST_ALL_DATABASES: "1"
-      PATHWAYS_TEST_POSTGRES_URL: postgres://postgres:Pathways-CI-0000@127.0.0.1:5432/postgres
-      PATHWAYS_TEST_MYSQL_URL: mysql://root:Pathways-CI-0000@127.0.0.1:3306/mysql
-      PATHWAYS_TEST_MARIADB_URL: mysql://root:Pathways-CI-0000@127.0.0.1:3307/mysql
-      PATHWAYS_TEST_SQLSERVER_URL: sqlserver://sa:Pathways-CI-0000@127.0.0.1:1433/master
+      # database of their own per test. Only this job's server has one; an empty URL is unset. With
+      # PATHWAYS_TEST_DATABASES naming the server, a missing URL fails the run instead of skipping
+      # that server's suites.
+      PATHWAYS_TEST_DATABASES: ${{ matrix.database }}
+      PATHWAYS_TEST_POSTGRES_URL: ${{ matrix.database == 'postgres' && 'postgres://postgres:Pathways-CI-0000@127.0.0.1:5432/postgres' || '' }}
+      PATHWAYS_TEST_MYSQL_URL: ${{ matrix.database == 'mysql' && 'mysql://root:Pathways-CI-0000@127.0.0.1:3306/mysql' || '' }}
+      PATHWAYS_TEST_MARIADB_URL: ${{ matrix.database == 'mariadb' && 'mysql://root:Pathways-CI-0000@127.0.0.1:3307/mysql' || '' }}
+      PATHWAYS_TEST_SQLSERVER_URL: ${{ matrix.database == 'sqlserver' && 'sqlserver://sa:Pathways-CI-0000@127.0.0.1:1433/master' || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -109,5 +122,22 @@ jobs:
           node-version: "24"
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Every test on every database, under coverage
+      - name: Every test on SQLite and ${{ matrix.database }}, under coverage
         run: pnpm test:coverage
+
+  # The context the ruleset requires. It runs after the servers' jobs, whatever they did, and fails
+  # unless every one of them passed, so a server that failed, was cancelled or was skipped can
+  # never let a pull request merge.
+  databases:
+    name: databases
+    needs: [server]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every server's job passed
+        env:
+          RESULT: ${{ needs.server.result }}
+        run: |
+          echo "the servers' jobs: $RESULT"
+          test "$RESULT" = success

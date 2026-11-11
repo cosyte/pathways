@@ -22,6 +22,7 @@ import {
   type SourceConnector,
 } from "../connectors/types.js";
 import { customDestination, customSource, loadAckBuilder } from "../extensions/build.js";
+import { faultPoint } from "../fault-points.js";
 import type { LifecycleEvent } from "../extensions/events.js";
 import { HookSet } from "../extensions/hooks.js";
 import type { ChannelContext } from "../extensions/types.js";
@@ -641,6 +642,7 @@ export class Engine {
           }));
           throw error;
         }
+        faultPoint("after-store-before-ack");
         if (received.alreadyStored === true) {
           // Handed in again after a stop between storing and acknowledging: stored once already.
           logger.info({ event: "already-stored", channel: config.name, message: received.id });
@@ -689,6 +691,7 @@ export class Engine {
       if (next === undefined) return;
       const outcome: TransformOutcome = await worker.run(next.body, { transfer: owned });
       if (outcome.ok) {
+        faultPoint("after-transform-before-complete");
         await store.completeTransform(next.id, outcome.outputs, config.destinations.length);
         if (owned) for (const output of outcome.outputs) release(output);
         const outputs = outcome.outputs.length;
@@ -858,6 +861,7 @@ export class Engine {
         }
         // Delivered: freed now when the store handed it over and the destination kept none of it.
         if (copiesBodies(store) && copiesBodies(destination)) release(delivery.body);
+        faultPoint("after-send-before-record");
         await store.markDelivered(delivery.id);
         logger.info({
           event: "delivered",

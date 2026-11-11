@@ -20,6 +20,7 @@ import { Migrator, type Migration, type MigrationProvider } from "kysely/migrati
 import { ConfigError } from "../config/load.js";
 import type { DatabaseStorage, StorageKind } from "../config/schema.js";
 import type { Env } from "../connectors/endpoint.js";
+import { faultPoint } from "../fault-points.js";
 import { dialectFor, type DriverImport } from "./dialects.js";
 import { markCopiesBodies } from "./ownership.js";
 
@@ -1811,6 +1812,7 @@ export class Store implements MessageStore, ContentStore {
           superseded: Number(superseded.numUpdatedRows),
           generation: message.generation,
         };
+        faultPoint("mid-requeue");
         const [entry] = await this.insertAudit(tx, actor, at, [
           { action: mode, channel: message.channel, messageId, detail: done },
         ]);
