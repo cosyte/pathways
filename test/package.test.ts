@@ -68,6 +68,28 @@ describe("package facts that must agree", () => {
     expect(Math.min(...lines)).toBe(Number(floor));
     expect(lines).toEqual([24, 26]);
   });
+
+  // Windows and macOS run the shared `verify` on the floor alone, at the same published commit as
+  // Linux, and the packed package is installed and run on all three. Each context is a check the
+  // ruleset can require, so a system dropped here is a check that silently stops running.
+  it("runs verify on Windows and macOS on the floor, and the tarball smoke on all three systems", () => {
+    const ci = workflow("ci.yml");
+    const floor = /^>=(\d+)/.exec(pkg.engines.node)?.[1];
+    const systems = ci.jobs["systems"];
+    expect(pinnedCommit(systems?.uses ?? "")).toBe(pinnedCommit(ci.jobs["ci"]?.uses ?? ""));
+    expect(JSON.parse(String(systems?.with?.["node-versions"]))).toEqual([floor]);
+    expect(JSON.parse(String(systems?.with?.["os"]))).toEqual(["windows-latest", "macos-latest"]);
+    expect(systems?.with?.["run-phi-scan"]).toBe(true);
+    // Linux alone runs the rest, once.
+    expect(ci.jobs["ci"]?.with?.["os"]).toBeUndefined();
+
+    const smoke = ci.jobs["tarball-smoke"] as unknown as {
+      readonly strategy: { readonly matrix: { readonly os: readonly string[] } };
+      readonly steps: readonly { readonly run?: string }[];
+    };
+    expect(smoke.strategy.matrix.os).toEqual(["ubuntu-latest", "windows-latest", "macos-latest"]);
+    expect(smoke.steps.map((step) => step.run).at(-1)).toMatch(/^node scripts\/tarball-smoke\.ts /);
+  });
 });
 
 // The release is the shared pipeline: Changesets opens a Version Packages pull request, and merging

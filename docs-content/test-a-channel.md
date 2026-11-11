@@ -33,6 +33,20 @@ Use synthetic messages only: [`@cosyte/synth`](https://docs.cosyte.com/synth) ge
 [Make sample messages](./make-sample-messages.md) shows, or write them by hand with values that are
 visibly invented.
 
+## Keep git from changing their line endings
+
+HL7 v2 ends each segment with a carriage return, and the comparison is byte for byte, so git must
+store and check out the test files exactly as written. Git on Windows can turn line endings into
+CRLF on checkout (`core.autocrlf`), which breaks a message and its expected file. Mark them in a
+`.gitattributes` at the project's root, beside `pathways.yaml`:
+
+```text title=".gitattributes"
+*.hl7 -text
+```
+
+`-text` tells git never to convert those files on any system. Add a line for each other extension
+your channels' tests use whose bytes must not change, such as `*.x12 -text`.
+
 ## Run them
 
 ```bash

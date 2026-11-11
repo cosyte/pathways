@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSyn
 import { mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage } from "node:http";
 import { createRequire } from "node:module";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { parseHL7 } from "@cosyte/hl7";
@@ -57,11 +57,18 @@ import { ADT_A01, ADT_A08, FHIR_PATIENT, X12_270 } from "./helpers.js";
  */
 
 const distEntry = join(ROOT, "dist", "index.mjs");
+// A file URL, not a path: the sample imports it as written, and on Windows Node's loader reads a
+// bare `D:\...` as a URL whose scheme is the drive.
 const resolve = (specifier: string): string | undefined =>
-  specifier === "@cosyte/pathways" ? distEntry : undefined;
+  specifier === "@cosyte/pathways" ? pathToFileURL(distEntry).href : undefined;
 
 beforeAll(() => {
-  execFileSync("pnpm", ["build"], { cwd: ROOT, stdio: "ignore" });
+  // pnpm is a .cmd shim on Windows, which only a shell can start.
+  execFileSync("pnpm", ["build"], {
+    cwd: ROOT,
+    stdio: "ignore",
+    shell: process.platform === "win32",
+  });
 }, 180_000);
 
 afterEach(removeProjects);
@@ -248,7 +255,13 @@ describe("the quickstart", () => {
       const dir = await starterProject();
       const written = (await readdir(dir, { recursive: true, withFileTypes: true }))
         .filter((entry) => entry.isFile() && !entry.parentPath.includes("node_modules"))
-        .map((entry) => join(entry.parentPath, entry.name).slice(dir.length + 1))
+        // With "/" between folders on every system, as the page shows them.
+        .map((entry) =>
+          join(entry.parentPath, entry.name)
+            .slice(dir.length + 1)
+            .split(sep)
+            .join("/"),
+        )
         .sort();
       expect(written.join("\n")).toBe(shown[0]);
 
@@ -825,7 +838,7 @@ async function freePort(): Promise<number> {
 
 describe("check status and health", () => {
   it(
-    "serves the health body the page shows, and stops cleanly on SIGTERM",
+    "serves the health body the page shows, and stops cleanly on SIGTERM where there is one",
     async () => {
       const dir = await starterProject();
       const port = await freePort();
@@ -842,7 +855,9 @@ describe("check status and health", () => {
           }
         }
       } finally {
-        expect(await engine.stop()).toBe(0);
+        const code = await engine.stop();
+        // Windows: ended at once, so its exit code says nothing (test/engine-stop.test.ts).
+        if (process.platform !== "win32") expect(code).toBe(0);
       }
       const shown = JSON.parse(
         fences(page("check-status-and-health.md")).find((fence) => fence.lang === "json")?.body ??

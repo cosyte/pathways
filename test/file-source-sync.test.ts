@@ -83,29 +83,34 @@ function eventsIn(dir: string): string[] {
 }
 
 describe("FileSource on disk", () => {
-  it("flushes every move of a pass to disk before it stores a file, so a power cut cannot undo a stored claim", async () => {
-    onPlatform("linux");
-    const dir = await inbox();
-    const source = new FileSource({ dir, channel: "adt", minAgeMs: 0 });
-    await source.poll(sink);
+  // Skipped on Windows itself, whose file system cannot flush a folder, which is what the Linux and
+  // macOS path does: the test after this one drives the path Windows takes.
+  it.skipIf(process.platform === "win32")(
+    "flushes every move of a pass to disk before it stores a file, so a power cut cannot undo a stored claim",
+    async () => {
+      onPlatform("linux");
+      const dir = await inbox();
+      const source = new FileSource({ dir, channel: "adt", minAgeMs: 0 });
+      await source.poll(sink);
 
-    expect(eventsIn(dir)).toEqual([
-      "rename a.hl7",
-      "rename b.hl7",
-      // Once a pass, before anything is stored: the folder the files moved into, the folder that
-      // holds it, and the folder they moved out of.
-      "sync r .claimed/adt",
-      "sync r .claimed",
-      "sync r .",
-      "receive first",
-      "receive second",
-    ]);
+      expect(eventsIn(dir)).toEqual([
+        "rename a.hl7",
+        "rename b.hl7",
+        // Once a pass, before anything is stored: the folder the files moved into, the folder that
+        // holds it, and the folder they moved out of.
+        "sync r .claimed/adt",
+        "sync r .claimed",
+        "sync r .",
+        "receive first",
+        "receive second",
+      ]);
 
-    // A pass that claims nothing flushes nothing.
-    disk.events.length = 0;
-    await source.poll(sink);
-    expect(disk.events).toEqual([]);
-  });
+      // A pass that claims nothing flushes nothing.
+      disk.events.length = 0;
+      await source.poll(sink);
+      expect(disk.events).toEqual([]);
+    },
+  );
 
   it("on Windows, flushes each claimed file under its claimed name before it stores a file, and no folder", async () => {
     onPlatform("win32");

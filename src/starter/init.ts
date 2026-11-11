@@ -84,8 +84,10 @@ export interface InitOptions {
 /**
  * Writes the starter project into `target`: `pathways.yaml`, the `adt-to-lab` channel with its
  * transform and synthetic test messages, a `.gitignore`, a `package.json`, and a freshly generated
- * development master key at {@link STARTER_KEY_FILE} (readable by its owner only), so stored
- * messages are encrypted from the first run. `target` must be an empty folder or not exist yet;
+ * development master key at {@link STARTER_KEY_FILE}, so stored messages are encrypted from the
+ * first run. On Linux and macOS the key and its folder are readable by their owner only (modes 0600
+ * and 0700); on Windows a mode sets only the read-only attribute, and the project folder's access
+ * control list decides who can read the key. `target` must be an empty folder or not exist yet;
  * anything else is refused before a file is written. Returns the files written, relative to
  * `target`, with `/` separators.
  *

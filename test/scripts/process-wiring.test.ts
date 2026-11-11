@@ -29,8 +29,11 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const REPO_ROOT = process.cwd();
 
-/** What `pnpm check:process` runs: the bin pnpm linked for `@cosyte/process`. */
-const BIN = join(REPO_ROOT, "node_modules", ".bin", "cosyte-process");
+/**
+ * What `pnpm check:process` runs: `@cosyte/process`'s `cosyte-process` bin, run by Node. The link
+ * pnpm puts in `.bin` is a `.cmd` shim on Windows, which only a shell can start.
+ */
+const BIN = join(REPO_ROOT, "node_modules", "@cosyte", "process", "dist", "cli.mjs");
 
 const VERBS = ["build", "test", "lint", "typecheck", "format"] as const;
 const VARIANTS: readonly (readonly [string, string])[] = [
@@ -50,7 +53,11 @@ interface RunResult {
 }
 
 function check(cwd: string): RunResult {
-  const result = spawnSync(BIN, ["check"], { cwd, encoding: "utf8", timeout: 60_000 });
+  const result = spawnSync(process.execPath, [BIN, "check"], {
+    cwd,
+    encoding: "utf8",
+    timeout: 60_000,
+  });
   return { code: result.status ?? -1, out: `${result.stdout}${result.stderr}` };
 }
 

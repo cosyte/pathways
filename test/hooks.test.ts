@@ -165,7 +165,8 @@ describe("lifecycle hooks in the engine", () => {
       {
         key: "delivered",
         channel: "text",
-        dir: expect.stringMatching(/channels\/text$/) as unknown,
+        // The channel's folder, with the system's own separator.
+        dir: expect.stringMatching(/channels[\\/]text$/) as unknown,
       },
     ]);
     expect(bench.notes["all:stop"]).toEqual([true]);

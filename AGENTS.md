@@ -22,9 +22,10 @@ job runs all four.
 
 ## The gate
 
-Run these from the repo root, in this order, before you push. CI runs the first nine on Node 24 and
-26 (`ci / verify`), and the em-dash gate, the public-surface gate, and the CLAUDE.md card checker as
-workflows of their own. The build, test, lint, typecheck and format scripts delegate to
+Run these from the repo root, in this order, before you push. CI runs the first nine on Linux on
+Node 24 and 26 (`ci / verify`) and on Windows and macOS on Node 24 (`systems / verify`), installs the
+packed package and runs it on all three (`tarball-smoke`), and runs the em-dash gate, the
+public-surface gate, and the CLAUDE.md card checker as workflows of their own. The build, test, lint, typecheck and format scripts delegate to
 `cosyte-process` from `@cosyte/process`, which owns the tool versions; `pnpm test` also runs
 `pnpm check:process`, its wiring check.
 

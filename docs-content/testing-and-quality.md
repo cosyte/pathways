@@ -25,6 +25,7 @@ what came out, and what did not.
 | Unit and engine tests            | each documented behavior and failure path: configuration checks, every connector, ACKs, retries and order, the transform worker's time limit and memory cap, encryption and rotation, the operator commands, the audit log and retention, run against the source with real sockets, TLS certificates made at test time, and real worker threads | an input or a timing nobody thought to write down                                                   |
 | Storage on every database        | a query that works on one database and not another: every storage test runs on SQLite, PostgreSQL, MySQL, MariaDB and SQL Server in CI                                                                                                                                                                                                          | a version of a database server we do not run; behavior under the load of a real deployment          |
 | The Docker image                 | an image that does not build, has a shell, cannot run the starter project, or cannot store messages on SQLite, PostgreSQL, MySQL or SQL Server; one that does not stop cleanly                                                                                                                                                                  | a host or orchestrator setup we do not run                                                          |
+| The tarball smoke                | a file left out of the package, a `pathways` command that does not start, a starter project `init` writes wrongly, or an SQLite driver with no binary for the system, on Linux, Windows and macOS                                                                                                                                               | an install through another package manager; a system or Node.js version we do not run it on         |
 | Guards on what must never happen | message content in a log line, an error or a hook event; an `update` or `delete` of the audit log anywhere in the source; a stored body or error text that bypasses encryption                                                                                                                                                                  | a leak through a path no test drives                                                                |
 | Coverage gate                    | code no test runs: lines, branches, functions and statements, held at a floor                                                                                                                                                                                                                                                                   | a test that runs code without checking what it does                                                 |
 | Mutation testing                 | a test that runs code but would not notice it changing                                                                                                                                                                                                                                                                                          | not yet run on this package; the numbers below say "not measured" until it is                       |
@@ -43,7 +44,9 @@ the floor only rises, and a change's own code is held to 100%. Every line it cha
 test and every mutant in those lines is killed, or an inline comment names why it cannot be. For
 Pathways, a pull request merges only when:
 
-- every test passes on Node.js 24 and 26, and the storage tests pass on all five databases;
+- every test passes on Node.js 24 and 26 on Linux, and on Node.js 24 on Windows and macOS, and the
+  storage tests pass on all five databases;
+- the packed package installs and runs on Linux, Windows and macOS;
 - coverage stays at or above its floor, which only rises: 99% of lines, branches and statements and
   100% of functions today;
 - a change in behavior comes with a test that fails without it and passes with it;
@@ -55,11 +58,23 @@ no mutation floor. Both join when Pathways adopts the standard's ratchet.
 
 ## How each one runs
 
-- **The test suite and the coverage gate** run on every pull request and on `main`, on Node.js 24 and 26. A floor that is not met fails the pull request.
+- **The test suite and the coverage gate** run on every pull request and on `main`: on Linux with
+  Node.js 24 and 26, and on Windows and macOS with Node.js 24, each on GitHub's own runner for that
+  system. A floor that is not met fails the pull request. On Windows and macOS the suite runs the
+  file source, the engine's start and stop, and MLLP over TLS natively, not by pretending to be
+  another system. A test that cannot run on a system says why in the test, where it is skipped.
+- **The tarball smoke** packs the package as `npm pack` would publish it, installs the tarball with
+  npm in an empty folder, and runs `pathways init`, `pathways test` and `pathways start --once`
+  through the installed command, on Linux, Windows and macOS. It catches a file left out of the
+  package, a command that does not start, the starter's `.gitignore` not written, and an SQLite
+  driver with no binary for that system.
 - **The database job** runs the storage tests on PostgreSQL, MySQL, MariaDB and SQL Server
-  servers, beside SQLite, on every pull request.
+  servers, beside SQLite, on every pull request. It runs on Linux only: the servers run as Linux
+  containers.
 - **The image job** builds the Docker image and runs the starter project through it on every pull
-  request.
+  request, on Linux only, where the image runs.
+- **The scaling gates and the benchmark comparison** run on Linux only, on one kind of runner, so
+  their numbers compare with each other.
 - **The PHI scan** runs on every commit (a pre-commit hook) and in CI.
 - **The docs checks** run on every pull request: every link and image inside these pages and every
   page the sidebar names must resolve, and the API reference must match what the source's TSDoc

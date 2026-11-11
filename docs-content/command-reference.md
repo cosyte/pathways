@@ -27,8 +27,11 @@ pathways init [dir]
 
 Writes the starter project into `dir` (default: the project folder), which must be empty or not exist
 yet: `pathways.yaml`, the `adt-to-lab` channel with its transform and tests, a `.gitignore`, a
-`package.json`, and a development master key generated for this project in `.pathways/dev.key`,
-readable by its owner only. Nothing is written if the folder is not empty.
+`package.json`, and a development master key generated for this project in `.pathways/dev.key`.
+On Linux and macOS the key is readable by its owner only (mode 0600, in a folder with mode 0700). On
+Windows a file's mode does not limit who can read it, so there the project folder's access control
+list is what keeps the key private, and `init` says so: keep the folder to the accounts that run
+Pathways. Nothing is written if the folder is not empty.
 
 ## pathways start
 
@@ -39,6 +42,18 @@ pathways start [--once]
 Runs every channel, and the health endpoint if `pathways.yaml` configures one, until it receives
 SIGINT or SIGTERM. Retention runs after the first pass and then every `retentionInterval`. Needs
 `encryption` in `pathways.yaml`.
+
+On either signal it stops cleanly and exits 0: sources stop taking messages, what is being stored is
+answered, and each [lifecycle hook](./add-lifecycle-hooks.md) gets up to its time limit to finish the
+events queued for it. Windows has no SIGTERM. There Ctrl+C in the engine's console is SIGINT and
+stops it the same way, while ending the process (Task Manager, `taskkill /F`, or a service manager
+that gives up waiting) stops it at once, with no stop at all. A hard stop loses no message: each one
+was stored before its source acknowledged it, and a file the engine had claimed is stored on the
+next start under the same key, so it is stored once. Only the hook events still queued are lost.
+
+To run it as a Windows service, use a service wrapper that stops a console program with Ctrl+C before
+it ends the process, and give it a stop timeout longer than your longest hook `timeout`, so the
+hooks finish what is queued.
 
 | Option   | Meaning                                                                                     |
 | -------- | ------------------------------------------------------------------------------------------- |

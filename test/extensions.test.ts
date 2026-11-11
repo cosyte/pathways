@@ -1,4 +1,4 @@
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, symlink } from "node:fs/promises";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
@@ -128,6 +128,36 @@ describe("loading an extension module", () => {
       "x.yaml: k: the module's default export is a null, not a function; export default a widget",
       "x.yaml: k: the module's default export is a array, not a function; export default a widget",
     ]);
+  });
+
+  // A module reached through a link is named by its real path in the stack, and one whose stack
+  // names only file URLs no path can be made of is placed nowhere: another host, which Linux and
+  // macOS refuse, and no drive, which Windows refuses. A junction on Windows,
+  // which needs no administrator's rights there; elsewhere the type is ignored.
+  it("places an error in a module reached through a link, and none in a frame of another host", async () => {
+    const root = await makeProject({
+      "real/throws.ts": "throw new RangeError('synthetic TESTPATIENT');\n",
+      "elsewhere.ts":
+        "const error = new RangeError('synthetic');\n" +
+        "error.stack = 'RangeError: synthetic\\n    at file://remote-host/share/elsewhere.ts:1:1" +
+        "\\n    at file:///share/elsewhere.ts:1:1';\n" +
+        "throw error;\n",
+    });
+    await symlink(join(root, "real"), join(root, "linked"), "junction");
+    const linked = (await loadDefaultFunction(
+      join(root, "linked", "throws.ts"),
+      "x.yaml: k",
+      "a thing",
+    ).catch((e: unknown) => e)) as ExtensionLoadError;
+    expect(linked.problem).toMatch(
+      /^the module could not be loaded \(RangeError at throws\.ts:1:\d+\)$/,
+    );
+    const remote = (await loadDefaultFunction(
+      join(root, "elsewhere.ts"),
+      "x.yaml: k",
+      "a thing",
+    ).catch((e: unknown) => e)) as ExtensionLoadError;
+    expect(remote.problem).toBe("the module could not be loaded (RangeError)");
   });
 
   it("reports a module that throws on load by error name and place, never its text", async () => {

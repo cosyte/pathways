@@ -63,8 +63,8 @@ importers:
         specifier: ^0.1.8
         version: 0.1.8(@types/node@24.19.2)(postcss@8.5.32)(tsx@4.23.15)(vite@8.3.6(@types/node@24.19.2)(esbuild@0.28.2)(tsx@4.23.15)(yaml@2.9.1))(yaml@2.9.1)
       '@cosyte/script-utils':
-        specifier: ^0.1.8
-        version: 0.1.8
+        specifier: ^0.1.11
+        version: 0.1.11
       '@cosyte/synth':
         specifier: ^0.1.5
         version: 0.1.5(@cosyte/ccda@0.1.6)(@cosyte/fhir@0.1.9(fast-check@4.10.2))(@cosyte/hl7@0.1.9(fast-check@4.10.2))(@cosyte/x12@0.1.11(fast-check@4.10.2))
@@ -346,8 +346,8 @@ packages:
     engines: {node: '>=22.22.2'}
     hasBin: true
 
-  '@cosyte/script-utils@0.1.8':
-    resolution: {integrity: sha512-d5+N2hVp/MqZ+MCAO91sJjFL1mRQU6gFlJOlMKdEF4iUKHWLNY/Vh1CTNSK6ebk9SxtrU+4GC5LGGCJWKoldbA==}
+  '@cosyte/script-utils@0.1.11':
+    resolution: {integrity: sha512-Xfk/DjBxSF24MBQrr+zzntZr3RgWtqBph0ebdbXbvO/80hRhKgbWMIFYUlk+dVBsQZaQGv91GCOhOqQDmHoKnA==}
     engines: {node: '>=22.14'}
     hasBin: true
 
@@ -2997,7 +2997,7 @@ snapshots:
       - vite
       - yaml
 
-  '@cosyte/script-utils@0.1.8': {}
+  '@cosyte/script-utils@0.1.11': {}
 
   '@cosyte/synth@0.1.5(@cosyte/ccda@0.1.6)(@cosyte/fhir@0.1.9(fast-check@4.10.2))(@cosyte/hl7@0.1.9(fast-check@4.10.2))(@cosyte/x12@0.1.11(fast-check@4.10.2))':
     optionalDependencies:

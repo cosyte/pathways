@@ -1,5 +1,7 @@
-import { writeFile } from "node:fs/promises";
+import { symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -82,6 +84,33 @@ describe("ChannelWorker", () => {
     expect(await worker.run(bytes("good"))).toEqual({ ok: true, outputs: [bytes("good")] });
   });
 
+  // Node loads a module from its real path, so the stack names the real path, not the one the
+  // channel gave. macOS's temporary folder is one such link (/var is /private/var), and a project
+  // reached through a link is another. A junction on Windows, which needs no administrator's rights
+  // there, as a symlink does; elsewhere the type is ignored.
+  it("says where a transform reached through a link threw", async () => {
+    const root = await makeProject({
+      "real/transform.ts":
+        "export default (m: string): string => {\n  throw new TypeError('synthetic ' + m);\n};\n",
+    });
+    await symlink(join(root, "real"), join(root, "linked"), "junction");
+    const worker = new ChannelWorker({
+      channel: "test",
+      transformFile: join(root, "linked", "transform.ts"),
+      format: "text",
+      timeoutMs: 5_000,
+      memoryMb: 256,
+    });
+    workers.push(worker);
+    expect(await worker.run(bytes("bad"))).toMatchObject({
+      ok: false,
+      failure: {
+        name: "TypeError",
+        where: expect.stringMatching(/^transform\.ts:2:\d+$/) as unknown,
+      },
+    });
+  });
+
   it("stops a transform that runs past its timeout, and the next message runs in a fresh worker", async () => {
     const worker = await workerFor(
       "export default (m: string): string => { if (m === 'loop') { for (;;) {} } return m; };\n",
@@ -157,14 +186,16 @@ describe("ChannelWorker", () => {
   });
 
   it("refuses to start when the worker itself cannot start", async () => {
-    const worker = await workerFor(undefined, { workerUrl: new URL("file:///nowhere/worker.mjs") });
+    // An absolute path on every system: a URL with no drive letter is not one on Windows.
+    const missing = pathToFileURL(join(tmpdir(), "pathways-nowhere", "worker.mjs"));
+    const worker = await workerFor(undefined, { workerUrl: missing });
     await expect(worker.start()).rejects.toBeInstanceOf(TransformLoadError);
   });
 
   it("reports a worker that exits before saying it is ready", async () => {
     const root = await makeProject({ "exit.mjs": "process.exit(4);\n" });
     const worker = await workerFor(undefined, {
-      workerUrl: new URL(`file://${join(root, "exit.mjs")}`),
+      workerUrl: pathToFileURL(join(root, "exit.mjs")),
     });
     await expect(worker.start()).rejects.toMatchObject({ failure: { kind: "crash" } });
   });

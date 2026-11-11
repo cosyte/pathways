@@ -33,7 +33,8 @@ jobs:
   # - `bench-compare` (pull requests only): bench/pathways.bench.mjs timed on the base build and the
   #   head build, interleaved on one runner. Advisory: it never fails, so never require it.
   # A skipped job satisfies a required check, so require `scaling-gate` only while its input below
-  # stays on. The full reading, the budgets and the profile are in bench-reading.yml. This caller
+  # stays on. `systems` below runs `verify` on Windows and macOS, and `tarball-smoke` installs the
+  # packed package on all three systems. The full reading, the budgets and the profile are in bench-reading.yml. This caller
   # moved to the 2026-11-10 reference, the first with those two jobs, and release.yml with it, since
   # test/package.test.ts holds the two to one commit (its release workflow is unchanged between the
   # two references); the other callers stay where they were. The jobs that reference added beside
@@ -51,6 +52,71 @@ jobs:
       # under docs-content/ that points inside the package, and every page id sidebars.json names,
       # must resolve. A finding fails `verify` on both Node lines.
       check-docs-content: true
+
+  # The same shared pipeline's `verify` on Windows and macOS, on the Node floor (24) alone: Node 26
+  # runs on Linux only, in `ci` above. The shared workflow's matrix is every Node line on every
+  # system it is given, so the two systems are a second caller of it rather than a wider `os` above,
+  # which would also run 26 on them. Everything else it can run stays off here, since `ci` runs it on
+  # Linux: actionlint, prepublish, the docs-content check, the scaling gate and bench-compare (both
+  # measured on one kind of runner, so their numbers compare). databases.yml and docker.yml stay on
+  # Linux too: their servers and the image are Linux containers. The skipped jobs still report
+  # contexts (`systems / actionlint` and the like), as skipped; never require those.
+  #
+  # Its contexts are `systems / verify (24, windows-latest)` and `systems / verify (24,
+  # macos-latest)`. Never rename this job once the ruleset requires them. On Windows the shared job
+  # checks text files out with LF before the checkout, and .gitattributes says the same.
+  systems:
+    uses: cosyte/.github/.github/workflows/ci.yml@0be6757a773885cbd5165dbfa0f93772d907b3e8 # workflows-2026-11-10-0be6757a7738
+    with:
+      run-phi-scan: true
+      node-versions: '["24"]'
+      os: '["windows-latest", "macos-latest"]'
+      expect-unpublished-deps: ""
+      run-actionlint: false
+      run-prepublish-manifest-lint: false
+      run-prepublish-install: false
+
+  # The packed package, installed and run as a team meets it, on each system: `npm pack` of the
+  # build, `npm install` of the tarball in an empty folder (which fetches better-sqlite3's binary
+  # for that system), then `pathways --version`, `init`, `test` and `start --once` through the
+  # installed bin. scripts/tarball-smoke.ts says what each step proves. Its contexts are
+  # `tarball-smoke (ubuntu-latest)`, `tarball-smoke (windows-latest)` and
+  # `tarball-smoke (macos-latest)`; never rename the job or drop a system once they are required.
+  tarball-smoke:
+    name: tarball-smoke (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # As the shared `verify` does: text files come out as committed, LF, on every system.
+      - name: Check out text files with LF line endings
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      # The Node floor, which engines.node and the matrix above state.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      # --ignore-scripts: packing would run this repository's own `prepare`, which installs git hooks
+      # in the checkout. Nothing it does reaches the tarball, which `pnpm build` already filled.
+      - name: Pack the package
+        run: npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP"
+      # Plain Node, not pnpm: nothing of pnpm's environment reaches the npm the smoke runs.
+      - name: Install the tarball in an empty folder, then init, test and start --once
+        run: node scripts/tarball-smoke.ts "$RUNNER_TEMP"/cosyte-pathways-*.tgz
 
   # The API reference in docs-content/api/ held to the source, with `cosyte-docs-reference --check`
   # from @cosyte/process. It fails when the committed pages differ from what the TSDoc comments

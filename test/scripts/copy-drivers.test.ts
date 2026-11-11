@@ -66,7 +66,10 @@ async function pnpmProject(peers: Record<string, string> = { a: "^1.0.0", "@s/b"
   return root;
 }
 
-describe("copy-drivers", () => {
+// Skipped on Windows: the Dockerfile runs this script only inside its Linux build, and the pnpm
+// layout below links folders the Linux way, with plain symlinks that Windows does not follow as
+// folders.
+describe.skipIf(process.platform === "win32")("copy-drivers", () => {
   it("names the drivers as package.json's peerDependencies, sorted, or none", async () => {
     expect(await driverNames(await pnpmProject({ z: "1", "@s/b": "1", a: "1" }))).toEqual([
       "@s/b",

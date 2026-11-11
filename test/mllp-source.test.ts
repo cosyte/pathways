@@ -3,6 +3,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import {
+  MllpDestination,
   MllpSource,
   readHeader,
   type MllpEvent,
@@ -362,6 +363,34 @@ describe.skipIf(!OPENSSL)(`MllpSource ${TLS_TESTS}`, () => {
       await sleep(10);
     }
     expect(events.filter((e) => e.event === "mllp-tls-refused")).toHaveLength(2);
+  });
+
+  // Pathways to Pathways, natively on each system CI runs: an MLLP destination sends to an MLLP
+  // source over mutual TLS. Every listen names its host and asks for port 0, and the port the
+  // system gave is read back, so the test never guesses at a free port another process can take
+  // first.
+  it("carries a message from a destination to a source and its ACK back, over mutual TLS", async () => {
+    const { sink, received } = recordingSink();
+    const { source, port } = await startSource(sink, {
+      host: "127.0.0.1",
+      port: 0,
+      tls: { cert: certs.serverCert, key: certs.serverKey, ca: certs.ca },
+    });
+    expect(port).toBeGreaterThan(0);
+    expect(source.port).toBe(port);
+    const sender = new MllpDestination({
+      host: "127.0.0.1",
+      port,
+      tls: { ca: certs.ca, cert: certs.clientCert, key: certs.clientKey },
+      ackTimeoutMs: 5_000,
+    });
+    try {
+      await sender.deliver({ messageId: 1, seq: 0, body: Buffer.from(ADT_A01, "latin1") });
+      await sender.deliver({ messageId: 2, seq: 0, body: Buffer.from(ADT_A08, "latin1") });
+    } finally {
+      await sender.stop();
+    }
+    expect(received.map((r) => r.body)).toEqual([ADT_A01, ADT_A08]);
   });
 });
 

@@ -23,7 +23,11 @@ import { rewriteVersion, syncVersion } from "../../scripts/version-sync.js";
 
 const REPO_ROOT = process.cwd();
 const SCRIPT = join(REPO_ROOT, "scripts", "sync-version.ts");
-const TSX_BIN = join(REPO_ROOT, "node_modules", ".bin", "tsx");
+/**
+ * tsx's command, run by Node: its `bin` in tsx's package.json. The `.bin/tsx` link is a `.cmd` shim
+ * on Windows, which only a shell can start.
+ */
+const TSX = join(REPO_ROOT, "node_modules", "tsx", "dist", "cli.mjs");
 
 const DOC = '/** The version. */\nexport const VERSION = "0.0.0";\n';
 
@@ -95,7 +99,11 @@ describe("syncVersion and the script", () => {
   }
 
   function run(): { code: number; stdout: string; stderr: string } {
-    const result = spawnSync(TSX_BIN, [SCRIPT], { cwd: dir, encoding: "utf8", timeout: 60_000 });
+    const result = spawnSync(process.execPath, [TSX, SCRIPT], {
+      cwd: dir,
+      encoding: "utf8",
+      timeout: 60_000,
+    });
     return { code: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
   }
 
