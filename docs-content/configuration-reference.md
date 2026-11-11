@@ -87,6 +87,7 @@ health:
 | `defaults`   | see [Settings](#settings)                               | the defaults below              |
 | `hooks`      | a list of [hooks](#hooks)                               | none                            |
 | `health`     | see [Health endpoint](#health-endpoint)                 | no health endpoint              |
+| `probes`     | see [Probe listener](#probe-listener)                   | no probe listener               |
 | `lease`      | see [Engine lease](#engine-lease)                       | a 15s lease, no standby         |
 | `migrations` | see [Migrations](#migrations)                           | no rollback window              |
 | `config`     | see [Transform configuration](#transform-configuration) | none                            |
@@ -208,6 +209,22 @@ The event names are `received`, `receive-failed`, `transformed`, `filtered`, `tr
 
 A [listener](#listener). Its token is read from `PATHWAYS_HEALTH_TOKEN` when `auth` is not set. See
 [Check status and health](./check-status-and-health.md).
+
+### Probe listener
+
+`GET /livez` and `GET /readyz` with no token, each answered 200 or 503 and one word, for a load
+balancer or an orchestrator. Off unless set. See
+[Probe liveness and readiness](./check-status-and-health.md#probe-liveness-and-readiness).
+
+| Key         | Type        | Default     |
+| ----------- | ----------- | ----------- |
+| `port`      | 1 to 65,535 | required    |
+| `host`      | an address  | `127.0.0.1` |
+| `plaintext` | `true`      | required    |
+
+It serves plain HTTP only, with no `tls` and no `auth`: it answers one word and takes nothing in,
+and a probe presents no token. `plaintext: true` says so, as it does for every endpoint without
+TLS.
 
 ### Engine lease
 

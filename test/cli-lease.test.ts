@@ -382,9 +382,9 @@ export default () => ({
     try {
       await until(() => holder.events.some((e) => e.event === "lease-acquired"), "the holder");
       await until(() => standby.events.some((e) => e.event === "standby-waiting"), "the standby");
-      expect(await health()).toEqual({
+      expect(await health()).toMatchObject({
         status: 503,
-        body: { status: "standby", storage: "ok", channels: {} },
+        body: { status: "standby", storage: "ok", role: "standby", leaseEpoch: null, channels: {} },
       });
       // A standby reads no folder: its message waits in its inbox.
       expect(await readdir(join(standbyRoot, "data/inbox"))).toContain("a01.hl7");
