@@ -15,11 +15,18 @@ import {
 } from "../src/config/schema.js";
 import { resolveTransformConfig, transformConfigFor } from "../src/config/transform-config.js";
 import { HttpSource } from "../src/connectors/http.js";
-import { remember } from "../src/connectors/mllp.js";
+import { rememberPeer } from "../src/connectors/mllp.js";
 import type { MessageSink, ReceiveOptions } from "../src/connectors/types.js";
 import { ChannelWorker } from "../src/engine/channel-worker.js";
 import { Engine } from "../src/engine/engine.js";
-import { isJsonMap, SourceFactsError, sourceFacts } from "../src/engine/source-facts.js";
+import {
+  copyFacts,
+  isJsonMap,
+  keepFacts,
+  MAX_WAITING_FACTS,
+  SourceFactsError,
+  sourceFacts,
+} from "../src/engine/source-facts.js";
 import {
   buildContext,
   freezeDeep,
@@ -409,10 +416,75 @@ describe("source facts", () => {
     });
   });
 
-  it("keep a bounded number of waiting TLS peers, dropping the oldest", () => {
+  it("are copied when received, and refused when the copy is not JSON either", () => {
+    const passed = { queue: "inbound", tries: [1] };
+    const kept = copyFacts(passed);
+    passed.tries[0] = 2;
+    passed.queue = "other";
+    expect(kept).toEqual({ queue: "inbound", tries: [1] });
+    expect(() => copyFacts({ at: new Date(0) })).toThrow(SourceFactsError);
+    expect(() => copyFacts("inbound")).toThrow(SourceFactsError);
+    // A getter that hands the check a string and the copy a function.
+    let reads = 0;
+    const shifty = {
+      get tag(): unknown {
+        reads += 1;
+        return reads === 1 ? "one" : () => 0;
+      },
+    };
+    expect(() => copyFacts(shifty)).toThrow(SourceFactsError);
+    let dated = 0;
+    const later = {
+      get tag(): unknown {
+        dated += 1;
+        return dated === 1 ? "one" : new Date(0);
+      },
+    };
+    expect(() => copyFacts(later)).toThrow(SourceFactsError);
+  });
+
+  it("are kept for a bounded number of waiting messages, dropping the oldest", () => {
+    const facts = new Map<number, SourceFacts>();
+    const fact = (id: number): SourceFacts =>
+      sourceFacts("module", { id }, 0, "2026-11-11T09:00:00.000Z");
+    for (const id of [1, 2, 3, 4]) keepFacts(facts, id, fact(id), 3);
+    expect([...facts.keys()]).toEqual([2, 3, 4]);
+    expect(MAX_WAITING_FACTS).toBe(4_096);
+    const many = new Map<number, SourceFacts>();
+    for (let id = 1; id <= MAX_WAITING_FACTS + 1; id++) keepFacts(many, id, fact(id));
+    expect(many.size).toBe(MAX_WAITING_FACTS);
+    expect(many.has(1)).toBe(false);
+  });
+
+  it("keep a bounded number of waiting TLS peers, and one peer's idle connections push out only its own", () => {
     const peers = new Map<string, string>();
-    for (const id of ["a", "b", "c", "d"]) remember(peers, id, `peer-${id}`, 3);
-    expect([...peers.keys()]).toEqual(["b", "c", "d"]);
+    rememberPeer(peers, "1", "lab", 3);
+    rememberPeer(peers, "2", "ehr", 3);
+    rememberPeer(peers, "3", "lab", 3);
+    // Full: the name with the most entries gives up its oldest.
+    rememberPeer(peers, "4", "ris", 3);
+    expect([...peers]).toEqual([
+      ["2", "ehr"],
+      ["3", "lab"],
+      ["4", "ris"],
+    ]);
+    // A flood from one peer pushes out only that peer's entries.
+    for (const id of ["5", "6", "7", "8"]) rememberPeer(peers, id, "lab", 3);
+    expect([...peers]).toEqual([
+      ["2", "ehr"],
+      ["4", "ris"],
+      ["8", "lab"],
+    ]);
+    // The newcomer's own name holds the most: its own oldest gives way.
+    rememberPeer(peers, "9", "ehr", 3);
+    expect([...peers]).toEqual([
+      ["4", "ris"],
+      ["8", "lab"],
+      ["9", "ehr"],
+    ]);
+    // Every name holds one: a new name is not remembered, and pushes out none.
+    rememberPeer(peers, "10", "pacs", 3);
+    expect([...peers.values()]).toEqual(["ris", "lab", "ehr"]);
   });
 
   describe("from an HTTP source", () => {
@@ -601,6 +673,100 @@ export default () => ({
         code: "INVALID_SOURCE_FACTS",
       },
     );
+  });
+
+  it("keeps a copy of a custom source's facts, so changing the object after receive changes nothing", async () => {
+    // One facts object reused for every delivery, and written after each receive, as a poll loop
+    // over a queue might.
+    const source = `
+let sent = false;
+export default () => ({
+  async poll(sink: { receive(body: Uint8Array, options?: object): Promise<number> }) {
+    if (sent) return;
+    sent = true;
+    const facts: Record<string, unknown> = { queue: "inbound", tag: 0, tries: [0] };
+    for (const tag of [1, 2, 3]) {
+      facts.tag = tag;
+      (facts.tries as number[])[0] = tag;
+      await sink.receive(new TextEncoder().encode("m" + tag), { source: facts });
+    }
+    // Not JSON, and written after the last receive: the transform never sees it.
+    facts.later = () => 0;
+  },
+});
+`;
+    const { root, engine, store } = await started(
+      {
+        "channels/q/channel.yaml":
+          "format: text\nsource:\n  module: ./source.ts\ntransform: ./transform.ts\ndestinations:\n  - file: { dir: ../../data/out }\n",
+        "channels/q/source.ts": source,
+        "channels/q/transform.ts": ECHO_CONTEXT,
+      },
+      {},
+    );
+    await engine.tick();
+    expect(await store.messageCounts("q")).toMatchObject({ transformed: 3, failed: 0 });
+    const outputs = await Promise.all(
+      ["1-1.txt", "2-1.txt", "3-1.txt"].map(
+        async (name) =>
+          JSON.parse(await readFile(join(root, "data/out", name), "utf8")) as {
+            source: { facts: unknown };
+          },
+      ),
+    );
+    expect(outputs.map((ctx) => ctx.source.facts)).toEqual([
+      { queue: "inbound", tag: 1, tries: [1] },
+      { queue: "inbound", tag: 2, tries: [2] },
+      { queue: "inbound", tag: 3, tries: [3] },
+    ]);
+  });
+
+  it("hands a message its facts when a pass takes it before its receive has returned", async () => {
+    // A push source: the test holds its sink and hands a message in while a pass runs.
+    const source = `
+export default () => ({
+  async start(sink: unknown) {
+    (globalThis as Record<string, unknown>).synthPushSink = sink;
+  },
+});
+`;
+    const { root, engine, store } = await started(
+      {
+        "channels/q/channel.yaml":
+          "format: text\nsource:\n  module: ./source.ts\ntransform: ./transform.ts\ndestinations:\n  - file: { dir: ../../data/out }\n",
+        "channels/q/source.ts": source,
+        "channels/q/transform.ts": ECHO_CONTEXT,
+      },
+      {},
+    );
+    const sink = (globalThis as Record<string, unknown>)["synthPushSink"] as MessageSink;
+    // The store has written the message, but its receive has not returned to the engine yet.
+    const receive = store.receive.bind(store);
+    let stored!: () => void;
+    const written = new Promise<void>((resolve) => (stored = resolve));
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    store.receive = async (...args: Parameters<Store["receive"]>) => {
+      const received = await receive(...args);
+      stored();
+      await held;
+      return received;
+    };
+    const receiving = sink.receive(bytes("pushed"), { source: { tag: 7 } });
+    await written;
+    const pass = engine.tick();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    release();
+    await Promise.all([receiving, pass]);
+    expect(await store.messageCounts("q")).toMatchObject({ transformed: 1 });
+    const ctx = JSON.parse(await readFile(join(root, "data/out", "1-1.txt"), "utf8")) as {
+      source: unknown;
+    };
+    expect(ctx.source).toEqual({
+      kind: "module",
+      facts: { tag: 7 },
+      receivedAt: expect.any(String) as unknown,
+    });
   });
 
   it("replays with the configuration as it is now, the next run, and no source facts", async () => {

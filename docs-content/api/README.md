@@ -2961,7 +2961,8 @@ these messages are looked up, so a message handed in for the first time costs no
 What the source knows about the message, which the channel's transform reads as
 `ctx.source.facts`: a map of plain JSON values (strings, finite numbers, booleans, null, lists
 and maps). Anything else is refused with the code `INVALID_SOURCE_FACTS` before the message is
-stored. It is never logged, sent to a hook or stored: the engine holds it in memory until the
+stored. The engine keeps a copy taken at the call, so the source may reuse or change its object
+afterwards. It is never logged, sent to a hook or stored: the engine holds it in memory until the
 message is transformed, so a message taken in before the engine restarts is transformed
 without it.
 
@@ -3667,7 +3668,8 @@ A per-message map of flat values. Always empty in this release: nothing sets it 
 
 What the source knew about the message when it took it in. Undefined when that is not known:
 under `pathways test`, on a replay, and for a message taken in before the engine last started,
-since the facts are kept in memory until the message is transformed and not stored.
+since the facts are kept in memory until the message is transformed and not stored; and for the
+oldest of a channel's messages past the 4,096 whose facts the engine holds while they wait.
 
 ***
 

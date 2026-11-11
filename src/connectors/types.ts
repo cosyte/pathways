@@ -51,7 +51,8 @@ export interface ReceiveOptions {
    * What the source knows about the message, which the channel's transform reads as
    * `ctx.source.facts`: a map of plain JSON values (strings, finite numbers, booleans, null, lists
    * and maps). Anything else is refused with the code `INVALID_SOURCE_FACTS` before the message is
-   * stored. It is never logged, sent to a hook or stored: the engine holds it in memory until the
+   * stored. The engine keeps a copy taken at the call, so the source may reuse or change its object
+   * afterwards. It is never logged, sent to a hook or stored: the engine holds it in memory until the
    * message is transformed, so a message taken in before the engine restarts is transformed
    * without it.
    */

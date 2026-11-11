@@ -52,6 +52,62 @@ export class SourceFactsError extends TypeError {
 }
 
 /**
+ * A copy of what a source passed as `source`, taken when the message is received, so the value the
+ * check passed and the value the transform later reads are the same snapshot: a source may reuse or
+ * change its object once `sink.receive` is called. Throws {@link SourceFactsError} when the value,
+ * or the copy, is not a map of plain JSON values.
+ *
+ * @example
+ * ```ts
+ * const facts = { tag: 1 };
+ * const kept = copyFacts(facts);
+ * facts.tag = 2; // kept.tag is still 1
+ * ```
+ */
+export function copyFacts(value: unknown): Readonly<Record<string, JsonValue>> {
+  if (!isJsonMap(value)) throw new SourceFactsError();
+  let copy: unknown;
+  try {
+    copy = structuredClone(value);
+  } catch {
+    // A getter that returns something else the second time it is read.
+    throw new SourceFactsError();
+  }
+  // Checked again: a getter can hand the copy what it did not hand the check.
+  if (!isJsonMap(copy)) throw new SourceFactsError();
+  return copy;
+}
+
+/**
+ * The most messages a channel holds source facts for while they wait for their transform. Past it
+ * the oldest are dropped, and those messages are transformed with `ctx.source` undefined, as after a
+ * restart.
+ */
+export const MAX_WAITING_FACTS = 4_096;
+
+/**
+ * Sets the facts of message `id` in `map`, first dropping the oldest entries until it holds fewer
+ * than `max`, so the map never holds more than `max`.
+ *
+ * @example
+ * ```ts
+ * keepFacts(channel.facts, 12, facts); // drops the oldest when the channel already holds the most
+ * ```
+ */
+export function keepFacts(
+  map: Map<number, SourceFacts>,
+  id: number,
+  facts: SourceFacts,
+  max = MAX_WAITING_FACTS,
+): void {
+  for (const oldest of map.keys()) {
+    if (map.size < max) break;
+    map.delete(oldest);
+  }
+  map.set(id, facts);
+}
+
+/**
  * What a transform receives as `ctx.source` for a message a channel's source took in: what the
  * source passed to `sink.receive`, with the kind of source and when the message was stored. A file
  * source's facts also carry the body's size. What a custom source passed sits under `facts`.

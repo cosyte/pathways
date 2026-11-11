@@ -263,7 +263,8 @@ Its token is read from `PATHWAYS_HTTP_TOKEN` when `auth` is not set. `response: 
 characters. See [Send and receive over HTTP](./send-and-receive-http.md#answer-with-an-hl7-ack) for
 how a path is matched and how each response answers. `contextHeaders` names the request headers the
 transform reads in `ctx.source.headers`; `Authorization`, `Proxy-Authorization` and `Cookie` are
-refused there, and never passed.
+refused there, and never passed. Any other header listed is passed as it came, a credential such as
+an API key header included.
 
 #### MLLP source
 

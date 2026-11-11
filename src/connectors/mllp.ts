@@ -212,8 +212,8 @@ export class MllpSource implements SourceConnector {
       }) => {
         const subject = event.peerCertificate?.subjectCN;
         if (typeof subject !== "string") return;
-        // A connection that never sends a message would leave its entry; the oldest go first.
-        remember(this.peers, event.connectionId, subject, MAX_WAITING_PEERS);
+        // A connection that never sends a message would leave its entry, so the map is bounded.
+        rememberPeer(this.peers, event.connectionId, subject, MAX_WAITING_PEERS);
       },
     );
     server.on("securityWarning", (warning: { readonly code: string }) => {
@@ -354,21 +354,38 @@ export class MllpSource implements SourceConnector {
 }
 
 /**
- * Sets `key` in `map`, first dropping the oldest entries until it holds fewer than `max`, so the
- * map never holds more than `max`.
+ * Sets the certificate name of connection `id` in `peers`, so the map never holds more than `max`.
+ * When it is full, the oldest entry of the name that holds the most entries goes, the newcomer's own
+ * name first on a tie, so a peer that opens many idle connections pushes out only its own entries,
+ * never another peer's. When every name holds one entry, the newcomer is not remembered.
  *
  * @example
  * ```ts
- * const peers = new Map([["a", "lab"]]);
- * remember(peers, "b", "ehr", 1); // peers is now { b: "ehr" }
+ * const peers = new Map([["1", "lab"], ["2", "lab"], ["3", "ehr"]]);
+ * rememberPeer(peers, "4", "lab", 3); // drops "1": peers is now { 2: lab, 3: ehr, 4: lab }
  * ```
  */
-export function remember<K, V>(map: Map<K, V>, key: K, value: V, max: number): void {
-  for (const oldest of map.keys()) {
-    if (map.size < max) break;
-    map.delete(oldest);
+export function rememberPeer(
+  peers: Map<string, string>,
+  id: string,
+  subject: string,
+  max: number,
+): void {
+  while (peers.size >= max) {
+    const counts = new Map<string, number>([[subject, 1]]);
+    for (const name of peers.values()) counts.set(name, (counts.get(name) ?? 0) + 1);
+    // Counting the newcomer, so on a tie its own name gives way first.
+    let most = subject;
+    for (const [name, count] of counts) if (count > (counts.get(most) ?? 0)) most = name;
+    // Every name holds one and the newcomer's none yet: it is not remembered, and pushes out none.
+    if (most === subject && counts.get(subject) === 1) return;
+    for (const [key, name] of peers) {
+      if (name !== most) continue;
+      peers.delete(key);
+      break;
+    }
   }
-  map.set(key, value);
+  peers.set(id, subject);
 }
 
 function close(conn: Connection, state: ConnectionState): void {

@@ -125,9 +125,12 @@ stored, as an ISO 8601 time.
 
 An HTTP source passes only the headers its `contextHeaders` lists. `Authorization`,
 `Proxy-Authorization` and `Cookie` carry credentials: the configuration refuses them there, and the
-source never passes them. A custom source passes a map of plain JSON values,
+source never passes them. Any other header the list names is passed as it came, so a header that
+carries a credential of its own, such as an API key header or a custom token header, reaches the
+transform if you list it. A custom source passes a map of plain JSON values,
 `sink.receive(body, { source: { queue: "inbound" } })`; anything else is refused with the code
-`INVALID_SOURCE_FACTS` before the message is stored. See
+`INVALID_SOURCE_FACTS` before the message is stored. The engine keeps a copy taken when
+`sink.receive` is called, so a source may reuse or change its object afterwards. See
 [Write custom connectors](./write-custom-connectors.md).
 
 A file's name, a header and a certificate's name can identify a patient or a person. Read them, and
@@ -140,10 +143,14 @@ is transformed; they are not stored with the message. So `ctx.source` is `undefi
 
 - for a message taken in before the engine last started, transformed after the restart;
 - on a replay, with `pathways replay`;
-- under `pathways test`.
+- under `pathways test`;
+- for a message among the oldest of a backlog of more than 4,096 messages of one channel waiting
+  for their transform: the engine keeps the facts of at most 4,096 such messages, and drops the
+  oldest first.
 
 A transform that depends on a source fact should handle its absence: filter the message, fail it, or
-use a value from the configuration.
+use a value from the configuration. A transform that branches on `ctx.source` can therefore treat a
+replayed message differently from its first run, and send it to other destinations or none.
 
 ## Keep state between messages
 

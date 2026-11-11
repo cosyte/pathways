@@ -249,7 +249,8 @@ export interface TransformContext {
   /**
    * What the source knew about the message when it took it in. Undefined when that is not known:
    * under `pathways test`, on a replay, and for a message taken in before the engine last started,
-   * since the facts are kept in memory until the message is transformed and not stored.
+   * since the facts are kept in memory until the message is transformed and not stored; and for the
+   * oldest of a channel's messages past the 4,096 whose facts the engine holds while they wait.
    */
   readonly source: SourceFacts | undefined;
   /** A per-message map of flat values. Always empty in this release: nothing sets it yet. */

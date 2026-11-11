@@ -36,7 +36,7 @@ import { ChannelWorker, type TransformOutcome } from "./channel-worker.js";
 import type { EngineFence } from "./lease.js";
 import { channelStatus, type ChannelHealth, type HealthReport } from "./health.js";
 import type { FailureSummary } from "./worker-entry.js";
-import { isJsonMap, SourceFactsError, sourceFacts } from "./source-facts.js";
+import { copyFacts, keepFacts, sourceFacts } from "./source-facts.js";
 
 /** The first retry waits this long; each later one waits twice as long as the one before. */
 export const RETRY_FIRST_MS = 1_000;
@@ -328,9 +328,15 @@ interface RunningChannel {
   down: { readonly attempts: number; readonly nextAt: number } | undefined;
   /**
    * What the source knew about each message it took in that waits for its transform, by message id:
-   * in memory only, and dropped once the message is transformed.
+   * in memory only, dropped once the message is transformed, and bounded: past the bound the oldest
+   * go, and those messages are transformed with no source facts.
    */
   readonly facts: Map<number, SourceFacts>;
+  /**
+   * Each `sink.receive` under way, settled once its message's facts are set or it failed: a pass that
+   * takes a message whose facts are not set yet waits for these before it runs the transform.
+   */
+  readonly receiving: Set<Promise<void>>;
 }
 
 /**
@@ -448,6 +454,7 @@ export class Engine {
           hooks,
           down: undefined,
           facts: new Map(),
+          receiving: new Set(),
         };
         this.channels.push(channel);
         this.warnInsecure(config);
@@ -669,10 +676,20 @@ export class Engine {
         const { duplicateKey, idempotencyKey, resumed, failure, source } = options;
         let received: ReceivedMessage;
         const receivedAt = this.at();
+        // Settled once this message's facts are set or the receive failed, so a pass that takes
+        // the message from the store before this call has returned waits for its facts.
+        let settle!: () => void;
+        const receiving = new Promise<void>((resolve) => (settle = resolve));
+        channel.receiving.add(receiving);
+        const settled = (): void => {
+          channel.receiving.delete(receiving);
+          settle();
+        };
         try {
-          // Checked before anything is stored, so a source that passes what a transform cannot
-          // be handed learns it at once, and the sender keeps the message.
-          if (source !== undefined && !isJsonMap(source)) throw new SourceFactsError();
+          // Checked and copied before anything is stored, so a source that passes what a
+          // transform cannot be handed learns it at once and the sender keeps the message, and a
+          // source that changes its object afterwards changes nothing the transform reads.
+          const passed = source === undefined ? undefined : copyFacts(source);
           // An engine that lost its lease takes nothing more in: the source answers as it does
           // when a message cannot be stored, so the sender keeps it.
           this.options.fence?.check();
@@ -685,7 +702,17 @@ export class Engine {
             failure,
             size: body.byteLength,
           });
+          // Set at once, with no wait between the store call and here.
+          if (failure === undefined && received.alreadyStored !== true) {
+            keepFacts(
+              channel.facts,
+              received.id,
+              sourceFacts(config.source.kind, passed, body.byteLength, receivedAt),
+            );
+          }
+          settled();
         } catch (error) {
+          settled();
           const code = errorCode(error);
           logger.error({ event: "receive-failed", channel: config.name, code });
           this.emit(channel, () => ({
@@ -702,12 +729,6 @@ export class Engine {
           // Handed in again after a stop between storing and acknowledging: stored once already.
           logger.info({ event: "already-stored", channel: config.name, message: received.id });
           return received.id;
-        }
-        if (failure === undefined) {
-          channel.facts.set(
-            received.id,
-            sourceFacts(config.source.kind, source, body.byteLength, receivedAt),
-          );
         }
         logger.info({
           event: "received",
@@ -751,6 +772,10 @@ export class Engine {
       this.options.fence?.check();
       const next = await store.nextToTransform(config.name);
       if (next === undefined) return;
+      if (!channel.facts.has(next.id) && channel.receiving.size > 0) {
+        // The receive that stored this message may not have set its facts yet.
+        await Promise.all(channel.receiving);
+      }
       const source = channel.facts.get(next.id);
       channel.facts.delete(next.id);
       const outcome: TransformOutcome = await worker.run(next.body, {
