@@ -59,7 +59,7 @@ const request: ControlRequest = {
 
 /** A server listening at `at` that answers nothing, in a folder made for it. */
 async function rawServerAt(at: ControlAddress): Promise<Server> {
-  await mkdir(at.dir ?? "", { mode: 0o700, recursive: true });
+  if (at.dir !== undefined) await mkdir(at.dir, { mode: 0o700, recursive: true });
   const server = createServer((socket) => socket.destroy());
   await new Promise<void>((resolve) => server.listen(at.path, resolve));
   return server;
@@ -145,8 +145,10 @@ describe("controlAddress", () => {
   });
 });
 
-describe.skipIf(!unix)("ControlServer", () => {
-  it("makes its folder 0700 and listens in it", async () => {
+// On Windows the address is a named pipe, with no folder and no socket file: the tests of the
+// folder and of a stale socket file are Unix only, and the protocol is the same on both.
+describe("ControlServer", () => {
+  it.skipIf(!unix)("makes its folder 0700 and listens in it", async () => {
     const at = await address();
     const server = new ControlServer(at, () => Promise.resolve({ channel: "adt" }));
     servers.push(server);
@@ -155,7 +157,7 @@ describe.skipIf(!unix)("ControlServer", () => {
     expect(await probe(at.path)).toBe(true);
   });
 
-  it("refuses a folder others may enter", async () => {
+  it.skipIf(!unix)("refuses a folder others may enter", async () => {
     const at = await address();
     await mkdir(at.dir ?? "", { mode: 0o700 });
     await chmod(at.dir ?? "", 0o755);
@@ -165,7 +167,7 @@ describe.skipIf(!unix)("ControlServer", () => {
     await server.stop();
   });
 
-  it("clears a stale socket left by an engine that died, and listens", async () => {
+  it.skipIf(!unix)("clears a stale socket left by an engine that died, and listens", async () => {
     const at = await address();
     await mkdir(at.dir ?? "", { mode: 0o700 });
     // A process that listens and is killed leaves its socket file behind, refusing connections.
@@ -267,34 +269,37 @@ describe.skipIf(!unix)("ControlServer", () => {
     expect(JSON.parse(reply)).toEqual({ v: 1, ok: true, report: { channel: "adt" } });
   });
 
-  it("reports a socket it may not connect to, and does not take it over", async () => {
-    const root = await makeProject({});
-    const runtime = await mkdtemp("/tmp/pwc-");
-    folders.push(runtime);
-    const env = { XDG_RUNTIME_DIR: runtime };
-    const at = controlAddress(root, { runtimeDir: runtime });
-    const blocked = await rawServerAt(at);
-    await chmod(at.path, 0o000);
-    try {
-      await expect(probe(at.path)).rejects.toMatchObject({ code: "EACCES" });
-      await expect(sendControl(at, request, 5_000)).rejects.toMatchObject({ code: "EACCES" });
-      await expect(
-        new ControlServer(at, () => Promise.resolve({ channel: "adt" })).start(),
-      ).rejects.toMatchObject({ code: "EACCES" });
-      let err = "";
-      const code = await run(["channel", "pause", "adt", "-C", root], {
-        out: () => undefined,
-        err: (text) => (err += text),
-        env,
-      });
-      expect({ code, err }).toEqual({
-        code: EXIT.failed,
-        err: "pathways: the engine could not be asked (EACCES).\n",
-      });
-    } finally {
-      await new Promise((resolve) => blocked.close(resolve));
-    }
-  });
+  it.skipIf(!unix)(
+    "reports a socket it may not connect to, and does not take it over",
+    async () => {
+      const root = await makeProject({});
+      const runtime = await mkdtemp("/tmp/pwc-");
+      folders.push(runtime);
+      const env = { XDG_RUNTIME_DIR: runtime };
+      const at = controlAddress(root, { runtimeDir: runtime });
+      const blocked = await rawServerAt(at);
+      await chmod(at.path, 0o000);
+      try {
+        await expect(probe(at.path)).rejects.toMatchObject({ code: "EACCES" });
+        await expect(sendControl(at, request, 5_000)).rejects.toMatchObject({ code: "EACCES" });
+        await expect(
+          new ControlServer(at, () => Promise.resolve({ channel: "adt" })).start(),
+        ).rejects.toMatchObject({ code: "EACCES" });
+        let err = "";
+        const code = await run(["channel", "pause", "adt", "-C", root], {
+          out: () => undefined,
+          err: (text) => (err += text),
+          env,
+        });
+        expect({ code, err }).toEqual({
+          code: EXIT.failed,
+          err: "pathways: the engine could not be asked (EACCES).\n",
+        });
+      } finally {
+        await new Promise((resolve) => blocked.close(resolve));
+      }
+    },
+  );
 
   it("closes a connection that sends nothing", async () => {
     const at = await address();
@@ -330,7 +335,7 @@ describe("pathways channel", () => {
     expect(await run(["channel", "stop", "adt", "--deadline", "soon"], io)).toBe(2);
   });
 
-  it.skipIf(!unix)("asks the engine and prints the report", async () => {
+  it("asks the engine and prints the report", async () => {
     const root = await makeProject({});
     const at = controlAddress(root);
     const server = new ControlServer(at, (given) =>
@@ -364,7 +369,7 @@ const connections: Socket[] = [];
 
 /** A server at `at` that answers each connection as `answer` says, for the client's edges. */
 async function rawServer(at: ControlAddress, answer: (socket: Socket) => void): Promise<Server> {
-  await mkdir(at.dir ?? "", { mode: 0o700, recursive: true });
+  if (at.dir !== undefined) await mkdir(at.dir, { mode: 0o700, recursive: true });
   const server = createServer((socket) => {
     connections.push(socket);
     answer(socket);
@@ -373,55 +378,52 @@ async function rawServer(at: ControlAddress, answer: (socket: Socket) => void): 
   return server;
 }
 
-describe.skipIf(!unix)(
-  "sendControl and pathways channel, against an engine that answers wrongly",
-  () => {
-    const raws: Server[] = [];
-    afterEach(async () => {
-      for (const socket of connections.splice(0)) socket.destroy();
-      await Promise.all(
-        raws.splice(0).map((server) => new Promise((resolve) => server.close(resolve))),
-      );
-    });
+describe("sendControl and pathways channel, against an engine that answers wrongly", () => {
+  const raws: Server[] = [];
+  afterEach(async () => {
+    for (const socket of connections.splice(0)) socket.destroy();
+    await Promise.all(
+      raws.splice(0).map((server) => new Promise((resolve) => server.close(resolve))),
+    );
+  });
 
-    it("gives up on an engine that does not answer, and on a reply it cannot read", async () => {
-      const silent = await address();
-      const held: Socket[] = [];
-      raws.push(await rawServer(silent, (socket) => held.push(socket)));
-      await expect(sendControl(silent, request, 100)).rejects.toMatchObject({ code: "ETIMEDOUT" });
-      for (const socket of held) socket.destroy();
+  it("gives up on an engine that does not answer, and on a reply it cannot read", async () => {
+    const silent = await address();
+    const held: Socket[] = [];
+    raws.push(await rawServer(silent, (socket) => held.push(socket)));
+    await expect(sendControl(silent, request, 100)).rejects.toMatchObject({ code: "ETIMEDOUT" });
+    for (const socket of held) socket.destroy();
 
-      const garbled = await address();
-      raws.push(await rawServer(garbled, (socket) => socket.end("not json\n")));
-      await expect(sendControl(garbled, request, 5_000)).rejects.toMatchObject({ code: "EPROTO" });
-    });
+    const garbled = await address();
+    raws.push(await rawServer(garbled, (socket) => socket.end("not json\n")));
+    await expect(sendControl(garbled, request, 5_000)).rejects.toMatchObject({ code: "EPROTO" });
+  });
 
-    it("says what the engine refused, and prints its report as JSON", async () => {
-      const root = await makeProject({});
-      const at = controlAddress(root);
-      const replies = [
-        "not json\n",
-        `${JSON.stringify({ v: 1, ok: false, error: "unsupported-version" })}\n`,
-        `${JSON.stringify({ v: 1, ok: true, report: { channel: "adt", state: "paused" } })}\n`,
-        `${JSON.stringify({ v: 1, ok: true, report: { channel: "adt", refused: "transform-load-failed", failure: "SyntaxError" } })}\n`,
-      ];
-      raws.push(await rawServer(at, (socket) => socket.end(replies.shift() ?? "")));
-      const out: string[] = [];
-      const err: string[] = [];
-      const io = { out: (text: string) => out.push(text), err: (text: string) => err.push(text) };
-      expect(await run(["channel", "pause", "adt", "-C", root], io)).toBe(EXIT.failed);
-      expect(await run(["channel", "pause", "adt", "-C", root], io)).toBe(EXIT.failed);
-      expect(await run(["channel", "pause", "adt", "-C", root, "--json"], io)).toBe(EXIT.ok);
-      expect(await run(["channel", "reload", "adt", "-C", root], io)).toBe(EXIT.failed);
-      expect(err).toEqual([
-        "pathways: the engine could not be asked (EPROTO).\n",
-        "pathways: the engine refused the request (unsupported-version).\n",
-        "pathways: channel adt: the new transform did not load, so the running one was kept (SyntaxError).\n",
-      ]);
-      expect(out).toEqual([`${JSON.stringify({ channel: "adt", state: "paused" })}\n`]);
-    });
-  },
-);
+  it("says what the engine refused, and prints its report as JSON", async () => {
+    const root = await makeProject({});
+    const at = controlAddress(root);
+    const replies = [
+      "not json\n",
+      `${JSON.stringify({ v: 1, ok: false, error: "unsupported-version" })}\n`,
+      `${JSON.stringify({ v: 1, ok: true, report: { channel: "adt", state: "paused" } })}\n`,
+      `${JSON.stringify({ v: 1, ok: true, report: { channel: "adt", refused: "transform-load-failed", failure: "SyntaxError" } })}\n`,
+    ];
+    raws.push(await rawServer(at, (socket) => socket.end(replies.shift() ?? "")));
+    const out: string[] = [];
+    const err: string[] = [];
+    const io = { out: (text: string) => out.push(text), err: (text: string) => err.push(text) };
+    expect(await run(["channel", "pause", "adt", "-C", root], io)).toBe(EXIT.failed);
+    expect(await run(["channel", "pause", "adt", "-C", root], io)).toBe(EXIT.failed);
+    expect(await run(["channel", "pause", "adt", "-C", root, "--json"], io)).toBe(EXIT.ok);
+    expect(await run(["channel", "reload", "adt", "-C", root], io)).toBe(EXIT.failed);
+    expect(err).toEqual([
+      "pathways: the engine could not be asked (EPROTO).\n",
+      "pathways: the engine refused the request (unsupported-version).\n",
+      "pathways: channel adt: the new transform did not load, so the running one was kept (SyntaxError).\n",
+    ]);
+    expect(out).toEqual([`${JSON.stringify({ channel: "adt", state: "paused" })}\n`]);
+  });
+});
 
 describe("pathways start with pathways channel", () => {
   const KEYS = "encryption:\n  keys: [{ id: test, file: ./test.key }]\n  current: test\n";
@@ -537,26 +539,23 @@ destinations:
     });
   });
 
-  it.skipIf(!unix)(
-    "refuses to start when another engine answers on the project's control socket",
-    async () => {
-      const root = await project();
-      const other = new ControlServer(controlAddress(root), () =>
-        Promise.resolve({ channel: "adt" }),
-      );
-      servers.push(other);
-      await other.start();
-      let err = "";
-      const code = await run(["start", "-C", root], {
-        out: () => undefined,
-        err: (text) => (err += text),
-        logger: captureLogger().logger,
-        signal: new AbortController().signal,
-      });
-      expect(code).toBe(EXIT.failed);
-      expect(err).toBe(
-        "pathways: another engine runs this project on this machine: its control socket answers.\n",
-      );
-    },
-  );
+  it("refuses to start when another engine answers on the project's control socket", async () => {
+    const root = await project();
+    const other = new ControlServer(controlAddress(root), () =>
+      Promise.resolve({ channel: "adt" }),
+    );
+    servers.push(other);
+    await other.start();
+    let err = "";
+    const code = await run(["start", "-C", root], {
+      out: () => undefined,
+      err: (text) => (err += text),
+      logger: captureLogger().logger,
+      signal: new AbortController().signal,
+    });
+    expect(code).toBe(EXIT.failed);
+    expect(err).toBe(
+      "pathways: another engine runs this project on this machine: its control socket answers.\n",
+    );
+  });
 });

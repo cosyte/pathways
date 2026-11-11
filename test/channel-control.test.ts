@@ -575,6 +575,27 @@ for (const database of TEST_DATABASES) {
       expect(entries.items[1]?.detail).toEqual({ state: "running", reason: "state-not-stored" });
     });
 
+    it("keeps the state in the engine alone on a store that keeps no states", async () => {
+      const { store, engineOn } = await setUp(database);
+      // A custom store without the two optional methods.
+      const plain = new Proxy(store, {
+        get(target, key): unknown {
+          if (key === "channelStates" || key === "setChannelState") return undefined;
+          const value: unknown = Reflect.get(target, key);
+          return typeof value === "function" ? (value as () => unknown).bind(target) : value;
+        },
+      });
+      const { engine, source } = await engineOn(plain);
+      expect(await engine.command("pause", "adt", actor)).toEqual({
+        channel: "adt",
+        state: "paused",
+      });
+      await engine.tick();
+      expect(engine.channelStates()).toEqual({ adt: "paused" });
+      expect(source.polls).toBe(0);
+      expect(await store.channelStates()).toEqual({});
+    });
+
     it("keeps a later command's state when an earlier one's write fails", async () => {
       const { store, engineOn } = await setUp(database);
       const { engine, source } = await engineOn(store);
