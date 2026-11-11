@@ -4,6 +4,7 @@ import { describeHolder } from "../engine/lease.js";
 import { EXIT } from "../exit.js";
 import {
   AUDIT_ACTIONS,
+  AUDIT_LOG_STEP,
   ENGINE_LEASE,
   leaseStore,
   MESSAGE_STATES,
@@ -22,6 +23,15 @@ import {
   type ClearOutcome,
   type ReplayResult,
 } from "./actions.js";
+import {
+  SchemaStepError,
+  SchemaVersionError,
+  type MigrateOptions,
+  type MigrationReport,
+  type SchemaState,
+  type SchemaStepInfo,
+} from "../storage/schema.js";
+import { VERSION } from "../version.js";
 import type { AuditLog } from "./audit.js";
 import { recordRetention, runRetention } from "./retention.js";
 
@@ -549,6 +559,151 @@ export async function leaseReleaseCommand(context: OperatorContext): Promise<num
     `Engine lease released: it was held by ${describeHolder(held)}. The next engine to start takes it.`,
   ]);
   return EXIT.ok;
+}
+
+/**
+ * What `pathways migrate` runs: the store's own `migrate`, or a stand-in in a test.
+ *
+ * @example
+ * ```ts
+ * const run: SchemaMigration = (options) => store.migrate(options);
+ * ```
+ */
+export type SchemaMigration = (options: MigrateOptions) => Promise<MigrationReport>;
+
+/**
+ * `pathways migrate`: applies the schema steps this version has and the database lacks, expand
+ * steps always and contract steps with `--contract`, printing each with its tag; with `--dry-run`,
+ * says which it would apply and applies none. Contract steps wait while the schema changed within
+ * `pathways.yaml`'s `migrations.rollbackWindow`. Every run is written to the audit log, a dry run
+ * and a refusal too. Steps, versions, generations and times only.
+ *
+ * @example
+ * ```ts
+ * const code = await migrateCommand(context, (options) => store.migrate(options), { contract: false, dryRun: true });
+ * ```
+ */
+export async function migrateCommand(
+  context: OperatorContext,
+  migrate: SchemaMigration,
+  flags: { readonly contract: boolean; readonly dryRun: boolean },
+): Promise<number> {
+  const { contract, dryRun } = flags;
+  let report: MigrationReport;
+  try {
+    report = await migrate({
+      contract,
+      dryRun,
+      rollbackWindowMs: context.project.migrations.rollbackWindowMs,
+      now: new Date(context.now()),
+    });
+  } catch (error) {
+    if (error instanceof SchemaVersionError) {
+      await context.audit.record({
+        action: "migrate",
+        outcome: "refused",
+        detail: {
+          reason: error.reason,
+          engine: error.engine,
+          schema: error.schemaVersion,
+          generation: error.generation,
+        },
+      });
+      context.err(`pathways: ${error.message}.\n`);
+      return EXIT.failed;
+    }
+    if (!(error instanceof SchemaStepError)) throw error;
+    const code = (error.cause as { code?: unknown } | undefined)?.code;
+    try {
+      await context.audit.record({
+        action: "migrate",
+        outcome: "refused",
+        detail: { reason: "step-failed", ...(typeof code === "string" ? { code } : {}) },
+      });
+    } catch {
+      // A step of a database's first migration failed, before its audit log was made.
+    }
+    context.err(`pathways: a schema step failed${typeof code === "string" ? ` (${code})` : ""}.\n`);
+    return EXIT.failed;
+  }
+  const { before, after, steps, waiting, refused } = report;
+  // A dry run on a database with no schema yet, or one older than the audit log, has none to write.
+  const audited = after.applied.some((step) => step.name === AUDIT_LOG_STEP);
+  if (audited) {
+    await context.audit.record({
+      action: "migrate",
+      ...(refused === undefined ? {} : { outcome: "refused" as const }),
+      detail: {
+        ...(refused === undefined ? {} : { reason: refused.reason }),
+        engine: VERSION,
+        from: before.generation,
+        to: after.generation,
+        steps: steps.length,
+        contract,
+        dryRun,
+      },
+    });
+  }
+  if (refused !== undefined) {
+    context.err(
+      `pathways: contract steps wait for the rollback window: the schema last changed at ${String(before.changedAt)}, by Pathways ${before.changedBy}, and the window ends at ${refused.until}. This is Pathways ${VERSION}. Nothing was applied.\n`,
+    );
+    return EXIT.failed;
+  }
+  const lines = [describeSchema(before)];
+  if (before.unknown.length > 0) {
+    lines.push(`It is newer than this Pathways ${VERSION} knows: nothing to apply.`);
+  } else if (steps.length === 0) {
+    lines.push("Nothing to apply.");
+  } else {
+    lines.push(
+      `${dryRun ? "Would apply" : "Applied"} ${count(steps.length, "step")}:`,
+      ...stepLines(steps),
+    );
+    if (!dryRun) lines.push(`Now generation ${after.generation}.`);
+  }
+  if (waiting.length > 0) {
+    lines.push(
+      `Waiting for pathways migrate --contract: ${count(waiting.length, "contract step")}:`,
+      ...stepLines(waiting),
+    );
+  }
+  if (!audited) lines.push("Not written to the audit log: the database has none yet.");
+  print(
+    context,
+    {
+      engine: VERSION,
+      before: schemaSummary(before),
+      after: schemaSummary(after),
+      steps,
+      waiting,
+      dryRun,
+      audited,
+    },
+    lines,
+  );
+  return EXIT.ok;
+}
+
+function describeSchema(state: SchemaState): string {
+  return state.generation === 0
+    ? `The database has no schema yet; this is Pathways ${VERSION}.`
+    : `Schema generation ${state.generation}, last changed by Pathways ${state.changedBy}; this is Pathways ${VERSION}.`;
+}
+
+function schemaSummary(state: SchemaState): Record<string, unknown> {
+  return {
+    generation: state.generation,
+    minEngine: state.minEngine,
+    changedBy: state.changedBy,
+    changedAt: state.changedAt ?? null,
+  };
+}
+
+function stepLines(steps: readonly SchemaStepInfo[]): string[] {
+  return table(steps.map((step) => [String(step.generation), step.name, step.tag])).map(
+    (line) => `  ${line}`,
+  );
 }
 
 function noLeases(context: OperatorContext): number {

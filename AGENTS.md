@@ -49,6 +49,25 @@ pnpm check:claude-card
 The em-dash gate also reads the pull request title, body, and commit messages: pipe each through
 `pnpm check:no-emdash --stdin <label>` before you open one.
 
+## Schema steps
+
+Every schema step, in `migrations()` in `src/storage/store.ts`, carries a tag, and the type refuses one
+without:
+
+- `expand` adds only (a table, a column that may be null, an index), so the version before keeps
+  running on the schema after it. Pathways applies expand steps when it opens a database.
+- `contract` removes or changes what an older version reads, and names `minEngine`, the oldest
+  version that runs once it is applied. Only `pathways migrate --contract` applies it.
+
+A release's code runs on its schema both before and after its own contract steps: code stops reading
+a column in one release, and a contract step in a later one drops it. A step that has shipped is
+never edited; a change is a new step, numbered after the last. Start applies expand steps that come
+after a contract step it skipped, so an expand step never depends on an earlier contract step (it
+does not re-add a dropped column or reuse a dropped index's name), and a later release's code still
+runs when an earlier release's contract steps were never applied. Each step records itself in
+`schema_info`; `test/schema-versions.test.ts` and `test/schema-steps.test.ts` hold the gate to this on
+every database.
+
 ## Data
 
 Synthetic data only. Pathways moves messages that carry patients' identities and records, so real
