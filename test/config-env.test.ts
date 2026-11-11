@@ -641,6 +641,7 @@ destinations:
       "pathways.yaml.storage.sqlserver.plaintext",
       "pathways.yaml.hooks.[].webhook.plaintext",
       "pathways.yaml.health.plaintext",
+      "pathways.yaml.probes.plaintext",
       "channel.yaml.name",
       "channel.yaml.format",
       "channel.yaml.source.http.plaintext",
@@ -700,6 +701,7 @@ destinations:
 
   it("refuse plaintext read from the environment, as Zod does", () => {
     expect(project({ health: { port: 9090, plaintext: { env: "PLAIN" } } })).toBe(false);
+    expect(project({ probes: { port: 9091, plaintext: { env: "PLAIN" } } })).toBe(false);
     expect(
       channel({
         source: { file: { dir: "./inbox" } },

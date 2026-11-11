@@ -168,6 +168,10 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
     project.health === undefined
       ? undefined
       : resolveListener(project.health, projectRoot, DEFAULT_HEALTH_TOKEN_ENV);
+  const probes =
+    project.probes === undefined
+      ? undefined
+      : { host: project.probes.host ?? DEFAULT_HOST, port: project.probes.port };
   const lease = {
     ttlMs: project.lease?.ttl ?? DEFAULT_LEASE_TTL_MS,
     standby: project.lease?.standby ?? false,
@@ -306,6 +310,7 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
     settings,
     hooks,
     health,
+    probes,
     lease,
     migrations: { rollbackWindowMs: project.migrations?.rollbackWindow ?? 0 },
     encryption,

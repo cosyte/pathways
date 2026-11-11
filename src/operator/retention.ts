@@ -49,6 +49,8 @@ export interface RetentionOptions {
   readonly now: number;
   /** Count what would go, and delete nothing. */
   readonly dryRun: boolean;
+  /** Called after each channel is done, so a caller can see a long run make progress. */
+  readonly onChannel?: () => void;
 }
 
 /**
@@ -85,6 +87,7 @@ export async function runRetention(
     channels[name] = { retentionMs, cutoff, configured, ...result };
     messages += result.messages;
     deliveries += result.deliveries;
+    options.onChannel?.();
   }
   return { dryRun: options.dryRun, channels, messages, deliveries };
 }
