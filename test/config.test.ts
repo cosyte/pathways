@@ -360,7 +360,7 @@ destinations:
       "o source.http.response.headers.Content-Type: Pathways sets this header itself",
       "o source.http.response.headers.Date: Pathways sets this header itself",
       "o source.http.response.headers.Content-Length: Pathways sets this header itself",
-      "o source.http.response.headers.Set-Cookie: a credential never goes in the YAML; read it with { env: NAME }",
+      "o source.http.response.headers.Set-Cookie: a credential never goes in the YAML; read it with { env: NAME }, { file: path } or { secret: { provider, name } }",
       "o source.http.response.headers.x y: not a valid header name",
       "o source.http.response.headers.X-Bad: not a valid header value",
       "p source.http.response.body: Too big: expected string to have <=4096 characters",
@@ -438,13 +438,13 @@ destinations:
     });
     expect(problems).toHaveLength(7);
     expect(problems).toContain(
-      "channels/a/channel.yaml: destinations.0.http.url: credentials do not belong in the url; send them in headers, from { env: NAME }",
+      "channels/a/channel.yaml: destinations.0.http.url: credentials do not belong in the url; send them in headers, from { env: NAME }, { file: path } or { secret: { provider, name } }",
     );
     expect(problems).toContain(
-      "channels/a/channel.yaml: destinations.0.http.headers.Authorization: a credential never goes in the YAML; read it with { env: NAME }",
+      "channels/a/channel.yaml: destinations.0.http.headers.Authorization: a credential never goes in the YAML; read it with { env: NAME }, { file: path } or { secret: { provider, name } }",
     );
     expect(problems).toContain(
-      "channels/a/channel.yaml: destinations.0.http.headers.X-Api-Key: a credential never goes in the YAML; read it with { env: NAME }",
+      "channels/a/channel.yaml: destinations.0.http.headers.X-Api-Key: a credential never goes in the YAML; read it with { env: NAME }, { file: path } or { secret: { provider, name } }",
     );
     expect(problems).toContain(
       "channels/a/channel.yaml: destinations.0.http.headers.Content-Length: Pathways sets this header itself",
@@ -808,7 +808,7 @@ describe("loadProject: extensions", () => {
       "pathways.yaml: hooks.0: a module path, { module: path, options }, or { webhook: { url } }",
       "pathways.yaml: hooks.1: name exactly one of: module, webhook",
       "pathways.yaml: hooks.2.webhook.url: https:// is required; set plaintext: true to send without TLS",
-      "pathways.yaml: hooks.3.webhook.headers.Authorization: a credential never goes in the YAML; read it with { env: NAME }",
+      "pathways.yaml: hooks.3.webhook.headers.Authorization: a credential never goes in the YAML; read it with { env: NAME }, { file: path } or { secret: { provider, name } }",
       expect.stringMatching(/^pathways\.yaml: hooks\.4\.events\.1: /) as unknown,
       "pathways.yaml: hooks.5.events: at least one event",
       'pathways.yaml: hooks.6.timeout: a duration above zero, such as "5s"',
@@ -830,7 +830,7 @@ describe("loadProject: storage", () => {
     const root = await makeProject(withStorage("  postgres: { tls: {} }\n"));
     expect((await loadProject(root)).storage).toEqual({
       kind: "postgres",
-      urlEnv: "PATHWAYS_DATABASE_URL",
+      url: { env: "PATHWAYS_DATABASE_URL" },
       tls: { ca: undefined, cert: undefined, key: undefined },
       plaintext: false,
       pool: { max: 10, idleTimeoutMs: 30_000 },
@@ -849,7 +849,7 @@ describe("loadProject: storage", () => {
     );
     expect((await loadProject(root)).storage).toEqual({
       kind: "mysql",
-      urlEnv: "LAB_DATABASE_URL",
+      url: { env: "LAB_DATABASE_URL" },
       tls: {
         ca: join(root, "tls/db-ca.pem"),
         cert: join(root, "tls/client.crt"),
@@ -872,7 +872,7 @@ describe("loadProject: storage", () => {
       withStorage('  postgres:\n    url: "postgres://u:synthetic-pw@db/pathways"\n    tls: {}\n'),
     );
     expect(problems).toEqual([
-      "pathways.yaml: storage.postgres.url: a connection URL carries a password, so it never goes in the YAML; read it with { env: NAME }",
+      "pathways.yaml: storage.postgres.url: a connection URL carries a password, so it never goes in the YAML; read it with { env: NAME }, { file: path } or { secret: { provider, name } }",
     ]);
   });
 

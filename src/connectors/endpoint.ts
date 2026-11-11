@@ -11,6 +11,7 @@ import { createServer as createHttpsServer } from "node:https";
 
 import { ConfigError } from "../config/load.js";
 import { HEADER_VALUE, type HeaderValue, type ListenerConfig } from "../config/schema.js";
+import { secretHolder, secretPlace, secretsOf, type SecretReader } from "../secrets/resolve.js";
 import { loadServerTls, serverTlsOptions, type ServerTlsMaterial } from "./tls.js";
 
 /** The environment Pathways reads secrets from: `process.env`, or a stand-in in tests. */
@@ -26,7 +27,8 @@ const TOKEN = /^[A-Za-z0-9\-._~+/]+=*$/;
 const CLOSE_GRACE_MS = 5_000;
 
 /**
- * Reads the environment variable `name`. `where` names the file and key that asked for it.
+ * Reads the environment variable `name`, through the same resolver as every other secret. `where`
+ * names the file and key that asked for it.
  *
  * @throws {ConfigError} when the variable is not set or is empty.
  * @example
@@ -34,22 +36,18 @@ const CLOSE_GRACE_MS = 5_000;
  * const token = readEnv(process.env, "LAB_TOKEN", "channels/adt/channel.yaml: source.http.auth");
  * ```
  */
-export function readEnv(env: Env, name: string, where: string): string {
-  const value = env[name];
-  if (value === undefined || value === "") {
-    throw new ConfigError([`${where}: the environment variable ${name} is not set`]);
-  }
-  return value;
+export function readEnv(env: SecretReader, name: string, where: string): string {
+  return secretsOf(env).read({ env: name }, where);
 }
 
 /**
- * The headers an HTTP client sends: `defaults` first, then each configured header, read from the
- * environment when it says `{ env: NAME }`. A configured header replaces a default of the same name,
- * whatever its case. `where` names the file and key, such as
- * `channels/adt/channel.yaml: destinations.0.http`. Errors name the header and the variable, never a
- * value.
+ * The headers an HTTP client sends: `defaults` first, then each configured header, read at start
+ * when it is a secret reference (`{ env: NAME }`, `{ file: path }` or `{ secret: ... }`). A
+ * configured header replaces a default of the same name, whatever its case. `where` names the file
+ * and key, such as `channels/adt/channel.yaml: destinations.0.http`. Errors name the header and where
+ * its value is read from, never a value.
  *
- * @throws {ConfigError} when a variable is not set, or holds characters a header cannot carry.
+ * @throws {ConfigError} when a secret cannot be had, or holds characters a header cannot carry.
  * @example
  * ```ts
  * const headers = resolveHeaders({ "Content-Type": "application/json" }, config.headers, process.env, where);
@@ -58,34 +56,35 @@ export function readEnv(env: Env, name: string, where: string): string {
 export function resolveHeaders(
   defaults: Readonly<Record<string, string>>,
   configured: Readonly<Record<string, HeaderValue>>,
-  env: Env,
+  env: SecretReader,
   where: string,
 ): Record<string, string> {
+  const secrets = secretsOf(env);
   const headers: Record<string, string> = { ...defaults };
   for (const [name, value] of Object.entries(configured)) {
     const lower = name.toLowerCase();
     for (const existing of Object.keys(headers)) {
       if (existing.toLowerCase() === lower) delete headers[existing];
     }
-    headers[name] =
-      "env" in value ? readHeaderEnv(env, value.env, `${where}.headers.${name}`) : value.value;
+    const at = `${where}.headers.${name}`;
+    if ("value" in value) {
+      headers[name] = value.value;
+      continue;
+    }
+    const secret = secrets.read(value, at);
+    if (!HEADER_VALUE.test(secret)) {
+      throw new ConfigError([
+        `${at}: ${secretPlace(value)} holds characters a header cannot carry`,
+      ]);
+    }
+    headers[name] = secret;
   }
   return headers;
 }
 
-function readHeaderEnv(env: Env, name: string, where: string): string {
-  const value = readEnv(env, name, where);
-  if (!HEADER_VALUE.test(value)) {
-    throw new ConfigError([
-      `${where}: the environment variable ${name} holds characters a header cannot carry`,
-    ]);
-  }
-  return value;
-}
-
 /**
  * What a listening endpoint needs at startup: its TLS read from disk (undefined with
- * `plaintext: true`) and its bearer token read from the environment (undefined with `auth: none`).
+ * `plaintext: true`) and its bearer token read where its reference says (undefined with `auth: none`).
  * `where` names the file and key, such as `channels/adt/channel.yaml: source.http`.
  *
  * @throws {ConfigError} when a TLS file cannot be read or loaded, or the token is missing or weak.
@@ -96,15 +95,16 @@ function readHeaderEnv(env: Env, name: string, where: string): string {
  */
 export function listenerSecurity(
   config: ListenerConfig,
-  env: Env,
+  env: SecretReader,
   where: string,
 ): { tls: ServerTlsMaterial | undefined; token: string | undefined } {
   const tls = config.tls === undefined ? undefined : loadServerTls(config.tls, `${where}.tls`);
-  if (config.auth.kind === "none") return { tls, token: undefined };
-  const token = readEnv(env, config.auth.env, `${where}.auth`);
+  const { auth } = config;
+  if (auth.kind === "none") return { tls, token: undefined };
+  const token = secretsOf(env).read(auth, `${where}.auth`);
   if (token.length < MIN_TOKEN_LENGTH || !TOKEN.test(token)) {
     throw new ConfigError([
-      `${where}.auth: the token in ${config.auth.env} must be at least ${MIN_TOKEN_LENGTH} characters of letters, digits and -._~+/`,
+      `${where}.auth: the token in ${secretHolder(auth)} must be at least ${MIN_TOKEN_LENGTH} characters of letters, digits and -._~+/`,
     ]);
   }
   return { tls, token };
