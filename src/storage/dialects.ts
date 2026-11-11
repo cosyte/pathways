@@ -153,9 +153,33 @@ async function sqliteDialect(file: string): Promise<Dialect> {
   sqlite.pragma("journal_mode = WAL");
   sqlite.pragma("foreign_keys = ON");
   // Freed space is overwritten with zeros, so a value rewritten in place (`pathways rekey`) or
-  // deleted leaves none of its old bytes in the file.
+  // deleted leaves none of its old bytes in the file. The write-ahead log keeps them until it is
+  // emptied (`emptySqliteLog`).
   sqlite.pragma("secure_delete = ON");
   return new SqliteDialect({ database: cachedStatements(sqlite) });
+}
+
+/**
+ * Copies every change in a SQLite database's write-ahead log into its file and truncates the log to
+ * nothing (`wal_checkpoint(TRUNCATE)`), so the pages the log held, earlier versions of rewritten rows
+ * among them, are gone from the database's files. The file's own freed space is already zeroed
+ * (`secure_delete`). It waits, as long as a connection's busy timeout, for another connection's
+ * write to finish. Returns false, having copied what it could, while a connection is still reading a
+ * snapshot from before the latest change, which keeps the log; an idle open connection, as a running
+ * engine's is between queries, does not.
+ *
+ * @example
+ * ```ts
+ * if (!emptySqliteLog(project.databaseFile)) console.error("a read is under way; try again");
+ * ```
+ */
+export function emptySqliteLog(file: string): boolean {
+  const sqlite = new SqliteDatabase(file, { fileMustExist: true });
+  try {
+    return sqlite.pragma("wal_checkpoint(TRUNCATE)", { simple: true }) === 0;
+  } finally {
+    sqlite.close();
+  }
 }
 
 /** How many prepared statements a SQLite connection keeps: more than the store's queries number. */
