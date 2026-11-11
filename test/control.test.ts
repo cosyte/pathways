@@ -605,7 +605,8 @@ export default (msg: Msg, ctx: { config: Record<string, unknown> }): Msg => {
         err: "",
       });
       for (let i = 0; i < 200; i += 1) {
-        if ((await readdir(join(root, "data/outbox")).catch(() => [])).length > 0) break;
+        // The file destination writes a hidden partial file first, then renames it.
+        if ((await readdir(join(root, "data/outbox")).catch(() => [])).includes("1-1.hl7")) break;
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
       expect(await readdir(join(root, "data/outbox"))).toEqual(["1-1.hl7"]);
