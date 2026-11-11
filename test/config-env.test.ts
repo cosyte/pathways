@@ -654,10 +654,10 @@ destinations:
 
   it("take a reference at every key that holds one value, but the documented exceptions", () => {
     // configuration-reference.md, "Settings from the environment": plaintext, a channel's name and
-    // format, and the header names an HTTP source hands a transform, are never read from the
-    // environment (encryption: none and auth: none are the short
-    // form of a block, and blocks are not scalars, so the walk passes over them). Matched by the
-    // whole path, so a new key that only shares one of these names is still checked.
+    // format, the header names an HTTP source hands a transform, and a channel's index: entries,
+    // are never read from the environment (encryption: none and auth: none are the short form of a
+    // block, and blocks are not scalars, so the walk passes over them). Matched by the whole path,
+    // so a new key that only shares one of these names is still checked.
     const EXCEPTIONS: readonly string[] = [
       "pathways.yaml.storage.postgres.plaintext",
       "pathways.yaml.storage.mysql.plaintext",
@@ -673,6 +673,8 @@ destinations:
       "channel.yaml.destinations.[].http.plaintext",
       "channel.yaml.destinations.[].mllp.plaintext",
       "channel.yaml.hooks.[].webhook.plaintext",
+      "channel.yaml.index.[].key",
+      "channel.yaml.index.[].bits",
     ];
     type Node = Record<string, unknown>;
     const isNode = (value: unknown): value is Node =>

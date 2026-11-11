@@ -74,6 +74,8 @@ health:
   are not read from the environment: turning TLS, encryption or authentication off stays in the
   file, where the audit sees it. Nor are the names in an HTTP source's `contextHeaders`: which
   request headers reach a transform stays in the file, where a credential header is refused at load.
+  Nor is a channel's `index:` block: which `ctx.meta` keys are stored as searchable tags, and how
+  many bits each keeps, stays in the file, where the audit sees it.
 - `pathways validate --print` prints the configuration as `start` reads it, with every setting the
   environment gave and the variable it named; see
   [Command reference](./command-reference.md#pathways-validate). The query string of a URL read
