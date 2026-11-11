@@ -13,9 +13,9 @@
  * - `readHeader`: an MLLP source reads the header of every message it takes in, in the engine's own
  *   thread, before it stores the message: it parses the MSH segment and scans every later segment
  *   for another message's start.
- * - `decode` for a `json` channel: the worker reads every JSON body with a reviver that checks each
- *   number can be held exactly. That branch does all of its work before it returns, so the gate times
- *   it as a synchronous call; the first test below holds it to that.
+ * - `decode` for a `json` channel: the worker parses every JSON body, then reads its text once to
+ *   check each number can be held exactly. That branch does all of its work before it returns, so the
+ *   gate times it as a synchronous call; the first test below holds it to that.
  *
  * Each base phase is sized to take 10 ms or more on a GitHub-hosted runner (the contract refuses a
  * phase under 4 ms); the input count only lengthens a phase, it does not move a ratio. Each
