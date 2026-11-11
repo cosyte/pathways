@@ -181,7 +181,13 @@ Exactly one of `file`, `http`, `mllp` or `module`.
 
 A path from `dir` is written with `/` on every system. A glob is read as Node.js's
 `path.matchesGlob` reads it, and its `*` never matches a leading dot. A `regex` is at most 256
-characters. [Choose which files a source takes](./read-and-write-files.md#choose-which-files-a-source-takes)
+characters. A regex runs on names whoever writes the files chooses, and one with nested repeats,
+such as `^(a+)+$`, can take minutes on a name built for it. So each run of a regex on a path stops
+after 50 ms: that file is left where it is, taken by neither `include` nor `exclude`, the engine
+logs `source-read-failed` with the code `ERR_SCRIPT_EXECUTION_TIMEOUT`, and the regex is not run on
+that path again while the file stays. Write a regex with no repeat inside a repeated group, or use
+a glob. `errorDir` is compared with `dir`'s subfolders after symbolic links are resolved.
+[Choose which files a source takes](./read-and-write-files.md#choose-which-files-a-source-takes)
 shows each in use.
 
 #### HTTP source

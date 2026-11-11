@@ -6,12 +6,14 @@ import {
   open,
   readdir,
   readFile,
+  realpath,
   rename,
   rm,
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { dirname, join, posix, resolve } from "node:path";
+import { dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
+import { createContext, Script } from "node:vm";
 
 import { DEFAULT_READ_TRIES, type PathPattern } from "../config/schema.js";
 import { copiesBodies, markCopiesBodies, ownsBuffer, release } from "../storage/ownership.js";
@@ -76,10 +78,11 @@ interface Found {
   readonly path: string;
 }
 
-/** A found file that is ready to be claimed, with its size and change time. */
+/** A found file that is ready to be claimed, with its size, change time and id when found. */
 interface Ready extends Found {
   readonly size: number;
   readonly mtimeMs: number;
+  readonly id: FileId;
 }
 
 /** A claimed file, with its path from the source folder when it was claimed. */
@@ -122,11 +125,39 @@ function decodePath(name: string): string {
   return name.replace(/%(25|2F)/g, (_, code: string) => (code === "25" ? "%" : "/"));
 }
 
-/** A test of a path against one {@link PathPattern}. */
+/**
+ * The longest a `{ regex }` pattern may run on one path, in milliseconds. A file's name is chosen by
+ * whoever writes it, and a pattern that backtracks (nested repeats, such as `^(a+)+$`) can take
+ * minutes or years on a name built for it, holding the whole engine meanwhile. A path that takes
+ * longer is left where it is and said, with the code `ERR_SCRIPT_EXECUTION_TIMEOUT`.
+ */
+export const REGEX_TIME_LIMIT_MS = 50;
+
+/** The one script each regex runs through, so a run can be stopped at {@link REGEX_TIME_LIMIT_MS}. */
+const TEST_SCRIPT = new Script("expression.test(path)");
+
+/** A test of a path against one {@link PathPattern}; a regex that runs too long throws. */
 function matcher(pattern: PathPattern): (rel: string) => boolean {
   if ("glob" in pattern) return (rel) => posix.matchesGlob(rel, pattern.glob);
-  const expression = new RegExp(pattern.regex, "u");
-  return (rel) => expression.test(rel);
+  const context = { expression: new RegExp(pattern.regex, "u"), path: "" };
+  createContext(context);
+  return (rel) => {
+    context.path = rel;
+    return TEST_SCRIPT.runInContext(context, { timeout: REGEX_TIME_LIMIT_MS }) === true;
+  };
+}
+
+/** A file's device and inode, as `lstat` and the open file's `stat` give them. */
+interface FileId {
+  readonly dev: bigint;
+  readonly ino: bigint;
+}
+
+/** The error a claim gives for a file no longer inside the source folder, or no longer the same. */
+function moved(): Error {
+  return Object.assign(new Error("the file left the source folder or was replaced"), {
+    code: "ESTALE",
+  });
 }
 
 /**
@@ -248,6 +279,8 @@ export class FileSource implements SourceConnector {
   private seen = new Map<string, string>();
   /** How many passes in a row each file has failed to open, for `readTries`. */
   private tries = new Map<string, number>();
+  /** Paths a regex ran too long on, so each costs one run, not one a pass. */
+  private slow = new Set<string>();
 
   /**
    * @param options The folder to read, the channel it is read for, how long a file must sit before
@@ -274,10 +307,41 @@ export class FileSource implements SourceConnector {
     for (const file of await this.claim(claims)) await this.store(file, sink, false);
   }
 
-  /** Whether a path from the source folder passes `include` and `exclude`. */
-  private matches(rel: string): boolean {
-    const included = this.include.length === 0 || this.include.some((test) => test(rel));
-    return included && !this.exclude.some((test) => test(rel));
+  /**
+   * Whether a path from the source folder passes `include` and `exclude`. A path a regex ran too
+   * long on passes neither, so it is left, and is noted in `slow` to be left on later passes too.
+   */
+  private matches(rel: string, slow: Set<string>): boolean {
+    if (this.slow.has(rel)) {
+      slow.add(rel);
+      return false;
+    }
+    try {
+      const included = this.include.length === 0 || this.include.some((test) => test(rel));
+      return included && !this.exclude.some((test) => test(rel));
+    } catch (error) {
+      this.options.onReadError?.(error);
+      slow.add(rel);
+      return false;
+    }
+  }
+
+  /**
+   * Whether `path` is in a folder that is `root` or under it once every link on the way is
+   * resolved, and, given `id`, is still the file `id` names. A folder on a file's path swapped for a link since the pass found
+   * it would otherwise lead an open or a move outside the source folder: `O_NOFOLLOW` refuses a
+   * link only in a path's last part.
+   */
+  private async inside(path: string, root: string, id?: FileId): Promise<boolean> {
+    try {
+      const from = relative(root, await realpath(dirname(path)));
+      if (from === ".." || from.startsWith(`..${sep}`) || isAbsolute(from)) return false;
+      if (id === undefined) return true;
+      const now = await lstat(path, { bigint: true });
+      return now.dev === id.dev && now.ino === id.ino;
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -294,10 +358,14 @@ export class FileSource implements SourceConnector {
       errorDir,
       onReadError,
     } = this.options;
-    const errors = errorDir === undefined ? undefined : resolve(errorDir);
     await mkdir(dir, { recursive: true });
+    // Both with every link resolved, so an errorDir reached through a link into dir is passed over.
+    const root = await realpath(dir);
+    const errors =
+      errorDir === undefined ? undefined : await realpath(errorDir).catch(() => resolve(errorDir));
     const found: Found[] = [];
     const markers = new Set<string>();
+    const slow = new Set<string>();
     const walk = async (folder: string, under: string): Promise<void> => {
       for (const entry of await readdir(folder, { withFileTypes: true })) {
         const rel = `${under}${entry.name}`;
@@ -305,7 +373,10 @@ export class FileSource implements SourceConnector {
         // The claim folder is passed over even when dot files are read.
         if (rel === CLAIMED_DIR || (ignoreDot && entry.name.startsWith("."))) continue;
         if (entry.isDirectory()) {
-          if (!recursive || rel === PROCESSED_DIR || resolve(path) === errors) continue;
+          // A folder the walk enters is a real one, never a link, so its real path is root's plus rel.
+          if (!recursive || rel === PROCESSED_DIR || join(root, ...rel.split("/")) === errors) {
+            continue;
+          }
           // A subfolder that cannot be read is said, and the rest of the pass goes on.
           // A try, not a catch callback: on Windows no mode makes a folder unreadable, so a
           // function here would go uncalled there.
@@ -318,12 +389,14 @@ export class FileSource implements SourceConnector {
           // A symbolic link, to a file or a folder, a pipe or a device: never read.
         } else if (doneFile !== undefined && rel.endsWith(doneFile)) {
           markers.add(rel);
-        } else if (this.matches(rel)) {
+        } else if (this.matches(rel, slow)) {
           found.push({ rel, path });
         }
       }
     };
     await walk(dir, "");
+    // Only paths found this pass are remembered, as with `seen`.
+    this.slow = slow;
     return { found, markers };
   }
 
@@ -336,7 +409,10 @@ export class FileSource implements SourceConnector {
     const ready: Ready[] = [];
     for (const file of found) {
       // lstat, not stat: a file swapped for a link meanwhile is refused when it is opened below.
-      const { size, mtimeMs } = await lstat(file.path);
+      const stats = await lstat(file.path, { bigint: true });
+      const size = Number(stats.size);
+      const mtimeMs = Number(stats.mtimeNs) / 1e6;
+      const id = { dev: stats.dev, ino: stats.ino };
       const state = `${String(size)}:${String(mtimeMs)}`;
       const unchanged = this.seen.get(file.rel) === state;
       seen.set(file.rel, state);
@@ -344,7 +420,7 @@ export class FileSource implements SourceConnector {
       if (tried !== undefined) tries.set(file.rel, tried);
       if (now - mtimeMs < minAgeMs || size < minSize || (stable && !unchanged)) continue;
       if (doneFile !== undefined && !markers.has(`${file.rel}${doneFile}`)) continue;
-      ready.push({ ...file, size, mtimeMs });
+      ready.push({ ...file, size, mtimeMs, id });
     }
     // Only files found this pass are remembered, so a file that left is forgotten.
     this.seen = seen;
@@ -369,10 +445,13 @@ export class FileSource implements SourceConnector {
     const flags = windows ? constants.O_RDWR : constants.O_RDONLY | constants.O_NOFOLLOW;
     const at = String(now()).padStart(15, "0");
     const taken: Claimed[] = [];
-    for (const file of await this.ready(now())) {
+    const ready = await this.ready(now());
+    // After the walk, which made dir: every open and move is held to this folder.
+    const root = await realpath(dir);
+    for (const file of ready) {
       if (taken.length >= maxPerPoll) break;
       if (file.size > maxSize) {
-        await this.setAside(file, "too-large");
+        await this.setAside(file, "too-large", file.id, root);
         continue;
       }
       const place = String(taken.length).padStart(8, "0");
@@ -388,14 +467,20 @@ export class FileSource implements SourceConnector {
         handle = await open(file.path, flags);
       } catch (error) {
         onReadError?.(error);
-        await this.unreadable(file);
+        await this.unreadable(file, root);
         continue;
       }
       this.tries.delete(file.rel);
       let grown: boolean;
+      let id: FileId;
       try {
+        const stats = await handle.stat({ bigint: true });
+        id = { dev: stats.dev, ino: stats.ino };
+        // The open file must be the one at its path, under dir with no link on the way: a folder
+        // swapped for a link would otherwise lead the open and the move outside dir.
+        if (!(await this.inside(file.path, root, id))) throw moved();
         // The open file's own size: a file that grew since it was found is held to maxSize too.
-        grown = (await handle.stat()).size > maxSize;
+        grown = Number(stats.size) > maxSize;
         if (!grown) await rename(file.path, path);
       } catch (error) {
         onReadError?.(error);
@@ -404,7 +489,7 @@ export class FileSource implements SourceConnector {
         await handle.close();
       }
       if (grown) {
-        await this.setAside(file, "too-large");
+        await this.setAside(file, "too-large", id, root);
         continue;
       }
       taken.push({ name, path, rel: file.rel });
@@ -419,25 +504,37 @@ export class FileSource implements SourceConnector {
       for (const folder of left) await flush(folder, "r");
     }
     // Each marker goes once its file's claim is on disk, so a power cut cannot leave a file unmarked.
+    // Never through a folder swapped for a link since: a marker outside dir is not ours to delete.
     if (doneFile !== undefined) {
-      for (const file of taken) await rm(join(dir, `${file.rel}${doneFile}`), { force: true });
+      for (const file of taken) {
+        const marker = join(dir, `${file.rel}${doneFile}`);
+        if (await this.inside(marker, root)) await rm(marker, { force: true });
+      }
     }
     return taken;
   }
 
   /** Counts a pass that failed to open `file`, and sets it aside after `readTries` in a row. */
-  private async unreadable(file: Found): Promise<void> {
+  private async unreadable(file: Ready, root: string): Promise<void> {
     const { errorDir, readTries = DEFAULT_READ_TRIES } = this.options;
     const tries = (this.tries.get(file.rel) ?? 0) + 1;
     this.tries.set(file.rel, tries);
-    if (errorDir !== undefined && tries >= readTries) await this.setAside(file, "unreadable");
+    if (errorDir !== undefined && tries >= readTries) {
+      await this.setAside(file, "unreadable", file.id, root);
+    }
   }
 
   /**
    * Moves `file` into `errorDir` under its path from the source folder, as it arrived, never over a
-   * file already there; or, with no `errorDir`, leaves it. Either way says so.
+   * file already there; or, with no `errorDir`, leaves it. Either way says so. Only while `file` is
+   * still the file `id` names, inside `root`: never one reached through a folder swapped for a link.
    */
-  private async setAside(file: Found, reason: FileFaultReason): Promise<void> {
+  private async setAside(
+    file: Found,
+    reason: FileFaultReason,
+    id: FileId,
+    root: string,
+  ): Promise<void> {
     const { errorDir, onFileFault } = this.options;
     if (errorDir === undefined) {
       onFileFault?.({ reason, moved: false });
@@ -451,6 +548,7 @@ export class FileSource implements SourceConnector {
         () => false,
       );
       if (taken) throw Object.assign(new Error("a file is already there"), { code: "EEXIST" });
+      if (!(await this.inside(file.path, root, id))) throw moved();
       await rename(file.path, target);
     } catch (error) {
       onFileFault?.({ reason, moved: false, error });

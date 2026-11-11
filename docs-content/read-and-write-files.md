@@ -102,14 +102,22 @@ destinations:
   as `wards/east/a.hl7`. A file is taken when it matches one `include` (or there is none) and no
   `exclude`. Each entry is a glob, read as Node.js's `path.matchesGlob` reads it (`**/*.hl7` matches
   `a.hl7` and `wards/east/a.hl7`), or `{ regex: ... }`, a JavaScript regular expression of at most 256
-  characters. A glob's `*` never matches a name that starts with a dot.
+  characters. A glob's `*` never matches a name that starts with a dot. A regex runs on names the
+  writer chooses: one with a repeat inside a repeated group, such as `^(a+)+$`, can take minutes on
+  a name built for it. Each run stops after 50 ms, and that file is left where it is and logged as
+  `source-read-failed` with `ERR_SCRIPT_EXECUTION_TIMEOUT`. Prefer a glob, or a regex with no
+  nested repeat.
 - **`recursive: true`** reads the subfolders of `dir` as well. It never reads `.claimed/`,
   `processed/` (in `dir` itself) or `errorDir`. A file's path from `dir` goes into its claimed name
   and its idempotency key, so `wards/east/a.hl7` and `wards/west/a.hl7` are two messages that never
   meet. Folders stay in place when their files are taken.
 - **Symbolic links** are never followed, to a file or to a folder, with or without `recursive`. A
   file swapped for a link after the pass found it is refused when it is opened (on Linux and macOS,
-  through `O_NOFOLLOW`).
+  through `O_NOFOLLOW`). A folder on a file's path swapped for a link is refused too: once the file
+  is open, and before it is moved into `errorDir` or a marker is deleted, the source checks that
+  its folder, with every link resolved, is still `dir` or under it, and that the file is still the
+  one it opened or found. A file that fails the check stays and is logged as `source-read-failed`
+  (or `source-file-set-aside`) with the code `ESTALE`.
 - **`ignoreDot: false`** reads files and folders whose name starts with a dot, which are left by
   default. `.claimed/` is never read.
 - **`minSize`** (default `1B`) leaves a smaller file where it is. An empty file is left by default:

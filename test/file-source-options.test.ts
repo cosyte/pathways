@@ -1,4 +1,4 @@
-import { appendFileSync } from "node:fs";
+import { appendFileSync, renameSync, symlinkSync, unlinkSync } from "node:fs";
 import { appendFile, chmod, mkdir, readdir, readFile, symlink, utimes } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -12,6 +12,7 @@ import {
   FileSource,
   type FileSourceOptions,
   PROCESSED_DIR,
+  REGEX_TIME_LIMIT_MS,
 } from "../src/connectors/file.js";
 import type { MessageSink, ReceiveOptions } from "../src/connectors/types.js";
 import { connectorsFor } from "../src/engine/engine.js";
@@ -249,6 +250,61 @@ describe.each([
     expect(await readFile(join(dir, "big.hl7"), "utf8")).toBe("second");
   });
 
+  it("leaves a file a regex runs too long on, says so, and does not run it on that path again", async () => {
+    const dir = await inbox();
+    // A name built to make ^(a+)+$ backtrack: unguarded, one test of it takes many seconds.
+    const name = `${"a".repeat(30)}!`;
+    await dropFile(join(dir, name), "slow");
+    await dropFile(join(dir, "aaa"), "fast");
+    const errors: unknown[] = [];
+    const source = sourceOn(dir, {
+      include: [{ regex: "^(a+)+$" }],
+      onReadError: (error) => errors.push(error),
+    });
+    const started = performance.now();
+    expect(await pass(source)).toEqual(["fast"]);
+    expect(await pass(source)).toEqual([]);
+    expect(performance.now() - started).toBeLessThan(REGEX_TIME_LIMIT_MS * 20);
+    expect(errors).toEqual([expect.objectContaining({ code: "ERR_SCRIPT_EXECUTION_TIMEOUT" })]);
+    expect(await tree(dir)).toEqual([name]);
+    // An exclude that runs too long leaves the file too, never takes it.
+    const excluded: unknown[] = [];
+    const other = sourceOn(dir, {
+      exclude: [{ regex: "^(a+)+$" }],
+      onReadError: (error) => excluded.push(error),
+    });
+    expect(await pass(other)).toEqual([]);
+    expect(excluded).toHaveLength(1);
+    expect(await tree(dir)).toEqual([name]);
+  });
+
+  it("never moves a file into errorDir once it is gone from where the pass found it", async () => {
+    const dir = await inbox();
+    const errorDir = join(dir, "errors");
+    await dropFile(join(dir, "a.hl7"), "12345");
+    await dropFile(join(dir, "b.hl7"), "12345");
+    const faults: FileFault[] = [];
+    const source = sourceOn(dir, {
+      maxSize: 4,
+      errorDir,
+      // b.hl7 goes after the pass found it and before it is set aside.
+      onFileFault: (fault) => {
+        faults.push(fault);
+        if (faults.length === 1) unlinkSync(join(dir, "b.hl7"));
+      },
+    });
+    expect(await pass(source)).toEqual([]);
+    expect(faults).toEqual([
+      { reason: "too-large", moved: true },
+      {
+        reason: "too-large",
+        moved: false,
+        error: expect.objectContaining({ code: "ESTALE" }) as unknown,
+      },
+    ]);
+    expect(await tree(dir)).toEqual(["errors/a.hl7"]);
+  });
+
   it("claims at most maxPerPoll files a pass, and the rest on the next", async () => {
     const dir = await inbox();
     for (const name of ["a.hl7", "b.hl7", "c.hl7"]) await dropFile(join(dir, name), name);
@@ -402,6 +458,95 @@ describe.skipIf(windows)("FileSource and symbolic links", () => {
     expect(await pass(sourceOn(dir, { recursive: true, ignoreDot: false }))).toEqual(["inside"]);
     expect((await readdir(dir)).sort()).toEqual([CLAIMED_DIR, "link.hl7", "linked-folder"]);
     expect(await readFile(join(outside, "secret.hl7"), "utf8")).toBe("outside");
+  });
+
+  /**
+   * A source on `dir` whose first file, `a.hl7`, is too large: once it is set aside, after the pass
+   * found every file, the subfolder `sub` is swapped for a link to `outside`.
+   */
+  function swapping(dir: string, outside: string, options: Partial<FileSourceOptions> = {}) {
+    const faults: FileFault[] = [];
+    const errors: unknown[] = [];
+    const source = sourceOn(dir, {
+      recursive: true,
+      maxSize: 4,
+      onReadError: (error) => errors.push(error),
+      onFileFault: (fault) => {
+        faults.push(fault);
+        if (faults.length > 1) return;
+        renameSync(join(dir, "sub"), join(dir, "was-sub"));
+        symlinkSync(outside, join(dir, "sub"), "dir");
+      },
+      ...options,
+    });
+    return { source, faults, errors };
+  }
+
+  it("never claims a file through a folder swapped for a link after the pass found it", async () => {
+    const dir = await inbox();
+    const outside = await makeProject({ "x.hl7": "outside" });
+    await dropFile(join(dir, "a.hl7"), "12345");
+    await dropFile(join(dir, "sub", "x.hl7"), "in");
+    const { source, errors } = swapping(dir, outside);
+    expect(await pass(source)).toEqual([]);
+    expect(errors).toEqual([expect.objectContaining({ code: "ESTALE" })]);
+    expect(await readFile(join(outside, "x.hl7"), "utf8")).toBe("outside");
+    expect(await readFile(join(dir, "was-sub", "x.hl7"), "utf8")).toBe("in");
+  });
+
+  it("never sets a file aside through a folder swapped for a link after the pass found it", async () => {
+    const dir = await inbox();
+    const errorDir = join(await makeProject({}), "errors");
+    const outside = await makeProject({ "x.hl7": "outside!" });
+    await dropFile(join(dir, "a.hl7"), "12345");
+    await dropFile(join(dir, "sub", "x.hl7"), "in big");
+    const { source, faults } = swapping(dir, outside, { errorDir });
+    expect(await pass(source)).toEqual([]);
+    expect(faults).toEqual([
+      { reason: "too-large", moved: true },
+      {
+        reason: "too-large",
+        moved: false,
+        error: expect.objectContaining({ code: "ESTALE" }) as unknown,
+      },
+    ]);
+    expect(await readFile(join(outside, "x.hl7"), "utf8")).toBe("outside!");
+    expect(await tree(errorDir)).toEqual(["a.hl7"]);
+  });
+
+  it("never deletes a marker through a folder swapped for a link after its file was claimed", async () => {
+    const dir = await inbox();
+    const outside = await makeProject({ "m.hl7.done": "" });
+    await dropFile(join(dir, "sub", "m.hl7"), "in");
+    await dropFile(join(dir, "sub", "m.hl7.done"), "");
+    // sub/m.hl7 is claimed first, by path; then z.hl7 is set aside and sub swapped, before the
+    // markers go.
+    await dropFile(join(dir, "z.hl7"), "12345");
+    await dropFile(join(dir, "z.hl7.done"), "");
+    const faults: FileFault[] = [];
+    const source = sourceOn(dir, {
+      recursive: true,
+      maxSize: 4,
+      doneFile: ".done",
+      onFileFault: (fault) => {
+        faults.push(fault);
+        renameSync(join(dir, "sub"), join(dir, "was-sub"));
+        symlinkSync(outside, join(dir, "sub"), "dir");
+      },
+    });
+    expect(await pass(source)).toEqual(["in"]);
+    expect(faults).toHaveLength(1);
+    expect((await readdir(outside)).sort()).toEqual(["m.hl7.done"]);
+  });
+
+  it("never reads errorDir when it is reached through a link into dir", async () => {
+    const dir = await inbox();
+    await dropFile(join(dir, "held", "x.hl7"), "set aside before");
+    await dropFile(join(dir, "a.hl7"), "new");
+    const errorDir = join(await makeProject({}), "errors");
+    await symlink(join(dir, "held"), errorDir, "dir");
+    expect(await pass(sourceOn(dir, { recursive: true, errorDir }))).toEqual(["new"]);
+    expect(await tree(dir)).toEqual(["held/x.hl7"]);
   });
 });
 
