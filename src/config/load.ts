@@ -5,6 +5,7 @@ import { parse as parseYaml, YAMLParseError } from "yaml";
 import type { z } from "zod";
 
 import { normalisePath } from "../connectors/http-path.js";
+import { referencesIn, resolvingEnv, variableAt, type EnvReference } from "./env-ref.js";
 import {
   channelSchema,
   DEFAULT_DATABASE_CONNECT_TIMEOUT_MS,
@@ -74,8 +75,25 @@ export class ConfigError extends Error {
 }
 
 /**
+ * How {@link loadProject} loads a project.
+ *
+ * @example
+ * ```ts
+ * const options: LoadOptions = { env: { HEALTH_PORT: "9090" } };
+ * ```
+ */
+export interface LoadOptions {
+  /**
+   * Where each `{ env: NAME }` setting is read from. Defaults to `process.env`. Only the variables
+   * the files name are read: there is no scan for a prefix.
+   */
+  readonly env?: Readonly<Record<string, string | undefined>> | undefined;
+}
+
+/**
  * Loads `pathways.yaml` (optional) and every `channels/<name>/channel.yaml` under `root`, validates
- * them, and resolves every relative path against the file that declares it.
+ * them, and resolves every relative path against the file that declares it. A setting written as
+ * `{ env: NAME, default? }` is read from `options.env` first and checked as if written in the file.
  *
  * @example
  * ```ts
@@ -83,7 +101,8 @@ export class ConfigError extends Error {
  * console.log(project.channels.map((c) => c.name));
  * ```
  */
-export async function loadProject(root: string): Promise<ProjectConfig> {
+export async function loadProject(root: string, options: LoadOptions = {}): Promise<ProjectConfig> {
+  const env = options.env ?? process.env;
   const projectRoot = resolve(root);
   const problems: string[] = [];
   // The project folder itself shows as ".", so a problem never repeats the path the caller typed.
@@ -92,13 +111,22 @@ export async function loadProject(root: string): Promise<ProjectConfig> {
   const show = (file: string): string => relative(projectRoot, file).split(sep).join("/") || ".";
 
   const projectFile = join(projectRoot, "pathways.yaml");
+  const environment: EnvReference[] = [];
   let project: ProjectYaml = {};
+  let projectEnv: ReadonlyMap<string, string> = new Map();
   if (await exists(projectFile)) {
     const parsed = await readYaml(projectFile, show, problems);
     if (parsed !== undefined) {
-      const result = projectSchema.safeParse(parsed ?? {});
-      if (result.success) project = result.data;
-      else problems.push(...describeIssues(show(projectFile), result.error.issues));
+      const yaml = parsed ?? {};
+      const { result, resolved } = resolvingEnv(env, () => projectSchema.safeParse(yaml));
+      if (result.success) {
+        project = result.data;
+        const references = referencesIn(yaml, resolved, undefined);
+        environment.push(...references);
+        projectEnv = byKey(references);
+      } else {
+        problems.push(...describeIssues(show(projectFile), result.error.issues, yaml, resolved));
+      }
     }
   }
 
@@ -111,7 +139,7 @@ export async function loadProject(root: string): Promise<ProjectConfig> {
   const hooks = (project.hooks ?? []).map((hook) => resolveHook(hook, projectRoot));
   const encryption = resolveEncryption(project.encryption, projectRoot);
   problems.push(
-    ...(await missingModules(show(projectFile), show, [
+    ...(await missingModules(show(projectFile), show, projectEnv, [
       [
         "encryption.provider.module",
         encryption?.kind === "provider" ? encryption.module : undefined,
@@ -157,12 +185,15 @@ export async function loadProject(root: string): Promise<ProjectConfig> {
     }
     const parsed = await readYaml(file, show, problems);
     if (parsed === undefined) continue;
-    const result = channelSchema.safeParse(parsed ?? {});
+    const yaml = parsed ?? {};
+    const { result, resolved } = resolvingEnv(env, () => channelSchema.safeParse(yaml));
     if (!result.success) {
-      problems.push(...describeIssues(show(file), result.error.issues));
+      problems.push(...describeIssues(show(file), result.error.issues, yaml, resolved));
       continue;
     }
     const channel = result.data;
+    const references = referencesIn(yaml, resolved, folder);
+    const channelEnv = byKey(references);
     if (channel.name !== undefined && channel.name !== folder) {
       problems.push(
         `${show(file)}: name: "${channel.name}" must match its folder name, "${folder}"`,
@@ -172,7 +203,9 @@ export async function loadProject(root: string): Promise<ProjectConfig> {
     const transform =
       channel.transform === undefined ? undefined : resolve(channelDir, channel.transform);
     if (transform !== undefined && !(await exists(transform))) {
-      problems.push(`${show(file)}: transform: ${show(transform)} does not exist`);
+      problems.push(
+        `${show(file)}: transform: ${absent(transform, "transform", channelEnv, show)}`,
+      );
       continue;
     }
     const channelSettings = mergeSettings(settings, channel);
@@ -196,7 +229,7 @@ export async function loadProject(root: string): Promise<ProjectConfig> {
       continue;
     }
     const channelHooks = (channel.hooks ?? []).map((hook) => resolveHook(hook, channelDir));
-    const absent = await missingModules(show(file), show, [
+    const missing = await missingModules(show(file), show, channelEnv, [
       ["source.module", source.kind === "module" ? source.module : undefined],
       ["source.mllp.ackBuilder", source.kind === "mllp" ? source.ackBuilder : undefined],
       ...destinations.map(
@@ -208,10 +241,11 @@ export async function loadProject(root: string): Promise<ProjectConfig> {
       ),
       ...hookModules(channelHooks),
     ]);
-    if (absent.length > 0) {
-      problems.push(...absent);
+    if (missing.length > 0) {
+      problems.push(...missing);
       continue;
     }
+    environment.push(...references);
     channels.push({
       name: folder,
       dir: channelDir,
@@ -240,7 +274,29 @@ export async function loadProject(root: string): Promise<ProjectConfig> {
     lease,
     encryption,
     channels,
+    environment,
   };
+}
+
+/** The variable each key was read from, by its dotted key. */
+function byKey(references: readonly EnvReference[]): ReadonlyMap<string, string> {
+  return new Map(references.map((reference) => [reference.key, reference.variable]));
+}
+
+/**
+ * What a problem says of a file that does not exist: its path, or, when the path was read from the
+ * environment, the variable that named it, since a problem never holds a value read from there.
+ */
+function absent(
+  file: string,
+  key: string,
+  fromEnv: ReadonlyMap<string, string>,
+  show: (file: string) => string,
+): string {
+  const variable = fromEnv.get(key) ?? fromEnv.get(`${key}.module`);
+  return variable === undefined
+    ? `${show(file)} does not exist`
+    : `the file the environment variable ${variable} names does not exist`;
 }
 
 /** Each module a list of hooks names, by its key. */
@@ -254,12 +310,13 @@ function hookModules(hooks: readonly HookConfig[]): (readonly [string, string | 
 async function missingModules(
   file: string,
   show: (file: string) => string,
+  fromEnv: ReadonlyMap<string, string>,
   modules: readonly (readonly [key: string, module: string | undefined])[],
 ): Promise<string[]> {
   const problems: string[] = [];
   for (const [key, module] of modules) {
     if (module !== undefined && !(await exists(module))) {
-      problems.push(`${file}: ${key}: ${show(module)} does not exist`);
+      problems.push(`${file}: ${key}: ${absent(module, key, fromEnv, show)}`);
     }
   }
   return problems;
@@ -320,15 +377,23 @@ function resolveStorage(
   root: string,
   databaseFile: string,
 ): StorageConfig {
-  const { postgres, mysql, sqlserver, module } = storage ?? {};
-  if (module !== undefined) {
-    return { kind: "module", module: resolve(root, module), options: storage?.options ?? {} };
+  // With no kind, the one block written; the schema lets exactly one through.
+  const kind =
+    storage?.kind ??
+    (["module", "postgres", "mysql", "sqlserver"] as const).find(
+      (block) => storage?.[block] !== undefined,
+    ) ??
+    "sqlite";
+  if (kind === "sqlite") return { kind: "sqlite", file: databaseFile };
+  if (kind === "module") {
+    return {
+      kind: "module",
+      // The schema refuses a kind whose block is not written.
+      module: resolve(root, storage?.module as string),
+      options: storage?.options ?? {},
+    };
   }
-  const server =
-    (postgres && { kind: "postgres" as const, ...postgres }) ??
-    (mysql && { kind: "mysql" as const, ...mysql }) ??
-    (sqlserver && { kind: "sqlserver" as const, ...sqlserver });
-  if (server === undefined) return { kind: "sqlite", file: databaseFile };
+  const server = { kind, ...(storage?.[kind] as NonNullable<StorageYaml[typeof kind]>) };
   return {
     kind: server.kind,
     urlEnv: server.url?.env ?? DEFAULT_DATABASE_URL_ENV,
@@ -587,13 +652,21 @@ async function readYaml(
   }
 }
 
+/**
+ * One line per issue: the file, the key, and what is wrong, with the variable the key was read from
+ * when it was. Never the value: Zod's own messages and ours hold none.
+ */
 function describeIssues(
   file: string,
   issues: ReadonlyArray<{ readonly path: readonly PropertyKey[]; readonly message: string }>,
+  yaml: unknown,
+  resolved: Parameters<typeof variableAt>[2],
 ): string[] {
   return issues.map((issue) => {
     const path = issue.path.map(String).join(".");
-    return `${file}: ${path === "" ? "" : `${path}: `}${issue.message}`;
+    const variable = variableAt(yaml, issue.path, resolved);
+    const from = variable === undefined ? "" : ` (read from the environment variable ${variable})`;
+    return `${file}: ${path === "" ? "" : `${path}: `}${issue.message}${from}`;
   });
 }
 
