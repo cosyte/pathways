@@ -482,6 +482,10 @@ describe("FileSource moving a swapped file back, on every system", () => {
     expect(await pass(source)).toEqual([]);
     expect(await pass(source)).toEqual([]);
     expect(await readdir(join(dir, CLAIMED_DIR, "adt"))).toHaveLength(1);
+    // A claim left by a run that stopped part way is still stored beside it.
+    await dropFile(join(dir, claims, "000001700000001.00000000.0000000a-y.hl7"), "unfinished");
+    expect(await pass(source)).toEqual(["unfinished"]);
+    expect(await readdir(join(dir, CLAIMED_DIR, "adt"))).toHaveLength(1);
     // A later run knows nothing of the refusal, and stores what waits in the claim folder.
     expect(await pass(recursiveSource(dir).source)).toEqual(["swapped"]);
   });
