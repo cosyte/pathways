@@ -2,6 +2,7 @@ import type { ModuleConnector, ModuleOptions } from "../config/schema.js";
 import type { AckBuilder } from "../connectors/ack.js";
 import type { DestinationConnector, SourceConnector } from "../connectors/types.js";
 import type { KeyProvider } from "../encryption/keys.js";
+import type { SecretProvider } from "../secrets/provider.js";
 import type { MessageStore } from "../storage/store.js";
 import { buildFromModule, loadDefaultFunction, methodsMissing, withTimeout } from "./load.js";
 import type { ChannelContext, ExtensionContext } from "./types.js";
@@ -45,6 +46,7 @@ const STORE_METHOD_LIST = {
   releaseLease: false,
   leaseHolder: false,
   markDeliveredAndDropContent: false,
+  markDryRun: false,
 } satisfies Record<keyof MessageStore, boolean>;
 
 const STORE_METHODS = Object.entries(STORE_METHOD_LIST)
@@ -176,6 +178,38 @@ export function customKeyProvider(
         ? undefined
         : `${what}: currentKeyId must be printable ASCII with no space, 1 to 255 characters`;
     },
+  );
+}
+
+/**
+ * Builds a secret provider from its module's default export, a `SecretProviderFactory`. It must
+ * return an object with `resolve`, and may have `stop`. The factory gets the provider's time limit,
+ * as each `resolve` does: a factory that waits on a login that never answers cannot hang the start.
+ *
+ * @throws {ExtensionLoadError} naming `where` when the module, its factory or what it returns is
+ *   wrong, or the factory runs past the time limit.
+ * @example
+ * ```ts
+ * const vault = await customSecretProvider(config, context, "pathways.yaml: secrets.vault.module");
+ * ```
+ */
+export function customSecretProvider(
+  config: {
+    readonly module: string;
+    readonly options: ModuleOptions;
+    readonly timeoutMs?: number | undefined;
+  },
+  context: ExtensionContext,
+  where: string,
+): Promise<SecretProvider> {
+  return buildFromModule<SecretProvider>(
+    config.module,
+    where,
+    "a secret provider factory",
+    config.options,
+    context,
+    (value) => methodsMissing(value, "a secret provider", ["resolve"], ["stop"]),
+    config.timeoutMs,
   );
 }
 

@@ -28,6 +28,7 @@ text or a source file's name. Commands whose standard output is their report (`s
 | `transform-failed`    | warn  | `channel`, `message`, `kind`, `name`, `code`, `where`                                  | the message is marked failed; `kind` is the stage                                                                               |
 | `delivered`           | info  | `channel`, `destination`, `delivery`, `resend`                                         | a destination accepted an output; `resend` only on a flagged resend                                                             |
 | `content-dropped`     | info  | `channel`, `message`, `delivery`                                                       | the last delivery was delivered, and the message's content dropped (`storage.content: dropAfterDelivery`)                       |
+| `dry-run`             | info  | `channel`, `destination`, `delivery`                                                   | a destination that runs dry recorded an output and sent nothing                                                                 |
 | `delivery-retry`      | warn  | `channel`, `destination`, `delivery`, `attempt`, `retryInMs`, `code`                   | it is tried again after `retryInMs`                                                                                             |
 | `delivery-redirected` | warn  | `channel`, `destination`, `delivery`, `attempt`, `retryInMs`, `status`, `locationHost` | an HTTP destination answered a 3xx; held, never followed, and tried again after `retryInMs` (`retry.max`, 5 minutes by default) |
 | `delivery-rejected`   | warn  | `channel`, `destination`, `delivery`, `reason`                                         | the destination rejected it for good                                                                                            |
@@ -38,37 +39,41 @@ A `transform-failed` line's `kind` is `load`, `parse`, `transform`, `output`, `t
 
 ### Sources and endpoints
 
-| Event                                                              | Meaning                                                                                 |
-| ------------------------------------------------------------------ | --------------------------------------------------------------------------------------- |
-| `source-start-failed`                                              | a source could not listen (`code`, such as `EADDRINUSE`); tried again after `retryInMs` |
-| `source-started`                                                   | a source that was down is listening again                                               |
-| `source-read-failed`                                               | a file source could not claim or read a file; it stays for the next pass                |
-| `http-refused`                                                     | an HTTP source or the health endpoint refused a request, with its `status`              |
-| `http-unreadable`                                                  | an HTTP source answering with ACKs stored a message as failed, with its `problem`       |
-| `mllp-listening`                                                   | an MLLP source is listening, on `port`, with `tls` true or false                        |
-| `mllp-store-failed`                                                | an MLLP message could not be stored; `onStoreFailure` says what was answered            |
-| `mllp-unreadable`                                                  | an MLLP message was stored as failed, with its `problem`                                |
-| `mllp-tls-refused`                                                 | a TLS handshake on an MLLP source failed, such as a client without a certificate        |
-| `mllp-ack-builder-failed`                                          | a custom ACK builder threw or ran out of time; the default ACK was sent                 |
-| `mllp-ack-unsendable`                                              | an ACK held an MLLP framing byte, so none was sent                                      |
-| `mllp-source-error`, `mllp-source-failed`, `mllp-security-warning` | the MLLP server reported an error or a warning, by name and code                        |
+| Event                                                              | Meaning                                                                                                                                         |
+| ------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `source-start-failed`                                              | a source could not listen (`code`, such as `EADDRINUSE`); tried again after `retryInMs`                                                         |
+| `source-started`                                                   | a source that was down is listening again                                                                                                       |
+| `source-read-failed`                                               | a file source could not claim or read a file; it stays for the next pass                                                                        |
+| `source-file-set-aside`                                            | a file source will not take a file, by `reason` (`too-large` or `unreadable`); `moved` says whether it went into `errorDir`, and `code` why not |
+| `http-refused`                                                     | an HTTP source or the health endpoint refused a request, with its `status`                                                                      |
+| `http-unreadable`                                                  | an HTTP source answering with ACKs stored a message as failed, with its `problem`                                                               |
+| `mllp-listening`                                                   | an MLLP source is listening, on `port`, with `tls` true or false                                                                                |
+| `mllp-store-failed`                                                | an MLLP message could not be stored; `onStoreFailure` says what was answered                                                                    |
+| `mllp-unreadable`                                                  | an MLLP message was stored as failed, with its `problem`                                                                                        |
+| `mllp-tls-refused`                                                 | a TLS handshake on an MLLP source failed, such as a client without a certificate                                                                |
+| `mllp-ack-builder-failed`                                          | a custom ACK builder threw or ran out of time; the default ACK was sent                                                                         |
+| `mllp-ack-unsendable`                                              | an ACK held an MLLP framing byte, so none was sent                                                                                              |
+| `mllp-source-error`, `mllp-source-failed`, `mllp-security-warning` | the MLLP server reported an error or a warning, by name and code                                                                                |
 
 ### Configuration and storage
 
-| Event                  | Meaning                                                                                        |
-| ---------------------- | ---------------------------------------------------------------------------------------------- |
-| `plaintext`            | an endpoint runs without TLS (`endpoint` says which); logged at every start                    |
-| `unauthenticated`      | a listening endpoint has neither a token nor `tls.ca`                                          |
-| `plaintext-copies`     | a file source keeps plaintext copies (`keepProcessed: true`)                                   |
-| `unencrypted-storage`  | `encryption: none`                                                                             |
-| `retention`            | a retention run, with the `messages` and `deliveries` it deleted                               |
-| `retention-failed`     | a retention run failed, by `code`; the next run tries again                                    |
-| `lease-acquired`       | the engine took the engine lease, with its `node` and `epoch`                                  |
-| `lease-lost`           | the engine lost its lease, with the `reason` and `epoch`; it stops and exits 1                 |
-| `lease-unsupported`    | a custom store has no lease methods: the engine runs unfenced, and a second one is not refused |
-| `lease-release-failed` | the lease could not be freed at a stop, by `code`; it lapses instead                           |
-| `standby`              | started as a standby, with its `node`                                                          |
-| `standby-waiting`      | a standby is waiting for the lease another engine holds (`holder`, `epoch`)                    |
+| Event                  | Meaning                                                                                                                                                                                |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `plaintext`            | an endpoint runs without TLS (`endpoint` says which); logged at every start                                                                                                            |
+| `unauthenticated`      | a listening endpoint has neither a token nor `tls.ca`                                                                                                                                  |
+| `plaintext-copies`     | a file source keeps plaintext copies (`keepProcessed: true`)                                                                                                                           |
+| `unencrypted-storage`  | `encryption: none`                                                                                                                                                                     |
+| `dry-run`              | `pathways start --dry-run`: every destination runs dry (`destinations` is `all`)                                                                                                       |
+| `dry-run-destinations` | at start, the destinations that run dry, by index under each channel's name (`channels`); a destination not named sends                                                                |
+| `dry-run-pending`      | a channel with a destination that runs dry (`destinations`, by index) has `pending` deliveries at start, of every destination; each of a dry destination is marked `dry-run`, not sent |
+| `retention`            | a retention run, with the `messages` and `deliveries` it deleted                                                                                                                       |
+| `retention-failed`     | a retention run failed, by `code`; the next run tries again                                                                                                                            |
+| `lease-acquired`       | the engine took the engine lease, with its `node` and `epoch`                                                                                                                          |
+| `lease-lost`           | the engine lost its lease, with the `reason` and `epoch`; it stops and exits 1                                                                                                         |
+| `lease-unsupported`    | a custom store has no lease methods: the engine runs unfenced, and a second one is not refused                                                                                         |
+| `lease-release-failed` | the lease could not be freed at a stop, by `code`; it lapses instead                                                                                                                   |
+| `standby`              | started as a standby, with its `node`                                                                                                                                                  |
+| `standby-waiting`      | a standby is waiting for the lease another engine holds (`holder`, `epoch`)                                                                                                            |
 
 ### Hooks and the audit log
 

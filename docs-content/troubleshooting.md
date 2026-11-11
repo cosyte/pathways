@@ -15,14 +15,14 @@ not start or stopped. [Logs, errors and codes](./logs-and-codes.md) lists every 
 
 ```text
 pathways: the configuration is invalid:
-  pathways.yaml: encryption: required to start the engine: set encryption: { keys: [{ id, env: NAME } or { id, file: path }], current: id } or { provider: { module: path } } to encrypt stored messages, or encryption: none to store them unencrypted
+  pathways.yaml: encryption: required to start the engine: set encryption: { keys: [{ id, env: NAME }, { id, file: path } or { id, secret: { provider, name } }], current: id } or { provider: { module: path } } to encrypt stored messages, or encryption: none to store them unencrypted
 ```
 
 `pathways.yaml` has no `encryption:`. Add your keys, as in
 [Encrypt stored messages](./encrypt-stored-messages.md). `pathways test` does not need them.
 
 ```text
-pathways.yaml: encryption.keys.0: the key prod-2026-11 is read from the environment variable PATHWAYS_KEY_2026_11, which is not set
+pathways.yaml: encryption.keys.0: the key prod-2026-11: the environment variable PATHWAYS_KEY_2026_11 is not set
 ```
 
 Every key in the list is read at start, the old ones too. Set the variable, or mount the file. A key
@@ -67,7 +67,11 @@ Docker image is built that way.
 - The source reads a file only once it has sat unchanged for `minAge` (1 second by default). `pathways
 start --once` run straight after copying a file in can find it too new; run it again, or use
   `pathways start`.
-- Hidden files (a name starting with a dot) and folders are never read.
+- Hidden files (a name starting with a dot) are left unless `ignoreDot: false`, and subfolders are
+  read only with `recursive: true`. An empty file is left unless `minSize: 0`.
+- `include`, `exclude`, `stable` and `doneFile` each hold a file back until it passes: see
+  [Choose which files a source takes](./read-and-write-files.md#choose-which-files-a-source-takes).
+- A file larger than `maxSize` is set aside, and the engine logs `source-file-set-aside`.
 - A file that cannot be opened or moved stays where it is, and the engine logs `source-read-failed`
   with the error's code: check the folder's permissions.
 - A file left in `.claimed/<channel>/` belongs to a run of that channel that stopped part way. The

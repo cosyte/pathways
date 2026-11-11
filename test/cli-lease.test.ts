@@ -376,11 +376,18 @@ export default () => ({
     const stopHolder = new AbortController();
     const stopStandby = new AbortController();
     const holder = runCli(["start", "-C", holderRoot], { signal: stopHolder.signal });
+    // The standby starts once the holder has the lease: a standby that found it free would take it,
+    // and the holder, started second, would be refused.
+    await until(() => holder.events.some((e) => e.event === "lease-acquired"), "the holder").catch(
+      (error: unknown) => {
+        stopHolder.abort();
+        throw error;
+      },
+    );
     const standby = runCli(["start", "--standby", "-C", standbyRoot], {
       signal: stopStandby.signal,
     });
     try {
-      await until(() => holder.events.some((e) => e.event === "lease-acquired"), "the holder");
       await until(() => standby.events.some((e) => e.event === "standby-waiting"), "the standby");
       expect(await health()).toMatchObject({
         status: 503,

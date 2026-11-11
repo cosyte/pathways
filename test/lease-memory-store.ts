@@ -114,6 +114,11 @@ export class LeasedMemoryStore extends MemoryStore {
     return super.markDelivered(deliveryId);
   }
 
+  override markDryRun(deliveryId: number, epoch?: number): Promise<void> {
+    fence(epoch);
+    return super.markDryRun(deliveryId);
+  }
+
   override scheduleRetry(
     deliveryId: number,
     attempts: number,

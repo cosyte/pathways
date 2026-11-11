@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { ConfigError, loadProject } from "../src/config/load.js";
-import { DEFAULT_SETTINGS } from "../src/config/schema.js";
+import { DEFAULT_SETTINGS, MAX_REGEX_LENGTH } from "../src/config/schema.js";
 import { cleanUp, makeProject } from "./helpers.js";
 
 afterEach(cleanUp);
@@ -45,13 +45,27 @@ describe("loadProject", () => {
           dir: join(root, "channels/adt/inbox"),
           minAgeMs: 1_000,
           keepProcessed: false,
+          include: [],
+          exclude: [],
+          recursive: false,
+          ignoreDot: true,
+          minSize: 1,
+          maxSize: undefined,
+          maxPerPoll: undefined,
+          sortBy: "name",
+          stable: false,
+          doneFile: undefined,
+          errorDir: undefined,
+          readTries: 3,
         },
         transform: undefined,
         destinations: [{ kind: "file", dir: join(root, "channels/adt/outbox") }],
         settings: DEFAULT_SETTINGS,
         hooks: [],
+        config: {},
       },
     ]);
+    expect(project.config).toEqual({});
   });
 
   it("applies engine defaults from pathways.yaml, then each channel's own", async () => {
@@ -102,6 +116,79 @@ defaults:
     expect(await problemsOf({ "channels/a/channel.yaml": channel("yes please") })).toEqual([
       expect.stringContaining("keepProcessed"),
     ]);
+  });
+
+  it("resolves every file source option, globs as { glob } and errorDir from the channel's folder", async () => {
+    const root = await makeProject({
+      "channels/a/channel.yaml": [
+        "source:",
+        "  file:",
+        "    dir: in",
+        "    include: ['**/*.hl7', { regex: '^ADT_' }]",
+        "    exclude: ['tmp/**']",
+        "    recursive: true",
+        "    ignoreDot: false",
+        "    minSize: 1KB",
+        "    maxSize: 10MB",
+        "    maxPerPoll: 50",
+        "    sortBy: mtime",
+        "    stable: true",
+        "    doneFile: .done",
+        "    errorDir: ../errors",
+        "    readTries: 5",
+        "destinations:",
+        "  - file: { dir: out }",
+        "",
+      ].join("\n"),
+    });
+    expect((await loadProject(root)).channels[0]?.source).toEqual({
+      kind: "file",
+      dir: join(root, "channels/a/in"),
+      minAgeMs: 1_000,
+      keepProcessed: false,
+      include: [{ glob: "**/*.hl7" }, { regex: "^ADT_" }],
+      exclude: [{ glob: "tmp/**" }],
+      recursive: true,
+      ignoreDot: false,
+      minSize: 1_024,
+      maxSize: 10_485_760,
+      maxPerPoll: 50,
+      sortBy: "mtime",
+      stable: true,
+      doneFile: ".done",
+      errorDir: join(root, "channels/errors"),
+      readTries: 5,
+    });
+  });
+
+  it("refuses a regex that is too long or does not compile, and a doneFile with a separator", async () => {
+    const channel = (option: string): string =>
+      `source:\n  file:\n    dir: in\n    ${option}\ndestinations:\n  - file: { dir: out }\n`;
+    const long = "a".repeat(MAX_REGEX_LENGTH + 1);
+    expect(
+      await problemsOf({ "channels/a/channel.yaml": channel(`include: [{ regex: '${long}' }]`) }),
+    ).toEqual([expect.stringContaining("include.0.regex")]);
+    const longest = "a".repeat(MAX_REGEX_LENGTH);
+    const root = await makeProject({
+      "channels/a/channel.yaml": channel(`exclude: [{ regex: '${longest}' }]`),
+    });
+    expect((await loadProject(root)).channels[0]?.source).toMatchObject({
+      exclude: [{ regex: longest }],
+    });
+    expect(
+      await problemsOf({ "channels/a/channel.yaml": channel("exclude: [{ regex: '(' }]") }),
+    ).toEqual([expect.stringContaining("a regular expression JavaScript compiles")]);
+    for (const option of [
+      "doneFile: a/b",
+      "doneFile: 'a\\b'",
+      "maxPerPoll: 0",
+      "readTries: 0",
+      "sortBy: size",
+      "include: '*.hl7'",
+      "minSize: -1",
+    ]) {
+      expect(await problemsOf({ "channels/a/channel.yaml": channel(option) })).toHaveLength(1);
+    }
   });
 
   it("accepts an empty pathways.yaml and a channel whose name matches its folder", async () => {
@@ -190,6 +277,7 @@ destinations:
       methods: ["POST"],
       response: { kind: "id" },
       maxBytes: 10 * 1_048_576,
+      contextHeaders: [],
       tls: {
         cert: join(root, "channels/adt/tls/server.crt"),
         key: join(root, "channels/adt/tls/server.key"),
@@ -360,7 +448,7 @@ destinations:
       "o source.http.response.headers.Content-Type: Pathways sets this header itself",
       "o source.http.response.headers.Date: Pathways sets this header itself",
       "o source.http.response.headers.Content-Length: Pathways sets this header itself",
-      "o source.http.response.headers.Set-Cookie: a credential never goes in the YAML; read it with { env: NAME }",
+      "o source.http.response.headers.Set-Cookie: a credential never goes in the YAML; read it with { env: NAME }, { file: path } or { secret: { provider, name } }",
       "o source.http.response.headers.x y: not a valid header name",
       "o source.http.response.headers.X-Bad: not a valid header value",
       "p source.http.response.body: Too big: expected string to have <=4096 characters",
@@ -438,13 +526,13 @@ destinations:
     });
     expect(problems).toHaveLength(7);
     expect(problems).toContain(
-      "channels/a/channel.yaml: destinations.0.http.url: credentials do not belong in the url; send them in headers, from { env: NAME }",
+      "channels/a/channel.yaml: destinations.0.http.url: credentials do not belong in the url; send them in headers, from { env: NAME }, { file: path } or { secret: { provider, name } }",
     );
     expect(problems).toContain(
-      "channels/a/channel.yaml: destinations.0.http.headers.Authorization: a credential never goes in the YAML; read it with { env: NAME }",
+      "channels/a/channel.yaml: destinations.0.http.headers.Authorization: a credential never goes in the YAML; read it with { env: NAME }, { file: path } or { secret: { provider, name } }",
     );
     expect(problems).toContain(
-      "channels/a/channel.yaml: destinations.0.http.headers.X-Api-Key: a credential never goes in the YAML; read it with { env: NAME }",
+      "channels/a/channel.yaml: destinations.0.http.headers.X-Api-Key: a credential never goes in the YAML; read it with { env: NAME }, { file: path } or { secret: { provider, name } }",
     );
     expect(problems).toContain(
       "channels/a/channel.yaml: destinations.0.http.headers.Content-Length: Pathways sets this header itself",
@@ -808,7 +896,7 @@ describe("loadProject: extensions", () => {
       "pathways.yaml: hooks.0: a module path, { module: path, options }, or { webhook: { url } }",
       "pathways.yaml: hooks.1: name exactly one of: module, webhook",
       "pathways.yaml: hooks.2.webhook.url: https:// is required; set plaintext: true to send without TLS",
-      "pathways.yaml: hooks.3.webhook.headers.Authorization: a credential never goes in the YAML; read it with { env: NAME }",
+      "pathways.yaml: hooks.3.webhook.headers.Authorization: a credential never goes in the YAML; read it with { env: NAME }, { file: path } or { secret: { provider, name } }",
       expect.stringMatching(/^pathways\.yaml: hooks\.4\.events\.1: /) as unknown,
       "pathways.yaml: hooks.5.events: at least one event",
       'pathways.yaml: hooks.6.timeout: a duration above zero, such as "5s"',
@@ -830,7 +918,7 @@ describe("loadProject: storage", () => {
     const root = await makeProject(withStorage("  postgres: { tls: {} }\n"));
     expect((await loadProject(root)).storage).toEqual({
       kind: "postgres",
-      urlEnv: "PATHWAYS_DATABASE_URL",
+      url: { env: "PATHWAYS_DATABASE_URL" },
       tls: { ca: undefined, cert: undefined, key: undefined },
       plaintext: false,
       pool: { max: 10, idleTimeoutMs: 30_000 },
@@ -849,7 +937,7 @@ describe("loadProject: storage", () => {
     );
     expect((await loadProject(root)).storage).toEqual({
       kind: "mysql",
-      urlEnv: "LAB_DATABASE_URL",
+      url: { env: "LAB_DATABASE_URL" },
       tls: {
         ca: join(root, "tls/db-ca.pem"),
         cert: join(root, "tls/client.crt"),
@@ -872,7 +960,7 @@ describe("loadProject: storage", () => {
       withStorage('  postgres:\n    url: "postgres://u:synthetic-pw@db/pathways"\n    tls: {}\n'),
     );
     expect(problems).toEqual([
-      "pathways.yaml: storage.postgres.url: a connection URL carries a password, so it never goes in the YAML; read it with { env: NAME }",
+      "pathways.yaml: storage.postgres.url: a connection URL carries a password, so it never goes in the YAML; read it with { env: NAME }, { file: path } or { secret: { provider, name } }",
     ]);
   });
 

@@ -40,6 +40,10 @@ health:
     bearer: { env: HEALTH_TOKEN }
 ```
 
+The token can also come from a file (`bearer: { file: path }`) or a secret store
+(`bearer: { secret: { provider, name } }`); see
+[Read secrets from files and secret stores](./read-secrets.md).
+
 A token is at least 16 characters of letters, digits and `-._~+/` (a base64 or hex string works);
 `openssl rand -base64 32` makes one. A missing or weak token stops the start. Pathways compares tokens
 in constant time and answers a wrong one with 401.

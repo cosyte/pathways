@@ -81,7 +81,14 @@ describe("MllpSource", () => {
 
     expect(order).toEqual(["storing", "stored", "acknowledged"]);
     expect(received).toEqual([
-      { body: ADT_A01, options: { duplicateKey: "SYNTH|TESTFAC\u0000MSG00001" } },
+      {
+        body: ADT_A01,
+        options: {
+          duplicateKey: "SYNTH|TESTFAC\u0000MSG00001",
+          // Over plain TCP there is no certificate, so no TLS peer.
+          source: { remoteAddress: "127.0.0.1" },
+        },
+      },
     ]);
     const [ack = ""] = replies;
     expect(msaOf(ack)).toEqual(["AA", "MSG00001"]);
@@ -331,6 +338,8 @@ describe.skipIf(!OPENSSL)(`MllpSource ${TLS_TESTS}`, () => {
     const { replies } = await exchange(port, [ADT_A01], { replies: 1, tls: { ca: certs.ca } });
     expect(msaOf(replies[0] ?? "")).toEqual(["AA", "MSG00001"]);
     expect(received).toHaveLength(1);
+    // No ca, so no client certificate is asked for, and the transform is told of no TLS peer.
+    expect(received[0]?.options?.source).toEqual({ remoteAddress: "127.0.0.1" });
     expect(events).toContainEqual(expect.objectContaining({ event: "mllp-listening", tls: true }));
   });
 
@@ -345,6 +354,11 @@ describe.skipIf(!OPENSSL)(`MllpSource ${TLS_TESTS}`, () => {
       tls: { ca: certs.ca, cert: certs.clientCert, key: certs.clientKey },
     });
     expect(msaOf(accepted.replies[0] ?? "")).toEqual(["AA", "MSG00001"]);
+    // The transform reads the common name of the certificate the client presented.
+    expect(received[0]?.options?.source).toEqual({
+      remoteAddress: "127.0.0.1",
+      tlsPeerSubject: "localhost",
+    });
 
     const without = await exchange(port, [MSG(2)], { replies: 1, tls: { ca: certs.ca } });
     expect(without).toEqual({ replies: [], closed: true });

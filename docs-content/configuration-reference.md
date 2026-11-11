@@ -14,9 +14,9 @@ A project is configured by two kinds of YAML file, each checked in full before a
 
 Unknown keys are refused. Relative paths are resolved against the file that holds them: the project
 root for `pathways.yaml`, the channel's folder for `channel.yaml`. Secrets (tokens, credential
-headers, connection URLs, master keys) are never values in the YAML: each is named as `{ env: NAME }`
-or a file, and read when a command starts. Any other setting may be written as a value or read from
-the environment: see [Settings from the environment](#settings-from-the-environment).
+headers, connection URLs, master keys) are never values in the YAML: each is a
+[secret reference](#secrets), read when a command starts. Any other setting may be written as a
+value or read from the environment: see [Settings from the environment](#settings-from-the-environment).
 
 **JSON Schemas.** The package ships a JSON Schema (draft-07) of each file, for editors and other
 tools: `@cosyte/pathways/schema/project.json` for `pathways.yaml` and
@@ -28,7 +28,9 @@ See [Check configuration in an editor and in CI](./check-configuration.md).
 **Value types.** A _duration_ is a whole number of milliseconds, or a string such as `500ms`, `5s`,
 `2m`, `1h` or `30d`. A _memory size_ is a whole number of megabytes, or a string such as `256MB`. A
 _byte size_ is a whole number of bytes, or a string such as `512B`, `64KB` or `10MB` (1 KB is 1,024
-bytes). An _env reference_ is `{ env: NAME }`, a variable name of letters, digits and underscores.
+bytes). A _secret reference_ is `{ env: NAME }` (a variable name of letters, digits and
+underscores), `{ file: path }`, or `{ secret: { provider, name, field, version } }`; see
+[Secrets](#secrets).
 
 ## Settings from the environment
 
@@ -66,10 +68,12 @@ health:
   there is no `PATHWAYS_*` prefix scan and no `${VAR}` text substitution, so the YAML stays the one
   place a setting is named.
 - Secrets keep their own meaning of `{ env: NAME }`: a token, a credential header, a connection URL
-  or a master key stays a reference, read when a command starts and never printed. `plaintext`,
+  or a master key is a [secret reference](#secrets), read when a command starts and never printed,
+  and it takes no `default`. `plaintext`,
   `encryption: none`, `auth: none`, a channel's `name` and `format`, and a block (`tls`, `options`)
   are not read from the environment: turning TLS, encryption or authentication off stays in the
-  file, where the audit sees it.
+  file, where the audit sees it. Nor are the names in an HTTP source's `contextHeaders`: which
+  request headers reach a transform stays in the file, where a credential header is refused at load.
 - `pathways validate --print` prints the configuration as `start` reads it, with every setting the
   environment gave and the variable it named; see
   [Command reference](./command-reference.md#pathways-validate). The query string of a URL read
@@ -79,27 +83,29 @@ health:
 
 ## pathways.yaml
 
-| Key          | Type                                    | Default                         |
-| ------------ | --------------------------------------- | ------------------------------- |
-| `encryption` | see [Encryption](#encryption)           | none: `start` refuses           |
-| `storage`    | see [Storage](#storage)                 | SQLite, `.pathways/pathways.db` |
-| `defaults`   | see [Settings](#settings)               | the defaults below              |
-| `hooks`      | a list of [hooks](#hooks)               | none                            |
-| `health`     | see [Health endpoint](#health-endpoint) | no health endpoint              |
-| `probes`     | see [Probe listener](#probe-listener)   | no probe listener               |
-| `lease`      | see [Engine lease](#engine-lease)       | a 15s lease, no standby         |
-| `migrations` | see [Migrations](#migrations)           | no rollback window              |
+| Key          | Type                                                    | Default                         |
+| ------------ | ------------------------------------------------------- | ------------------------------- |
+| `encryption` | see [Encryption](#encryption)                           | none: `start` refuses           |
+| `secrets`    | see [Secrets](#secrets)                                 | `env` and `file` only           |
+| `storage`    | see [Storage](#storage)                                 | SQLite, `.pathways/pathways.db` |
+| `defaults`   | see [Settings](#settings)                               | the defaults below              |
+| `hooks`      | a list of [hooks](#hooks)                               | none                            |
+| `health`     | see [Health endpoint](#health-endpoint)                 | no health endpoint              |
+| `probes`     | see [Probe listener](#probe-listener)                   | no probe listener               |
+| `lease`      | see [Engine lease](#engine-lease)                       | a 15s lease, no standby         |
+| `migrations` | see [Migrations](#migrations)                           | no rollback window              |
+| `config`     | see [Transform configuration](#transform-configuration) | none                            |
 
 ### Encryption
 
 One of three forms. `pathways start` and every command that reads stored messages need it; `pathways
 test` does not.
 
-| Form                                | Meaning                                                                                                      |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `none`                              | store messages unencrypted; logged at every start                                                            |
-| `{ keys: [...], current: id }`      | master keys, each `{ id, env: NAME }` or `{ id, file: path }`; `current` names the one that wraps new values |
-| `{ provider: { module, options } }` | a module whose default export builds a `KeyProvider`                                                         |
+| Form                                | Meaning                                                                                                                                                              |
+| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `none`                              | store messages unencrypted; logged at every start                                                                                                                    |
+| `{ keys: [...], current: id }`      | master keys, each `id` with a secret reference (`{ id, env: NAME }`, `{ id, file: path }` or `{ id, secret: {...} }`); `current` names the one that wraps new values |
+| `{ provider: { module, options } }` | a module whose default export builds a `KeyProvider`                                                                                                                 |
 
 A key's `id` is 1 to 64 letters, digits, dots, hyphens and underscores, starting with a letter or
 digit, and unique in the list. A key's value is 32 bytes in base64. See
@@ -144,7 +150,7 @@ store without it, `pathways start` refuses that channel.
 
 | Key                | Type               | Default                          |
 | ------------------ | ------------------ | -------------------------------- |
-| `url`              | env reference      | `{ env: PATHWAYS_DATABASE_URL }` |
+| `url`              | secret reference   | `{ env: PATHWAYS_DATABASE_URL }` |
 | `tls`              | [client TLS](#tls) | required unless `plaintext`      |
 | `plaintext`        | boolean            | `false`                          |
 | `pool.max`         | 1 to 1,000         | `10`                             |
@@ -253,6 +259,16 @@ How `pathways migrate --contract` treats contract steps. See
 | ---------------- | -------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------- |
 | `rollbackWindow` | duration | `0`     | how long after the schema last changed contract steps are refused, so the version before can still be started again; `0` refuses none |
 
+### Transform configuration
+
+What every channel's transform reads as `ctx.config`: a mapping of names to any YAML value (a
+string, a finite number, a boolean, null, a list or a mapping). A mapping with the key `env`,
+`{ env: NAME }` or `{ env: NAME, default: value }`, is read from that environment variable when the
+engine starts, never when the configuration loads; a variable that is not set, or is empty, takes the
+`default`, one value that is not a list or a mapping, and with none stops the start with its name,
+never a value. A channel's own `config` replaces this one key
+by key. See [Use the message context](./use-the-message-context.md).
+
 ## channel.yaml
 
 | Key                                                              | Type                                                    | Default                          |
@@ -264,6 +280,7 @@ How `pathways migrate --contract` treats contract steps. See
 | `destinations`                                                   | a list of at least one [destination](#destinations)     | required                         |
 | `hooks`                                                          | a list of [hooks](#hooks)                               | none                             |
 | `storage`                                                        | `{ content: keep }` or `{ content: dropAfterDelivery }` | the project's `storage.content`  |
+| `config`                                                         | see [Transform configuration](#transform-configuration) | the project's, key by key        |
 | `timeout`, `memory`, `onStoreFailure`, `ackTimeout`, `retention` | see [Settings](#settings)                               | the project's                    |
 | `resendFlag`, `retry`                                            | see [Settings](#settings)                               | the project's                    |
 
@@ -275,29 +292,61 @@ Exactly one of `file`, `http`, `mllp` or `module`.
 
 #### File source
 
-| Key             | Type     | Default  | Meaning                                                        |
-| --------------- | -------- | -------- | -------------------------------------------------------------- |
-| `dir`           | path     | required | the folder to read; created if missing                         |
-| `minAge`        | duration | `1s`     | how long a file must sit unchanged before it is read           |
-| `keepProcessed` | boolean  | `false`  | move each stored file into `processed/` instead of deleting it |
+| Key             | Type                           | Default    | Meaning                                                              |
+| --------------- | ------------------------------ | ---------- | -------------------------------------------------------------------- |
+| `dir`           | path                           | required   | the folder to read; created if missing                               |
+| `minAge`        | duration                       | `1s`       | how long a file must sit unchanged before it is read                 |
+| `keepProcessed` | boolean                        | `false`    | move each stored file into `processed/` instead of deleting it       |
+| `include`       | a list of globs or `{ regex }` | every file | take only a file whose path from `dir` matches one                   |
+| `exclude`       | a list of globs or `{ regex }` | none       | leave a file whose path from `dir` matches one                       |
+| `recursive`     | boolean                        | `false`    | read the subfolders too, never `.claimed`, `processed` or `errorDir` |
+| `ignoreDot`     | boolean                        | `true`     | leave files and folders whose name starts with a dot                 |
+| `minSize`       | byte size, or `0`              | `1B`       | leave a smaller file; by default an empty file is left               |
+| `maxSize`       | byte size                      | no limit   | set a larger file aside: into `errorDir`, or left where it is        |
+| `maxPerPoll`    | a whole number, 1 or more      | no limit   | the most files claimed in one pass                                   |
+| `sortBy`        | `name` or `mtime`              | `name`     | the order files are taken in                                         |
+| `stable`        | boolean                        | `false`    | take a file only once two passes in a row find it unchanged          |
+| `doneFile`      | a suffix, such as `.done`      | none       | take a file only once its marker is there, then delete the marker    |
+| `errorDir`      | path                           | none       | where a file set aside goes, under its path from `dir`               |
+| `readTries`     | a whole number, 1 or more      | `3`        | passes in a row a file fails to open before it goes into `errorDir`  |
+
+A path from `dir` is written with `/` on every system. A glob is read as Node.js's
+`path.matchesGlob` reads it, and its `*` never matches a leading dot. A `regex` is at most 256
+characters. Each pattern runs on names whoever writes the files chooses, and can take minutes on a
+name built for it: a regex with nested repeats, such as `^(a+)+$`, and a glob with several `*` in
+one segment, such as `*_*_*_*_*.hl7`, which Node.js turns into as many repeats. So each run of a
+glob or a regex on a path stops after 50 ms: that file is left where it is this pass, taken by
+neither `include` nor `exclude`, and the engine logs `source-read-failed` with the code
+`ERR_SCRIPT_EXECUTION_TIMEOUT`. The 50 ms are time on the clock, not work done, so a pause of a busy
+host can stop a harmless run too: the path is tried again on the next pass, and taken once a run
+finishes. After three timeouts in a row on one path it is set aside, and tried again after 1 pass,
+then 2, 4 and so on up to 64, each timeout logged again, for as long as the file stays. Write a
+regex with no repeat inside a repeated group, and a glob with few `*` in a segment.
+`errorDir` is compared with `dir`'s subfolders after symbolic links are resolved.
+[Choose which files a source takes](./read-and-write-files.md#choose-which-files-a-source-takes)
+shows each in use.
 
 #### HTTP source
 
 A [listener](#listener), and:
 
-| Key        | Type                                               | Default         |
-| ---------- | -------------------------------------------------- | --------------- |
-| `path`     | starting with `/`                                  | `/`             |
-| `paths`    | a list of paths, in place of `path`                | `[path]`        |
-| `methods`  | a list of `POST` and `PUT`                         | `[POST]`        |
-| `response` | `ack`, or `{ status, contentType, headers, body }` | 202 with the id |
-| `maxBytes` | byte size                                          | `10MB`          |
+| Key              | Type                                               | Default         |
+| ---------------- | -------------------------------------------------- | --------------- |
+| `path`           | starting with `/`                                  | `/`             |
+| `paths`          | a list of paths, in place of `path`                | `[path]`        |
+| `methods`        | a list of `POST` and `PUT`                         | `[POST]`        |
+| `response`       | `ack`, or `{ status, contentType, headers, body }` | 202 with the id |
+| `maxBytes`       | byte size                                          | `10MB`          |
+| `contextHeaders` | a list of header names                             | none            |
 
 Its token is read from `PATHWAYS_HTTP_TOKEN` when `auth` is not set. `response: ack` needs the format
 `hl7v2` and takes POST alone. A fixed `response` has a 2xx `status`, an optional `contentType`,
 `headers` by the [HTTP destination](#http-destination)'s rules, and a `body` of at most 4,096
 characters. See [Send and receive over HTTP](./send-and-receive-http.md#answer-with-an-hl7-ack) for
-how a path is matched and how each response answers.
+how a path is matched and how each response answers. `contextHeaders` names the request headers the
+transform reads in `ctx.source.headers`; `Authorization`, `Proxy-Authorization` and `Cookie` are
+refused there, and never passed. Any other header listed is passed as it came, a credential such as
+an API key header included.
 
 #### MLLP source
 
@@ -317,7 +366,7 @@ how a path is matched and how each response answers.
 ### Destinations
 
 Each entry is exactly one of `file`, `http`, `mllp` or `module`, and may add a [`retry`](#retry)
-block of its own, beside that key:
+block of its own and `dryRun`, beside that key:
 
 ```yaml title="channels/results-out/channel.yaml"
 source:
@@ -327,23 +376,31 @@ destinations:
     retry: { limit: 10, jitter: full }
 ```
 
+| Key      | Type    | Default | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| -------- | ------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dryRun` | boolean | `false` | transform and record each output, mark its delivery `dry-run`, and never send it: no connector is built, so no TLS file is read and no connection opened, and none of its secrets is read or resolved at start, a provider's (`secret:`) included, so a missing or expired one does not stop the start. Takes an environment reference. When `dryRun` is read from an environment variable, setting that variable to `false` makes the destination send for real, and the audit log does not record that change |
+
+`pathways start --dry-run` runs every destination dry. Turning dry run on marks every pending delivery
+of that destination `dry-run`, including those queued or waiting for a retry before. See
+[Upgrade Pathways](./upgrade-pathways.md#watch-a-destination-before-it-sends).
+
 #### File destination
 
 `file: { dir: path }`: the folder to write into, created if missing.
 
 #### HTTP destination
 
-| Key            | Type                                               | Default                  |
-| -------------- | -------------------------------------------------- | ------------------------ |
-| `url`          | an `https://` URL, or `http://` with `plaintext`   | required                 |
-| `headers`      | a mapping of names to a string or an env reference | none                     |
-| `tls`          | [client TLS](#tls)                                 | Node.js's built-in roots |
-| `plaintext`    | boolean, only with an `http://` URL                | `false`                  |
-| `timeout`      | duration                                           | `30s`                    |
-| `resendHeader` | a header name                                      | none                     |
+| Key            | Type                                                 | Default                  |
+| -------------- | ---------------------------------------------------- | ------------------------ |
+| `url`          | an `https://` URL, or `http://` with `plaintext`     | required                 |
+| `headers`      | a mapping of names to a string or a secret reference | none                     |
+| `tls`          | [client TLS](#tls)                                   | Node.js's built-in roots |
+| `plaintext`    | boolean, only with an `http://` URL                  | `false`                  |
+| `timeout`      | duration                                             | `30s`                    |
+| `resendHeader` | a header name                                        | none                     |
 
 The URL may not hold a user name or password. A header whose name holds `auth`, `cookie`, `token`,
-`secret`, `password`, `key`, `signature` or `credential` must be an env reference. `Content-Length`,
+`secret`, `password`, `key`, `signature` or `credential` must be a secret reference. `Content-Length`,
 `Transfer-Encoding`, `Connection` and `Keep-Alive` are set by Pathways and may not be given.
 `Content-Type` defaults by format.
 
@@ -378,13 +435,13 @@ answer after it, and is retried when none comes within `timeout` or the connecti
 
 What the HTTP source and the health endpoint take:
 
-| Key         | Type                                   | Default                                                                             |
-| ----------- | -------------------------------------- | ----------------------------------------------------------------------------------- |
-| `port`      | 1 to 65,535                            | required                                                                            |
-| `host`      | an address                             | `127.0.0.1`                                                                         |
-| `tls`       | [server TLS](#tls)                     | required unless `plaintext`                                                         |
-| `plaintext` | boolean                                | `false`                                                                             |
-| `auth`      | `none`, or `{ bearer: { env: NAME } }` | mutual TLS when `tls.ca` is set, otherwise a bearer token from the default variable |
+| Key         | Type                                        | Default                                                                             |
+| ----------- | ------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `port`      | 1 to 65,535                                 | required                                                                            |
+| `host`      | an address                                  | `127.0.0.1`                                                                         |
+| `tls`       | [server TLS](#tls)                          | required unless `plaintext`                                                         |
+| `plaintext` | boolean                                     | `false`                                                                             |
+| `auth`      | `none`, or `{ bearer: <secret reference> }` | mutual TLS when `tls.ca` is set, otherwise a bearer token from the default variable |
 
 ### TLS
 
@@ -394,6 +451,35 @@ What the HTTP source and the health endpoint take:
 | client TLS | `ca` to trust in place of Node.js's built-in roots; `cert` and `key`, together, to present a client certificate |
 
 `tls` and `plaintext: true` cannot both be set.
+
+### Secrets
+
+A secret reference names where a secret is read when a command starts. It is one of:
+
+| Form                                             | Read from                                                                                             |
+| ------------------------------------------------ | ----------------------------------------------------------------------------------------------------- |
+| `{ env: NAME }`                                  | the environment variable `NAME`; unset and empty are the same                                         |
+| `{ file: path }`                                 | the file, relative to the YAML file that names it, with one line break at its end dropped             |
+| `{ secret: { provider, name, field, version } }` | the provider `provider`: `env`, `file`, or one named under `secrets:`; `field` and `version` optional |
+
+`field` takes one field of a secret that holds a JSON object, or of a store's structured secret.
+`version` asks for a version the provider keeps; `env` and `file` keep none. `{ env: NAME }` is the
+same as `{ secret: { provider: env, name: NAME } }`, and `{ file: path }` as the `file` provider's.
+
+`secrets:` in `pathways.yaml` names the other providers, by the name a reference gives:
+
+| Key       | Type                                                              | Default |
+| --------- | ----------------------------------------------------------------- | ------- |
+| `module`  | a module whose default export builds a `SecretProvider`, required |         |
+| `options` | a mapping, handed to the module's factory                         | `{}`    |
+| `timeout` | duration: how long resolving one secret may take                  | `10s`   |
+
+A provider's name is a letter, then letters, digits, hyphens and underscores, at most 64; `env` and
+`file` are taken. A reference to a provider that is not named is refused at load, and `pathways
+validate` checks that each module exists without loading it. At start, each provider a reference
+names is built, asked once for each secret, then stopped. A secret it cannot answer, answers late or
+answers expired stops the start, named by its file and key, its name, and the error's name and code;
+never a value. See [Read secrets from files and secret stores](./read-secrets.md).
 
 ## Related
 

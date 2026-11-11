@@ -1,10 +1,11 @@
 // The interfaces an extension is written against: a source or destination connector's factory, a
-// lifecycle hook's factory and a storage adapter's factory. Types only: the package entry exports
-// them, so this module imports nothing at runtime.
+// lifecycle hook's factory, a storage adapter's factory and a secret provider's factory. Types
+// only: the package entry exports them, so this module imports nothing at runtime.
 
 import type { Format } from "../config/schema.js";
 import type { DestinationConnector, SourceConnector } from "../connectors/types.js";
 import type { KeyProvider } from "../encryption/keys.js";
+import type { SecretProvider } from "../secrets/provider.js";
 import type { MessageStore } from "../storage/store.js";
 import type { LifecycleEvent } from "./events.js";
 
@@ -271,3 +272,33 @@ export type KeyProviderFactory<Options = ExtensionOptions> = (
   options: Options,
   context: ExtensionContext,
 ) => KeyProvider | Promise<KeyProvider>;
+
+/**
+ * Builds a secret provider: a module's default export, named in `pathways.yaml` as
+ * `secrets: { vault: { module: ./vault.ts, options: {...} } }`. It returns a `SecretProvider` (or a
+ * promise of one) that `{ secret: { provider: vault, name } }` references are resolved through. It
+ * is built when the engine (or a command that opens the store) starts, asked for each secret, and
+ * stopped. Building it gets the provider's `timeout`, as each request does: a factory still waiting
+ * then fails the start. Its own credentials come from `context.env`, or from a file its options name.
+ *
+ * @example
+ * ```ts
+ * // vault.ts
+ * import type { SecretProviderFactory } from "@cosyte/pathways";
+ *
+ * export default (async (options, context) => {
+ *   const client = await connectStore(options.address, context.env["STORE_ROLE_TOKEN"]);
+ *   return {
+ *     resolve: async (ref, signal) => {
+ *       const found = await client.read(ref.name, { field: ref.field, version: ref.version, signal });
+ *       return { value: found.value, version: found.version };
+ *     },
+ *     stop: () => client.close(),
+ *   };
+ * }) satisfies SecretProviderFactory<{ address: string }>;
+ * ```
+ */
+export type SecretProviderFactory<Options = ExtensionOptions> = (
+  options: Options,
+  context: ExtensionContext,
+) => SecretProvider | Promise<SecretProvider>;

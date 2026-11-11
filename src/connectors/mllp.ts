@@ -126,7 +126,12 @@ interface ConnectionState {
   tail: Promise<void>;
   /** Set once this source closes the connection: nothing queued behind is stored or answered. */
   closed: boolean;
+  /** What the transform reads in `ctx.source` about each message on this connection. */
+  readonly facts: Readonly<Record<string, string>>;
 }
+
+/** The most TLS peers a source remembers for connections that have sent nothing yet. */
+const MAX_WAITING_PEERS = 1_024;
 
 /**
  * Listens for HL7 v2 messages over MLLP, over TLS when it is given TLS material. Each message is
@@ -155,6 +160,11 @@ export class MllpSource implements SourceConnector {
   private server: MllpServer | undefined;
   private readonly states = new WeakMap<Connection, ConnectionState>();
   private readonly pending = new Set<Promise<void>>();
+  /**
+   * The common name in each TLS client certificate, by connection id, from the moment the
+   * connection opens until its first message: the connection's state takes it from there.
+   */
+  private readonly peers = new Map<string, string>();
   private stopping = false;
 
   /** @param options Where to listen, TLS, and how to answer. */
@@ -194,6 +204,18 @@ export class MllpSource implements SourceConnector {
     server.on("tlsClientError", (event: { readonly code: string | null }) => {
       this.report("warn", "mllp-tls-refused", { code: event.code });
     });
+    server.on(
+      "connection",
+      (event: {
+        readonly connectionId: string;
+        readonly peerCertificate: { readonly subjectCN: string | null } | null;
+      }) => {
+        const subject = event.peerCertificate?.subjectCN;
+        if (typeof subject !== "string") return;
+        // A connection that never sends a message would leave its entry, so the map is bounded.
+        rememberPeer(this.peers, event.connectionId, subject, MAX_WAITING_PEERS);
+      },
+    );
     server.on("securityWarning", (warning: { readonly code: string }) => {
       this.report("warn", "mllp-security-warning", { code: warning.code });
     });
@@ -210,6 +232,7 @@ export class MllpSource implements SourceConnector {
    */
   async stop(): Promise<void> {
     this.stopping = true;
+    this.peers.clear();
     await Promise.all(this.pending);
     const server = this.server;
     this.server = undefined;
@@ -220,7 +243,18 @@ export class MllpSource implements SourceConnector {
     if (this.stopping) return;
     let state = this.states.get(conn);
     if (state === undefined) {
-      state = { tail: Promise.resolve(), closed: false };
+      const { remoteAddress } = conn.getStats();
+      const subject = this.peers.get(meta.connectionId);
+      this.peers.delete(meta.connectionId);
+      state = {
+        tail: Promise.resolve(),
+        closed: false,
+        facts: {
+          /* v8 ignore next: a connection that delivered a message has the address it came from */
+          ...(remoteAddress === null ? {} : { remoteAddress }),
+          ...(subject === undefined ? {} : { tlsPeerSubject: subject }),
+        },
+      };
       this.states.set(conn, state);
     }
     const current = state;
@@ -250,7 +284,7 @@ export class MllpSource implements SourceConnector {
         messageId = await sink.receive(
           payload,
           problem === undefined
-            ? { duplicateKey: reading.duplicateKey }
+            ? { duplicateKey: reading.duplicateKey, source: state.facts }
             : { failure: `inbound: ${problem}` },
         );
       } catch (error) {
@@ -317,6 +351,41 @@ export class MllpSource implements SourceConnector {
   ): void {
     this.options.onEvent?.({ ...fields, level, event });
   }
+}
+
+/**
+ * Sets the certificate name of connection `id` in `peers`, so the map never holds more than `max`.
+ * When it is full, the oldest entry of the name that holds the most entries goes, the newcomer's own
+ * name first on a tie, so a peer that opens many idle connections pushes out only its own entries,
+ * never another peer's. When every name holds one entry, the newcomer is not remembered.
+ *
+ * @example
+ * ```ts
+ * const peers = new Map([["1", "lab"], ["2", "lab"], ["3", "ehr"]]);
+ * rememberPeer(peers, "4", "lab", 3); // drops "1": peers is now { 2: lab, 3: ehr, 4: lab }
+ * ```
+ */
+export function rememberPeer(
+  peers: Map<string, string>,
+  id: string,
+  subject: string,
+  max: number,
+): void {
+  while (peers.size >= max) {
+    const counts = new Map<string, number>([[subject, 1]]);
+    for (const name of peers.values()) counts.set(name, (counts.get(name) ?? 0) + 1);
+    // Counting the newcomer, so on a tie its own name gives way first.
+    let most = subject;
+    for (const [name, count] of counts) if (count > (counts.get(most) ?? 0)) most = name;
+    // Every name holds one and the newcomer's none yet: it is not remembered, and pushes out none.
+    if (most === subject && counts.get(subject) === 1) return;
+    for (const [key, name] of peers) {
+      if (name !== most) continue;
+      peers.delete(key);
+      break;
+    }
+  }
+  peers.set(id, subject);
 }
 
 function close(conn: Connection, state: ConnectionState): void {
