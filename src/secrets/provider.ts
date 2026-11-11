@@ -37,6 +37,12 @@ export interface ResolvedSecret {
   readonly version: string;
   /** When the value stops being good, for a lease or a short-lived credential. */
   readonly expiresAt?: Date | undefined;
+  /**
+   * Who read it, when the provider can tell: the cloud principal its call ran as, such as a role's
+   * ARN, a managed identity's id or a service account's email. Never secret. `pathways secrets
+   * check` prints it, when it is printable ASCII with no space, 1 to 256 characters.
+   */
+  readonly identity?: string | undefined;
 }
 
 /**

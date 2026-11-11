@@ -59,6 +59,7 @@ import {
 import { recordConfigChanges } from "./operator/config-audit.js";
 import { verifyCommand, type VerifySelection } from "./operator/verify.js";
 import { InitError, initProject, STARTER_CHANNEL, STARTER_KEY_FILE } from "./starter/init.js";
+import { checkSecrets, formatSecretCheck } from "./secrets/check.js";
 import { resolveSecrets, type Secrets } from "./secrets/resolve.js";
 import type { DrySkip, SecretScope } from "./secrets/sources.js";
 import { openRawStore, openStore, startingKeys, type OpenStoreContext } from "./storage/open.js";
@@ -127,6 +128,11 @@ Commands:
                       secret or opening a connection: for a project's CI.
                       Settings written as { env: NAME } are read as start
                       reads them
+  secrets check       Resolve every secret a start reads, and wrap and unwrap
+                      a throwaway key with the key provider: prints each
+                      secret's provider, name, version, identity and expiry,
+                      never a value. Exits 0 when all resolve, 1 when any
+                      does not: a pre-deploy step
   status [name...]    Each channel's counts, retrying deliveries and failed
                       messages, read from the database
   messages            List stored messages, newest first: ids, states, times,
@@ -182,7 +188,8 @@ Options:
                         as JSON, with each setting read from the environment
                         and the variable it named; secrets stay references
       --json            status, messages, replay, clear, retention, audit,
-                        lease, migrate, verify: print one JSON document
+                        lease, migrate, verify, secrets check: print one JSON
+                        document
                         instead of text
       --channel <name>  messages, audit, verify: only this channel
       --status <state>  messages: only this state: received, queued, retrying,
@@ -225,8 +232,8 @@ project, rekey left a value not under the current key, a replay, resend or
 clear was refused or the message failed again, another engine holds the lease,
 the engine lost its lease, there was no lease to release, the database schema
 is one this version will not run on or migrate, verify found a difference or a
-failure, or probe found the engine not alive or not ready (probe exits only 0
-or 1); 2 the command line was not
+failure, a secret or the key provider failed secrets check, or probe found the
+engine not alive or not ready (probe exits only 0 or 1); 2 the command line was not
 understood; 3 the configuration is invalid; 4 a message named does not exist.
 `;
 
@@ -245,6 +252,7 @@ const OPTIONS: Readonly<Record<string, readonly OptionName[]>> = {
   start: ["once", "standby", "no-migrate", "dry-run"],
   test: ["update"],
   validate: ["print"],
+  secrets: ["json"],
   status: ["json"],
   messages: ["json", "channel", "status", "since", "until", "limit", "before", "content"],
   replay: ["json", "resend"],
@@ -322,6 +330,9 @@ export async function run(argv: readonly string[], io: CliIo): Promise<number> {
     case "validate":
       if (rest.length > 0) return usage(io);
       return validate(projectDir, values.print === true, io);
+    case "secrets":
+      if (rest.length !== 1 || rest[0] !== "check") return usage(io);
+      return secretsCheck(projectDir, values.json === true, io);
     case "rekey":
       if (rest.length > 0) return usage(io);
       return rekeyStore(projectDir, values["encrypt-plaintext"] === true, io);
@@ -941,6 +952,26 @@ async function validate(projectDir: string, print: boolean, io: CliIo): Promise<
     `pathways: the configuration is valid: ${names.length} channel${names.length === 1 ? "" : "s"} (${names.join(", ")}).\n`,
   );
   return EXIT.ok;
+}
+
+/**
+ * `pathways secrets check`: loads the project as `validate` does, then resolves every secret a start
+ * reads and runs a throwaway key through the key provider. Prints what resolved, never a value: as
+ * text, or with `--json` as one JSON document. Exits 0 when everything resolved, 1 when anything did
+ * not, 3 when the configuration is invalid.
+ */
+async function secretsCheck(projectDir: string, json: boolean, io: CliIo): Promise<number> {
+  const project = await load(projectDir, io);
+  if (project === undefined) return EXIT.config;
+  if (project.encryption === undefined) {
+    reportConfigError(new ConfigError([ENCRYPTION_REQUIRED]), io);
+    return EXIT.config;
+  }
+  // Providers log to stderr, so stdout holds only the report.
+  const env = io.env ?? process.env;
+  const check = await checkSecrets(project, { env, logger: io.logger ?? pino(STDERR_LOG, stderr) });
+  io.out(json ? `${JSON.stringify(check, null, 2)}\n` : formatSecretCheck(check));
+  return check.ok ? EXIT.ok : EXIT.failed;
 }
 
 /** The text `validate --print` shows in place of a masked query string. */
