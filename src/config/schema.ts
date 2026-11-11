@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { normalisePath } from "../connectors/http-path.js";
 import { LIFECYCLE_EVENTS, type LifecycleEventType } from "../extensions/events.js";
+import type { JsonValue } from "../transform.js";
 import { ENV_NAME, fromEnvironment, type EnvReference } from "./env-ref.js";
 
 export type { EnvReference } from "./env-ref.js";
@@ -610,6 +611,13 @@ const httpSource = restate(
         .optional(),
       response: httpSourceResponse.optional(),
       maxBytes: bytes.optional(),
+      contextHeaders: z
+        .array(z.string())
+        .meta({
+          description:
+            "Request headers the transform reads in ctx.source.headers, by name. Authorization, Proxy-Authorization and Cookie are never passed. Default: none.",
+        })
+        .optional(),
     })
     .meta({
       description:
@@ -632,9 +640,11 @@ function httpSourceChecks(
     readonly paths?: readonly string[] | undefined;
     readonly methods?: readonly string[] | undefined;
     readonly response?: z.output<typeof httpSourceResponse> | undefined;
+    readonly contextHeaders?: readonly string[] | undefined;
   },
   ctx: z.RefinementCtx,
 ): void {
+  contextHeaderChecks(value.contextHeaders ?? [], ctx);
   if (value.path !== undefined && value.paths !== undefined) {
     ctx.addIssue({
       code: "custom",
@@ -700,6 +710,37 @@ function httpSourceChecks(
     });
   }
   headerChecks(response.headers, MANAGED_RESPONSE_HEADERS, ["response", "headers"], ctx);
+}
+
+/**
+ * Request headers that carry a credential, which an HTTP source never passes to a transform, even
+ * when `contextHeaders` names one.
+ */
+export const NEVER_CONTEXT_HEADERS: ReadonlySet<string> = new Set([
+  "authorization",
+  "proxy-authorization",
+  "cookie",
+]);
+
+/** An HTTP source's `contextHeaders`: valid names, none twice, and none that carries a credential. */
+function contextHeaderChecks(names: readonly string[], ctx: z.RefinementCtx): void {
+  const seen = new Set<string>();
+  for (const [index, name] of names.entries()) {
+    const at = ["contextHeaders", index];
+    const lower = name.toLowerCase();
+    if (!HEADER_NAME.test(name)) {
+      ctx.addIssue({ code: "custom", path: at, message: "not a valid header name" });
+    } else if (NEVER_CONTEXT_HEADERS.has(lower)) {
+      ctx.addIssue({
+        code: "custom",
+        path: at,
+        message: "carries a credential, so it is never passed to the transform",
+      });
+    } else if (seen.has(lower)) {
+      ctx.addIssue({ code: "custom", path: at, message: "names a header twice" });
+    }
+    seen.add(lower);
+  }
 }
 
 /** What an HTTP client endpoint (an HTTP destination, a webhook hook) is configured with. */
@@ -1341,6 +1382,74 @@ const lease = z
       "The engine lease, which one engine per database holds, so a second is refused or waits as a standby.",
   });
 
+/** How deep a `config:` value may nest. */
+const CONFIG_DEPTH = 32;
+
+/**
+ * Checks one `config:` value: JSON only (a string, a finite number, a boolean, null, a list or a
+ * map), no deeper than {@link CONFIG_DEPTH}, and a map with an `env` key only as `{ env: NAME }` or
+ * `{ env: NAME, default: value }`, the default one value that is not a list or a map.
+ */
+function configValueChecks(
+  value: unknown,
+  path: readonly (string | number)[],
+  ctx: z.RefinementCtx,
+  depth = 0,
+): void {
+  const issue = (message: string): void => {
+    ctx.addIssue({ code: "custom", path: [...path], message });
+  };
+  if (depth > CONFIG_DEPTH) return issue(`nests deeper than ${CONFIG_DEPTH} levels`);
+  if (value === null || typeof value === "string" || typeof value === "boolean") return;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) issue("a number must be finite");
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const [index, item] of value.entries()) {
+      configValueChecks(item, [...path, index], ctx, depth + 1);
+    }
+    return;
+  }
+  if (typeof value !== "object" || Object.getPrototypeOf(value) !== Object.prototype) {
+    return issue("a string, number, boolean, null, list or map");
+  }
+  const entries = Object.entries(value);
+  if ("env" in value) {
+    const { env: name, ...rest } = value as { env: unknown; [key: string]: unknown };
+    const keys = Object.keys(rest);
+    const fallback = rest["default"];
+    const scalar =
+      fallback === null ||
+      typeof fallback === "string" ||
+      typeof fallback === "boolean" ||
+      (typeof fallback === "number" && Number.isFinite(fallback));
+    if (
+      typeof name !== "string" ||
+      !ENV_NAME.test(name) ||
+      keys.some((key) => key !== "default") ||
+      (keys.length === 1 && !scalar)
+    ) {
+      issue(
+        "{ env: NAME } reads an environment variable at start; it takes only a default, one value that is not a list or a map",
+      );
+    }
+    return;
+  }
+  for (const [key, item] of entries) configValueChecks(item, [...path, key], ctx, depth + 1);
+}
+
+/** A `config:` block: what a transform reads as `ctx.config`, keyed by name. */
+const transformConfig = z
+  .record(z.string(), z.unknown())
+  .meta({
+    description:
+      "What the transform reads as ctx.config: any YAML value by name, and { env: NAME } (or { env: NAME, default: value }) to read one from an environment variable at start. A channel's own config: replaces this one key by key.",
+  })
+  .superRefine((config, ctx) => {
+    for (const [key, value] of Object.entries(config)) configValueChecks(value, [key], ctx);
+  });
+
 /** How `pathways migrate` treats contract steps. */
 const migrationsBlock = z
   .strictObject({
@@ -1368,12 +1477,52 @@ export const projectSchema = z
     probes: probes.optional(),
     lease: lease.optional(),
     migrations: migrationsBlock.optional(),
+    config: transformConfig.optional(),
   })
   .meta({
     title: "pathways.yaml",
     description:
       "Settings for a whole Pathways project. This schema checks a subset of what pathways start checks: run pathways validate for the rest.",
   });
+
+/** The longest `regex:` a file source's `include` or `exclude` takes, in characters. */
+export const MAX_REGEX_LENGTH = 256;
+
+/** Whether `text` is a regular expression JavaScript compiles with the `u` flag. */
+function compiles(text: string): boolean {
+  try {
+    new RegExp(text, "u");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** A file source's `include` or `exclude`: globs, or `{ regex }` for a regular expression. */
+const pathPatterns = (description: string) =>
+  z
+    .array(
+      z.union([
+        envable(
+          z.string().min(1).meta({
+            description: "A glob, as Node's path.matchesGlob reads it, matched on the path with /.",
+          }),
+        ),
+        z.strictObject({
+          regex: envable(
+            z
+              .string()
+              .min(1)
+              .max(MAX_REGEX_LENGTH)
+              .refine(compiles, "a regular expression JavaScript compiles with the u flag")
+              .meta({
+                description: `A regular expression, at most ${String(MAX_REGEX_LENGTH)} characters, tested on the path with /.`,
+              }),
+          ),
+        }),
+      ]),
+    )
+    .meta({ description });
 
 /** A channel's `source:` block: exactly one kind. */
 const source = restate(
@@ -1391,6 +1540,77 @@ const source = restate(
             z.boolean().meta({
               description:
                 "Move each stored file into processed/ instead of deleting it. Those copies are plaintext. Default false.",
+            }),
+          ).optional(),
+          include: pathPatterns(
+            "Take only files whose path from dir matches one of these: a glob such as **/*.hl7, or { regex }. Default: every file.",
+          ).optional(),
+          exclude: pathPatterns(
+            "Leave files whose path from dir matches one of these: a glob, or { regex }. Default: none.",
+          ).optional(),
+          recursive: envable(
+            z.boolean().meta({
+              description:
+                "Read the subfolders of dir too, never .claimed, processed or errorDir. Symbolic links are never followed. Default false.",
+            }),
+          ).optional(),
+          ignoreDot: envable(
+            z.boolean().meta({
+              description:
+                "Leave files and folders whose name starts with a dot. Default true; false reads them.",
+            }),
+          ).optional(),
+          minSize: envable(
+            z.union([z.literal(0), bytes]).meta({
+              description:
+                "The smallest file taken: a size such as 1B or 1KB, or a number of bytes. A smaller file is left. Default 1: an empty file is left.",
+            }),
+          ).optional(),
+          maxSize: bytes
+            .meta({
+              description:
+                "The largest file taken: a size such as 64KB or 10MB, or a number of bytes. A larger file moves into errorDir, or stays. Default: no limit.",
+            })
+            .optional(),
+          maxPerPoll: envable(
+            z
+              .number()
+              .int()
+              .positive()
+              .meta({ description: "The most files claimed in one pass. Default: no limit." }),
+          ).optional(),
+          sortBy: envable(
+            z.enum(["name", "mtime"]).meta({
+              description:
+                "The order files are taken in: name, by path from dir (the default), or mtime, oldest change first.",
+            }),
+          ).optional(),
+          stable: envable(
+            z.boolean().meta({
+              description:
+                "Take a file only once two passes in a row find the same size and change time, as well as minAge. Default false.",
+            }),
+          ).optional(),
+          doneFile: envable(
+            z
+              .string()
+              .min(1)
+              .regex(/^[^/\\\0]+$/, "a suffix such as .done, with no / or \\")
+              .meta({
+                description:
+                  "A suffix such as .done: a file is taken only once a file of its name plus the suffix is there, and that marker is deleted once the file is claimed. Default: none.",
+              }),
+          ).optional(),
+          errorDir: path
+            .meta({
+              description:
+                "Where a file larger than maxSize, or one that fails to open readTries passes in a row, is moved as it arrived, relative to this file. Never a message that fails. Default: none, so it stays.",
+            })
+            .optional(),
+          readTries: envable(
+            z.number().int().positive().meta({
+              description:
+                "How many passes in a row a file fails to open before it moves into errorDir. Default 3.",
             }),
           ).optional(),
         })
@@ -1426,10 +1646,16 @@ const destination = restate(
       module: modulePath.optional(),
       options: moduleOptions.optional(),
       retry: settingsShape.retry,
+      dryRun: envable(
+        z.boolean().meta({
+          description:
+            "Run dry: transform and record each output, mark its delivery dry-run, and never send it or open a connection. Default false.",
+        }),
+      ).optional(),
     })
     .meta({
       description:
-        "One destination: exactly one of file, http, mllp or module, and its own retry settings.",
+        "One destination: exactly one of file, http, mllp or module, its own retry settings, and dryRun.",
     })
     .superRefine(oneKind(DESTINATION_KINDS))
     .superRefine(optionsWithModule),
@@ -1478,6 +1704,7 @@ export const channelSchema = restate(
       ackTimeout: settingsShape.ackTimeout,
       retention: settingsShape.retention,
       resendFlag: settingsShape.resendFlag,
+      config: transformConfig.optional(),
       retry: settingsShape.retry,
     })
     .meta({
@@ -1658,6 +1885,9 @@ export const DEFAULT_LEASE_TTL_MS = 15_000;
 /** How long a file must sit unchanged in a file source before it is read, by default. */
 export const DEFAULT_MIN_AGE_MS = 1_000;
 
+/** How many passes in a row a file source fails to open a file before it sets it aside, by default. */
+export const DEFAULT_READ_TRIES = 3;
+
 /** Where the SQLite database lives by default, relative to the project root. */
 export const DEFAULT_DATABASE_FILE = ".pathways/pathways.db";
 
@@ -1761,7 +1991,37 @@ export interface FileSource {
    * encrypted store, instead of being deleted. Off unless the channel sets `keepProcessed: true`.
    */
   readonly keepProcessed: boolean;
+  /** Globs and `{ regex }` patterns a file's path from `dir` must match one of. Empty: every file. */
+  readonly include: readonly PathPattern[];
+  /** Globs and `{ regex }` patterns a file's path from `dir` must match none of. */
+  readonly exclude: readonly PathPattern[];
+  /** Whether subfolders are read too. */
+  readonly recursive: boolean;
+  /** Whether files and folders whose name starts with a dot are left. */
+  readonly ignoreDot: boolean;
+  /** The smallest file taken, in bytes. */
+  readonly minSize: number;
+  /** The largest file taken, in bytes, or `undefined` for no limit. */
+  readonly maxSize: number | undefined;
+  /** The most files claimed in one pass, or `undefined` for no limit. */
+  readonly maxPerPoll: number | undefined;
+  /** The order files are claimed in. */
+  readonly sortBy: "name" | "mtime";
+  /** Whether a file must be found unchanged on two passes in a row. */
+  readonly stable: boolean;
+  /** The suffix of the marker file a file waits for, or `undefined`. */
+  readonly doneFile: string | undefined;
+  /** Where a file that cannot be taken is moved, resolved to an absolute path, or `undefined`. */
+  readonly errorDir: string | undefined;
+  /** How many passes in a row a file fails to open before it moves into `errorDir`. */
+  readonly readTries: number;
 }
+
+/**
+ * A pattern a file source matches on a file's path from its folder, written with `/`: a glob as
+ * Node's `path.matchesGlob` reads it, or a regular expression.
+ */
+export type PathPattern = { readonly glob: string } | { readonly regex: string };
 
 /** A file destination, with its folder resolved to an absolute path. */
 export interface FileDestination {
@@ -1828,6 +2088,8 @@ export interface HttpSource extends ListenerConfig {
   readonly methods: readonly ("POST" | "PUT")[];
   readonly response: HttpSourceResponseConfig;
   readonly maxBytes: number;
+  /** The request headers passed to the transform in `ctx.source.headers`, in lower case. */
+  readonly contextHeaders: readonly string[];
 }
 
 /**
@@ -2007,16 +2269,21 @@ export type HookConfig =
 /**
  * One destination, resolved. `retry` is set when the destination's block has a `retry:` of its own:
  * that block over the channel's settings, key by key. Without it, the channel's `settings.retry`
- * applies.
+ * applies. `dryRun` is `true` when the destination runs dry: each output is recorded, its delivery
+ * marked `dry-run`, and nothing is sent.
  *
  * @example
  * ```ts
- * const destination: DestinationConfig = { kind: "file", dir: "/srv/project/out" };
+ * const destination: DestinationConfig = { kind: "file", dir: "/srv/project/out", dryRun: true };
  * ```
  */
 export type DestinationConfig = (
   FileDestination | HttpDestination | MllpDestination | ModuleConnector
-) & { readonly retry?: RetryPolicy };
+) & {
+  readonly retry?: RetryPolicy;
+  /** True when the destination runs dry: each output recorded, marked `dry-run`, never sent. */
+  readonly dryRun?: boolean | undefined;
+};
 
 /** One channel, loaded, validated and resolved. */
 export interface ChannelConfig {
@@ -2031,7 +2298,23 @@ export interface ChannelConfig {
   readonly settings: Settings;
   /** The channel's own hooks, which receive its events beside the engine-wide ones. */
   readonly hooks: readonly HookConfig[];
+  /**
+   * The channel's own `config:` block, as written: each `{ env: NAME }` is still a reference, read
+   * when the engine starts. Its keys replace those of the project's block.
+   */
+  readonly config: TransformConfigBlock;
 }
+
+/**
+ * A `config:` block as written, after its checks: JSON values by key, where a map whose one key is
+ * `env` names an environment variable to read at start.
+ *
+ * @example
+ * ```ts
+ * const block: TransformConfigBlock = { facility: "LAB", apiKey: { env: "LAB_API_KEY" } };
+ * ```
+ */
+export type TransformConfigBlock = Readonly<Record<string, JsonValue>>;
 
 /**
  * SQLite storage: one database file, opened by the bundled better-sqlite3 driver.
@@ -2176,6 +2459,8 @@ export interface ProjectConfig {
    * start` refuses to run without it; `pathways test` stores nothing and does not need it.
    */
   readonly encryption: EncryptionConfig | undefined;
+  /** The project's `config:` block, as written: what every channel's transform reads, by key. */
+  readonly config: TransformConfigBlock;
   /** The secret providers `secrets:` names; `env` and `file` are built in and not listed. */
   readonly secrets: readonly SecretProviderConfig[];
   readonly channels: readonly ChannelConfig[];

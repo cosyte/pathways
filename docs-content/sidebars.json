@@ -11,6 +11,7 @@
         "configure-a-channel",
         "check-configuration",
         "transform-and-filter-messages",
+        "use-the-message-context",
         "test-a-channel",
         "make-sample-messages",
         "read-and-write-files",

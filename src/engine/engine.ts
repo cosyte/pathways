@@ -4,13 +4,16 @@ import { setTimeout as sleep } from "node:timers/promises";
 
 import type { Logger } from "pino";
 
+import { ConfigError } from "../config/load.js";
 import {
   DEFAULT_RETRY,
   type ChannelConfig,
   type Format,
   type ProjectConfig,
   type RetryPolicy,
+  type TransformConfigBlock,
 } from "../config/schema.js";
+import { resolveTransformConfig } from "../config/transform-config.js";
 import {
   listenerSecurity,
   listenerWarnings,
@@ -44,10 +47,12 @@ import {
   type MessageStore,
   type ReceivedMessage,
 } from "../storage/store.js";
+import type { SourceFacts } from "../transform.js";
 import { ChannelWorker, TransformLoadError, type TransformOutcome } from "./channel-worker.js";
 import type { EngineFence } from "./lease.js";
 import { channelStatus, type ChannelHealth, type EngineHealth } from "./health.js";
 import type { FailureSummary } from "./worker-entry.js";
+import { copyFacts, keepFacts, sourceFacts } from "./source-facts.js";
 
 /**
  * By default the first retry waits this long, and each later one twice as long as the one before.
@@ -245,8 +250,32 @@ export interface ConnectorContext {
   readonly logger: Logger;
   /** Where tokens and secret headers are read from, and what extensions are given as `env`. */
   readonly env: Env;
+  /** Every destination runs dry, as `pathways start --dry-run` asks, whatever its block says. */
+  readonly dryRun?: boolean | undefined;
   /** The secrets a start resolved; `env` alone without them. */
   readonly secrets?: Secrets | undefined;
+}
+
+/**
+ * The connector a destination that runs dry gets in place of its own: nothing is built for it, so no
+ * TLS file, secret or module is read and no connection is opened. The engine never hands it a
+ * message; a send that reached it would be a defect, so it rejects rather than drop one quietly.
+ */
+const DRY_RUN_CONNECTOR: DestinationConnector = {
+  deliver: () => Promise.reject(new Error("a destination that runs dry was handed a message")),
+};
+
+/**
+ * Whether destination `index` of `channel` runs dry: its block sets `dryRun: true`, or the engine
+ * runs every destination dry.
+ *
+ * @example
+ * ```ts
+ * runsDry(channel, 0, false); // true when channel.yaml's first destination sets dryRun: true
+ * ```
+ */
+export function runsDry(channel: ChannelConfig, index: number, all: boolean): boolean {
+  return all || channel.destinations[index]?.dryRun === true;
 }
 
 /**
@@ -280,15 +309,23 @@ export async function connectorsFor(
   switch (source.kind) {
     case "file":
       sourceConnector = new FileSource({
-        dir: source.dir,
+        ...source,
         channel: channel.name,
-        minAgeMs: source.minAgeMs,
-        keepProcessed: source.keepProcessed,
         now,
         onReadError: (error) => {
           logger.warn({
             event: "source-read-failed",
             channel: channel.name,
+            code: errorCode(error),
+          });
+        },
+        // The reason and a code, never the file's name: a name can carry an identifier.
+        onFileFault: ({ reason, moved, error }) => {
+          logger.warn({
+            event: "source-file-set-aside",
+            channel: channel.name,
+            reason,
+            moved,
             code: errorCode(error),
           });
         },
@@ -315,6 +352,7 @@ export async function connectorsFor(
               }
             : response,
         maxBytes: source.maxBytes,
+        contextHeaders: source.contextHeaders,
         tls,
         token,
         onRefused: (status) => {
@@ -359,6 +397,10 @@ export async function connectorsFor(
   }
   const destinations: DestinationConnector[] = [];
   for (const [index, destination] of channel.destinations.entries()) {
+    if (runsDry(channel, index, context.dryRun === true)) {
+      destinations.push(DRY_RUN_CONNECTOR);
+      continue;
+    }
     switch (destination.kind) {
       case "file":
         destinations.push(
@@ -443,6 +485,12 @@ export interface EngineOptions {
    */
   readonly fence?: EngineFence;
   /**
+   * Runs every destination dry, as `pathways start --dry-run` does: each output is transformed and
+   * recorded, its delivery marked `dry-run`, and nothing is sent. A destination whose block sets
+   * `dryRun: true` runs dry without it.
+   */
+  readonly dryRun?: boolean;
+  /**
    * A number from 0 up to 1 for each retry with `jitter: "full"`. Defaults to `Math.random`; tests
    * pass their own.
    */
@@ -481,6 +529,17 @@ interface RunningChannel {
   draining: boolean;
   /** The reloads, one after another. */
   reloads: Promise<unknown>;
+  /**
+   * What the source knew about each message it took in that waits for its transform, by message id:
+   * in memory only, dropped once the message is transformed, and bounded: past the bound the oldest
+   * go, and those messages are transformed with no source facts.
+   */
+  readonly facts: Map<number, SourceFacts>;
+  /**
+   * Each `sink.receive` under way, settled once its message's facts are set or it failed: a pass that
+   * takes a message whose facts are not set yet waits for these before it runs the transform.
+   */
+  readonly receiving: Set<Promise<void>>;
 }
 
 /**
@@ -500,7 +559,9 @@ export type ChannelCommand = "pause" | "resume" | "stop" | "halt" | "reload";
  * - `drained`: `stop` and `halt` only, whether the work in flight ended within the deadline.
  * - `left`: messages still to transform and deliveries still to send, which run after a resume.
  * - `refused`: why nothing was done: `no-such-channel`, `draining` (a stop is under way, for a
- *   reload), `invalid-config`, `not-configured` (the channel is gone from the configuration),
+ *   reload), `invalid-config` (the configuration does not load, or a `config:` value names an
+ *   environment variable that is not set), `not-configured` (the channel is gone from the
+ *   configuration),
  *   `needs-restart` (with `changed`: the settings a reload cannot apply, such as `source`),
  *   `transform-load-failed` (with `failure`: the error's name, never its text), or
  *   `state-not-stored` (a pause, resume, stop or halt the database did not store: the channel was
@@ -550,6 +611,9 @@ const RESTART_ONLY = ["source", "destinations", "format", "hooks"] as const;
  * - Before each send, the delivery is marked with its attempt and start time; the outcome clears
  *   the mark. A delivery found still marked was cut off after the send, so it is sent again flagged
  *   as a possible duplicate (`OutgoingMessage.resend`), as is every later send of it.
+ * - A destination that runs dry (`dryRun: true` in its block, or the `dryRun` option for all) gets
+ *   each output transformed and recorded as any other, and its delivery is marked `dry-run` in
+ *   place of the send: no connector is built for it and no connection is opened.
  * - A message whose transform fails is marked failed, and the channel moves on to the next.
  * - A source that cannot listen (its port is taken) is tried again with the same growing waits,
  *   while the rest of the engine runs and the health endpoint answers 503.
@@ -589,6 +653,8 @@ export class Engine {
   private storageCheck: { readonly at: number; readonly reachable: Promise<boolean> } | undefined;
   /** The engine-wide hooks, from `pathways.yaml`, once started. */
   private hooks: HookSet | undefined;
+  /** The environment the engine started with: a reload reads the transform's configuration from it. */
+  private env: Env = process.env;
 
   /** @param options The project, the store, the logger and, for tests, a clock and connectors. */
   constructor(options: EngineOptions) {
@@ -611,17 +677,32 @@ export class Engine {
 
   /**
    * Starts the hooks and every channel. Rejects, having stopped any it started, if a transform will
-   * not load, a connector's TLS files or secrets cannot be had (a `ConfigError`), or an extension
-   * module is wrong (an `ExtensionLoadError`). A source that cannot listen does not stop the start:
+   * not load, its configuration names an environment variable that is not set, a connector's TLS
+   * files or secrets cannot be had (each a `ConfigError`), or an extension module is wrong (an
+   * `ExtensionLoadError`). A source that cannot listen does not stop the start:
    * it is logged, reported on the health endpoint, and tried again.
    */
   async start(): Promise<void> {
     const { project, logger } = this.options;
     const env = this.options.env ?? process.env;
+    this.env = env;
+    const dryRun = this.options.dryRun === true;
+    if (this.options.store.markDryRun === undefined) {
+      const dry = project.channels.filter((channel) =>
+        channel.destinations.some((_, index) => runsDry(channel, index, dryRun)),
+      );
+      if (dry.length > 0) {
+        throw new ConfigError([
+          `${dry.map((channel) => `channels/${channel.name}/channel.yaml`).join(", ")}: a destination runs dry, and the store has no markDryRun to record it`,
+        ]);
+      }
+    }
+    this.logDryDestinations(dryRun);
     try {
       const stored = await this.readStates();
       const secrets =
-        this.options.secrets ?? (await resolveSecrets(project, { env, logger }, "all"));
+        this.options.secrets ??
+        (await resolveSecrets(project, { env, logger, skipDry: dryRun ? "all" : "each" }, "all"));
       this.hooks = await HookSet.open(project.hooks, {
         file: "pathways.yaml",
         channel: undefined,
@@ -637,6 +718,8 @@ export class Engine {
           format: config.format,
           timeoutMs: config.settings.timeoutMs,
           memoryMb: config.settings.memoryMb,
+          // Read here, in the engine's process, so a worker never sees the environment.
+          config: resolveTransformConfig(project.config, config, env),
         });
         const hooks = await HookSet.open(config.hooks, {
           file: `channels/${config.name}/channel.yaml`,
@@ -649,7 +732,7 @@ export class Engine {
         let connectors: ChannelConnectors;
         try {
           connectors = await (this.options.connectors?.(config) ??
-            connectorsFor(config, { now: this.now, logger, env, secrets }));
+            connectorsFor(config, { now: this.now, logger, env, secrets, dryRun }));
         } catch (error) {
           await hooks.stop();
           throw error;
@@ -671,9 +754,12 @@ export class Engine {
           halt: new AbortController(),
           draining: false,
           reloads: Promise.resolve(),
+          facts: new Map(),
+          receiving: new Set(),
         };
         this.channels.push(channel);
         this.warnInsecure(config);
+        await this.warnDryBacklog(config);
         await worker.start();
         // A channel paused or stopped before this start stays so: its source is not opened.
         if (channel.state === "running") await this.startSource(channel);
@@ -683,6 +769,44 @@ export class Engine {
       await this.stop();
       throw error;
     }
+  }
+
+  /**
+   * Says once at start which destinations of each channel run dry, by index, so a destination left
+   * out of the line is one that sends. Nothing is said when none runs dry.
+   */
+  private logDryDestinations(all: boolean): void {
+    const channels: Record<string, number[]> = {};
+    for (const channel of this.options.project.channels) {
+      const dry = channel.destinations.flatMap((_, index) =>
+        runsDry(channel, index, all) ? [index] : [],
+      );
+      if (dry.length > 0) channels[channel.name] = dry;
+    }
+    if (Object.keys(channels).length === 0) return;
+    this.options.logger.warn({ event: "dry-run-destinations", channels });
+  }
+
+  /**
+   * Warns when a channel with a destination that runs dry already has pending deliveries: each one of
+   * a dry destination is marked `dry-run` at its next pass, those queued, retrying or cut off
+   * mid-send before dry run was turned on too, and is not sent until `pathways replay --resend`.
+   * `pending` counts the channel's pending deliveries, of every destination.
+   */
+  private async warnDryBacklog(config: ChannelConfig): Promise<void> {
+    const all = this.options.dryRun === true;
+    const destinations = config.destinations.flatMap((_, index) =>
+      runsDry(config, index, all) ? [index] : [],
+    );
+    if (destinations.length === 0) return;
+    const { pending } = await this.options.store.deliveryCounts(config.name);
+    if (pending === 0) return;
+    this.options.logger.warn({
+      event: "dry-run-pending",
+      channel: config.name,
+      destinations,
+      pending,
+    });
   }
 
   /**
@@ -736,6 +860,11 @@ export class Engine {
       readonly deadlineMs?: number;
       /** For `reload`: the channel's new configuration, or why there is none. */
       readonly config?: ChannelConfig | "invalid-config" | "not-configured";
+      /**
+       * For `reload`: the project's `config:` block as the reload read it, under the channel's own;
+       * the one the engine started with when not given.
+       */
+      readonly transformConfig?: TransformConfigBlock;
     },
   ): Promise<ChannelCommandReport> {
     const channel = this.channels.find((c) => c.config.name === name);
@@ -753,7 +882,11 @@ export class Engine {
         report = await this.drain(channel, command, options.deadlineMs ?? STOP_DEADLINE_MS);
         break;
       case "reload":
-        report = await this.reload(channel, options.config ?? "not-configured");
+        report = await this.reload(
+          channel,
+          options.config ?? "not-configured",
+          options.transformConfig ?? this.options.project.config,
+        );
         break;
     }
     await this.audit.recordAs(options.actor, {
@@ -1117,10 +1250,11 @@ export class Engine {
   private reload(
     channel: RunningChannel,
     next: ChannelConfig | "invalid-config" | "not-configured",
+    projectConfig: TransformConfigBlock,
   ): Promise<ChannelCommandReport> {
     const name = channel.config.name;
     if (channel.draining) return Promise.resolve({ channel: name, refused: "draining" });
-    const run = channel.reloads.then(() => this.reloadNow(channel, next));
+    const run = channel.reloads.then(() => this.reloadNow(channel, next, projectConfig));
     channel.reloads = settled(run);
     return run;
   }
@@ -1128,6 +1262,7 @@ export class Engine {
   private async reloadNow(
     channel: RunningChannel,
     next: ChannelConfig | "invalid-config" | "not-configured",
+    projectConfig: TransformConfigBlock,
   ): Promise<ChannelCommandReport> {
     const name = channel.config.name;
     if (typeof next === "string") return { channel: name, refused: next };
@@ -1135,12 +1270,22 @@ export class Engine {
       (key) => JSON.stringify(channel.config[key]) !== JSON.stringify(next[key]),
     );
     if (changed.length > 0) return { channel: name, refused: "needs-restart", changed };
+    let config: ReturnType<typeof resolveTransformConfig>;
+    try {
+      // Read here, in the engine's process, as at start, so a worker never sees the environment.
+      config = resolveTransformConfig(projectConfig, next, this.env);
+    } catch (error) {
+      /* v8 ignore next: resolveTransformConfig throws only ConfigError */
+      if (!(error instanceof ConfigError)) throw error;
+      return { channel: name, refused: "invalid-config" };
+    }
     const worker = new ChannelWorker({
       channel: name,
       transformFile: next.transform,
       format: next.format,
       timeoutMs: next.settings.timeoutMs,
       memoryMb: next.settings.memoryMb,
+      config,
     });
     try {
       // A fresh worker, so the transform's module and every module it imports are read anew.
@@ -1220,6 +1365,19 @@ export class Engine {
     return epoch === undefined ? [] : [epoch];
   }
 
+  /**
+   * Marks a delivery `dry-run`. `start` refuses a store without `markDryRun` when a destination runs
+   * dry, so this never finds it missing; if it did, it throws rather than let the send go ahead.
+   */
+  private async markDryRun(deliveryId: number): Promise<void> {
+    const { store } = this.options;
+    /* v8 ignore next 3: start refuses a store without markDryRun when a destination runs dry */
+    if (store.markDryRun === undefined) {
+      throw new ConfigError(["the store has no markDryRun to record a dry run"]);
+    }
+    await store.markDryRun(deliveryId, ...this.epoch());
+  }
+
   /** Now, or `inMs` from now, as an ISO 8601 time for an event. */
   private at(inMs = 0): string {
     return new Date(this.now() + inMs).toISOString();
@@ -1230,9 +1388,23 @@ export class Engine {
     const { store, logger } = this.options;
     const sink: MessageSink = {
       receive: async (body, options = {}) => {
-        const { duplicateKey, idempotencyKey, resumed, failure } = options;
+        const { duplicateKey, idempotencyKey, resumed, failure, source } = options;
         let received: ReceivedMessage;
+        const receivedAt = this.at();
+        // Settled once this message's facts are set or the receive failed, so a pass that takes
+        // the message from the store before this call has returned waits for its facts.
+        let settle!: () => void;
+        const receiving = new Promise<void>((resolve) => (settle = resolve));
+        channel.receiving.add(receiving);
+        const settled = (): void => {
+          channel.receiving.delete(receiving);
+          settle();
+        };
         try {
+          // Checked and copied before anything is stored, so a source that passes what a
+          // transform cannot be handed learns it at once and the sender keeps the message, and a
+          // source that changes its object afterwards changes nothing the transform reads.
+          const passed = source === undefined ? undefined : copyFacts(source);
           // An engine that lost its lease takes nothing more in: the source answers as it does
           // when a message cannot be stored, so the sender keeps it.
           this.options.fence?.check();
@@ -1245,7 +1417,17 @@ export class Engine {
             failure,
             size: body.byteLength,
           });
+          // Set at once, with no wait between the store call and here.
+          if (failure === undefined && received.alreadyStored !== true) {
+            keepFacts(
+              channel.facts,
+              received.id,
+              sourceFacts(config.source.kind, passed, body.byteLength, receivedAt),
+            );
+          }
+          settled();
         } catch (error) {
+          settled();
           const code = errorCode(error);
           logger.error({ event: "receive-failed", channel: config.name, code });
           this.emit(channel, () => ({
@@ -1309,7 +1491,17 @@ export class Engine {
       this.step();
       const next = await store.nextToTransform(config.name);
       if (next === undefined) return;
-      const outcome: TransformOutcome = await worker.run(next.body, { transfer: owned });
+      if (!channel.facts.has(next.id) && channel.receiving.size > 0) {
+        // The receive that stored this message may not have set its facts yet.
+        await Promise.all(channel.receiving);
+      }
+      const source = channel.facts.get(next.id);
+      channel.facts.delete(next.id);
+      const outcome: TransformOutcome = await worker.run(next.body, {
+        transfer: owned,
+        // Every message the engine transforms is on its first run: a replay runs elsewhere.
+        context: { messageId: next.id, attempt: 1, source, meta: {} },
+      });
       if (outcome.ok) {
         faultPoint("after-transform-before-complete");
         await store.completeTransform(
@@ -1374,6 +1566,7 @@ export class Engine {
     const { config, connectors } = channel;
     const { store, logger } = this.options;
     for (const [index, destination] of connectors.destinations.entries()) {
+      const dry = runsDry(config, index, this.options.dryRun === true);
       const policy = config.destinations[index]?.retry ?? config.settings.retry;
       // With rotate, a delivery waiting for a retry steps aside for the due ones behind it; each is
       // tried once a pass, so a retry due at once waits for the next pass.
@@ -1387,6 +1580,19 @@ export class Engine {
         if (delivery === undefined || delivery.nextAttemptAt > this.now()) break;
         if (tried.has(delivery.id)) break;
         tried.add(delivery.id);
+        if (dry) {
+          // Everything but the send: the output is recorded already, so the delivery is marked and
+          // the destination moves on. Nothing is handed to a connector, so nothing is opened.
+          this.options.fence?.check();
+          await this.markDryRun(delivery.id);
+          logger.info({
+            event: "dry-run",
+            channel: config.name,
+            destination: index,
+            delivery: delivery.id,
+          });
+          continue;
+        }
         // Still marked: an attempt was handed over and its outcome never recorded, so it counts.
         const interrupted = delivery.sending?.attempt;
         const attempt = (interrupted ?? delivery.attempts) + 1;

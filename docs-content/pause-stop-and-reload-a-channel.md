@@ -69,11 +69,14 @@ HTTP destinations drop the connection; a custom destination gives the send up wh
 `reload` reads the project's configuration again, starts a fresh transform worker with the channel's
 new transform and settings, and once it has loaded swaps it in between two messages. The message in
 hand finishes in the old worker. A fresh worker means the transform file, and every module it
-imports, is read anew.
+imports, is read anew. So is what the transform reads as `ctx.config`: the `config:` blocks of
+`pathways.yaml` and the channel's `channel.yaml`, with each `{ env: NAME }` read from the engine's
+environment, as at start.
 
 A reload changes nothing and says why when:
 
 - the configuration no longer passes `pathways validate`: run it to see the problems;
+- a `config:` value names an environment variable the engine was not started with;
 - the new transform throws as it loads: the running one is kept;
 - the channel is gone from the configuration;
 - a stop or halt is still waiting for the channel's work in flight;

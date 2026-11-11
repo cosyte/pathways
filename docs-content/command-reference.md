@@ -15,7 +15,7 @@ Every command runs on the project in the current folder, or the one `-C <dir>` (
 names. `pathways --help` prints the usage, and `pathways --version` the version.
 
 The commands that read or change stored messages (`start`, `status`, `messages`, `replay`, `clear`,
-`retention`, `audit`, `rekey` and `lease`) open the database as `start` does, so they need the same
+`retention`, `audit`, `rekey`, `lease`, and `verify` unless it is given `--samples`) open the database as `start` does, so they need the same
 `pathways.yaml`, encryption keys and environment. None of them prints a value you typed back to you:
 an argument can hold a path or a value from a message, and standard error often ends up in a log.
 
@@ -36,7 +36,7 @@ Pathways. Nothing is written if the folder is not empty.
 ## pathways start
 
 ```text
-pathways start [--once | --standby] [--no-migrate]
+pathways start [--once | --standby] [--no-migrate] [--dry-run]
 ```
 
 Runs every channel, and the health endpoint and the probe listener if `pathways.yaml` configures
@@ -69,11 +69,12 @@ Once running it listens on a control socket for `pathways channel`, in a folder 
 open; a start that finds another engine answering there for the same project refuses and exits 1.
 See [pause, stop and reload a channel](./pause-stop-and-reload-a-channel.md#the-control-socket).
 
-| Option         | Meaning                                                                                                                                                                 |
-| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--once`       | take in, transform and deliver what is waiting, then exit; no health endpoint, no probe listener, no retention                                                          |
-| `--standby`    | hold no lease and open no source until the engine holding the lease stops, then take over; health answers 503 `standby` until then. Needs a database server, not SQLite |
-| `--no-migrate` | apply no schema step; refuse, naming both versions, a database that lacks an expand step this version needs. For a database `pathways migrate` keeps up to date         |
+| Option         | Meaning                                                                                                                                                                                                                                                                                                   |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--once`       | take in, transform and deliver what is waiting, then exit; no health endpoint, no probe listener, no retention                                                                                                                                                                                            |
+| `--standby`    | hold no lease and open no source until the engine holding the lease stops, then take over; health answers 503 `standby` until then. Needs a database server, not SQLite                                                                                                                                   |
+| `--no-migrate` | apply no schema step; refuse, naming both versions, a database that lacks an expand step this version needs. For a database `pathways migrate` keeps up to date                                                                                                                                           |
+| `--dry-run`    | run every destination dry, as `dryRun: true` does for one: each output is transformed and recorded, its delivery marked `dry-run`, and nothing is sent; no destination's connection is ever opened. Every pending delivery of a destination that runs dry is marked `dry-run`, those queued before it too |
 
 ## pathways test
 
@@ -87,6 +88,55 @@ Runs each channel's `tests/` inputs through its transform and compares the outpu
 | Option     | Meaning                                       |
 | ---------- | --------------------------------------------- |
 | `--update` | save the current outputs as the expected ones |
+
+## pathways verify
+
+```text
+pathways verify [--channel <name>] [--since <time> | --ids <id,...> | --samples <dir>] [--json]
+```
+
+Runs inputs through this project's transforms, in the same workers the engine uses, and compares
+each output with the one recorded for the same input: the outputs stored for a message, or a sample's
+`.expected` file. Point `-C` at a candidate project, such as a copy on a newer Pathways, to see what
+an upgrade or a changed transform would send differently. See
+[Upgrade Pathways](./upgrade-pathways.md).
+
+For each channel and destination it prints how many inputs were the same, different, or failed, and
+for each one that was not the same, where it first differs or why it failed:
+
+| Where                                             | Format                                                                                                                                              |
+| ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PID[1]-5.2`                                      | HL7 v2: the segment and its occurrence, the field, then the repetition (`[n]`), component and subcomponent where either side has more than one      |
+| `/name/0/family`                                  | FHIR and JSON: a JSON pointer, which names the keys on its path. For `json`, a key can be data the message carries, such as a medical record number |
+| `byte offset 118`                                 | any other format, or when the outputs read as the same value written differently                                                                    |
+| `2 outputs from the transform, 1 output recorded` | the number of outputs differs                                                                                                                       |
+
+It never prints a value. Stored messages are read through encryption at rest, decrypted in memory
+only, and each one is written to the audit log (`verify`) before its content is read; nothing is
+written to the message or delivery tables. A message with no recorded outputs (received, failed or
+cleared) is skipped. Two outputs are the same only when they are the same bytes.
+
+It opens the database as `start --no-migrate` does: it applies no schema step, and refuses, naming
+both versions, a database that lacks a step the candidate's Pathways needs. The candidate's
+transforms run with this process's environment, as the engine's do, and what they write to the
+console goes to its output. Each transform reads its channel's `config:` as the engine does, and a
+stored message runs with its own id as `ctx.messageId` and no source facts, as a replay does; a
+transform that reads `ctx.source` is therefore reported different on a message whose recorded
+outputs came from its first run, which had them. `ctx.attempt` is the message's generation plus one,
+and after `replay --resend`, which raises the generation without a transform run, that is not the
+attempt that made the recorded outputs, so a transform that reads it is reported different there. A
+sample runs with the context `pathways test` gives. On SQLite, where the database file does not
+exist, it stops and creates none. It builds no destination, so it sends no message; `pathways.yaml`'s
+engine-wide hooks receive its audit entries, as they do every command's.
+
+| Option             | Meaning                                                                                                                           |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| `--channel <name>` | only this channel                                                                                                                 |
+| `--since <time>`   | the messages stored from this time, newest first, in the forms `messages` takes; the default is `24h`                             |
+| `--ids <id,...>`   | these stored messages, in the order given                                                                                         |
+| `--samples <dir>`  | instead of stored messages, the inputs in `<dir>/<channel>/`, each against its `.expected` file as in `tests/`; opens no database |
+
+It exits 1 when an input was different or failed, and 4 when a message named does not exist.
 
 ## pathways validate
 
@@ -127,7 +177,7 @@ content; or shows one message and its deliveries. Each search and view is audite
 | Option             | Meaning                                                                                                                    |
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------- |
 | `--channel <name>` | only this channel                                                                                                          |
-| `--status <state>` | only this state: `received`, `queued`, `retrying`, `delivered`, `filtered`, `failed` or `cleared`                          |
+| `--status <state>` | only this state: `received`, `queued`, `retrying`, `delivered`, `dry-run`, `filtered`, `failed` or `cleared`               |
 | `--since <time>`   | from this time: `2026-11-07`, `2026-11-07T12:00:00Z` (UTC unless a zone is given), or a duration ago such as `24h` or `7d` |
 | `--until <time>`   | before this time, in the same forms                                                                                        |
 | `--limit <n>`      | at most `n` rows, 1 to 1,000; default 50                                                                                   |
@@ -178,8 +228,8 @@ pathways audit [--action <name>] [--message <id>] [--channel <name>] [--since <t
 
 Reads the audit log, newest first. `--action` takes `search`, `view`, `content-view`, `replay`,
 `resend`, `clear`, `retention`, `config`, `lease-release`, `migrate`, `channel-pause`,
-`channel-resume`, `channel-stop`, `channel-halt` or `channel-reload`; `--message` takes a message
-id; the other options are as for `messages`.
+`channel-resume`, `channel-stop`, `channel-halt`, `channel-reload` or `verify`; `--message` takes a
+message id; the other options are as for `messages`.
 
 ## pathways rekey
 
@@ -290,13 +340,13 @@ answers, it says `engine not running` and exits 1. See
 
 ## Exit codes
 
-| Code | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 0    | done                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| 1    | a test failed; the engine, a command or an extension module could not start or stopped on an error; `init` could not write; `rekey` left a value not under the current key; a replay, resend or clear was refused, or the message failed again; another engine holds the lease, the engine lost its lease, or there was no lease to release; the database schema is one this version will not run on or migrate; `probe` found the engine not alive or not ready; no engine runs the project, or a channel command was refused |
-| 2    | the command line was not understood; nothing was done                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| 3    | the configuration is invalid; nothing was done                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| 4    | a message named does not exist; any others named were still acted on                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| Code | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 0    | done                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| 1    | a test failed; the engine, a command or an extension module could not start or stopped on an error; `init` could not write; `rekey` left a value not under the current key; a replay, resend or clear was refused, or the message failed again; another engine holds the lease, the engine lost its lease, or there was no lease to release; the database schema is one this version will not run on or migrate; `verify` found a difference or a failure; `probe` found the engine not alive or not ready; no engine runs the project, or a channel command was refused |
+| 2    | the command line was not understood; nothing was done                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| 3    | the configuration is invalid; nothing was done                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| 4    | a message named does not exist; any others named were still acted on                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 
 ## Related
 

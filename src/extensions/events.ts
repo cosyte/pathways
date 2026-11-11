@@ -312,9 +312,9 @@ export interface SourceUpEvent extends LifecycleEventBase {
  * listed), `view` (one message's details, without content), `content-view`, `replay`, `resend`,
  * `clear`, `retention` (a run, with what it deleted), `config` (a configuration change seen when
  * the engine started), `lease-release` (the engine lease freed by force), `migrate` (schema steps
- * applied by `pathways migrate`), and `channel-pause`, `channel-resume`, `channel-stop`,
- * `channel-halt` and `channel-reload` (a `pathways channel` command). Kept equal to the audit log's
- * own list by a test.
+ * applied by `pathways migrate`), `channel-pause`, `channel-resume`, `channel-stop`,
+ * `channel-halt` and `channel-reload` (a `pathways channel` command), and `verify` (a stored
+ * message read by `pathways verify`). Kept equal to the audit log's own list by a test.
  *
  * @example
  * ```ts
@@ -336,7 +336,8 @@ export type AuditEventAction =
   | "channel-resume"
   | "channel-stop"
   | "channel-halt"
-  | "channel-reload";
+  | "channel-reload"
+  | "verify";
 
 /**
  * An entry of the audit log, once it is stored: who did what, to which message, and how it ended.

@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { ConfigError, loadProject } from "../src/config/load.js";
-import { DEFAULT_SETTINGS } from "../src/config/schema.js";
+import { DEFAULT_SETTINGS, MAX_REGEX_LENGTH } from "../src/config/schema.js";
 import { cleanUp, makeProject } from "./helpers.js";
 
 afterEach(cleanUp);
@@ -45,13 +45,27 @@ describe("loadProject", () => {
           dir: join(root, "channels/adt/inbox"),
           minAgeMs: 1_000,
           keepProcessed: false,
+          include: [],
+          exclude: [],
+          recursive: false,
+          ignoreDot: true,
+          minSize: 1,
+          maxSize: undefined,
+          maxPerPoll: undefined,
+          sortBy: "name",
+          stable: false,
+          doneFile: undefined,
+          errorDir: undefined,
+          readTries: 3,
         },
         transform: undefined,
         destinations: [{ kind: "file", dir: join(root, "channels/adt/outbox") }],
         settings: DEFAULT_SETTINGS,
         hooks: [],
+        config: {},
       },
     ]);
+    expect(project.config).toEqual({});
   });
 
   it("applies engine defaults from pathways.yaml, then each channel's own", async () => {
@@ -102,6 +116,79 @@ defaults:
     expect(await problemsOf({ "channels/a/channel.yaml": channel("yes please") })).toEqual([
       expect.stringContaining("keepProcessed"),
     ]);
+  });
+
+  it("resolves every file source option, globs as { glob } and errorDir from the channel's folder", async () => {
+    const root = await makeProject({
+      "channels/a/channel.yaml": [
+        "source:",
+        "  file:",
+        "    dir: in",
+        "    include: ['**/*.hl7', { regex: '^ADT_' }]",
+        "    exclude: ['tmp/**']",
+        "    recursive: true",
+        "    ignoreDot: false",
+        "    minSize: 1KB",
+        "    maxSize: 10MB",
+        "    maxPerPoll: 50",
+        "    sortBy: mtime",
+        "    stable: true",
+        "    doneFile: .done",
+        "    errorDir: ../errors",
+        "    readTries: 5",
+        "destinations:",
+        "  - file: { dir: out }",
+        "",
+      ].join("\n"),
+    });
+    expect((await loadProject(root)).channels[0]?.source).toEqual({
+      kind: "file",
+      dir: join(root, "channels/a/in"),
+      minAgeMs: 1_000,
+      keepProcessed: false,
+      include: [{ glob: "**/*.hl7" }, { regex: "^ADT_" }],
+      exclude: [{ glob: "tmp/**" }],
+      recursive: true,
+      ignoreDot: false,
+      minSize: 1_024,
+      maxSize: 10_485_760,
+      maxPerPoll: 50,
+      sortBy: "mtime",
+      stable: true,
+      doneFile: ".done",
+      errorDir: join(root, "channels/errors"),
+      readTries: 5,
+    });
+  });
+
+  it("refuses a regex that is too long or does not compile, and a doneFile with a separator", async () => {
+    const channel = (option: string): string =>
+      `source:\n  file:\n    dir: in\n    ${option}\ndestinations:\n  - file: { dir: out }\n`;
+    const long = "a".repeat(MAX_REGEX_LENGTH + 1);
+    expect(
+      await problemsOf({ "channels/a/channel.yaml": channel(`include: [{ regex: '${long}' }]`) }),
+    ).toEqual([expect.stringContaining("include.0.regex")]);
+    const longest = "a".repeat(MAX_REGEX_LENGTH);
+    const root = await makeProject({
+      "channels/a/channel.yaml": channel(`exclude: [{ regex: '${longest}' }]`),
+    });
+    expect((await loadProject(root)).channels[0]?.source).toMatchObject({
+      exclude: [{ regex: longest }],
+    });
+    expect(
+      await problemsOf({ "channels/a/channel.yaml": channel("exclude: [{ regex: '(' }]") }),
+    ).toEqual([expect.stringContaining("a regular expression JavaScript compiles")]);
+    for (const option of [
+      "doneFile: a/b",
+      "doneFile: 'a\\b'",
+      "maxPerPoll: 0",
+      "readTries: 0",
+      "sortBy: size",
+      "include: '*.hl7'",
+      "minSize: -1",
+    ]) {
+      expect(await problemsOf({ "channels/a/channel.yaml": channel(option) })).toHaveLength(1);
+    }
   });
 
   it("accepts an empty pathways.yaml and a channel whose name matches its folder", async () => {
@@ -190,6 +277,7 @@ destinations:
       methods: ["POST"],
       response: { kind: "id" },
       maxBytes: 10 * 1_048_576,
+      contextHeaders: [],
       tls: {
         cert: join(root, "channels/adt/tls/server.crt"),
         key: join(root, "channels/adt/tls/server.key"),

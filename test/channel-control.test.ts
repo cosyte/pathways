@@ -52,6 +52,27 @@ export default (msg: Msg): Msg => {
 };
 `;
 
+/** A transform that writes its configuration's `facility` and `site` into MSH.5. */
+const CONFIGURED = `
+interface Msg { setField(path: string, value: string): void }
+export default (msg: Msg, ctx: { config: Record<string, unknown> }): Msg => {
+  msg.setField("MSH.5", String(ctx.config["facility"]) + "-" + String(ctx.config["site"]));
+  return msg;
+};
+`;
+
+/** A channel whose one destination takes its token from a secret reference. */
+const WITH_SECRET = `
+source:
+  file: { dir: ../../data/inbox, minAge: 0 }
+transform: ./transform.ts
+destinations:
+  - http:
+      url: http://127.0.0.1:9/in
+      plaintext: true
+      headers: { Authorization: { secret: { provider: env, name: SYNTHETIC_CONTROL_TOKEN } } }
+`;
+
 /** A source that listens: the test hands messages in through the sink it was started with. */
 class TestSource implements SourceConnector {
   sink: MessageSink | undefined;
@@ -151,12 +172,17 @@ interface Setup {
   readonly engineOn: (
     store: Store,
     logger?: Logger,
+    extra?: { readonly dryRun?: boolean },
   ) => Promise<{ engine: Engine; source: TestSource }>;
 }
 
-async function setUp(database: TestDatabase, transform = LAB_TRANSFORM): Promise<Setup> {
+async function setUp(
+  database: TestDatabase,
+  transform = LAB_TRANSFORM,
+  channelYaml = CHANNEL,
+): Promise<Setup> {
   const root = await makeProject({
-    "channels/adt/channel.yaml": CHANNEL,
+    "channels/adt/channel.yaml": channelYaml,
     "channels/adt/transform.ts": transform,
   });
   const project = await loadProject(root);
@@ -172,6 +198,7 @@ async function setUp(database: TestDatabase, transform = LAB_TRANSFORM): Promise
   const engineOn = async (
     on: Store,
     logger: Logger = captureLogger().logger,
+    extra: { readonly dryRun?: boolean } = {},
   ): Promise<{ engine: Engine; source: TestSource }> => {
     const source = new TestSource();
     const engine = new Engine({
@@ -180,6 +207,7 @@ async function setUp(database: TestDatabase, transform = LAB_TRANSFORM): Promise
       logger,
       now: () => clock.now,
       connectors: () => ({ source, destinations: [destination] }),
+      ...extra,
     });
     engines.push(engine);
     await engine.start();
@@ -408,6 +436,117 @@ for (const database of TEST_DATABASES) {
       expect(
         await engine.command("reload", "adt", { ...actor, config: await channelNow(root) }),
       ).toEqual({ channel: "adt", refused: "needs-restart", changed: ["source", "destinations"] });
+    });
+
+    it("reloads the transform's configuration, the project's under the channel's, read anew", async () => {
+      const { root, store, destination, engineOn } = await setUp(
+        database,
+        CONFIGURED,
+        `${CHANNEL}config: { facility: FIRST }\n`,
+      );
+      const { engine, source } = await engineOn(store);
+      const tags = (): (string | undefined)[] =>
+        destination.delivered.map((m) => new TextDecoder().decode(m.body).split("|")[4]);
+      await source.sink?.receive(body());
+      await engine.tick();
+
+      await writeFile(
+        join(root, "channels/adt/channel.yaml"),
+        `${CHANNEL}config: { facility: SECOND }\n`,
+      );
+      expect(
+        await engine.command("reload", "adt", {
+          ...actor,
+          config: await channelNow(root),
+          transformConfig: { facility: "PROJECT", site: "NORTH" },
+        }),
+      ).toEqual({ channel: "adt", state: "running" });
+      await source.sink?.receive(body());
+      await engine.tick();
+
+      // Given no project block, the one the engine started with stands.
+      expect(
+        await engine.command("reload", "adt", { ...actor, config: await channelNow(root) }),
+      ).toEqual({ channel: "adt", state: "running" });
+      await source.sink?.receive(body());
+      await engine.tick();
+      expect(tags()).toEqual(["FIRST-undefined", "SECOND-NORTH", "SECOND-undefined"]);
+    });
+
+    it("refuses a reload whose configuration names a variable that is not set, keeping the old one", async () => {
+      const { root, store, destination, engineOn } = await setUp(
+        database,
+        CONFIGURED,
+        `${CHANNEL}config: { facility: FIRST }\n`,
+      );
+      const { engine, source } = await engineOn(store);
+      await writeFile(
+        join(root, "channels/adt/channel.yaml"),
+        `${CHANNEL}config: { facility: { env: SYNTHETIC_UNSET_FACILITY } }\n`,
+      );
+      expect(
+        await engine.command("reload", "adt", { ...actor, config: await channelNow(root) }),
+      ).toEqual({ channel: "adt", refused: "invalid-config" });
+      await source.sink?.receive(body());
+      await engine.tick();
+      expect(new TextDecoder().decode(destination.delivered[0]?.body).split("|")[4]).toBe(
+        "FIRST-undefined",
+      );
+    });
+
+    it("keeps a paused channel paused across a restart with a secret reference, and reloads it unchanged", async () => {
+      const { root, store, open, engineOn } = await setUp(database, LAB_TRANSFORM, WITH_SECRET);
+      const first = await engineOn(store);
+      await first.engine.command("pause", "adt", actor);
+      // The same reference read again is the same destination: no restart is asked for.
+      expect(
+        await first.engine.command("reload", "adt", { ...actor, config: await channelNow(root) }),
+      ).toEqual({ channel: "adt", state: "paused" });
+      await first.engine.stop();
+
+      const second = await engineOn(await open());
+      expect(second.source.starts).toBe(0);
+      expect(second.engine.channelStates()).toEqual({ adt: "paused" });
+      await second.engine.command("resume", "adt", actor);
+      expect(second.source.starts).toBe(1);
+    });
+
+    it("under start --dry-run, says which destinations run dry and keeps a paused or stopped channel so", async () => {
+      const { store, destination, clock, open, engineOn } = await setUp(database);
+      const first = await engineOn(store);
+      destination.plan.push("fail");
+      await first.source.sink?.receive(body());
+      await first.engine.tick();
+      expect(await store.retryingDeliveries("adt")).toBe(1);
+      await first.engine.command("halt", "adt", actor);
+      await first.engine.stop();
+
+      const log = captureLogger();
+      const second = await engineOn(await open(), log.logger, { dryRun: true });
+      expect(second.source.starts).toBe(0);
+      expect(log.events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ event: "dry-run-destinations", channels: { adt: [0] } }),
+          expect.objectContaining({
+            event: "dry-run-pending",
+            channel: "adt",
+            destinations: [0],
+            pending: 1,
+          }),
+          expect.objectContaining({ event: "channel-state", channel: "adt", state: "stopped" }),
+        ]),
+      );
+      // Stopped: the pending delivery is neither sent nor marked.
+      clock.now += 60_000;
+      await second.engine.tick();
+      expect(await store.deliveryCounts("adt")).toMatchObject({ pending: 1 });
+
+      // Paused: stored work goes on, so the delivery is marked dry-run, still not sent.
+      await second.engine.command("pause", "adt", actor);
+      await second.engine.tick();
+      expect(second.source.starts).toBe(0);
+      expect(await store.deliveryCounts("adt")).toMatchObject({ pending: 0, "dry-run": 1 });
+      expect(destination.sends).toBe(1);
     });
 
     it("refuses a reload during a stop's drain, and runs two reloads one after the other", async () => {

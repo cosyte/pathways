@@ -1,4 +1,5 @@
 import { parseDuration, type ProjectConfig } from "../config/schema.js";
+import type { Env } from "../connectors/endpoint.js";
 import { channelStatus } from "../engine/health.js";
 import { describeHolder } from "../engine/lease.js";
 import { EXIT } from "../exit.js";
@@ -53,6 +54,8 @@ export interface OperatorContext {
   readonly err: (text: string) => void;
   /** Epoch milliseconds now. */
   readonly now: () => number;
+  /** Where a replayed transform's configuration reads its variables. Defaults to `process.env`. */
+  readonly env?: Env;
 }
 
 /**
@@ -257,7 +260,11 @@ export async function statusCommand(
     lines.push(`${name}: ${status}${configured.has(name) ? "" : " (not configured)"}`);
     lines.push(`  messages: ${tally(messages)}`);
     lines.push(
-      `  deliveries: ${counts.pending} pending (${retryingCount} retrying), ${counts.delivered} delivered, ${counts.failed} failed, ${counts.cleared} cleared`,
+      `  deliveries: ${counts.pending} pending (${retryingCount} retrying), ${counts.delivered} delivered, ${counts.failed} failed, ${counts.cleared} cleared` +
+        // Named only when there are some: a channel that never ran dry reads as it always has.
+        (counts["dry-run"] === undefined
+          ? ""
+          : `, ${counts["dry-run"]} dry-run (recorded, not sent)`),
     );
     for (const d of shown) {
       lines.push(
@@ -431,8 +438,8 @@ export async function replayCommand(
   ids: readonly number[],
   resend: boolean,
 ): Promise<number> {
-  const { project, store, audit } = context;
-  const results = await replayMessages(ids, { project, store, audit, resend });
+  const { project, store, audit, env } = context;
+  const results = await replayMessages(ids, { project, store, audit, resend, env });
   print(
     context,
     { results },
@@ -823,8 +830,8 @@ function tally(counts: Readonly<Record<string, number>>): string {
 }
 
 function deliverySummary(deliveries: DeliveryTally): string {
-  const parts = (["delivered", "pending", "failed", "cleared"] as const)
-    .filter((status) => deliveries[status] > 0)
+  const parts = (["delivered", "dry-run", "pending", "failed", "cleared"] as const)
+    .filter((status) => (deliveries[status] ?? 0) > 0)
     .map((status) =>
       status === "pending" && deliveries.retrying > 0
         ? `${deliveries.pending} pending (${deliveries.retrying} retrying)`

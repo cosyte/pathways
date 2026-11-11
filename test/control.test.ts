@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -442,12 +442,23 @@ destinations:
   - file: { dir: ../../data/outbox }
 `;
 
-  async function project(): Promise<string> {
+  /** pathways.yaml, with a `config:` block whose `facility` the transform writes into MSH.5. */
+  const settings = (facility: string): string =>
+    `${KEYS}defaults:\n  pollInterval: 20ms\nconfig: { facility: ${facility} }\n`;
+  const FACILITY = `
+interface Msg { setField(path: string, value: string): void }
+export default (msg: Msg, ctx: { config: Record<string, unknown> }): Msg => {
+  msg.setField("MSH.5", String(ctx.config["facility"]));
+  return msg;
+};
+`;
+
+  async function project(transform = LAB_TRANSFORM): Promise<string> {
     return makeProject({
       "test.key": `${generateKey()}\n`,
-      "pathways.yaml": `${KEYS}defaults:\n  pollInterval: 20ms\n`,
+      "pathways.yaml": settings("FIRST"),
       "channels/adt/channel.yaml": CHANNEL,
-      "channels/adt/transform.ts": LAB_TRANSFORM,
+      "channels/adt/transform.ts": transform,
     });
   }
 
@@ -469,7 +480,7 @@ destinations:
   }
 
   it("pauses, reloads and resumes a channel of the running engine", async () => {
-    const root = await project();
+    const root = await project(FACILITY);
     const stop = new AbortController();
     let startErr = "";
     const running = run(["start", "-C", root], {
@@ -494,6 +505,8 @@ destinations:
         err: expect.stringContaining("the configuration is invalid") as unknown,
       });
       await writeFile(join(root, "channels/adt/channel.yaml"), CHANNEL);
+      // A reload reads pathways.yaml's config: block anew too.
+      await writeFile(join(root, "pathways.yaml"), settings("SECOND"));
       expect(await ask(root, "reload", "adt")).toEqual({
         code: EXIT.ok,
         out: "adt: paused (reloaded)\n",
@@ -518,6 +531,8 @@ destinations:
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
       expect(await readdir(join(root, "data/outbox"))).toEqual(["1-1.hl7"]);
+      const out = await readFile(join(root, "data/outbox/1-1.hl7"), "utf8");
+      expect(out.split("|")[4]).toBe("SECOND");
     } finally {
       stop.abort();
     }

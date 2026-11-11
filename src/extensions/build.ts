@@ -47,6 +47,7 @@ const STORE_METHOD_LIST = {
   leaseHolder: false,
   channelStates: false,
   setChannelState: false,
+  markDryRun: false,
 } satisfies Record<keyof MessageStore, boolean>;
 
 const STORE_METHODS = Object.entries(STORE_METHOD_LIST)

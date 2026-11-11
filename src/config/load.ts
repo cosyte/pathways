@@ -21,6 +21,7 @@ import {
   DEFAULT_LEASE_TTL_MS,
   DEFAULT_MAX_BYTES,
   DEFAULT_MIN_AGE_MS,
+  DEFAULT_READ_TRIES,
   DEFAULT_POOL_IDLE_TIMEOUT_MS,
   DEFAULT_POOL_MAX,
   DEFAULT_SECRET_TIMEOUT_MS,
@@ -37,12 +38,14 @@ import {
   type ListenerConfig,
   type ModuleConnector,
   type OnStoreFailure,
+  type PathPattern,
   type ProjectConfig,
   type RetryPolicy,
   type SecretProviderConfig,
   type ServerTlsFiles,
   type Settings,
   type StorageConfig,
+  type TransformConfigBlock,
 } from "./schema.js";
 
 type ChannelYaml = z.infer<typeof channelSchema>;
@@ -230,8 +233,12 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
     }
     const channelSettings = mergeSettings(settings, channel);
     const source = resolveSource(channel.source, channelDir, channelSettings);
-    const destinations = channel.destinations.map((destination) =>
-      resolveDestination(destination, channelDir, channelSettings),
+    const destinations = channel.destinations.map(
+      (destination): ChannelConfig["destinations"][number] => ({
+        ...resolveDestination(destination, channelDir, channelSettings),
+        // Set only when true, so a destination that sends resolves as it always has.
+        ...(destination.dryRun === true ? { dryRun: true } : {}),
+      }),
     );
     const channelRetry: RetryLevel = { key: "retry", block: channel.retry, fromEnv: channelEnv };
     const badRetry = [
@@ -283,6 +290,8 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
       destinations,
       settings: channelSettings,
       hooks: channelHooks,
+      // The schema checked each value is JSON.
+      config: (channel.config ?? {}) as TransformConfigBlock,
     });
   }
 
@@ -314,6 +323,7 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
     lease,
     migrations: { rollbackWindowMs: project.migrations?.rollbackWindow ?? 0 },
     encryption,
+    config: (project.config ?? {}) as TransformConfigBlock,
     secrets,
     channels,
     environment,
@@ -477,6 +487,7 @@ function resolveSource(
       methods: http.methods ?? ["POST"],
       response: resolveSourceResponse(http.response, dir),
       maxBytes: http.maxBytes ?? DEFAULT_MAX_BYTES,
+      contextHeaders: (http.contextHeaders ?? []).map((name) => name.toLowerCase()),
     };
   }
   // The schema lets exactly one kind through, so a source that is not HTTP is a file source.
@@ -486,7 +497,28 @@ function resolveSource(
     dir: resolve(dir, file.dir),
     minAgeMs: file.minAge ?? DEFAULT_MIN_AGE_MS,
     keepProcessed: file.keepProcessed ?? false,
+    include: patterns(file.include),
+    exclude: patterns(file.exclude),
+    recursive: file.recursive ?? false,
+    ignoreDot: file.ignoreDot ?? true,
+    minSize: file.minSize ?? 1,
+    maxSize: file.maxSize,
+    maxPerPoll: file.maxPerPoll,
+    sortBy: file.sortBy ?? "name",
+    stable: file.stable ?? false,
+    doneFile: file.doneFile,
+    errorDir: file.errorDir === undefined ? undefined : resolve(dir, file.errorDir),
+    readTries: file.readTries ?? DEFAULT_READ_TRIES,
   };
+}
+
+/** A file source's `include` or `exclude` as written, each glob made a `{ glob }`. */
+function patterns(
+  written: readonly (string | { readonly regex: string })[] | undefined,
+): PathPattern[] {
+  return (written ?? []).map((pattern) =>
+    typeof pattern === "string" ? { glob: pattern } : { regex: pattern.regex },
+  );
 }
 
 /**

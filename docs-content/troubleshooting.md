@@ -67,7 +67,11 @@ Docker image is built that way.
 - The source reads a file only once it has sat unchanged for `minAge` (1 second by default). `pathways
 start --once` run straight after copying a file in can find it too new; run it again, or use
   `pathways start`.
-- Hidden files (a name starting with a dot) and folders are never read.
+- Hidden files (a name starting with a dot) are left unless `ignoreDot: false`, and subfolders are
+  read only with `recursive: true`. An empty file is left unless `minSize: 0`.
+- `include`, `exclude`, `stable` and `doneFile` each hold a file back until it passes: see
+  [Choose which files a source takes](./read-and-write-files.md#choose-which-files-a-source-takes).
+- A file larger than `maxSize` is set aside, and the engine logs `source-file-set-aside`.
 - A file that cannot be opened or moved stays where it is, and the engine logs `source-read-failed`
   with the error's code: check the folder's permissions.
 - A file left in `.claimed/<channel>/` belongs to a run of that channel that stopped part way. The
