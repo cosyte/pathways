@@ -32,7 +32,9 @@ transform returns that library's model, so a channel does not pay to load format
   up.
 - **A transform that runs out of memory.** Each worker has a heap cap (256 MB by default). A worker
   past it exits with `ERR_WORKER_OUT_OF_MEMORY`; the message is marked failed and the engine carries
-  on.
+  on. Writing an HL7 v2 message back out builds its whole parsed tree, about 44 times the message's
+  size for a dense result report of short OBX segments, so under the default cap such a message
+  gets through up to about 5 MiB. Set a larger `memory` on a channel that takes larger ones.
 - **A transform that throws.** The message is marked failed with the error's name, its code and the
   line in the transform, and the channel moves on.
 
