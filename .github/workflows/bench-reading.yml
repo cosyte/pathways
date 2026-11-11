@@ -68,28 +68,38 @@ jobs:
           set -euo pipefail
           mkdir -p bench-results
           # The ack group is the in-process benchmark, with its memory and the cold import of the
-          # built entry. Every other group runs the engine as a process, whose memory the measuring
-          # process cannot see: the profile job reads it.
+          # built entry, read in one run. Every other group runs the engine as a process, whose
+          # memory the measuring process cannot see (the profile job reads it), one case a run: a
+          # case that cannot be measured writes no reading, and the others keep theirs.
           mapfile -t names < <(node bench/names.mjs "${GROUP}")
           flags=()
           if [ "${GROUP}" != "ack" ]; then flags+=(--no-memory --no-import); fi
-          for name in "${names[@]}"; do flags+=(--only "${name}"); done
-          status=0
-          pnpm exec cosyte-bench run --suite bench/pathways.bench.mjs --target dist/index.mjs \
-            --commit "${COMMIT}" "${flags[@]}" \
-            --out "bench-results/reading-${GROUP}.json" \
-            --summary "bench-results/reading-${GROUP}.md" || status=$?
-          case "${status}" in
-            0) ;;
-            2) echo "::notice::bench-reading: at least one case could not be measured; a skip is not a pass" ;;
-            *) echo "::warning::bench-reading: cosyte-bench exited ${status}" ;;
-          esac
-          if [ ! -f "bench-results/reading-${GROUP}.json" ]; then
+          written=0
+          n=0
+          for name in "${names[@]}"; do
+            n=$((n + 1))
+            out="bench-results/reading-${GROUP}-${n}"
+            status=0
+            pnpm exec cosyte-bench run --suite bench/pathways.bench.mjs --target dist/index.mjs \
+              --commit "${COMMIT}" "${flags[@]}" --only "${name}" \
+              --out "${out}.json" --summary "${out}.md" || status=$?
+            case "${status}" in
+              0) ;;
+              2) echo "::notice::bench-reading: ${name}: could not be measured; a skip is not a pass" ;;
+              *) echo "::warning::bench-reading: ${name}: cosyte-bench exited ${status}" ;;
+            esac
+            if [ -f "${out}.json" ]; then
+              pnpm exec cosyte-bench check "${out}.json"
+              cat "${out}.md" >> "${GITHUB_STEP_SUMMARY}"
+              written=$((written + 1))
+            else
+              { echo; echo "Not read: ${name} (cosyte-bench exited ${status})."; } >> "${GITHUB_STEP_SUMMARY}"
+            fi
+          done
+          if [ "${written}" -eq 0 ]; then
             echo "::error::bench-reading: no reading was written"
             exit 1
           fi
-          pnpm exec cosyte-bench check "bench-results/reading-${GROUP}.json"
-          cat "bench-results/reading-${GROUP}.md" >> "${GITHUB_STEP_SUMMARY}"
       - name: Keep the reading
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
