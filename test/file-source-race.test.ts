@@ -477,6 +477,11 @@ describe("FileSource moving a swapped file back, on every system", () => {
     expect(await heldIn(dir)).toEqual([]);
     expect(await readdir(join(dir, CLAIMED_DIR, "adt"))).toHaveLength(1);
     expect(await pass(source)).toEqual([]);
+    // A pass that cannot read the claim's id leaves it too, and still knows it after.
+    race.fail = (what, path) => what === "lstat" && path.includes(claims);
+    expect(await pass(source)).toEqual([]);
+    expect(await pass(source)).toEqual([]);
+    expect(await readdir(join(dir, CLAIMED_DIR, "adt"))).toHaveLength(1);
     // A later run knows nothing of the refusal, and stores what waits in the claim folder.
     expect(await pass(recursiveSource(dir).source)).toEqual(["swapped"]);
   });
