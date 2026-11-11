@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSyn
 import { mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage } from "node:http";
 import { createRequire } from "node:module";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { parseHL7 } from "@cosyte/hl7";
@@ -57,8 +57,10 @@ import { ADT_A01, ADT_A08, FHIR_PATIENT, X12_270 } from "./helpers.js";
  */
 
 const distEntry = join(ROOT, "dist", "index.mjs");
+// A file URL, not a path: the sample imports it as written, and on Windows Node's loader reads a
+// bare `D:\...` as a URL whose scheme is the drive.
 const resolve = (specifier: string): string | undefined =>
-  specifier === "@cosyte/pathways" ? distEntry : undefined;
+  specifier === "@cosyte/pathways" ? pathToFileURL(distEntry).href : undefined;
 
 beforeAll(() => {
   // pnpm is a .cmd shim on Windows, which only a shell can start.
@@ -253,7 +255,13 @@ describe("the quickstart", () => {
       const dir = await starterProject();
       const written = (await readdir(dir, { recursive: true, withFileTypes: true }))
         .filter((entry) => entry.isFile() && !entry.parentPath.includes("node_modules"))
-        .map((entry) => join(entry.parentPath, entry.name).slice(dir.length + 1))
+        // With "/" between folders on every system, as the page shows them.
+        .map((entry) =>
+          join(entry.parentPath, entry.name)
+            .slice(dir.length + 1)
+            .split(sep)
+            .join("/"),
+        )
         .sort();
       expect(written.join("\n")).toBe(shown[0]);
 
