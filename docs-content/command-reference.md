@@ -197,19 +197,22 @@ running under a lease freed this way stops at its next renewal.
 ## pathways probe
 
 ```text
-pathways probe [--ready]
+pathways probe [--ready] [--if-configured]
 ```
 
 Asks the probe listener of the engine running in this project (the `probes` block of
 `pathways.yaml`) for `/livez`, or `/readyz` with `--ready`, prints the word it answers, and exits 0
 on a 200 and 1 on anything else. It exits 1, saying why, when `pathways.yaml` has no `probes` block,
 when the configuration is invalid, or when nothing answers within 5 seconds, so a container's health
-check sees only 0 or 1. It reads `pathways.yaml` and opens no database. A listener on `0.0.0.0` or
-`::` is asked on the loopback address.
+check sees only 0 or 1. With `--if-configured`, no `probes` block exits 0 and prints
+`not-configured` instead; the Docker image's health check runs it that way. It reads `pathways.yaml`
+and opens no database. A listener on `0.0.0.0` or `::` is asked on the loopback address. It reads at
+most 256 characters of an answer.
 
-| Option    | Meaning                            |
-| --------- | ---------------------------------- |
-| `--ready` | ask `/readyz` in place of `/livez` |
+| Option            | Meaning                                                            |
+| ----------------- | ------------------------------------------------------------------ |
+| `--ready`         | ask `/readyz` in place of `/livez`                                 |
+| `--if-configured` | exit 0, asking nothing, when `pathways.yaml` has no `probes` block |
 
 ## Exit codes
 

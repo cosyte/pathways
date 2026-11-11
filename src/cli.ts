@@ -123,7 +123,8 @@ Commands:
   rekey               Re-encrypt every stored message under the current key
                       of pathways.yaml's encryption, so older keys can be
                       retired
-  probe [--ready]     Ask the running engine's probe listener (pathways.yaml's
+  probe [--ready] [--if-configured]
+                      Ask the running engine's probe listener (pathways.yaml's
                       probes block) whether it is alive, or with --ready
                       whether it is ready for traffic: exits 0 if so, 1 if
                       not. For a container's health check
@@ -144,6 +145,8 @@ Options:
                         engine holding the lease stops, then take over.
                         Needs a database server
       --ready           probe: ask /readyz in place of /livez
+      --if-configured   probe: exit 0 when pathways.yaml has no probes block,
+                        as the Docker image's health check does
       --force           lease release: say the lease's host is gone
       --update          test: save the current outputs as the expected ones
       --json            status, messages, replay, clear, retention, audit,
@@ -208,7 +211,7 @@ const OPTIONS: Readonly<Record<string, readonly OptionName[]>> = {
   audit: ["json", "action", "message", "channel", "since", "until", "limit", "before"],
   rekey: ["encrypt-plaintext"],
   lease: ["json", "force"],
-  probe: ["ready"],
+  probe: ["ready", "if-configured"],
 };
 
 /**
@@ -271,7 +274,11 @@ export async function run(argv: readonly string[], io: CliIo): Promise<number> {
       return rekeyStore(projectDir, values["encrypt-plaintext"] === true, io);
     case "probe":
       if (rest.length > 0) return usage(io);
-      return probe(projectDir, values.ready === true, io);
+      return probe(
+        projectDir,
+        { ready: values.ready === true, ifConfigured: values["if-configured"] === true },
+        io,
+      );
     default:
       return operator(command, rest, values, projectDir, io);
   }
@@ -744,18 +751,29 @@ async function runEngine(
 }
 
 /**
- * `pathways probe [--ready]`: asks the probe listener of the engine running in this project for
- * `/livez`, or `/readyz`, and exits 0 on a 200 and 1 on anything else, a configuration without a
- * `probes` block or one that is invalid among them, so a container's health check reads only 0 or
- * 1. Prints the one word the engine answered, or why there was none.
+ * `pathways probe [--ready] [--if-configured]`: asks the probe listener of the engine running in
+ * this project for `/livez`, or `/readyz`, and exits 0 on a 200 and 1 on anything else, a
+ * configuration without a `probes` block or one that is invalid among them, so a container's health
+ * check reads only 0 or 1. Prints the one word the engine answered, or why there was none. With
+ * `--if-configured`, a configuration without a `probes` block exits 0 and prints `not-configured`:
+ * the image's health check then has nothing to ask, and a running container is all it can say.
  */
-async function probe(projectDir: string, ready: boolean, io: CliIo): Promise<number> {
+async function probe(
+  projectDir: string,
+  options: { readonly ready: boolean; readonly ifConfigured: boolean },
+  io: CliIo,
+): Promise<number> {
   const project = await load(projectDir, io);
   if (project === undefined) return EXIT.failed;
   if (project.probes === undefined) {
+    if (options.ifConfigured) {
+      io.out("not-configured\n");
+      return EXIT.ok;
+    }
     io.err("pathways: pathways.yaml has no probes block, so there is nothing to ask.\n");
     return EXIT.failed;
   }
+  const { ready } = options;
   const result = await askProbe(project.probes, { ready });
   if (result.status === undefined) {
     io.err(
@@ -1099,6 +1117,7 @@ function parseCli(argv: readonly string[]) {
       once: { type: "boolean" },
       standby: { type: "boolean" },
       ready: { type: "boolean" },
+      "if-configured": { type: "boolean" },
       force: { type: "boolean" },
       update: { type: "boolean" },
       json: { type: "boolean" },

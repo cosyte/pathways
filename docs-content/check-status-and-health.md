@@ -118,14 +118,17 @@ answers one word and takes nothing in.
 Every other path answers 404, and every method but `GET` and `HEAD` 405.
 
 **Liveness** looks at the engine loop alone. A step is a message taken in by a polled source, one
-transform, one delivery attempt, a channel's turn in a pass, or a retention run. The bound is 60
+transform, one delivery attempt, a channel's turn in a pass, or one channel of a retention run. The bound is 60
 seconds, plus the poll interval, plus the longest time one step can take: the longest of each
 channel's transform `timeout`, each HTTP destination's `timeout`, and twice each MLLP destination's
 `ackTimeout` (one to connect, one for the ACK) plus a second. A source that cannot listen or a
 destination that is down never makes the engine stalled, since the loop keeps stepping while it
 retries them and a restart would not bring them back; a standby, and an engine still starting or
 stopping, are always live. A custom destination has no time limit of its own, so one that never
-returns does stall the engine. Point a restart policy at `/livez`.
+returns does stall the engine. Nor has one channel's retention delete: a channel with a very large
+backlog past its retention period (the first run after a long outage, or after `retention` was
+shortened) can take longer than the bound to delete, and `/livez` answers `stalled` until it is
+done. Run `pathways retention` by hand first in that case. Point a restart policy at `/livez`.
 
 **Readiness** is 503 until the engine is running, and while it runs when storage cannot be read
 (read at most once a second, and counted unreachable after 5 seconds without an answer) or a source

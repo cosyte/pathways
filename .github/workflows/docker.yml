@@ -152,7 +152,8 @@ jobs:
           test -z "$(find "$inbox" -type f)"
 
       # The way most people will run it: the default command (`start -C /project`) as uid 65532,
-      # stopped with SIGTERM by `docker stop`, which must end it cleanly with exit code 0.
+      # stopped with SIGTERM by `docker stop`, which must end it cleanly with exit code 0. The
+      # starter has no probes block, and the image's HEALTHCHECK must still call it healthy.
       - name: The default command runs as nonroot and stops cleanly on docker stop
         run: |
           project="$RUNNER_TEMP/project"
@@ -160,9 +161,16 @@ jobs:
           cp "$project/channels/adt-to-lab/tests/a01.hl7" "$inbox/next.hl7"
           touch -d '1 minute ago' "$inbox/next.hl7"
           sudo chown -R 65532:65532 "$project"
-          docker run --detach --name pathways-ci --volume "$project:/project" "$IMAGE"
+          docker run --detach --name pathways-ci --health-interval 1s \
+            --volume "$project:/project" "$IMAGE"
           for _ in $(seq 1 30); do
             if [ -f "$project/data/adt-to-lab/out/3-1.hl7" ]; then break; fi
+            sleep 1
+          done
+          health=""
+          for _ in $(seq 1 30); do
+            health="$(docker inspect --format '{{.State.Health.Status}}' pathways-ci)"
+            if [ "$health" = healthy ]; then break; fi
             sleep 1
           done
           docker stop pathways-ci
@@ -170,7 +178,8 @@ jobs:
           # The engine logs ids, counts and events, never message content.
           docker logs pathways-ci
           docker rm pathways-ci
-          echo "exit code after docker stop: $code"
+          echo "health without a probes block: $health, exit code after docker stop: $code"
+          test "$health" = healthy
           test "$code" = 0
           cmp "$project/data/adt-to-lab/out/3-1.hl7" "$project/channels/adt-to-lab/tests/a01.expected.hl7"
 

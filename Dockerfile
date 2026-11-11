@@ -91,8 +91,9 @@ COPY --from=app /app /app
 USER 65532:65532
 WORKDIR /project
 STOPSIGNAL SIGTERM
+# Asks the probe listener when pathways.yaml has a probes block, and passes when it has none.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-  CMD ["/nodejs/bin/node", "/app/dist/bin/pathways.mjs", "probe", "-C", "/project"]
+  CMD ["/nodejs/bin/node", "/app/dist/bin/pathways.mjs", "probe", "--if-configured", "-C", "/project"]
 ENTRYPOINT ["/nodejs/bin/node", "/app/dist/bin/pathways.mjs"]
 CMD ["start", "-C", "/project"]
 
@@ -104,7 +105,8 @@ COPY --from=app /app /app
 USER 65532:65532
 WORKDIR /project
 STOPSIGNAL SIGTERM
+# Asks the probe listener when pathways.yaml has a probes block, and passes when it has none.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-  CMD ["/nodejs/bin/node", "/app/dist/bin/pathways.mjs", "probe", "-C", "/project"]
+  CMD ["/nodejs/bin/node", "/app/dist/bin/pathways.mjs", "probe", "--if-configured", "-C", "/project"]
 ENTRYPOINT ["/nodejs/bin/node", "/app/dist/bin/pathways.mjs"]
 CMD ["start", "-C", "/project"]

@@ -2,7 +2,7 @@
 // or counts) and behind the health endpoint's authentication, the engine's liveness and readiness
 // behind them, the identity fields of the health body, and `pathways probe`.
 import { createServer, type Server, type Socket } from "node:net";
-import { access } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -255,6 +255,28 @@ describe("the probe listener", () => {
       ),
     ).toEqual({ status: undefined, code: "ABORT_ERR" });
   });
+
+  it("reads at most a few hundred bytes of an answer, whatever holds the port", async () => {
+    // A server that answers 200 and then sends without end: the probe stops reading and answers.
+    const server = (await import("node:http")).createServer((_request, response) => {
+      response.writeHead(200, { "Content-Type": "text/plain" });
+      const chunk = "x".repeat(1024);
+      const timer = setInterval(() => response.write(chunk), 5);
+      response.on("close", () => clearInterval(timer));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    closers.push(
+      () =>
+        new Promise<void>((resolve) => {
+          server.closeAllConnections();
+          server.close(() => resolve());
+        }),
+    );
+    const address = server.address();
+    const port = typeof address === "object" && address !== null ? address.port : 0;
+    const result = await askProbe({ host: "127.0.0.1", port }, { ready: false, timeoutMs: 3_000 });
+    expect(result).toEqual({ status: 200, word: "x".repeat(40) });
+  });
 });
 
 describe("the health endpoint", () => {
@@ -337,6 +359,35 @@ describe("the engine's liveness and readiness", () => {
     );
     // The MLLP destination's two waits and its second of grace: 61 seconds, past the HTTP 45.
     expect(livenessBoundMs(loaded)).toBe(LIVE_GRACE_MS + 2_000 + 61_000);
+  });
+
+  it("counts each channel of a retention run as a step, so a long run over many stays live", async () => {
+    const root = await project("defaults:\n  pollInterval: 1h\n", FILE_CHANNEL, {
+      "channels/orm/channel.yaml": FILE_CHANNEL.replace("inbox", "orders"),
+    });
+    const loaded = await loadProject(root);
+    const store = await Store.open(loaded.databaseFile);
+    closers.push(() => store.close());
+    const { logger, events } = captureLogger();
+    const clock = { now: 0 };
+    const engine = new Engine({ project: loaded, store, logger, monotonic: () => clock.now });
+    await engine.start();
+    closers.push(() => engine.stop());
+    const bound = livenessBoundMs(loaded);
+    // Each channel's delete takes most of the bound: the run as a whole takes longer than it.
+    const live: boolean[] = [];
+    const expire = store.expire.bind(store);
+    vi.spyOn(store, "expire").mockImplementation(async (...args) => {
+      clock.now += bound - 1;
+      live.push(engine.live());
+      return expire(...args);
+    });
+    const stop = new AbortController();
+    const running = engine.run(stop.signal);
+    await until(() => events.some((e) => e.event === "retention"), "the first retention run");
+    stop.abort();
+    await running;
+    expect(live).toEqual([true, true]);
   });
 
   it("stays live while a source cannot listen, and is not ready until it can", async () => {
@@ -609,6 +660,41 @@ describe("pathways probe", () => {
         await project(`probes: { port: ${String(port)}, plaintext: true }\n`),
       ]),
     ).toEqual({ code: EXIT.failed, out: "500\n", err: "" });
+  });
+
+  it("with --if-configured, exits 0 with no probes block and asks the port when there is one", async () => {
+    expect(await cli(["probe", "--if-configured", "-C", await project("")])).toEqual({
+      code: EXIT.ok,
+      out: "not-configured\n",
+      err: "",
+    });
+    const closed = await freePort();
+    const configured = await project(`probes: { port: ${String(closed)}, plaintext: true }\n`);
+    expect(await cli(["probe", "--if-configured", "-C", configured])).toEqual({
+      code: EXIT.failed,
+      out: "",
+      err: "pathways: the probe listener did not answer (ECONNREFUSED).\n",
+    });
+    const invalid = await cli([
+      "probe",
+      "--if-configured",
+      "-C",
+      await project("probes: { port: 0 }\n"),
+    ]);
+    expect(invalid.code).toBe(EXIT.failed);
+    expect((await cli(["start", "--if-configured", "-C", await project("")])).code).toBe(
+      EXIT.usage,
+    );
+  });
+
+  it("is the image's health check, which passes for a project without a probes block", async () => {
+    const dockerfile = await readFile(join(import.meta.dirname, "..", "Dockerfile"), "utf8");
+    const checks = dockerfile.match(/^HEALTHCHECK [^\n]*\\\n\s*CMD (\[.*\])$/gm) ?? [];
+    expect(checks).toHaveLength(2);
+    for (const check of checks) {
+      const argv = JSON.parse(check.replace(/^[^]*CMD /, "")) as string[];
+      expect(argv.slice(2)).toEqual(["probe", "--if-configured", "-C", "/project"]);
+    }
   });
 
   it("opens no database: the probe reads pathways.yaml and asks the port, nothing else", async () => {

@@ -36,9 +36,11 @@ turns 503, sources stop taking messages, what is being stored is answered, and t
 
 ## Health check
 
-The image has no shell and no `curl`, so its `HEALTHCHECK` runs `pathways probe -C /project`, which
-asks the probe listener for `/livez` every 30 seconds and exits 0 or 1. Add a `probes` block to
-`pathways.yaml` for it to ask:
+The image has no shell and no `curl`, so its `HEALTHCHECK` runs
+`pathways probe --if-configured -C /project` every 30 seconds. With a `probes` block in
+`pathways.yaml`, it asks the probe listener for `/livez` and exits 0 or 1. Without one it exits 0
+and asks nothing, so the container is `healthy` once it has started, and all the check then says is
+that the engine process is running. Add the block for a check that means more:
 
 ```yaml title="pathways.yaml"
 probes:
@@ -46,8 +48,11 @@ probes:
   plaintext: true
 ```
 
-Without the block the check fails and Docker reports the container `unhealthy`; the engine runs on
-regardless. To leave the check out, run with `--no-healthcheck`. For a probe from outside the
+What happens on `unhealthy` depends on what reads it. Under plain `docker run` the container keeps
+running, and Docker only reports it. Docker Swarm replaces a task that turns `unhealthy`, so with
+the block a `stalled` engine is restarted. Compose does not restart on it, but `depends_on` with
+`condition: service_healthy` holds back the services that depend on Pathways until it is `healthy`.
+A project without the block turns `healthy` under all three. To leave the check out, run with `--no-healthcheck`. For a probe from outside the
 container (a load balancer, an orchestrator), set `host: 0.0.0.0` and publish the port
 (`--publish 9091:9091`). See
 [probe liveness and readiness](./check-status-and-health.md#probe-liveness-and-readiness).

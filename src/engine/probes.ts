@@ -181,6 +181,9 @@ export function probeEndpointFor(config: ProbesConfig, probes: Probes): ProbeEnd
 /** How long `pathways probe` waits for an answer before it counts the engine as not answering. */
 export const PROBE_TIMEOUT_MS = 5_000;
 
+/** The most of an answer `pathways probe` reads: the engine's one word is far shorter. */
+const PROBE_READ_LIMIT = 256;
+
 /** What {@link askProbe} found: the status and word, or the code of the failure to get them. */
 export type ProbeResult =
   | { readonly status: number; readonly word: string }
@@ -188,7 +191,8 @@ export type ProbeResult =
 
 /**
  * Asks the probe listener `config` names for `/livez`, or `/readyz` when `ready`, as `pathways
- * probe` does. A wildcard host (`0.0.0.0`, `::`) is asked on the loopback address.
+ * probe` does. A wildcard host (`0.0.0.0`, `::`) is asked on the loopback address. At most 256
+ * characters of the answer are read, whatever holds the port.
  *
  * @example
  * ```ts
@@ -216,13 +220,20 @@ export function askProbe(
       },
       (response) => {
         let text = "";
+        const answered = (): void => {
+          resolve({ status: Number(response.statusCode), word: text.trim().slice(0, 40) });
+        };
         response.setEncoding("utf8");
         response.on("data", (chunk: string) => {
           text += chunk;
+          // One word is all the engine answers: whatever else holds the port is read no further.
+          if (text.length >= PROBE_READ_LIMIT) {
+            text = text.slice(0, PROBE_READ_LIMIT);
+            answered();
+            response.destroy();
+          }
         });
-        response.on("end", () => {
-          resolve({ status: Number(response.statusCode), word: text.trim().slice(0, 40) });
-        });
+        response.on("end", answered);
         response.on("error", failed);
       },
     );

@@ -47,11 +47,13 @@ export const LIVE_GRACE_MS = 60_000;
 /**
  * How long the engine loop may go without a step before liveness answers `stalled`: 60 seconds,
  * plus the poll interval, plus the longest time limit one step can take. A step is a message taken
- * in by a polled source, one transform, one delivery attempt, a channel's turn in a pass, or a
- * retention run. The longest step is the longest of each channel's transform timeout, each HTTP
+ * in by a polled source, one transform, one delivery attempt, a channel's turn in a pass, or one
+ * channel of a retention run. The longest step is the longest of each channel's transform timeout, each HTTP
  * destination's timeout, and twice each MLLP destination's ACK timeout (one to connect, one for the
  * ACK) plus a second. A custom destination has no time limit of its own: one that never returns
- * stalls the engine, and liveness says so.
+ * stalls the engine, and liveness says so. Nor has one channel's retention delete: one that takes
+ * longer than the bound (a very large backlog past its retention period) makes liveness say stalled
+ * until it is done.
  *
  * @example
  * ```ts
@@ -578,7 +580,14 @@ export class Engine {
   async retention(): Promise<RetentionReport | undefined> {
     const { store, project, logger } = this.options;
     try {
-      const report = await runRetention(store, project, { now: this.now(), dryRun: false });
+      // Each channel deleted is a step: a run over many channels is not a stall.
+      const report = await runRetention(store, project, {
+        now: this.now(),
+        dryRun: false,
+        onChannel: () => {
+          this.step();
+        },
+      });
       await recordRetention(this.audit, report);
       logger.info({
         event: "retention",
