@@ -4,6 +4,8 @@ node_modules/
 
 # Build output
 dist/
+# The JSON Schemas of the YAML files, which the build writes (tsup.config.ts)
+/schema/
 *.tsbuildinfo
 
 # Test / coverage

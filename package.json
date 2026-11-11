@@ -46,10 +46,13 @@
         "default": "./dist/index.cjs"
       }
     },
+    "./schema/channel.json": "./schema/channel.json",
+    "./schema/project.json": "./schema/project.json",
     "./package.json": "./package.json"
   },
   "files": [
     "dist",
+    "schema",
     "templates",
     "README.md",
     "LICENSE",
@@ -77,7 +80,7 @@
     "test": "cosyte-process test",
     "test:watch": "cosyte-process test --watch",
     "test:coverage": "cosyte-process test --coverage",
-    "clean": "rm -rf dist coverage",
+    "clean": "rm -rf dist schema coverage",
     "attw": "cosyte-attw",
     "version": "changeset version && tsx scripts/sync-version.ts && cosyte-process format",
     "pack:docs": "cosyte-process pack-docs",
@@ -111,6 +114,7 @@
     "@types/better-sqlite3": "9.6.0",
     "@types/node": "^24.0.0",
     "@types/pg": "8.23.1",
+    "ajv": "8.17.1",
     "fast-check": "4.10.2",
     "mysql2": "3.24.6",
     "pg": "8.23.1",

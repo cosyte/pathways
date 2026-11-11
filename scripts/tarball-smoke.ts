@@ -13,10 +13,12 @@
  * In a new empty folder it installs the tarball with npm, which proves its `files` (the build and
  * the starter's templates) and fetches better-sqlite3's native addon for this system. Then, through
  * the installed `pathways` bin (its `.cmd` shim on Windows): `--version`; `init` into another empty
- * folder, which must rename the starter's `gitignore` to `.gitignore`; `test`, which runs the
- * starter channel's tests; and `start --once`, which stores the starter's two synthetic messages in
+ * folder, which must rename the starter's `gitignore` to `.gitignore`; `validate`; `test`, which
+ * runs the starter channel's tests; and `start --once`, which stores the starter's two synthetic messages in
  * SQLite through that addon, delivers the admission and filters the update. Every message here is
- * the starter's own synthetic one. It prints what it checked and exits 1 on the first failure.
+ * the starter's own synthetic one. It also resolves the two JSON Schemas the package exports, and
+ * checks that the modeline on each starter YAML file names one of them by its path under
+ * `node_modules`. It prints what it checked and exits 1 on the first failure.
  *
  * Node runs it as it is, stripping the types, with no package of this repository loaded: it imports
  * Node's own modules only, and is started with `node`, not through pnpm, so nothing of pnpm's
@@ -31,10 +33,12 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   utimesSync,
 } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 const windows = process.platform === "win32";
 
@@ -105,6 +109,34 @@ run(bin, ["init", project], install);
 check(existsSync(join(project, ".gitignore")), "init wrote the starter's .gitignore");
 check(!existsSync(join(project, "gitignore")), "init left no file named gitignore");
 check(existsSync(join(project, ".pathways", "dev.key")), "init generated a development key");
+
+// The JSON Schemas, through the subpaths package.json exports, as an editor or a script reaches them.
+const fromInstall = createRequire(join(install, "index.js"));
+for (const [yaml, subpath] of [
+  ["pathways.yaml", "@cosyte/pathways/schema/project.json"],
+  [join("channels", "adt-to-lab", "channel.yaml"), "@cosyte/pathways/schema/channel.json"],
+] as const) {
+  const file = fromInstall.resolve(subpath);
+  const schema = JSON.parse(readFileSync(file, "utf8")) as { $schema?: unknown };
+  check(schema.$schema === "http://json-schema.org/draft-07/schema#", `${subpath} is draft-07`);
+  // The starter's modeline is relative to its file and goes through the project's node_modules,
+  // which holds this package once the project's own dependencies are installed: here, the package
+  // installed above stands in for it. Both sides are compared as real paths, since macOS's temp
+  // folder is reached through a symbolic link and require.resolve follows it.
+  const first = readFileSync(join(project, yaml), "utf8").split("\n")[0] ?? "";
+  const named = /^# yaml-language-server: \$schema=(\S+)$/.exec(first)?.[1] ?? "";
+  const landing = resolve(dirname(join(project, yaml)), named).replace(
+    join(project, "node_modules", "@cosyte", "pathways"),
+    installed,
+  );
+  check(
+    named !== "" && existsSync(landing) && realpathSync(landing) === realpathSync(file),
+    `the starter's ${yaml} names ${subpath} in its modeline`,
+  );
+}
+
+run(bin, ["validate"], project);
+check(true, "pathways validate passes on the starter project");
 
 run(bin, ["test"], project);
 check(true, "pathways test passes on the starter project");

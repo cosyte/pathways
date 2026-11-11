@@ -53,8 +53,8 @@
   ],
   "$surfacePaths": "What a user reads: the README (also in the tarball), docs-content (docs.cosyte.com), the LICENSE, and the starter `pathways init` writes into a user's project.",
   "surfacePaths": ["README.md", "LICENSE", "docs-content", "templates"],
-  "$accountedTarballFiles": "The other `files` entries: dist is untracked build output, gated through its source by sourceDocComments; CHANGELOG.md is where identifiers belong, and is written by Changesets.",
-  "accountedTarballFiles": ["dist", "CHANGELOG.md"],
+  "$accountedTarballFiles": "The other `files` entries: dist is untracked build output, gated through its source by sourceDocComments; schema holds the two JSON Schemas the build writes from src/config/schema.ts, untracked too, their text the descriptions in that file; CHANGELOG.md is where identifiers belong, and is written by Changesets.",
+  "accountedTarballFiles": ["dist", "schema", "CHANGELOG.md"],
   "sourceDocComments": {
     "enabled": true,
     "paths": ["src/*.ts", "src/**/*.ts"]

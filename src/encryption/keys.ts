@@ -195,8 +195,8 @@ export class LocalKeyProvider implements KeyProvider {
   }
 }
 
-/** What `start` says when `pathways.yaml` does not set `encryption`. */
-const ENCRYPTION_REQUIRED =
+/** What `start` and `validate` say when `pathways.yaml` does not set `encryption`. */
+export const ENCRYPTION_REQUIRED =
   "pathways.yaml: encryption: required to start the engine: set encryption: { keys: [{ id, env: NAME } or { id, file: path }], current: id } or { provider: { module: path } } to encrypt stored messages, or encryption: none to store them unencrypted";
 
 /**
