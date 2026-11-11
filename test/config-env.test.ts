@@ -292,6 +292,67 @@ destinations:
     expect(project.environment).toEqual([]);
   });
 
+  it("never reads plaintext from the environment, so a variable cannot turn TLS off", async () => {
+    const files = {
+      "pathways.yaml": "health:\n  port: 9090\n  plaintext: { env: HEALTH_PLAIN }\n  auth: none\n",
+      "channels/lab/channel.yaml": `
+source:
+  mllp: { port: 2575, plaintext: { env: ADT_PLAIN } }
+destinations:
+  - http: { url: { env: LAB_URL }, plaintext: { env: LAB_PLAIN, default: false } }
+hooks:
+  - webhook: { url: http://hooks.example.test/in, plaintext: { env: HOOK_PLAIN } }
+`,
+    };
+    const env = {
+      HEALTH_PLAIN: "true",
+      ADT_PLAIN: "true",
+      LAB_URL: "http://lab.example.test/in",
+      LAB_PLAIN: "true",
+      HOOK_PLAIN: "true",
+    };
+    const problems = await problemsOf(files, env);
+    for (const key of [
+      "pathways.yaml: health.plaintext:",
+      "channels/lab/channel.yaml: source.mllp.plaintext:",
+      "channels/lab/channel.yaml: destinations.0.http.plaintext:",
+      "channels/lab/channel.yaml: hooks.0.webhook.plaintext:",
+    ]) {
+      expect(problems.some((problem) => problem.startsWith(key))).toBe(true);
+    }
+    expect(problems.join("\n")).not.toContain("read from the environment variable LAB_PLAIN");
+  });
+
+  it("keeps text the setting takes as text, and refuses a port with spaces", async () => {
+    const project = await load(
+      {
+        "pathways.yaml":
+          "encryption:\n  keys: [{ id: { env: KEY_ID }, env: PROD_KEY }]\n  current: { env: KEY_ID }\nhealth:\n  port: 9090\n  host: { env: HEALTH_HOST }\n  plaintext: true\n",
+        "channels/adt/channel.yaml": `
+source:
+  file: { dir: ./inbox }
+destinations:
+  - http: { url: https://lab.example.test/in, resendHeader: { env: RESEND_HEADER } }
+`,
+      },
+      { KEY_ID: "123", HEALTH_HOST: "123", RESEND_HEADER: "123" },
+    );
+    expect(project.health?.host).toBe("123");
+    expect(project.encryption).toMatchObject({ keys: [{ id: "123" }], current: "123" });
+    expect(project.channels[0]?.destinations[0]).toMatchObject({ resendHeader: "123" });
+    expect(
+      await problemsOf(
+        {
+          "pathways.yaml": "health:\n  port: { env: HEALTH_PORT }\n  plaintext: true\n",
+          "channels/adt/channel.yaml": CHANNEL,
+        },
+        { HEALTH_PORT: " 80 " },
+      ),
+    ).toEqual([
+      "pathways.yaml: health.port: Invalid input: expected number, received string (read from the environment variable HEALTH_PORT)",
+    ]);
+  });
+
   it("leaves a secret a reference, read at start, never resolved at load", async () => {
     const project = await load(
       {
@@ -423,6 +484,41 @@ destinations:
     ]);
   });
 
+  it("--print masks the query string of a URL read from the environment", async () => {
+    const dir = await makeProject({
+      ...files,
+      "channels/lab/channel.yaml": `
+source:
+  file: { dir: ./inbox }
+destinations:
+  - http: { url: { env: LAB_URL } }
+  - http: { url: { env: LAB_URL_2, default: "https://two.example.test/in?site=a" } }
+  - http: { url: "https://three.example.test/in?site=b" }
+hooks:
+  - webhook: { url: { env: HOOK_URL } }
+`,
+    });
+    const env = {
+      ADT_PORT: "2576",
+      LAB_URL: "https://lab.example.test/in?token=TESTSECRET",
+      HOOK_URL: "https://hooks.example.test/in?sig=TESTSECRET#part",
+    };
+    const result = await runCli(["validate", "--print", "-C", dir], env);
+    expect(result).toMatchObject({ code: EXIT.ok, err: "" });
+    expect(result.out).not.toContain("TESTSECRET");
+    const lab = (JSON.parse(result.out) as ProjectConfig).channels.find(
+      (channel) => channel.name === "lab",
+    );
+    expect(lab?.destinations.map((destination) => (destination as { url: string }).url)).toEqual([
+      "https://lab.example.test/in?(hidden)",
+      "https://two.example.test/in?site=a",
+      "https://three.example.test/in?site=b",
+    ]);
+    expect(lab?.hooks).toMatchObject([
+      { webhook: { url: "https://hooks.example.test/in?(hidden)" } },
+    ]);
+  });
+
   it("fails as start does when a variable is unset, naming it", async () => {
     const dir = await makeProject(files);
     expect(await runCli(["validate", "-C", dir], {})).toEqual({
@@ -443,14 +539,14 @@ describe("the JSON Schemas", () => {
     const projectYaml = parseYaml(`
 storage:
   kind: { env: STORAGE_KIND, default: sqlite }
-  postgres: { plaintext: { env: DB_PLAINTEXT }, pool: { max: { env: POOL_MAX } } }
+  postgres: { plaintext: true, pool: { max: { env: POOL_MAX } } }
 defaults: { timeout: { env: T, default: 5s }, memory: { env: M }, resendFlag: { env: R, default: true } }
 health: { port: { env: HEALTH_PORT, default: 9090 }, plaintext: true }
 lease: { ttl: { env: TTL }, standby: { env: STANDBY } }
 `) as unknown;
     const channelYaml = parseYaml(`
 source:
-  http: { port: { env: P }, host: { env: H }, path: { env: PATH_IN }, maxBytes: { env: B }, plaintext: { env: PT } }
+  http: { port: { env: P }, host: { env: H }, paths: [{ env: PATH_IN }], methods: [{ env: METHOD }], maxBytes: { env: B }, plaintext: true, response: { status: { env: STATUS }, contentType: { env: CT }, body: { env: BODY } } }
 destinations:
   - http: { url: { env: U }, resendHeader: { env: RH } }
   - mllp: { host: lab.example.test, port: { env: LAB_PORT }, plaintext: true, ackTimeout: { env: AT } }
@@ -459,7 +555,6 @@ destinations:
     expect(channel(channelYaml)).toBe(true);
     const env = {
       STORAGE_KIND: "postgres",
-      DB_PLAINTEXT: "true",
       POOL_MAX: "20",
       M: "64",
       TTL: "20s",
@@ -467,8 +562,11 @@ destinations:
       P: "8080",
       H: "0.0.0.0",
       PATH_IN: "/in",
+      METHOD: "PUT",
       B: "1MB",
-      PT: "true",
+      STATUS: "200",
+      CT: "text/plain",
+      BODY: "ok",
       U: "https://lab.example.test/in",
       RH: "X-Dup",
       LAB_PORT: "2575",
@@ -500,5 +598,15 @@ destinations:
     expect(project({ health: { port: { env: "9X" }, plaintext: true } })).toBe(false);
     expect(project({ health: { port: { env: "P", fallback: 1 }, plaintext: true } })).toBe(false);
     expect(project({ storage: { sqlite: { file: "a.db" }, module: "./s.ts" } })).toBe(false);
+  });
+
+  it("refuse plaintext read from the environment, as Zod does", () => {
+    expect(project({ health: { port: 9090, plaintext: { env: "PLAIN" } } })).toBe(false);
+    expect(
+      channel({
+        source: { file: { dir: "./inbox" } },
+        destinations: [{ http: { url: { env: "LAB_URL" }, plaintext: { env: "LAB_PLAIN" } } }],
+      }),
+    ).toBe(false);
   });
 });

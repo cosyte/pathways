@@ -30,7 +30,8 @@ Each entry holds the time, the operating system user who acted, the action, its 
 SHA-256 hashes. A `config` entry holds hashes of the files, never their contents, and, for a file
 that reads settings from the environment, `env`: each key and the variable it is read from, such as
 `health.port=HEALTH_PORT`, never the value. A key that starts or stops reading a variable is a
-change. No entry holds a message's content.
+change. A value changed only in the environment, with the files the same, is not audited: the audit
+shows which variables a setting came from, not what they held. No entry holds a message's content.
 
 ## Read it
 

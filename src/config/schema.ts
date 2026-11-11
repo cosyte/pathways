@@ -60,20 +60,11 @@ const PLAINTEXT_TRUE: JsonSchema = {
   required: ["plaintext"],
 };
 
-/**
- * JSON Schema for `plaintext: true`, or `plaintext:` read from the environment, which may hold true:
- * what a rule that needs plaintext accepts, so the JSON Schema never refuses what start may accept.
- */
-const PLAINTEXT_MAYBE_TRUE: JsonSchema = {
-  properties: { plaintext: { anyOf: [{ const: true }, { type: "object" }] } },
-  required: ["plaintext"],
-};
-
 /** JSON Schema for "TLS unless `plaintext: true`, and never both". */
 const TLS_OR_PLAINTEXT: JsonSchema = {
   if: PLAINTEXT_TRUE,
   then: { not: { required: ["tls"] } },
-  else: { anyOf: [{ required: ["tls"] }, PLAINTEXT_MAYBE_TRUE] },
+  else: { required: ["tls"] },
 };
 
 /**
@@ -244,12 +235,14 @@ const port = envable(
   z.number().int().min(1).max(65_535).meta({ description: "A port, 1 to 65535." }),
 );
 const host = envable(z.string().min(1));
-/** `plaintext:`, the one way to run an endpoint without TLS. */
-const plaintext = envable(
-  z
-    .boolean()
-    .meta({ description: "true runs without TLS. Cannot be set alongside tls. Default false." }),
-).optional();
+/**
+ * `plaintext:`, the one way to run an endpoint without TLS. Never read from the environment: turning
+ * TLS off stays in the reviewed file, where the configuration audit sees it.
+ */
+const plaintext = z
+  .boolean()
+  .meta({ description: "true runs without TLS. Cannot be set alongside tls. Default false." })
+  .optional();
 
 /** A value read from an environment variable at startup: `{ env: NAME }`. */
 const fromEnv = z.strictObject({
@@ -545,7 +538,7 @@ function restateHttpClient(json: JsonSchema): void {
   });
   json.allOf = [
     { if: PLAINTEXT_TRUE, then: { not: { required: ["tls"] } } },
-    { if: scheme("^[Hh][Tt][Tt][Pp]:"), then: PLAINTEXT_MAYBE_TRUE },
+    { if: scheme("^[Hh][Tt][Tt][Pp]:"), then: PLAINTEXT_TRUE },
     { if: scheme("^[Hh][Tt][Tt][Pp][Ss]:"), then: { not: PLAINTEXT_TRUE } },
   ];
 }

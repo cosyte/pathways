@@ -679,8 +679,12 @@ async function validate(projectDir: string, print: boolean, io: CliIo): Promise<
   }
   if (print) {
     // The configuration holds no secret: tokens, secret headers, connection URLs and master keys
-    // stay the names of the variables or files start reads them from.
-    io.out(`${JSON.stringify(project, null, 2)}\n`);
+    // stay the names of the variables or files start reads them from. A URL read from the
+    // environment may carry a token in its query string, so that query string is masked.
+    const hidden = urlsFromEnvironment(project, io.env ?? process.env);
+    const replacer = (key: string, value: unknown): unknown =>
+      key === "url" && typeof value === "string" && hidden.has(value) ? maskQuery(value) : value;
+    io.out(`${JSON.stringify(project, replacer, 2)}\n`);
     return EXIT.ok;
   }
   const names = project.channels.map((channel) => channel.name);
@@ -688,6 +692,26 @@ async function validate(projectDir: string, print: boolean, io: CliIo): Promise<
     `pathways: the configuration is valid: ${names.length} channel${names.length === 1 ? "" : "s"} (${names.join(", ")}).\n`,
   );
   return EXIT.ok;
+}
+
+/** The text `validate --print` shows in place of a masked query string. */
+const MASKED_QUERY = "?(hidden)";
+
+/** The URLs the configuration read from environment variables (not from a reference's default). */
+function urlsFromEnvironment(project: ProjectConfig, env: Env): ReadonlySet<string> {
+  const urls = new Set<string>();
+  for (const reference of project.environment ?? []) {
+    if (reference.from !== "environment" || !reference.key.endsWith(".url")) continue;
+    const value = env[reference.variable];
+    if (value !== undefined) urls.add(value);
+  }
+  return urls;
+}
+
+/** `url` with everything from its first `?` replaced by {@link MASKED_QUERY}, if it has one. */
+function maskQuery(url: string): string {
+  const query = url.indexOf("?");
+  return query === -1 ? url : `${url.slice(0, query)}${MASKED_QUERY}`;
 }
 
 /** What `rekey` says when `pathways.yaml` names no keys. */

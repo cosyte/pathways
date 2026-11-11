@@ -32,8 +32,9 @@ bytes). An _env reference_ is `{ env: NAME }`, a variable name of letters, digit
 
 ## Settings from the environment
 
-Every setting that holds one value (a port, a host, a duration, a size, a boolean, a path, a URL, a
-choice such as `onStoreFailure` or the storage `kind`, a key id, one event in `events`) may be
+Every setting that holds one value (a port, a host, a duration, a size, a boolean other than
+`plaintext`, a path, a URL, a choice such as `onStoreFailure` or the storage `kind`, a key id, one
+event in `events`, one HTTP source path or method) may be
 written as `{ env: NAME }`, or `{ env: NAME, default: value }`, in place of the value. So one
 image, with the same YAML, runs in staging and in production, each with its own environment:
 
@@ -65,14 +66,16 @@ health:
   there is no `PATHWAYS_*` prefix scan and no `${VAR}` text substitution, so the YAML stays the one
   place a setting is named.
 - Secrets keep their own meaning of `{ env: NAME }`: a token, a credential header, a connection URL
-  or a master key stays a reference, read when a command starts and never printed. `encryption:
-none`, `auth: none`, a channel's `name` and `format`, and a block (`tls`, `options`) are not read
-  from the environment.
+  or a master key stays a reference, read when a command starts and never printed. `plaintext`,
+  `encryption: none`, `auth: none`, a channel's `name` and `format`, and a block (`tls`, `options`)
+  are not read from the environment: turning TLS, encryption or authentication off stays in the
+  file, where the audit sees it.
 - `pathways validate --print` prints the configuration as `start` reads it, with every setting the
   environment gave and the variable it named; see
-  [Command reference](./command-reference.md#pathways-validate). The audit log's `config` entries
-  name the variables each file reads, never their values; see
-  [Read the audit log](./read-the-audit-log.md).
+  [Command reference](./command-reference.md#pathways-validate). The query string of a URL read
+  from the environment is printed as `?(hidden)`. The audit log's `config` entries name the
+  variables each file reads, never their values, so a value changed only in the environment is not
+  audited; see [Read the audit log](./read-the-audit-log.md).
 
 ## pathways.yaml
 
