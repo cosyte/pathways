@@ -342,8 +342,9 @@ export interface SearchFilters extends MessageFilters {
 /**
  * `pathways messages --where key=value`: the channel's messages whose `ctx.meta` holds every pair,
  * newest first, found by the channel's index tags and confirmed by decrypting each row's metadata.
- * Writes a `search` entry to the audit log with the keys searched and the counts, never a value.
- * A key the channel does not index is a usage error, exit 2.
+ * Writes a `search` entry to the audit log first, with the keys searched and the filters, never a
+ * value, and does not search when it cannot be written. A key the channel does not index is a
+ * usage error, exit 2.
  *
  * @example
  * ```ts
@@ -377,6 +378,22 @@ export async function searchCommand(
     context.err("pathways: this store cannot be searched by metadata.\n");
     return EXIT.failed;
   }
+  // Audited before any row is read and decrypted, as a content view is: no entry, no search.
+  try {
+    await audit.record({
+      action: "search",
+      channel,
+      detail: {
+        where: keys.join(","),
+        ...(state === undefined ? {} : { state }),
+        ...(since === undefined ? {} : { since }),
+        ...(until === undefined ? {} : { until }),
+      },
+    });
+  } catch {
+    context.err("pathways: the audit log could not be written, so the search did not run.\n");
+    return EXIT.failed;
+  }
   let page: MetaSearchPage;
   try {
     page = await store.findByMeta({ ...filters, where });
@@ -385,18 +402,6 @@ export async function searchCommand(
     context.err("pathways: this store cannot be searched by metadata.\n");
     return EXIT.failed;
   }
-  await audit.record({
-    action: "search",
-    channel,
-    detail: {
-      results: page.items.length,
-      candidates: page.candidates,
-      where: keys.join(","),
-      ...(state === undefined ? {} : { state }),
-      ...(since === undefined ? {} : { since }),
-      ...(until === undefined ? {} : { until }),
-    },
-  });
   printMessages(context, page);
   return EXIT.ok;
 }

@@ -2541,7 +2541,8 @@ Fenced by `epoch` when it is given.
 [markDelivered](#markdelivered), and when that was the last delivery of the message's current generation
 still to be delivered, also drops the bodies of the message and of all its deliveries in the
 same transaction, keeping its metadata: ids, times, statuses, sizes, the content hash and the
-possible-duplicate flag. Keeps every body while any delivery of the current generation has
+possible-duplicate flag. Its `ctx.meta` and that metadata's index tags go with the bodies, since
+they hold identifiers. Keeps every body while any delivery of the current generation has
 failed or waits to be tried again. Resolves to whether it dropped them. Fenced by `epoch` when
 it is given. Optional: a channel with `storage.content: dropAfterDelivery` needs it, and the
 engine refuses to start such a channel on a store without it.

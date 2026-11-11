@@ -972,7 +972,8 @@ export interface MessageStore {
    * {@link markDelivered}, and when that was the last delivery of the message's current generation
    * still to be delivered, also drops the bodies of the message and of all its deliveries in the
    * same transaction, keeping its metadata: ids, times, statuses, sizes, the content hash and the
-   * possible-duplicate flag. Keeps every body while any delivery of the current generation has
+   * possible-duplicate flag. Its `ctx.meta` and that metadata's index tags go with the bodies, since
+   * they hold identifiers. Keeps every body while any delivery of the current generation has
    * failed or waits to be tried again. Resolves to whether it dropped them. Fenced by `epoch` when
    * it is given. Optional: a channel with `storage.content: dropAfterDelivery` needs it, and the
    * engine refuses to start such a channel on a store without it.
@@ -2368,8 +2369,10 @@ export class Store implements MessageStore, ContentStore, MetaStore {
    * Marks a delivery done and clears its marker, then, when no delivery of the message's current
    * generation is left undelivered, drops the bodies of the message and of every one of its
    * deliveries, all in one transaction: see {@link MessageStore.markDeliveredAndDropContent}. A body
-   * is emptied in place rather than its row deleted, so the metadata stays, and each delivery's last
-   * error text goes with it, since encryption at rest treats that as content too. Every delivery of
+   * is emptied in place rather than its row deleted, so the ids, states and times stay, and each
+   * delivery's last error text goes with it, since encryption at rest treats that as content too.
+   * The message's `ctx.meta` and its index tags go too: they hold identifiers such as an MRN, so a
+   * message whose content is dropped can no longer be found by its metadata. Every delivery of
    * an earlier generation is done by then: a replay or a resend is refused while one is pending,
    * and clears those that failed.
    */
@@ -2394,7 +2397,7 @@ export class Store implements MessageStore, ContentStore, MetaStore {
       const messageId = Number(delivery.message_id);
       const dropped = await tx
         .updateTable("messages")
-        .set({ body: EMPTY_BODY[this.kind], error: null, content_dropped_at: at })
+        .set({ body: EMPTY_BODY[this.kind], error: null, meta: null, content_dropped_at: at })
         .where("id", "=", messageId)
         .where("status", "=", "transformed")
         .where("content_dropped_at", "is", null)
@@ -2417,6 +2420,7 @@ export class Store implements MessageStore, ContentStore, MetaStore {
         .set({ body: EMPTY_BODY[this.kind], last_error: null })
         .where("message_id", "=", messageId)
         .execute();
+      await tx.deleteFrom("meta_index").where("message_id", "=", messageId).execute();
       return true;
     });
   }

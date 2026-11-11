@@ -51,10 +51,15 @@ compute the tag of a value they guess.
 
 ## Choose the bit length
 
-A tag cut to `b` bits takes one of 2^b values, so many values share each tag. That is the point: two
-rows with the same tag may hold different values, so the database alone does not prove two messages
-are about the same patient. The search then reads each row that carries the tag, decrypts its
+A tag cut to `b` bits takes one of 2^b values, so different values can share a tag: two rows with the
+same tag may hold different values. The search reads each row that carries the tag, decrypts its
 metadata and keeps only the rows that hold the value.
+
+Equal values always give equal tags. One patient's messages all carry the same tag for their MRN, so
+someone who reads the database can see which messages share a tag, and so which may share a value.
+What truncation adds is that other values share the tag too, and how many depends on how many
+distinct values the channel holds, not on how many rows: with `d` distinct values, about `d / 2^b`
+other values share each value's tag.
 
 With `n` rows in a channel, a tag of `b` bits is shared by about `n / 2^b` rows that hold other
 values. Each search reads and drops those rows, so a search for one value reads about `n / 2^b`
@@ -67,9 +72,12 @@ rows more than it returns: one in 4,096 of the channel's rows at the default of 
 | 16              | about 15                                          | a large channel, where search speed matters |
 | 20              | about 1                                           | rarely: a tag then points at few rows       |
 
-Choose `b` so that each tag is still shared by several rows (`n / 2^b` of 2 or more) for as many rows
-as the channel keeps: a tag shared by no other row points at one message. Changing `bits` changes the
-tags new messages get; run `pathways rekey` to derive the stored messages' tags again.
+Choose `b` so that each tag is still shared by several distinct values (`d / 2^b` of 2 or more) for
+as many values as the channel keeps: a tag no other value shares points at one value's messages. At
+the default of 12 bits that takes at least 8,192 distinct values. A new channel starts below that,
+and while it is, most tags belong to one value each: the tags then group a patient's messages much as
+the value itself would, though they still do not show the value. Changing `bits` changes the tags
+new messages get; run `pathways rekey` to derive the stored messages' tags again.
 
 ## Keys with few values
 
@@ -94,8 +102,12 @@ npx pathways messages --channel results-to-ehr --where mrn=SYN-000123 --where ac
 ```
 
 `--where key=value` needs `--channel`, and the key must be in that channel's `index:` block. The
-value is compared as text, so `--where visit=2` finds a number 2. With several `--where`, a message
-must hold every pair. The other options of `messages` apply: `--status`, `--since`, `--until`,
+value is compared as stored text, exactly: a number is its digits, so `--where visit=2` finds a
+number 2, and nothing else is changed on either side. Case, spaces before or after the value and
+Unicode form all count, so `syn-000123`, `SYN-000123 ` and a name stored in decomposed form (NFD) and
+typed in composed form (NFC) do not match. Normalize a value before it is stored in `ctx.meta`: trim
+it, settle on one case for identifiers that ignore case, and use NFC for text. With several
+`--where`, a message must hold every pair. The other options of `messages` apply: `--status`, `--since`, `--until`,
 `--limit` and `--before`. The listing shows ids, states, times and sizes, never the value.
 
 The search computes the value's tag under every master key the configuration holds, so messages
@@ -103,12 +115,17 @@ tagged before a key rotation are found too. It reads at most 10,000 candidate ro
 reaches that, or holds fewer matches than `--limit`, still ends with the `--before` line when there
 is more to read.
 
-Each search is written to the audit log as a `search` entry with the keys searched, the number of
-results and the number of rows read, never the value:
+Each search is written to the audit log as a `search` entry before any row is read, with the keys
+searched and the `--status`, `--since` and `--until` filters given, never the value. When the entry
+cannot be written, the search does not run:
 
 ```json
-{ "results": 2, "candidates": 3, "where": "mrn" }
+{ "where": "mrn", "since": "2026-11-01T00:00:00.000Z" }
 ```
+
+A message whose content is dropped after delivery (`storage.content: dropAfterDelivery`) loses its
+`ctx.meta` and its tags with its content, so it can no longer be found by metadata: see
+[set message retention](./set-message-retention.md).
 
 ## Rotate the key
 

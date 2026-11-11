@@ -65,7 +65,8 @@ export interface MetaSearch {
   readonly limit: number;
   /**
    * The most rows the page reads and decrypts: {@link META_SEARCH_MAX_CANDIDATES} when not given.
-   * A page that reaches it ends there, with `next` set to go on.
+   * A page that reaches it ends there, with `next` set to go on. A whole number of 1 or more:
+   * anything else is refused with a `RangeError`.
    */
   readonly maxCandidates?: number | undefined;
 }
@@ -280,10 +281,15 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
    * a page; a page can hold fewer than `limit` messages and still have a `next`.
    *
    * @throws {MetaSearchError} when a key is not indexed, or the store underneath cannot be searched.
+   * @throws {RangeError} when `maxCandidates` is below 1 or not a whole number.
    */
   async findByMeta(search: MetaSearch): Promise<MetaSearchPage> {
     const { channel, where, state, since, until, limit } = search;
     const most = search.maxCandidates ?? META_SEARCH_MAX_CANDIDATES;
+    // A cap below one would read no row and never end the page.
+    if (!Number.isInteger(most) || most < 1) {
+      throw new RangeError("maxCandidates must be a whole number of 1 or more");
+    }
     const batch = Math.min(META_SEARCH_BATCH, most);
     const conditions: MetaCondition[] = [];
     for (const [key, value] of where) {

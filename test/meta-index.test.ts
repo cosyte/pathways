@@ -3,6 +3,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import SqliteDatabase from "better-sqlite3";
+import { Kysely } from "kysely";
 
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 
@@ -21,6 +22,7 @@ import {
   EncryptedStore,
   MetaSearchError,
   UnencryptedStore,
+  type MetaSearch,
   canSearchMeta,
 } from "../src/encryption/encrypted-store.js";
 import { decryptTextWithKeyId, isEncryptedText } from "../src/encryption/envelope.js";
@@ -34,6 +36,7 @@ import {
 import { rekey } from "../src/encryption/rekey.js";
 import { AuditLog } from "../src/operator/audit.js";
 import { searchCommand } from "../src/operator/commands.js";
+import { dialectFor } from "../src/storage/dialects.js";
 import { openStore } from "../src/storage/open.js";
 import { isMetaStore, Store, type AuditEntry, type StoredMeta } from "../src/storage/store.js";
 import {
@@ -42,6 +45,7 @@ import {
   dropDatabases,
   freshDatabase,
   TEST_DATABASES,
+  testStorage,
   type TestDatabase,
 } from "./databases.js";
 import { ADT_A01, captureLogger, cleanUp, makeProject, type LogEvent } from "./helpers.js";
@@ -342,6 +346,45 @@ for (const database of TEST_DATABASES) {
       const rest = await store.findByMeta({ ...search, maxCandidates: 3, before: first.next });
       expect(rest.items.map((m) => m.id)).toEqual(ids.slice(0, 2).reverse());
       expect(rest).toMatchObject({ candidates: 2, next: undefined });
+      // A page cap below one would read nothing and never end, so it is refused.
+      for (const maxCandidates of [0, -1, 0.5, Number.NaN]) {
+        await expect(store.findByMeta({ ...search, maxCandidates })).rejects.toThrow(RangeError);
+      }
+    });
+
+    it("drops a message's metadata and its tags with its content, so a search no longer finds it", async () => {
+      const storage = await testStorage(
+        database,
+        join(await makeProject({}), ".pathways/pathways.db"),
+      );
+      const raw = await storage.open();
+      const store = new EncryptedStore(
+        raw,
+        keyring("dev")("dev"),
+        indexes("adt", { key: "mrn", bits: 12 }),
+      );
+      open.push(store);
+      const where = [["mrn", "SYN-000123"]] as const;
+      const { id: kept } = await store.receive("adt", bytes("x"), { meta: { mrn: "SYN-000123" } });
+      const { id } = await store.receive("adt", bytes("x"), { meta: { mrn: "SYN-000123" } });
+      await store.completeTransform(id, [bytes("out")], 1);
+      const [delivery] = await store.deliveries(id);
+      expect(
+        (await store.findByMeta({ channel: "adt", where, limit: 50 })).items.map((m) => m.id),
+      ).toEqual([id, kept]);
+
+      expect(await store.markDeliveredAndDropContent?.(delivery?.id ?? -1)).toBe(true);
+      expect(
+        (await store.findByMeta({ channel: "adt", where, limit: 50 })).items.map((m) => m.id),
+      ).toEqual([kept]);
+      expect((await raw.storedMeta(0, 10)).map((row) => row.id)).toEqual([kept]);
+      // No tag row of the dropped message is left behind, on any database.
+      const db = new Kysely<{ meta_index: { message_id: number } }>({
+        dialect: await dialectFor(storage.storage, { env: storage.env }),
+      });
+      open.push({ close: () => db.destroy() });
+      const left = await db.selectFrom("meta_index").select("message_id").execute();
+      expect(left.map((row) => Number(row.message_id))).toEqual([kept]);
     });
 
     it("keeps metadata handed to the store itself as JSON, with no tags", async () => {
@@ -657,7 +700,7 @@ describe("pathways messages --where", () => {
     expect(printed.messages.map((message) => message.id)).toEqual([ids[2], ids[0]]);
     expect(result.out).not.toContain("SYN-");
     expect(result.audit).toMatchObject([
-      { action: "search", channel: "adt", detail: { results: 2, where: "mrn" } },
+      { action: "search", channel: "adt", detail: { where: "mrn" } },
     ]);
     expect(JSON.stringify(result.audit)).not.toContain("SYN-");
 
@@ -676,7 +719,7 @@ describe("pathways messages --where", () => {
     expect(both.out).toMatch(
       new RegExp(`^ID +CHANNEL +STATE.*\\n${String(ids[1])} +adt +received`),
     );
-    expect(both.audit[0]?.detail).toMatchObject({ results: 1, where: "mrn,sex" });
+    expect(both.audit[0]?.detail).toEqual({ where: "mrn,sex" });
   });
 
   it("is a usage error without --channel, with a key the channel does not index, or with no pair", async () => {
@@ -818,6 +861,71 @@ describe("pathways messages --where", () => {
     }
   });
 
+  it("writes its audit entry before it reads a row, and does not search when it cannot", async () => {
+    const { root, ids } = await stored();
+    const project = await loadProject(root);
+    const { logger } = captureLogger();
+    const key = decodeKey(await readFile(join(root, "dev.key"), "utf8")) as Buffer;
+    const real = await openStore(project, {
+      env: {},
+      logger,
+      keys: new LocalKeyProvider([["dev", key]], "dev"),
+    });
+    open.push(real);
+    if (!canSearchMeta(real)) throw new Error("openStore gave a store that cannot search");
+    const audited: AuditEntry[] = [];
+    let auditedFirst: number | undefined;
+    const store = {
+      findByMeta: async (search: MetaSearch) => {
+        auditedFirst = audited.length;
+        return real.findByMeta(search);
+      },
+    } as unknown as Store;
+    const audit = new AuditLog(real);
+    audit.subscribe((entry) => {
+      audited.push(entry);
+    });
+    let out = "";
+    const context = {
+      project,
+      store,
+      audit,
+      json: true,
+      out: (text: string) => {
+        out += text;
+      },
+      err: () => undefined,
+      now: Date.now,
+    };
+    const filters = { channel: "adt", where: [["mrn", "SYN-000123"]] as const, limit: 5 };
+    expect(await searchCommand(context, filters)).toBe(EXIT.ok);
+    expect(auditedFirst).toBe(1);
+    expect(audited).toMatchObject([{ action: "search", channel: "adt", detail: { where: "mrn" } }]);
+    expect((JSON.parse(out) as { messages: { id: number }[] }).messages.map((m) => m.id)).toEqual([
+      ids[2],
+      ids[0],
+    ]);
+
+    // An audit log that cannot be written stops the search before it reads anything.
+    auditedFirst = undefined;
+    let err = "";
+    const refused = await searchCommand(
+      {
+        ...context,
+        audit: new AuditLog({
+          appendAudit: () => Promise.reject(new Error("the disk is full")),
+        } as unknown as Store),
+        err: (text: string) => {
+          err += text;
+        },
+      },
+      filters,
+    );
+    expect(refused).toBe(EXIT.failed);
+    expect(auditedFirst).toBeUndefined();
+    expect(err).toBe("pathways: the audit log could not be written, so the search did not run.\n");
+  });
+
   it("names the listing's filters in the audit entry beside the keys", async () => {
     const { root } = await stored();
     const result = await cli([
@@ -840,9 +948,6 @@ describe("pathways messages --where", () => {
     expect(result.code).toBe(EXIT.ok);
     expect(result.out).toMatch(/\nMore: add --before \d+ for the next page\.\n$/);
     expect(result.audit[0]?.detail).toEqual({
-      results: 1,
-      // The page was full at the first match, so it read no further.
-      candidates: 1,
       where: "mrn",
       state: "received",
       since: "2026-01-01T00:00:00.000Z",
