@@ -18,15 +18,18 @@ import {
   RECORD_HOOK,
 } from "./extension-helpers.js";
 import { captureLogger, cleanUp, makeProject, type LogEvent } from "./helpers.js";
+import { receiver, status, type Receiver } from "./net-helpers.js";
 
 const engines: Engine[] = [];
 const stores: MessageStore[] = [];
 const sets: HookSet[] = [];
+const receivers: Receiver[] = [];
 
 afterEach(async () => {
   await Promise.all(engines.splice(0).map((engine) => engine.stop()));
   await Promise.all(sets.splice(0).map((set) => set.stop()));
   await Promise.all(stores.splice(0).map((store) => store.close()));
+  await Promise.all(receivers.splice(0).map((r) => r.close()));
   await cleanUp();
 });
 
@@ -378,6 +381,41 @@ describe("HookSet", () => {
       "pathways.yaml: hooks.1: the module's default export is a number, not a function; export default a hook factory",
     );
     expect(bench.notes["first:stop"]).toEqual([true]);
+  });
+
+  it("reads a webhook's headers from the environment when given no resolved secrets", async () => {
+    const ops = await receiver(status(204));
+    receivers.push(ops);
+    const root = await makeProject({
+      "pathways.yaml": [
+        "encryption: none",
+        "hooks:",
+        "  - webhook:",
+        `      url: "${ops.url}"`,
+        "      plaintext: true",
+        "      headers:",
+        "        Authorization: { env: OPS_TOKEN }",
+        "",
+      ].join("\n"),
+      "channels/text/channel.yaml": textChannel(),
+      "channels/text/source.ts": POLL_SOURCE,
+      "channels/text/destination.ts": LIST_DESTINATION,
+      "channels/text/transform.ts": SORTING_TRANSFORM,
+    });
+    const project = await loadProject(root);
+    const { logger } = captureLogger();
+    const hooks = await HookSet.open(project.hooks, {
+      file: "pathways.yaml",
+      channel: undefined,
+      dir: root,
+      env: { OPS_TOKEN: "synthetic-ops-token-0002" },
+      logger,
+    });
+    hooks.emit(event(1));
+    await hooks.stop();
+    expect(ops.received.map((request) => request.headers.authorization)).toEqual([
+      "synthetic-ops-token-0002",
+    ]);
   });
 
   it("does nothing with no hooks, and stops a hook that has no stop of its own", async () => {
