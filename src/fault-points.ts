@@ -13,9 +13,11 @@
 // With PATHWAYS_TEST_FAULT_POINT_RESUME also set, naming a file, the child holds at the point until
 // that file exists and then carries on, as a process paused by its host (a long GC, a VM stalled)
 // carries on: its timers have not run meanwhile, and its connections are still open. The lease
-// tests hold an engine this way while a second one takes over, then let it write.
+// tests hold an engine this way while a second one takes over, then let it write. The child deletes
+// the file as it carries on, so the next point armed holds it again: the file source's crash test
+// holds it before a move, changes the folder, and kills it at a later point.
 
-import { existsSync, writeSync } from "node:fs";
+import { existsSync, rmSync, writeSync } from "node:fs";
 
 /**
  * The points a crash test can stop the process at, each between two steps whose order keeps a
@@ -27,12 +29,18 @@ import { existsSync, writeSync } from "node:fs";
  * - `after-send-before-record`: the destination took the message and the outcome is not stored.
  * - `mid-requeue`: inside the transaction of a replay or resend, after its writes and before its
  *   audit entry and commit.
+ * - `before-claim-move`: a file source opened a ready file and checked it, and has not moved it into
+ *   its claim folder.
+ * - `mid-move-back`: a file source moved a file that is not the one it checked to a held name in
+ *   `.claimed/` and linked it from there back where it came from, and has not removed the held name.
  */
 export const FAULT_POINTS = [
   "after-store-before-ack",
   "after-transform-before-complete",
   "after-send-before-record",
   "mid-requeue",
+  "before-claim-move",
+  "mid-move-back",
 ] as const;
 
 /** One of {@link FAULT_POINTS}. */
@@ -40,7 +48,8 @@ export type FaultPoint = (typeof FAULT_POINTS)[number];
 
 /**
  * The environment variable that arms a point: its name, or its name, `@` and a count to stop at
- * the count-th time the process reaches it (`after-send-before-record@2`). Read once, at start.
+ * the count-th time the process reaches it (`after-send-before-record@2`). Several, each so, are
+ * separated by commas (`before-claim-move,mid-move-back`). Read once, at start.
  */
 export const FAULT_POINT_ENV = "PATHWAYS_TEST_FAULT_POINT";
 
@@ -58,10 +67,11 @@ export const FAULT_POINT_RESUMED = "pathways fault point resumed: ";
 
 /**
  * The function each point calls: it does nothing unless `armed` names that point, and on the
- * point's count-th call it hands the point to `halt`. `armed` that names no point, or has a count
- * that is not a whole number from 1, is refused, so a typo in a test cannot pass by never stopping.
+ * point's count-th call it hands the point to `halt`. `armed` may name several points, separated by
+ * commas. An entry that names no point, or has a count that is not a whole number from 1, is
+ * refused, so a typo in a test cannot pass by never stopping.
  *
- * @throws {Error} when `armed` is set and names no point.
+ * @throws {Error} when `armed` is set and an entry of it names no point.
  * @example
  * ```ts
  * const point = faultPoints("after-send-before-record@2", (name) => console.log(name));
@@ -74,18 +84,22 @@ export function faultPoints(
   halt: (point: FaultPoint) => void,
 ): (point: FaultPoint) => void {
   if (armed === undefined || armed === "") return () => undefined;
-  const [name, count, ...rest] = armed.split("@");
-  const target = FAULT_POINTS.find((point) => point === name);
-  let at: number | undefined = 1;
-  if (count !== undefined) at = /^[1-9]\d*$/.test(count) ? Number(count) : undefined;
-  if (target === undefined || at === undefined || rest.length > 0) {
-    throw new Error(`${FAULT_POINT_ENV} names no fault point: ${armed}`);
-  }
-  let reached = 0;
+  const targets = armed.split(",").map((entry) => {
+    const [name, count, ...rest] = entry.split("@");
+    const target = FAULT_POINTS.find((point) => point === name);
+    let at: number | undefined = 1;
+    if (count !== undefined) at = /^[1-9]\d*$/.test(count) ? Number(count) : undefined;
+    if (target === undefined || at === undefined || rest.length > 0) {
+      throw new Error(`${FAULT_POINT_ENV} names no fault point: ${armed}`);
+    }
+    return { target, at, reached: 0 };
+  });
   return (point) => {
-    if (point !== target) return;
-    reached += 1;
-    if (reached === at) halt(point);
+    for (const armedPoint of targets) {
+      if (point !== armedPoint.target) continue;
+      armedPoint.reached += 1;
+      if (armedPoint.reached === armedPoint.at) halt(point);
+    }
   };
 }
 
@@ -103,6 +117,8 @@ function freeze(point: FaultPoint): void {
   if (resume !== undefined && resume !== "") {
     for (let waited = 0; waited < 60_000; waited += 25) {
       if (existsSync(resume)) {
+        // Gone again, so the next point armed holds until the test writes it once more.
+        rmSync(resume, { force: true });
         writeSync(2, `${FAULT_POINT_RESUMED}${point}\n`);
         return;
       }

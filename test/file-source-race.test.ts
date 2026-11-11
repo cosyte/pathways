@@ -1,4 +1,4 @@
-import { renameSync, symlinkSync, unlinkSync } from "node:fs";
+import { renameSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import type * as fs from "node:fs/promises";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -335,7 +335,7 @@ describe("FileSource moving a refused file back", () => {
 
 describe("FileSource when a step of moving a refused file back fails", () => {
   it.skipIf(windows)(
-    "holds the copy left in the claim folder when the unlink after the link fails",
+    "keeps its held name, never the claim folder, when the unlink after the link fails",
     async () => {
       const dir = join(await makeProject({}), "inbox");
       const outside = await makeProject({ "x.hl7": "outside" });
@@ -343,10 +343,10 @@ describe("FileSource when a step of moving a refused file back fails", () => {
       const { source, errors } = recursiveSource(dir);
       swapBefore(dir, outside, claims);
       race.after = () => {
-        race.fail = (what, path) => what === "unlink" && path.includes(claims);
+        race.fail = (what, path) => what === "unlink" && path.includes("refused-");
       };
       expect(await pass(source)).toEqual([]);
-      expect(errors).toEqual([expect.objectContaining({ code: "ERR_PATHWAYS_FILE_HELD" })]);
+      expect(errors).toEqual([expect.objectContaining({ code: "ESTALE" })]);
       // Back where it came from, and the second name it had is held, never in the claim folder.
       expect(await readFile(join(outside, "x.hl7"), "utf8")).toBe("outside");
       expect(await heldIn(dir)).toEqual(["outside"]);
@@ -391,6 +391,94 @@ describe("FileSource when a step of moving a refused file back fails", () => {
     expect(await pass(source)).toEqual([]);
     expect(errors).toEqual([expect.objectContaining({ code: "EIO" })]);
     expect(await pass(source)).toEqual(["in"]);
+  });
+});
+
+/**
+ * Puts another file at `dir/x.hl7` just before the next move into the claim folder, as a writer in
+ * the source folder could between the last check and the move, and keeps the file that was there
+ * at `kept`. No folder is renamed, so this runs on Windows too.
+ */
+async function swapFileBefore(dir: string): Promise<string> {
+  const elsewhere = await makeProject({ "swapped.hl7": "swapped" });
+  const kept = join(elsewhere, "kept.hl7");
+  race.when = (to) => to.includes(claims);
+  race.then = () => {
+    renameSync(join(dir, "x.hl7"), kept);
+    renameSync(join(elsewhere, "swapped.hl7"), join(dir, "x.hl7"));
+  };
+  return kept;
+}
+
+// A file swapped for another in the source folder itself, between the last check and the move: the
+// move takes the other one, which goes to a held name in .claimed/ and back from there.
+describe("FileSource moving a swapped file back, on every system", () => {
+  it("moves it back by way of its held name, and never takes it while it runs", async () => {
+    const dir = join(await makeProject({}), "inbox");
+    await dropFile(join(dir, "x.hl7"), "in");
+    const { source, errors } = recursiveSource(dir);
+    const kept = await swapFileBefore(dir);
+    expect(await pass(source)).toEqual([]);
+    expect(errors).toEqual([expect.objectContaining({ code: "ESTALE" })]);
+    expect(await readFile(join(dir, "x.hl7"), "utf8")).toBe("swapped");
+    expect(await readFile(kept, "utf8")).toBe("in");
+    // Its held name is gone, and nothing waits in the claim folder.
+    expect(await readdir(join(dir, CLAIMED_DIR))).toEqual(["adt"]);
+    expect(await readdir(join(dir, CLAIMED_DIR, "adt"))).toEqual([]);
+    for (let index = 0; index < 2; index += 1) expect(await pass(source)).toEqual([]);
+    expect(await readFile(join(dir, "x.hl7"), "utf8")).toBe("swapped");
+  });
+
+  it("keeps its held name when the unlink after the link fails, and says it went back", async () => {
+    const dir = join(await makeProject({}), "inbox");
+    await dropFile(join(dir, "x.hl7"), "in");
+    const { source, errors } = recursiveSource(dir);
+    await swapFileBefore(dir);
+    race.after = () => {
+      race.fail = (what, path) => what === "unlink" && path.includes("refused-");
+    };
+    expect(await pass(source)).toEqual([]);
+    expect(errors).toEqual([expect.objectContaining({ code: "ESTALE" })]);
+    expect(await readFile(join(dir, "x.hl7"), "utf8")).toBe("swapped");
+    expect(await heldIn(dir)).toEqual(["swapped"]);
+    expect(await readdir(join(dir, CLAIMED_DIR, "adt"))).toEqual([]);
+    expect(await pass(source)).toEqual([]);
+  });
+
+  it("holds it when a file was put where it came from since", async () => {
+    const dir = join(await makeProject({}), "inbox");
+    await dropFile(join(dir, "x.hl7"), "in");
+    const { source, errors } = recursiveSource(dir);
+    await swapFileBefore(dir);
+    race.after = () => {
+      writeFileSync(join(dir, "x.hl7"), "newer");
+      // Backdated, as dropFile does: a time in this millisecond can read as later than the pass's.
+      const past = new Date(Date.now() - 60_000);
+      utimesSync(join(dir, "x.hl7"), past, past);
+    };
+    expect(await pass(source)).toEqual([]);
+    expect(errors).toEqual([expect.objectContaining({ code: "ERR_PATHWAYS_FILE_HELD" })]);
+    expect(await heldIn(dir)).toEqual(["swapped"]);
+    expect(await readdir(join(dir, CLAIMED_DIR, "adt"))).toEqual([]);
+    expect(await pass(source)).toEqual(["newer"]);
+    expect(await heldIn(dir)).toEqual(["swapped"]);
+  });
+
+  it("leaves it in the claim folder when the move to its held name fails: never stored by this run", async () => {
+    const dir = join(await makeProject({}), "inbox");
+    await dropFile(join(dir, "x.hl7"), "in");
+    const { source, errors } = recursiveSource(dir);
+    await swapFileBefore(dir);
+    race.after = () => {
+      race.fail = (what, path) => what === "rename" && path.includes("refused-");
+    };
+    expect(await pass(source)).toEqual([]);
+    expect(errors).toEqual([expect.objectContaining({ code: "ERR_PATHWAYS_FILE_HELD" })]);
+    expect(await heldIn(dir)).toEqual([]);
+    expect(await readdir(join(dir, CLAIMED_DIR, "adt"))).toHaveLength(1);
+    expect(await pass(source)).toEqual([]);
+    // A later run knows nothing of the refusal, and stores what waits in the claim folder.
+    expect(await pass(recursiveSource(dir).source)).toEqual(["swapped"]);
   });
 });
 

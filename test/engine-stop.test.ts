@@ -51,7 +51,11 @@ interface Project {
   readonly hookFile: string;
 }
 
-async function project(): Promise<Project> {
+/**
+ * A project with one file channel and {@link SLOW_HOOK}, whose engine lease lasts `ttl`. A hard stop
+ * leaves the lease held until it lapses, so those tests keep it short; a clean stop frees it.
+ */
+async function project(ttl = "2s"): Promise<Project> {
   const root = await makeProject({
     "test.key": `${generateKey()}\n`,
     "hooks/slow.ts": SLOW_HOOK,
@@ -65,7 +69,7 @@ async function project(): Promise<Project> {
   await writeFile(
     join(root, "pathways.yaml"),
     "encryption:\n  keys: [{ id: test, file: ./test.key }]\n  current: test\n" +
-      "defaults:\n  pollInterval: 10ms\nlease:\n  ttl: 2s\n" +
+      `defaults:\n  pollInterval: 10ms\nlease:\n  ttl: ${ttl}\n` +
       `hooks:\n  - module: ./hooks/slow.ts\n    options: { file: ${JSON.stringify(hookFile)} }\n`,
   );
   return { root, hookFile };
@@ -127,7 +131,10 @@ describe("pathways start, stopped from outside", () => {
   it.skipIf(windows).each(["SIGINT", "SIGTERM"] as const)(
     "stops cleanly on %s with exit code 0, and each hook finishes the events queued for it",
     async (signal) => {
-      const { root, hookFile } = await project();
+      // A clean stop frees the lease, so nothing here waits for it to lapse. A time to live no
+      // pause of a busy host outlasts keeps a renewal that comes late, under coverage on a loaded
+      // runner, from ending the run with exit code 1 while its hooks drain.
+      const { root, hookFile } = await project("10m");
       const engine = start(root);
       try {
         await sendThrough(root);
@@ -136,8 +143,12 @@ describe("pathways start, stopped from outside", () => {
       } finally {
         engine.child.kill(signal);
       }
-      expect(await engine.exited).toEqual({ code: 0, signal: null });
-      expect(engine.stderr()).toBe("");
+      // With stderr, so a run that ends otherwise says why.
+      expect({ ...(await engine.exited), stderr: engine.stderr() }).toEqual({
+        code: 0,
+        signal: null,
+        stderr: "",
+      });
       expect(await hookCounts(hookFile)).toMatchObject({
         received: MESSAGES,
         transformed: MESSAGES,

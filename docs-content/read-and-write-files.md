@@ -135,13 +135,16 @@ destinations:
   its folder, with every link resolved, is still `dir` or under it, and that the file is still the
   one it opened or found. A file that fails the check stays and is logged as `source-read-failed`
   (or `source-file-set-aside`) with the code `ESTALE`. The source checks each move again once it
-  is made: a file it moved that is not the one it checked goes back where it came from, by a hard
-  link and an unlink, so it never replaces a file put there since, and is logged with `ESTALE`. A
-  file that cannot go back (another file is at that name, or its folder is gone) waits in
-  `.claimed/` under a name that starts with `refused-`, is logged with
-  `ERR_PATHWAYS_FILE_HELD`, and is never stored: see
-  [Troubleshooting](./troubleshooting.md#a-file-in-the-inbox-is-not-picked-up). Such a file is never
-  taken while the source runs, wherever a later swap leaves it.
+  is made: a file it moved that is not the one it checked first moves into `.claimed/` under a name
+  that starts with `refused-`, where no pass reads, then goes back where it came from by a hard
+  link and an unlink of that name, so it never replaces a file put there since, and is logged with
+  `ESTALE`. A crash part way leaves it under one name a pass reads at most, so a restart never
+  stores it twice. A file that cannot go back (another file is at that name, or its folder is gone)
+  keeps its `refused-` name, is logged with `ERR_PATHWAYS_FILE_HELD`, and is never stored: see
+  [Troubleshooting](./troubleshooting.md#a-file-in-the-inbox-is-not-picked-up). When even the move
+  to that name fails, it is logged the same way and waits in the claim folder, where the run that
+  refused it never stores it and the next start does. Such a file is never taken while the source
+  runs, wherever a later swap leaves it.
 - **`ignoreDot: false`** reads files and folders whose name starts with a dot, which are left by
   default. `.claimed/` is never read.
 - **`minSize`** (default `1B`) leaves a smaller file where it is. An empty file is left by default:
