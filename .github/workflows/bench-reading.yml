@@ -305,25 +305,26 @@ jobs:
           set -euo pipefail
           mkdir -p bench-results
           disk="$(findmnt -no SOURCE,FSTYPE -T "$(node -p 'require("node:os").tmpdir()')" || echo unknown)"
+          fence="$(printf '\x60\x60\x60')"
           {
             echo "## Closed loop"
             echo
             echo "Node $(node --version), the system temporary folder on ${disk}, commit ${COMMIT}."
             echo
-            echo '`pnpm bench 2000`, five times:'
+            echo "pnpm bench 2000, five times:"
             echo
-            echo '```text'
+            echo "${fence}text"
+            for n in 1 2 3 4 5; do
+              pnpm --silent bench 2000 | sed "s/^/run ${n}: /"
+            done
+            echo "${fence}"
+            echo
           } > bench-results/closed-loop.md
-          for n in 1 2 3 4 5; do
-            pnpm --silent bench 2000 | sed "s/^/run ${n}: /" | tee -a bench-results/closed-loop.md
-          done
-          echo '```' >> bench-results/closed-loop.md
           node bench/open-loop/run.mjs --target dist/index.mjs --case drain --runs 5 \
             --commit "${COMMIT}" --out bench-results/open-loop-drain.json \
             --summary bench-results/open-loop-drain.md
           pnpm exec cosyte-bench check bench-results/open-loop-drain.json
-          cat bench-results/open-loop-drain.md >> bench-results/closed-loop.md
-          cat bench-results/closed-loop.md >> "${GITHUB_STEP_SUMMARY}"
+          cat bench-results/closed-loop.md bench-results/open-loop-drain.md >> "${GITHUB_STEP_SUMMARY}"
       - name: Keep the reading
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
