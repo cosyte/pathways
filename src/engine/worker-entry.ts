@@ -369,8 +369,11 @@ export async function decode<F extends WorkerFormat>(
   body: Uint8Array,
 ): Promise<FormatModel<F>> {
   const entry = FORMAT_REGISTRY[format] as FormatEntry<FormatModel<F>>;
-  // Awaited here, so a parser that throws as it is called rejects like one that rejects.
-  return await entry.decode(body);
+  // Called inside this async function, so a parser that throws as it is called rejects like one that
+  // rejects. Only a parser's promise is awaited: a parser that returns its value at once (json,
+  // text) leaves nothing waiting, so a run of calls that never yields piles up no continuations.
+  const message = entry.decode(body);
+  return message instanceof Promise ? await message : message;
 }
 
 /**
