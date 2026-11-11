@@ -60,7 +60,7 @@ import { recordConfigChanges } from "./operator/config-audit.js";
 import { verifyCommand, type VerifySelection } from "./operator/verify.js";
 import { InitError, initProject, STARTER_CHANNEL, STARTER_KEY_FILE } from "./starter/init.js";
 import { resolveSecrets, type Secrets } from "./secrets/resolve.js";
-import type { SecretScope } from "./secrets/sources.js";
+import type { DrySkip, SecretScope } from "./secrets/sources.js";
 import { openRawStore, openStore, startingKeys, type OpenStoreContext } from "./storage/open.js";
 import { SchemaVersionError } from "./storage/schema.js";
 import {
@@ -417,7 +417,10 @@ function reportConfigError(error: ConfigError, io: CliIo): void {
  */
 async function secretsOrExit(
   project: ProjectConfig,
-  context: OpenStoreContext & { readonly signal?: AbortSignal | undefined },
+  context: OpenStoreContext & {
+    readonly signal?: AbortSignal | undefined;
+    readonly skipDry?: DrySkip | undefined;
+  },
   scope: SecretScope,
   io: CliIo,
 ): Promise<Secrets | number> {
@@ -562,8 +565,14 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
   }
   const env = io.env ?? process.env;
   const logger = io.logger ?? pino({ redact: REDACT });
-  // Every secret is read now, at startup, master keys among them: a missing one stops the start.
-  const secrets = await secretsOrExit(project, { env, logger, signal: io.signal }, "all", io);
+  // Every secret is read now, at startup, master keys among them: a missing one stops the start. A
+  // destination that runs dry never sends, so its secrets are not read and cannot stop it.
+  const secrets = await secretsOrExit(
+    project,
+    { env, logger, signal: io.signal, skipDry: mode.dryRun ? "all" : "each" },
+    "all",
+    io,
+  );
   if (typeof secrets === "number") return secrets;
   const context: OpenStoreContext = mode.noMigrate
     ? { env, logger, secrets, migrate: "none" }

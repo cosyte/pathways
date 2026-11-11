@@ -612,7 +612,8 @@ export class Engine {
     this.logDryDestinations(dryRun);
     try {
       const secrets =
-        this.options.secrets ?? (await resolveSecrets(project, { env, logger }, "all"));
+        this.options.secrets ??
+        (await resolveSecrets(project, { env, logger, skipDry: dryRun ? "all" : "each" }, "all"));
       this.hooks = await HookSet.open(project.hooks, {
         file: "pathways.yaml",
         channel: undefined,

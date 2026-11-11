@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { readdir } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -20,6 +21,9 @@ import {
   LAB_TRANSFORM,
   makeProject,
 } from "./helpers.js";
+import { built } from "./secret-vault.js";
+
+const VAULT = fileURLToPath(new URL("./secret-vault.ts", import.meta.url));
 
 afterEach(cleanUp);
 
@@ -75,6 +79,35 @@ destinations:
       url: http://127.0.0.1:${port}/in
       plaintext: true
       headers: { Authorization: { env: SYNTHETIC_MISSING_TOKEN } }
+${http}
+  - file: { dir: ../../data/out }
+`,
+    "channels/adt/transform.ts": LAB_TRANSFORM,
+  });
+  await dropFile(join(root, "data/inbox/1.hl7"), ADT_A01);
+  return root;
+}
+
+/**
+ * A project whose HTTP destination (dry or not) takes its token from a provider that holds no such
+ * secret and fails every request for it: asked, it stops the start.
+ */
+async function vaultProject(port: number, http: string): Promise<string> {
+  const failing = {
+    "lab-token": { name: "VaultError", code: "E_SYNTHETIC", leak: "synthetic-detail" },
+  };
+  const root = await makeProject({
+    "test.key": `${generateKey()}\n`,
+    "pathways.yaml": `${KEYS}secrets:\n  vault: { module: ${JSON.stringify(VAULT)}, options: ${JSON.stringify({ failing })} }\n`,
+    "channels/adt/channel.yaml": `
+source:
+  file: { dir: ../../data/inbox, minAge: 0 }
+transform: ./transform.ts
+destinations:
+  - http:
+      url: http://127.0.0.1:${port}/in
+      plaintext: true
+      headers: { Authorization: { secret: { provider: vault, name: lab-token } } }
 ${http}
   - file: { dir: ../../data/out }
 `,
@@ -203,6 +236,51 @@ describe("a destination that runs dry", () => {
     const result = await start(["start", "--once", "-C", root]);
     expect(result.code).toBe(EXIT.config);
     expect(target.connections()).toBe(0);
+  });
+
+  it("never asks a secret provider for a dry destination's secret, so a missing one cannot stop the start", async () => {
+    const target = await listener();
+    const before = built.length;
+    const root = await vaultProject(target.port, "    dryRun: true");
+    const dry = await start(["start", "--once", "-C", root]);
+    expect(dry).toMatchObject({ code: EXIT.ok, err: "" });
+    const all = await start([
+      "start",
+      "--once",
+      "--dry-run",
+      "-C",
+      await vaultProject(target.port, ""),
+    ]);
+    expect(all).toMatchObject({ code: EXIT.ok, err: "" });
+    // No destination needed the provider, so it was never built, let alone asked.
+    expect(built.length).toBe(before);
+    expect(target.connections()).toBe(0);
+
+    // The engine resolves the same way when it is handed no secrets.
+    const store = await Store.open(join(root, ".pathways/pathways.db"));
+    const { logger } = captureLogger();
+    const quiet = () => ({ source: { poll: () => Promise.resolve() }, destinations: [] });
+    for (const project of [
+      await loadProject(root),
+      await loadProject(await vaultProject(target.port, "")),
+    ]) {
+      const dryRun = project.channels[0]?.destinations[0]?.dryRun !== true;
+      const engine = new Engine({ project, store, logger, dryRun, connectors: quiet });
+      await engine.start();
+      await engine.stop();
+    }
+    expect(built.length).toBe(before);
+
+    // The same destination that sends asks the provider, whose refusal stops the start.
+    const sending = await start(["start", "--once", "-C", await vaultProject(target.port, "")]);
+    expect(sending.code).toBe(EXIT.config);
+    expect(sending.err).toContain(
+      "channels/adt/channel.yaml: destinations.0.http.headers.Authorization: the secret lab-token from the provider vault could not be resolved (VaultError E_SYNTHETIC)",
+    );
+    expect(sending.err).not.toContain("synthetic-detail");
+    expect(built.length).toBe(before + 1);
+    expect(target.connections()).toBe(0);
+    await store.close();
   });
 
   it("is refused at start on a store that cannot record a dry run", async () => {

@@ -117,6 +117,10 @@ both versions, a database that lacks a step the candidate's Pathways needs. The 
 transforms run with this process's environment, as the engine's do, and what they write to the
 console goes to its output. Each transform reads its channel's `config:` as the engine does, and a
 stored message runs with its own id as `ctx.messageId` and no source facts, as a replay does; a
+transform that reads `ctx.source` is therefore reported different on a message whose recorded
+outputs came from its first run, which had them. `ctx.attempt` is the message's generation plus one,
+and after `replay --resend`, which raises the generation without a transform run, that is not the
+attempt that made the recorded outputs, so a transform that reads it is reported different there. A
 sample runs with the context `pathways test` gives. On SQLite, where the database file does not
 exist, it stops and creates none. It builds no destination, so it sends no message; `pathways.yaml`'s
 engine-wide hooks receive its audit entries, as they do every command's.

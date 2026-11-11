@@ -121,7 +121,9 @@ every run: expect that field in the report, and look for the others.
 
 A destination block with `dryRun: true` takes part in everything but the send. Each output is
 transformed and stored as it would be, and its delivery is marked `dry-run` instead of being sent.
-No connector is built for it, so no TLS file or secret is read and no connection is opened:
+No connector is built for it, so no TLS file is read and no connection is opened. None of its
+secrets is read either: start does not ask a provider for them, so a missing or expired one does not
+stop it, and no real credential is held for a destination that never sends:
 
 ```yaml title="channels/adt-to-lab/channel.yaml"
 source:
