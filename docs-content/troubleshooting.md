@@ -83,7 +83,11 @@ start --once` run straight after copying a file in can find it too new; run it a
 - A file in `.claimed/` whose name starts with `refused-`, logged with `ERR_PATHWAYS_FILE_HELD`, is
   one the source moved in from outside `dir`, through a folder swapped for a link, and could not put
   back. It is never stored. Find out who swapped the folder, then move the file back where it
-  belongs by hand.
+  belongs by hand. When the source could not even give it that name, it waits in the channel's
+  claim folder, `.claimed/<channel>/`: the run that refused it never stores it, and the next start
+  does, so move it out before you restart. A `refused-` file logged with `ESTALE` instead is a
+  second name of a file the source did put back, and can be deleted. One left by a crash may be the
+  only name the file has: check where it came from before you delete it.
 - Two channels that read one folder share its files: each file goes to whichever channel's pass
   sees it first.
 - On Windows, the source must also be able to open a file to write before it takes it: a read-only

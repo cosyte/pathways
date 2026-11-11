@@ -17,6 +17,7 @@ import { dirname, join, posix, resolve, sep } from "node:path";
 import { createContext, Script } from "node:vm";
 
 import { DEFAULT_READ_TRIES, type PathPattern } from "../config/schema.js";
+import { faultPoint } from "../fault-points.js";
 import { copiesBodies, markCopiesBodies, ownsBuffer, release } from "../storage/ownership.js";
 import type {
   DestinationConnector,
@@ -222,7 +223,9 @@ function moved(): Error {
 
 /**
  * The error for a file a move took in that is not the one checked, and that could not be moved back
- * where it came from: it waits in `.claimed/` under a `refused-` name, never stored.
+ * where it came from: it waits in `.claimed/` under a `refused-` name, never stored. When even the
+ * move to that name failed, it waits where the move took it, and this run never stores it; a later
+ * run that finds it in the claim folder does.
  */
 function held(): Error {
   return Object.assign(new Error("a refused file could not be moved back, and is held"), {
@@ -450,44 +453,40 @@ export class FileSource implements SourceConnector {
    * Moves the file `id` names from `from` to `to`, and checks after the move that the file now at
    * `to` is that one. A folder on `from` swapped for a link between the last check and the move
    * would move a file from outside the source folder: then the move is refused, with
-   * {@link moved}'s error, and the file goes back to `from` by a hard link and an unlink, never by a
-   * rename, which would replace a file put at `from` since. A file that cannot go back (one is
-   * there, or the folder is gone) moves into `.claimed/` under a `refused-` name, out of every
-   * folder a pass reads, with {@link held}'s error. Either way its id is noted in `refused`, so a
-   * file a later swap leaves in the source folder is never taken.
+   * {@link moved}'s error. The file first moves into `.claimed/` under a `refused-` name, out of
+   * every folder a pass reads, and goes back to `from` from there by a hard link and an unlink,
+   * never by a rename, which would replace a file put at `from` since. So a crash at any step
+   * leaves it under at most one name a pass reads: `to` (when the crash comes before the move to
+   * the held name), or `from`, never both. A file that cannot go back (one is there, or the folder
+   * is gone) stays under its held name, with {@link held}'s error. Either way its id is noted in
+   * `refused`, so a file a later swap leaves in the source folder is never taken.
    */
   private async relocate(from: string, to: string, id: FileId): Promise<void> {
     await rename(from, to);
     const now = await lstat(to, { bigint: true });
     if (now.dev === id.dev && now.ino === id.ino) return;
     this.refused.add(idKey(now));
+    const name = `refused-${randomBytes(8).toString("hex")}`;
+    const holding = join(this.options.dir, CLAIMED_DIR, name);
     try {
-      await link(to, from);
+      await rename(to, holding);
     } catch {
-      await this.hold(to);
+      // Left at to, where its noted id keeps this run from storing it. A later run that finds it in
+      // the claim folder stores it.
       throw held();
     }
     try {
-      await unlink(to);
+      await link(holding, from);
     } catch {
-      // Back at from, and still at to: the copy at to is held, so a claim of it is never stored.
-      await this.hold(to);
       throw held();
+    }
+    faultPoint("mid-move-back");
+    try {
+      await unlink(holding);
+    } catch {
+      // Back at from, and still under its held name, which no pass reads.
     }
     throw moved();
-  }
-
-  /**
-   * Moves a refused file into `.claimed/` under a `refused-` name of its own, where no pass reads.
-   * A move that fails leaves it, and its noted id keeps this run from storing it.
-   */
-  private async hold(path: string): Promise<void> {
-    const name = `refused-${randomBytes(8).toString("hex")}`;
-    try {
-      await rename(path, join(this.options.dir, CLAIMED_DIR, name));
-    } catch {
-      // Left where it is: the error the caller throws says it is held either way.
-    }
   }
 
   /**
@@ -729,7 +728,10 @@ export class FileSource implements SourceConnector {
         if (!(await this.inside(file.path, root, id))) throw moved();
         // The open file's own size: a file that grew since it was found is held to maxSize too.
         grown = Number(stats.size) > maxSize;
-        if (!grown) await this.relocate(file.path, path, id);
+        if (!grown) {
+          faultPoint("before-claim-move");
+          await this.relocate(file.path, path, id);
+        }
       } catch (error) {
         onReadError?.(error);
         continue;

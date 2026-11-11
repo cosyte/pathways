@@ -9,7 +9,7 @@
 // Each runs on SQLite and on each server whose URL is set; each test has a database of its own,
 // and stops its own processes and closes its own stores before it ends.
 import { spawn } from "node:child_process";
-import { readdir, readFile, writeFile } from "node:fs/promises";
+import { readdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { afterAll, afterEach, describe, expect, it } from "vitest";
@@ -18,6 +18,7 @@ import { generateKey } from "../src/encryption/keys.js";
 import {
   FAULT_POINT_ENV,
   FAULT_POINT_REACHED,
+  FAULT_POINT_RESUME_ENV,
   FAULT_POINTS,
   faultPoints,
   type FaultPoint,
@@ -65,11 +66,26 @@ describe("faultPoints", () => {
     const third = faultPoints("after-store-before-ack@3", halt);
     for (let i = 0; i < 5; i += 1) third("after-store-before-ack");
     expect(halted).toEqual(["mid-requeue", "after-store-before-ack"]);
+
+    // Several, separated by commas, each at its own count.
+    const two = faultPoints("before-claim-move,mid-move-back@2", halt);
+    two("mid-move-back");
+    two("before-claim-move");
+    two("mid-move-back");
+    two("before-claim-move");
+    expect(halted.slice(2)).toEqual(["before-claim-move", "mid-move-back"]);
   });
 
   it("refuses a value that names no point, so a typo cannot pass by never stopping", () => {
     const halt = (): void => undefined;
-    for (const armed of ["after-send", "mid-requeue@0", "mid-requeue@x", "mid-requeue@1@2"]) {
+    for (const armed of [
+      "after-send",
+      "mid-requeue@0",
+      "mid-requeue@x",
+      "mid-requeue@1@2",
+      "mid-requeue,",
+      "mid-requeue,after-send",
+    ]) {
       expect(() => faultPoints(armed, halt)).toThrow(`${FAULT_POINT_ENV} names no fault point`);
     }
   });
@@ -431,3 +447,96 @@ for (const database of TEST_DATABASES) {
     },
   );
 }
+
+/**
+ * `pathways <args> -C root` with `armed` in PATHWAYS_TEST_FAULT_POINT and `resume` named as the file
+ * that lets a held point carry on: `reached` waits for the child to say it reached a point, and
+ * `exited` for its end.
+ */
+function holdAt(setup: Project, args: readonly string[], armed: string, resume: string) {
+  const child = spawn(process.execPath, ["--import", "tsx", BIN, ...args, "-C", setup.root], {
+    stdio: ["ignore", "ignore", "pipe"],
+    env: {
+      ...process.env,
+      ...setup.env,
+      NODE_NO_WARNINGS: "1",
+      [FAULT_POINT_ENV]: armed,
+      [FAULT_POINT_RESUME_ENV]: resume,
+    },
+  });
+  let stderr = "";
+  const exited = new Promise<Ended>((resolve) =>
+    child.once("exit", (code, signal) => resolve({ code, signal, stderr })),
+  );
+  const listeners = new Set<() => void>();
+  child.stderr.on("data", (chunk: Buffer) => {
+    stderr += chunk.toString();
+    for (const listener of listeners) listener();
+  });
+  const reached = (point: FaultPoint): Promise<void> =>
+    new Promise<void>((resolve, reject) => {
+      const check = (): void => {
+        if (!stderr.includes(`${FAULT_POINT_REACHED}${point}\n`)) return;
+        listeners.delete(check);
+        resolve();
+      };
+      listeners.add(check);
+      check();
+      void exited.then(({ code }) => {
+        reject(new Error(`the child ended (${String(code)}) before ${point}: ${stderr}`));
+      });
+    });
+  return { child, exited, reached };
+}
+
+// A file the source moved that is not the one it checked goes to a held name in `.claimed/` before
+// it is linked back where it came from. A process killed between the link and the removal of the
+// held name leaves the file under two names, and only one of them is in a folder a pass reads.
+describe("A file source killed while it moves a refused file back", () => {
+  const sqlite = TEST_DATABASES.find((database) => database.kind === "sqlite");
+
+  it("leaves it under one name a restart reads, and the restart stores it once", async () => {
+    if (sqlite === undefined) throw new Error("the test databases have no SQLite");
+    const setup = await project(sqlite);
+    const inbox = join(setup.root, "data/inbox");
+    const resume = join(setup.root, "resume");
+    const held = holdAt(setup, ["start", "--once"], "before-claim-move,mid-move-back", resume);
+    try {
+      // Held after its last check of note-1.txt, the first by name: another file takes its place.
+      await held.reached("before-claim-move");
+      await dropFile(join(setup.root, "data/swap/note-1.txt"), "synthetic swapped note");
+      await rename(join(inbox, "note-1.txt"), join(setup.root, "data/kept-note-1.txt"));
+      await rename(join(setup.root, "data/swap/note-1.txt"), join(inbox, "note-1.txt"));
+      await writeFile(resume, "");
+      // The move takes the swapped file, which the check after it refuses: killed mid move back.
+      await held.reached("mid-move-back");
+    } finally {
+      // A hard stop, on every system: SIGKILL on Linux and macOS, TerminateProcess on Windows.
+      held.child.kill("SIGKILL");
+    }
+    const killed = await held.exited;
+    expect(killed.code === 0 && killed.signal === null).toBe(false);
+    const claimed = await readdir(join(inbox, ".claimed/notes"));
+    const names = (await readdir(join(inbox, ".claimed"))).filter((n) => n.startsWith("refused-"));
+    const heldText = await Promise.all(
+      names.map((name) => readFile(join(inbox, ".claimed", name), "utf8")),
+    );
+
+    await leaseLapsed(() => setup.storage.open());
+    await cleanly(run(setup, ["start", "--once"]));
+    // The restart remembers no refusal: it takes the swapped file from the inbox, once.
+    const bodies = (await setup.sent()).filter((s) => s.to === "a").map((s) => s.body);
+    expect(bodies.sort()).toEqual([
+      "synthetic note 2",
+      "synthetic note 3",
+      "synthetic swapped note",
+    ]);
+    // At the kill, nothing waited in the claim folder: the swapped file was back in the inbox, and
+    // its second name held in .claimed/, where no pass reads.
+    expect(claimed).toEqual([]);
+    expect(heldText).toEqual(["synthetic swapped note"]);
+    expect(await readFile(join(setup.root, "data/kept-note-1.txt"), "utf8")).toBe(
+      "synthetic note 1",
+    );
+  }, 120_000);
+});

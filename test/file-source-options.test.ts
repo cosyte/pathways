@@ -280,11 +280,15 @@ describe.each([
       include: [{ regex: "^(a+)+$" }],
       onReadError: (error) => errors.push(error),
     });
-    const started = performance.now();
     expect(await pass(source)).toEqual(["fast"]);
-    // Tried on three passes in a row, each stopped and said; the fourth pass passes it over.
-    for (let index = 0; index < 3; index += 1) expect(await pass(source)).toEqual([]);
-    expect(performance.now() - started).toBeLessThan(REGEX_TIME_LIMIT_MS * 20);
+    expect(errors).toHaveLength(1);
+    // Tried on three passes in a row, each stopped and said; the fourth pass passes it over. Each
+    // pass is judged by what it said, never by the clock: a pass also reads the folder, which a
+    // busy Windows runner can make slow.
+    for (const said of [2, 3, 3]) {
+      expect(await pass(source)).toEqual([]);
+      expect(errors).toHaveLength(said);
+    }
     expect(errors).toEqual(
       Array.from(
         { length: 3 },
@@ -313,11 +317,15 @@ describe.each([
     await dropFile(join(dir, "FAC_ADT_A01_20261111_0001.hl7"), "fast");
     const errors: unknown[] = [];
     const source = sourceOn(dir, { include: [{ glob }], onReadError: (e) => errors.push(e) });
-    const started = performance.now();
     expect(await pass(source)).toEqual(["fast"]);
-    // Tried on three passes in a row, each stopped and said; the fourth pass passes it over.
-    for (let index = 0; index < 3; index += 1) expect(await pass(source)).toEqual([]);
-    expect(performance.now() - started).toBeLessThan(REGEX_TIME_LIMIT_MS * 20);
+    expect(errors).toHaveLength(1);
+    // Tried on three passes in a row, each stopped and said; the fourth pass passes it over. Each
+    // pass is judged by what it said, never by the clock: a pass also reads the folder, which a
+    // busy Windows runner can make slow.
+    for (const said of [2, 3, 3]) {
+      expect(await pass(source)).toEqual([]);
+      expect(errors).toHaveLength(said);
+    }
     expect(errors).toEqual(
       Array.from(
         { length: 3 },
