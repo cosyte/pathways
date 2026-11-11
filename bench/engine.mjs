@@ -1,0 +1,219 @@
+// A Pathways project in a temporary directory, for the bench and the profile to run the built
+// `pathways` command on: one channel, file in to file out, stored in SQLite and encrypted at rest,
+// the way `pathways init` sets a project up.
+//
+// One pass is `pathways start --once`: the engine starts, takes in every file waiting in the
+// channel's folder (each stored, encrypted, before the next step), runs each through the transform
+// in the channel's worker thread, delivers every output to the out folder, and stops. Each pass
+// starts from the same state: the inputs are linked back into the in folder from a folder of their
+// own (a link costs no copy, so the pass does not time writing them), the outputs of the last pass
+// are removed, and so is the database, so every pass opens a fresh one. A pass with no input is the
+// fixed cost of a pass: process start, configuration, the database's schema, the worker and its
+// parser.
+
+import { spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import {
+  existsSync,
+  linkSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+/** The transforms a channel can run, as TypeScript a user would write. */
+export const TRANSFORMS = {
+  // The starter's kind of edit: address each message to the lab, and send it on.
+  hl7Address: [
+    "export default (msg: { setField(path: string, value: string): void }) => {",
+    '  msg.setField("MSH.5", "LAB");',
+    "  return msg;",
+    "};",
+    "",
+  ].join("\n"),
+};
+
+/**
+ * Finds the built bin beside the entry the suite was handed. A suite is handed the module, not its
+ * path, so this calls `defaultAckBuilder` with a request whose first read records the stack: the
+ * first frame outside bench/ is the entry's own, and the bin sits in `bin/` beside it. The base
+ * and the head of a comparison each run their own bin.
+ */
+export function binOf(pathways) {
+  return fileURLToPath(new URL("bin/pathways.mjs", entryOf(pathways)));
+}
+
+/** The URL of the built entry the suite was handed, found as {@link binOf} describes. */
+export function entryOf(pathways) {
+  let stack = "";
+  const request = {
+    get header() {
+      stack = new Error("where").stack ?? "";
+      throw new Error("located");
+    },
+  };
+  try {
+    pathways.defaultAckBuilder(request);
+  } catch {
+    // Expected: the getter stops the call once it has the stack.
+  }
+  const bench = new URL(".", import.meta.url).href;
+  for (const match of stack.matchAll(/(file:\/\/[^\s)]+?):\d+:\d+/g)) {
+    if (!match[1].startsWith(bench)) return match[1];
+  }
+  throw new Error("@cosyte/pathways bench: could not find the built entry the suite was handed");
+}
+
+/**
+ * The `@cosyte/hl7` the handed entry itself imports: the copy installed beside that build, which a
+ * comparison's base and head each have their own of. An `Hl7Message` from one copy is not one to
+ * the other, so a header handed to a build's ACK builder is parsed by that build's own copy. Found
+ * through the package's `import` entry and loaded with `require`, which for an ES module returns
+ * the instance the entry already loaded.
+ */
+export function hl7Of(pathways) {
+  const require = createRequire(entryOf(pathways));
+  let dir = dirname(require.resolve("@cosyte/hl7"));
+  while (!existsSync(join(dir, "package.json"))) dir = dirname(dir);
+  const manifest = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
+  const entry = manifest.exports?.["."]?.import?.default ?? manifest.module;
+  return require(join(dir, entry));
+}
+
+/** The worker module beside a bin: decode, transform and encode, as the channel's worker runs them. */
+export function workerOf(bin) {
+  return join(dirname(bin), "pathways-worker.mjs");
+}
+
+/**
+ * Writes a project with one channel of `format`, whose inputs are `bodies`, and returns it.
+ * `transform` is the TypeScript of the channel's transform, or undefined to pass each message
+ * through as it was parsed.
+ */
+export function makeProject({ format, transform, bodies, extension = "msg" }) {
+  const root = mkdtempSync(join(tmpdir(), "pathways-bench-"));
+  const channel = join(root, "channels", "bench");
+  mkdirSync(channel, { recursive: true });
+  mkdirSync(join(root, ".pathways"), { recursive: true });
+  writeFileSync(join(root, ".pathways", "bench.key"), randomBytes(32).toString("base64"));
+  writeFileSync(
+    join(root, "pathways.yaml"),
+    [
+      "storage:",
+      "  sqlite:",
+      "    file: .pathways/pathways.db",
+      "encryption:",
+      "  keys:",
+      "    - id: bench",
+      "      file: .pathways/bench.key",
+      "  current: bench",
+      "",
+    ].join("\n"),
+  );
+  writeFileSync(
+    join(channel, "channel.yaml"),
+    [
+      "name: bench",
+      `format: ${format}`,
+      "source:",
+      "  file:",
+      "    dir: ../../data/in",
+      "    minAge: 0",
+      ...(transform === undefined ? [] : ["transform: ./transform.ts"]),
+      "destinations:",
+      "  - file:",
+      "      dir: ../../data/out",
+      "",
+    ].join("\n"),
+  );
+  if (transform !== undefined) writeFileSync(join(channel, "transform.ts"), transform);
+  const stash = join(root, "stash");
+  mkdirSync(stash);
+  mkdirSync(join(root, "data", "in"), { recursive: true });
+  let bytes = 0;
+  const names = bodies.map((body, n) => {
+    const name = `${String(n).padStart(8, "0")}.${extension}`;
+    writeFileSync(join(stash, name), body);
+    bytes += Buffer.byteLength(body);
+    return name;
+  });
+  return { root, names, bytes, count: bodies.length };
+}
+
+/** Puts a project back as it was before a pass: the inputs waiting, no outputs, no database. */
+export function resetProject(project) {
+  rmSync(join(project.root, "data", "out"), { recursive: true, force: true });
+  for (const file of ["pathways.db", "pathways.db-wal", "pathways.db-shm", "pathways.db-journal"]) {
+    rmSync(join(project.root, ".pathways", file), { force: true });
+  }
+  const inbox = join(project.root, "data", "in");
+  rmSync(inbox, { recursive: true, force: true });
+  mkdirSync(inbox, { recursive: true });
+  for (const name of project.names) linkSync(join(project.root, "stash", name), join(inbox, name));
+}
+
+/** How many files the last pass delivered. */
+export function delivered(project) {
+  try {
+    return readdirSync(join(project.root, "data", "out")).length;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * One pass of the built bin over a reset project, its output to /dev/null. `nodeArgs` go before the
+ * bin (a probe, a profiler). An exit other than 0, or a pass that delivered fewer files than it took
+ * in, is a broken case and never a number: the error names the exit and the counts, and the failure
+ * kinds and codes the engine logged, never content. The engine logs ids, counts and codes only.
+ */
+export function runPass(bin, project, { nodeArgs = [], env } = {}) {
+  resetProject(project);
+  const result = spawnSync(
+    process.execPath,
+    [...nodeArgs, bin, "start", "--once", "--project", project.root],
+    { stdio: ["ignore", "pipe", "ignore"], env: env ?? process.env, maxBuffer: 64 * 1024 * 1024 },
+  );
+  if (result.status !== 0) {
+    throw new Error(
+      `pathways exited ${String(result.status ?? result.signal)}${failures(result.stdout)}`,
+    );
+  }
+  const out = delivered(project);
+  if (out !== project.count) {
+    throw new Error(
+      `pathways delivered ${String(out)} of ${String(project.count)}${failures(result.stdout)}`,
+    );
+  }
+  return out;
+}
+
+/** The failures an engine's log names, as `event kind code`, each once. */
+function failures(stdout) {
+  const seen = new Set();
+  for (const line of String(stdout ?? "").split("\n")) {
+    if (!line.includes("fail")) continue;
+    try {
+      const entry = JSON.parse(line);
+      if (typeof entry.event === "string" && entry.event.includes("fail")) {
+        seen.add(
+          [entry.event, entry.kind, entry.code].filter((x) => typeof x === "string").join(" "),
+        );
+      }
+    } catch {
+      // Not a log line.
+    }
+  }
+  return seen.size === 0 ? "" : ` (${[...seen].join("; ")})`;
+}
+
+export function removeProject(project) {
+  rmSync(project.root, { recursive: true, force: true });
+}
