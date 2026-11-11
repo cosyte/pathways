@@ -127,6 +127,21 @@ describe("the release workflow", () => {
     expect(pkg.scripts["release"]).toBe("changeset publish");
   });
 
+  // A pull request that changes an export without regenerating docs-content/api/, or adds an export
+  // with no TSDoc summary, fails `docs-reference`; a broken link or sidebar id fails `ci / verify`.
+  it("runs both docs checks on every pull request", () => {
+    const ci = workflow("ci.yml");
+    expect(ci.jobs["ci"]?.with?.["check-docs-content"]).toBe(true);
+    expect(pkg.scripts["check:docs-reference"]).toBe("cosyte-docs-reference --check");
+    const job = ci.jobs["docs-reference"] as unknown as {
+      readonly steps: readonly { readonly run?: string }[];
+    };
+    expect(job.steps.map((step) => step.run).filter(Boolean)).toEqual([
+      "pnpm install --frozen-lockfile --ignore-scripts",
+      "pnpm check:docs-reference",
+    ]);
+  });
+
   // The shared pipeline refuses to release a version whose CHANGELOG.md has no section for it, and
   // Changesets writes that section only when a changelog generator is configured.
   it("has Changesets write the changelog the release checks for", () => {

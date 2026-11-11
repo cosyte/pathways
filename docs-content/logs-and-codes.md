@@ -92,7 +92,7 @@ host (and port, when it names one) of the 3xx answer's `Location`, never its pat
 absent when there is no `Location` or it names no host.
 
 A delivery rejected for good stores its reason: the ACK code (`AE`, `CE`), `HTTP <status>` for a
-final 1xx or a 4xx other than 408, 425 and 429, or `MLLP_PAYLOAD_CONTAINS_...` for an output that
+101 or a 4xx other than 408, 425 and 429, or `MLLP_PAYLOAD_CONTAINS_...` for an output that
 holds a framing byte.
 
 ## MLLP problem codes

@@ -52,6 +52,28 @@ Pathways is an open engine, MIT licensed and free to self-host. We plan to offer
 Pathways as well. Need an integration built, or hosted and run for you? See our
 [integration services](https://cosyte.com/integration-services).
 
+## Support
+
+Questions, bug reports and feature requests go on the
+[issue tracker](https://github.com/cosyte/pathways/issues). Never attach a real patient's message, a
+log from a live system or anything else that holds patient data: a synthetic message that shows the
+problem is enough, and [`@cosyte/synth`](https://docs.cosyte.com/synth) makes one. Report a
+vulnerability privately, as the
+[security policy](https://github.com/cosyte/.github/blob/main/SECURITY.md) describes, never in a
+public issue.
+
+## Contributing
+
+Pull requests are welcome. For anything that changes how a message is stored, routed or delivered, or
+moves the public API, open an issue first so the behavior can be agreed before it is written. Every
+fixture is synthetic, a change in behavior comes with a test that fails without it, and a change to
+what a reader sees updates the pages in `docs-content/` in the same pull request. `AGENTS.md` lists
+the checks a pull request must pass, and
+[Testing and quality](https://github.com/cosyte/pathways/blob/main/docs-content/testing-and-quality.md)
+says the floor they hold a change to. The organization's
+[contributing guide](https://github.com/cosyte/.github/blob/main/CONTRIBUTING.md) and
+[code of conduct](https://github.com/cosyte/.github/blob/main/CODE_OF_CONDUCT.md) apply here.
+
 ## License
 
 [MIT](LICENSE)

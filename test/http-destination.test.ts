@@ -309,3 +309,72 @@ async function counting(): Promise<{ port: number; connections: () => number }> 
   });
   return { port: (server.address() as AddressInfo).port, connections: () => sockets.length };
 }
+
+/** A TCP server that writes `raw` once a request arrives, then ends the socket when `end` says. */
+async function rawAnswer(raw: string, end: boolean): Promise<string> {
+  const sockets: Socket[] = [];
+  const server: Server = createServer((socket) => {
+    sockets.push(socket);
+    socket.on("error", () => undefined);
+    socket.once("data", () => {
+      socket.write(raw);
+      if (end) socket.end();
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  receivers.push({
+    port: 0,
+    url: "",
+    received: [],
+    close: () => {
+      for (const socket of sockets) socket.destroy();
+      return new Promise<void>((resolve) => server.close(() => resolve()));
+    },
+  });
+  return `http://127.0.0.1:${String((server.address() as AddressInfo).port)}/`;
+}
+
+// What Node does with a 1xx, so the docs can say it: an interim answer (100, 102, 103) never
+// reaches the status table. Node waits for the final answer after it, so the attempt is retried
+// when none comes. A 101 Switching Protocols, which a destination never asks for, is rejected.
+describe("HttpDestination and 1xx answers", () => {
+  it("waits past an interim 1xx for the final answer", async () => {
+    const url = await rawAnswer(
+      "HTTP/1.1 103 Early Hints\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
+      false,
+    );
+    expect(await outcomeOf(destination({ url }).deliver(ONE))).toBe("delivered");
+  });
+
+  it("retries when no final answer follows a 1xx: the time limit, or the closed connection", async () => {
+    const silent = await rawAnswer("HTTP/1.1 102 Processing\r\n\r\n", false);
+    const timedOut = await outcomeOf(destination({ url: silent, timeoutMs: 200 }).deliver(ONE));
+    expect(timedOut).toBeInstanceOf(RetryableError);
+    expect(timedOut).toMatchObject({ code: "ETIMEDOUT" });
+
+    const closed = await rawAnswer("HTTP/1.1 100 Continue\r\n\r\n", true);
+    const reset = await outcomeOf(destination({ url: closed }).deliver(ONE));
+    expect(reset).toBeInstanceOf(RetryableError);
+  });
+
+  // Node hands a 101 that names an upgrade to an `upgrade` listener, never to `response`, and with
+  // no listener it leaves the attempt unsettled past its time limit: the destination stalled.
+  it("rejects an unasked 101 that names an upgrade for good, within the time limit", async () => {
+    const upgraded = await rawAnswer(
+      "HTTP/1.1 101 Switching Protocols\r\nConnection: upgrade\r\nUpgrade: synthetic\r\n\r\n",
+      false,
+    );
+    const started = Date.now();
+    const error = await outcomeOf(destination({ url: upgraded, timeoutMs: 2_000 }).deliver(ONE));
+    expect(error).toBeInstanceOf(DeliveryRejected);
+    expect((error as DeliveryRejected).reason).toBe("HTTP 101");
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it("rejects a 101 with no Upgrade header for good, which Node hands over as an answer", async () => {
+    const url = await rawAnswer("HTTP/1.1 101 Switching Protocols\r\n\r\n", false);
+    const error = await outcomeOf(destination({ url }).deliver(ONE));
+    expect(error).toBeInstanceOf(DeliveryRejected);
+    expect((error as DeliveryRejected).reason).toBe("HTTP 101");
+  });
+});
