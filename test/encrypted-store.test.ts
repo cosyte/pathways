@@ -129,6 +129,7 @@ for (const database of TEST_DATABASES) {
           delivered: 0,
           failed: 0,
           cleared: 0,
+          "dry-run": 0,
         });
         expect(await store.retryingDeliveries("adt")).toBe(0);
 
@@ -174,6 +175,7 @@ for (const database of TEST_DATABASES) {
           delivered: 1,
           failed: 1,
           cleared: 0,
+          "dry-run": 0,
         });
       });
 
@@ -498,6 +500,7 @@ export default (msg: string): string => {
       delivered: 1,
       failed: 1,
       cleared: 0,
+      "dry-run": 0,
     });
     expect(lines.join("")).not.toContain("TESTPATIENT");
     await store.close();

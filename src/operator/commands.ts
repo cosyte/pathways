@@ -247,7 +247,9 @@ export async function statusCommand(
     lines.push(`${name}: ${status}${configured.has(name) ? "" : " (not configured)"}`);
     lines.push(`  messages: ${tally(messages)}`);
     lines.push(
-      `  deliveries: ${counts.pending} pending (${retryingCount} retrying), ${counts.delivered} delivered, ${counts.failed} failed, ${counts.cleared} cleared`,
+      `  deliveries: ${counts.pending} pending (${retryingCount} retrying), ${counts.delivered} delivered, ${counts.failed} failed, ${counts.cleared} cleared` +
+        // Named only when there are some: a channel that never ran dry reads as it always has.
+        (counts["dry-run"] > 0 ? `, ${counts["dry-run"]} dry-run (recorded, not sent)` : ""),
     );
     for (const d of shown) {
       lines.push(
@@ -668,7 +670,7 @@ function tally(counts: Readonly<Record<string, number>>): string {
 }
 
 function deliverySummary(deliveries: DeliveryTally): string {
-  const parts = (["delivered", "pending", "failed", "cleared"] as const)
+  const parts = (["delivered", "dry-run", "pending", "failed", "cleared"] as const)
     .filter((status) => deliveries[status] > 0)
     .map((status) =>
       status === "pending" && deliveries.retrying > 0

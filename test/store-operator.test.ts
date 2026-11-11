@@ -81,6 +81,12 @@ async function seed(store: Store): Promise<Record<MessageState, number[]>> {
   const delivered = await receive();
   await store.completeTransform(delivered, [bytes("d")], 2);
   for (const id of await deliveryIds(delivered)) await store.markDelivered(id);
+  // One destination ran dry and the other sent: recorded, not all of it sent, so dry-run.
+  const dryRun = await receive();
+  await store.completeTransform(dryRun, [bytes("n")], 2);
+  const [dry, sent] = await deliveryIds(dryRun);
+  await store.markDryRun(dry ?? -1);
+  await store.markDelivered(sent ?? -1);
   const deliveryFailed = await receive();
   await store.completeTransform(deliveryFailed, [bytes("x")], 2);
   const [ok, rejected] = await deliveryIds(deliveryFailed);
@@ -100,6 +106,7 @@ async function seed(store: Store): Promise<Record<MessageState, number[]>> {
     queued: [queued],
     retrying: [retrying],
     delivered: [delivered],
+    "dry-run": [dryRun],
     filtered: [filtered],
     failed: [failed, deliveryFailed],
     cleared: [cleared, deliveryCleared],
@@ -153,6 +160,7 @@ for (const database of TEST_DATABASES) {
           delivered: 0,
           failed: 0,
           cleared: 0,
+          "dry-run": 0,
         });
         await store.close();
       });
@@ -196,7 +204,14 @@ for (const database of TEST_DATABASES) {
           size: 5,
           duplicateOf: null,
           generation: 0,
-          deliveries: { pending: 0, retrying: 0, delivered: 0, failed: 0, cleared: 0 },
+          deliveries: {
+            pending: 0,
+            retrying: 0,
+            delivered: 0,
+            failed: 0,
+            cleared: 0,
+            "dry-run": 0,
+          },
         });
         expect(Object.keys(summary ?? {})).not.toContain("error");
         expect(Object.keys(summary ?? {})).not.toContain("body");
@@ -399,6 +414,7 @@ for (const database of TEST_DATABASES) {
           delivered: 0,
           failed: 0,
           cleared: 2,
+          "dry-run": 0,
         });
         expect((await store.message(transformed))?.state).toBe("cleared");
         await store.close();
@@ -443,11 +459,16 @@ for (const database of TEST_DATABASES) {
         clock.now = start;
 
         const cutoff = new Date(start - 30 * DAY).toISOString();
-        const gone = [...expected.delivered, ...expected.filtered, ...expected.cleared];
+        const gone = [
+          ...expected.delivered,
+          ...expected["dry-run"],
+          ...expected.filtered,
+          ...expected.cleared,
+        ];
         const dry = await store.expire("a", cutoff, true);
-        // Delivered: 2 deliveries; the cleared transformed message: 2; the others none.
-        expect(dry).toEqual({ messages: gone.length, deliveries: 4 });
-        expect((await store.listMessages({ limit: 100 })).items).toHaveLength(12);
+        // Delivered: 2 deliveries; dry-run: 2; the cleared transformed message: 2; the others none.
+        expect(dry).toEqual({ messages: gone.length, deliveries: 6 });
+        expect((await store.listMessages({ limit: 100 })).items).toHaveLength(13);
 
         expect(await store.expire("a", cutoff, false)).toEqual(dry);
         const left = (await store.listMessages({ limit: 100 })).items.map((m) => m.id);

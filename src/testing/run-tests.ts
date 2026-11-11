@@ -140,7 +140,15 @@ async function testInputs(dir: string): Promise<string[] | undefined> {
   }
 }
 
-function joinOutputs(outputs: readonly Uint8Array[]): Uint8Array {
+/**
+ * Outputs as `pathways test` saves them in one `.expected` file: joined by a newline.
+ *
+ * @example
+ * ```ts
+ * joinOutputs([]); // an empty array: a message filtered out expects an empty file
+ * ```
+ */
+export function joinOutputs(outputs: readonly Uint8Array[]): Uint8Array {
   const parts: Uint8Array[] = [];
   for (const [index, output] of outputs.entries()) {
     if (index > 0) parts.push(SEPARATOR);

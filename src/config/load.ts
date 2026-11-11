@@ -170,8 +170,12 @@ export async function loadProject(root: string): Promise<ProjectConfig> {
     }
     const channelSettings = mergeSettings(settings, channel);
     const source = resolveSource(channel.source, channelDir, channelSettings);
-    const destinations = channel.destinations.map((destination) =>
-      resolveDestination(destination, channelDir, channelSettings),
+    const destinations = channel.destinations.map(
+      (destination): ChannelConfig["destinations"][number] => ({
+        ...resolveDestination(destination, channelDir, channelSettings),
+        // Set only when true, so a destination that sends resolves as it always has.
+        ...(destination.dryRun === true ? { dryRun: true } : {}),
+      }),
     );
     const channelHooks = (channel.hooks ?? []).map((hook) => resolveHook(hook, channelDir));
     const absent = await missingModules(show(file), show, [

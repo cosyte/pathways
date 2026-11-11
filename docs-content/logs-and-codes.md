@@ -27,6 +27,7 @@ text or a source file's name. Commands whose standard output is their report (`s
 | `filtered`            | info  | `channel`, `message`, `outputs`                                                        | the transform returned none                                                                             |
 | `transform-failed`    | warn  | `channel`, `message`, `kind`, `name`, `code`, `where`                                  | the message is marked failed; `kind` is the stage                                                       |
 | `delivered`           | info  | `channel`, `destination`, `delivery`, `resend`                                         | a destination accepted an output; `resend` only on a flagged resend                                     |
+| `dry-run`             | info  | `channel`, `destination`, `delivery`                                                   | a destination that runs dry recorded an output and sent nothing                                         |
 | `delivery-retry`      | warn  | `channel`, `destination`, `delivery`, `attempt`, `retryInMs`, `code`                   | it is tried again after `retryInMs`                                                                     |
 | `delivery-redirected` | warn  | `channel`, `destination`, `delivery`, `attempt`, `retryInMs`, `status`, `locationHost` | an HTTP destination answered a 3xx; held, never followed, and tried again after `retryInMs` (5 minutes) |
 | `delivery-rejected`   | warn  | `channel`, `destination`, `delivery`, `reason`                                         | the destination rejected it for good                                                                    |
@@ -58,6 +59,7 @@ A `transform-failed` line's `kind` is `load`, `parse`, `transform`, `output`, `t
 | `unauthenticated`      | a listening endpoint has neither a token nor `tls.ca`                                          |
 | `plaintext-copies`     | a file source keeps plaintext copies (`keepProcessed: true`)                                   |
 | `unencrypted-storage`  | `encryption: none`                                                                             |
+| `dry-run`              | `pathways start --dry-run`: every destination runs dry (`destinations` is `all`)               |
 | `retention`            | a retention run, with the `messages` and `deliveries` it deleted                               |
 | `retention-failed`     | a retention run failed, by `code`; the next run tries again                                    |
 | `lease-acquired`       | the engine took the engine lease, with its `node` and `epoch`                                  |

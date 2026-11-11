@@ -1,0 +1,165 @@
+import { readdir } from "node:fs/promises";
+import { createServer, type Server } from "node:net";
+import { join } from "node:path";
+
+import { afterEach, describe, expect, it } from "vitest";
+
+import { EXIT, run } from "../src/cli.js";
+import { loadProject, ConfigError } from "../src/config/load.js";
+import { Engine } from "../src/engine/engine.js";
+import { isEncrypted } from "../src/encryption/envelope.js";
+import { generateKey } from "../src/encryption/keys.js";
+import { Store, type MessageStore } from "../src/storage/store.js";
+import {
+  ADT_A01,
+  captureLogger,
+  cleanUp,
+  dropFile,
+  LAB_TRANSFORM,
+  makeProject,
+} from "./helpers.js";
+
+afterEach(cleanUp);
+
+const servers: Server[] = [];
+afterEach(async () => {
+  await Promise.all(
+    servers.splice(0).map((server) => new Promise((resolve) => server.close(resolve))),
+  );
+});
+
+const KEYS = "encryption:\n  keys: [{ id: test, file: ./test.key }]\n  current: test\n";
+
+/** A TCP listener that counts the connections made to it, and answers none. */
+async function listener(): Promise<{ port: number; connections: () => number }> {
+  let connections = 0;
+  const server = createServer((socket) => {
+    connections += 1;
+    socket.destroy();
+  });
+  servers.push(server);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new Error("no port");
+  return { port: address.port, connections: () => connections };
+}
+
+async function start(argv: readonly string[]) {
+  const { logger, events, lines } = captureLogger();
+  let err = "";
+  const code = await run(argv, {
+    out: () => undefined,
+    err: (text) => {
+      err += text;
+    },
+    logger,
+    // Named by the HTTP destination below; never read when it runs dry.
+    env: {},
+  });
+  return { code, err, events, lines };
+}
+
+/** A project whose one channel sends to an HTTP listener (dry or not) and writes into out/. */
+async function project(port: number, http: string): Promise<string> {
+  const root = await makeProject({
+    "test.key": `${generateKey()}\n`,
+    "pathways.yaml": KEYS,
+    "channels/adt/channel.yaml": `
+source:
+  file: { dir: ../../data/inbox, minAge: 0 }
+transform: ./transform.ts
+destinations:
+  - http:
+      url: http://127.0.0.1:${port}/in
+      plaintext: true
+      headers: { Authorization: { env: SYNTHETIC_MISSING_TOKEN } }
+${http}
+  - file: { dir: ../../data/out }
+`,
+    "channels/adt/transform.ts": LAB_TRANSFORM,
+  });
+  await dropFile(join(root, "data/inbox/1.hl7"), ADT_A01);
+  return root;
+}
+
+async function deliveries(root: string) {
+  const store = await Store.open(join(root, ".pathways/pathways.db"));
+  try {
+    const [message] = (await store.listMessages({ limit: 10 })).items;
+    return {
+      message,
+      deliveries: await store.deliveries(message?.id ?? -1),
+      outputs: await store.outputs(message?.id ?? -1),
+    };
+  } finally {
+    await store.close();
+  }
+}
+
+describe("a destination that runs dry", () => {
+  it("records the output, marks its delivery dry-run, reads no secret and opens no connection", async () => {
+    const target = await listener();
+    const root = await project(target.port, "    dryRun: true");
+    const result = await start(["start", "--once", "-C", root]);
+    expect(result).toMatchObject({ code: EXIT.ok, err: "" });
+
+    expect(target.connections()).toBe(0);
+    const stored = await deliveries(root);
+    expect(stored.deliveries.map((d) => [d.destination, d.status, d.attempts])).toEqual([
+      [0, "dry-run", 0],
+      [1, "delivered", 0],
+    ]);
+    // Recorded as any other output, through encryption at rest.
+    expect(stored.outputs).toHaveLength(1);
+    expect(isEncrypted(stored.outputs[0] ?? new Uint8Array())).toBe(true);
+    expect(stored.message?.state).toBe("dry-run");
+    expect(stored.message?.deliveries).toMatchObject({ "dry-run": 1, delivered: 1 });
+    expect(await readdir(join(root, "data/out"))).toHaveLength(1);
+    expect(result.events.filter((e) => e.event === "dry-run")).toEqual([
+      expect.objectContaining({ channel: "adt", destination: 0, delivery: 1 }),
+    ]);
+    expect(result.lines.join("")).not.toContain("TESTPATIENT");
+  });
+
+  it("is every destination with pathways start --dry-run, which says so at start", async () => {
+    const target = await listener();
+    const root = await project(target.port, "");
+    const result = await start(["start", "--once", "--dry-run", "-C", root]);
+    expect(result).toMatchObject({ code: EXIT.ok, err: "" });
+
+    expect(target.connections()).toBe(0);
+    const stored = await deliveries(root);
+    expect(stored.deliveries.map((d) => d.status)).toEqual(["dry-run", "dry-run"]);
+    expect(stored.outputs).toHaveLength(1);
+    await expect(readdir(join(root, "data/out"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(result.events).toContainEqual(
+      expect.objectContaining({ event: "dry-run", destinations: "all" }),
+    );
+  });
+
+  it("sends as before without it", async () => {
+    const target = await listener();
+    const root = await project(target.port, "");
+    // The secret is read now, and missing: the start stops before anything is sent.
+    const result = await start(["start", "--once", "-C", root]);
+    expect(result.code).toBe(EXIT.config);
+    expect(target.connections()).toBe(0);
+  });
+
+  it("is refused at start on a store that cannot record a dry run", async () => {
+    const root = await project(1, "    dryRun: true");
+    const loaded = await loadProject(root);
+    expect(loaded.channels[0]?.destinations.map((d) => d.dryRun)).toEqual([true, undefined]);
+    const store = await Store.open(join(root, ".pathways/pathways.db"));
+    // A custom store from before dry runs: every method but markDryRun.
+    const old = new Proxy(store, {
+      get: (target, key, receiver) =>
+        key === "markDryRun" ? undefined : (Reflect.get(target, key, receiver) as unknown),
+    }) as MessageStore;
+    const { logger } = captureLogger();
+    const engine = new Engine({ project: loaded, store: old, logger });
+    await expect(engine.start()).rejects.toBeInstanceOf(ConfigError);
+    await expect(engine.start()).rejects.toThrow(/markDryRun/);
+    await store.close();
+  });
+});

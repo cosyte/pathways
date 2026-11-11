@@ -118,6 +118,7 @@ describe("an MLLP channel", () => {
       delivered: 1,
       failed: 0,
       cleared: 0,
+      "dry-run": 0,
     });
     expect(await store.messageCounts("adt")).toMatchObject({ transformed: 1, filtered: 1 });
     // Plaintext runs only because the channel says so, and it is said once per endpoint.
@@ -234,6 +235,7 @@ describe("an MLLP channel", () => {
       delivered: 0,
       failed: 1,
       cleared: 0,
+      "dry-run": 0,
     });
     expect(events).toContainEqual(
       expect.objectContaining({ event: "delivery-rejected", reason: "AE", destination: 0 }),

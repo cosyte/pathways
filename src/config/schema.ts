@@ -883,6 +883,13 @@ const destination = restate(
       mllp: mllpDestination.optional(),
       module: modulePath.optional(),
       options: moduleOptions.optional(),
+      dryRun: z
+        .boolean()
+        .meta({
+          description:
+            "Run dry: transform and record each output, mark its delivery dry-run, and never send it or open a connection. Default false.",
+        })
+        .optional(),
     })
     .meta({ description: "One destination: exactly one of file, http, mllp or module." })
     .superRefine(oneKind(DESTINATION_KINDS))
@@ -1340,6 +1347,17 @@ export type HookConfig =
     })
   | (HookSettings & { readonly kind: "webhook"; readonly webhook: HttpClientConfig });
 
+/**
+ * One destination of a channel, resolved: its kind's block, and `dryRun: true` when the channel
+ * sets it, so the destination records each output and sends none.
+ */
+export type DestinationConfig = (
+  FileDestination | HttpDestination | MllpDestination | ModuleConnector
+) & {
+  /** True when the destination runs dry: each output recorded, marked `dry-run`, never sent. */
+  readonly dryRun?: boolean | undefined;
+};
+
 /** One channel, loaded, validated and resolved. */
 export interface ChannelConfig {
   readonly name: string;
@@ -1349,9 +1367,7 @@ export interface ChannelConfig {
   readonly source: FileSource | HttpSource | MllpSource | ModuleConnector;
   /** The transform module, or `undefined` to pass each message through unchanged. */
   readonly transform: string | undefined;
-  readonly destinations: readonly (
-    FileDestination | HttpDestination | MllpDestination | ModuleConnector
-  )[];
+  readonly destinations: readonly DestinationConfig[];
   readonly settings: Settings;
   /** The channel's own hooks, which receive its events beside the engine-wide ones. */
   readonly hooks: readonly HookConfig[];

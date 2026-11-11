@@ -35,6 +35,7 @@ content. A message's state is one of:
 | `queued`    | transformed; a delivery waits for its first try                                     |
 | `retrying`  | transformed; a delivery failed and waits to be tried again                          |
 | `delivered` | every delivery is done                                                              |
+| `dry-run`   | every delivery is done, and at least one destination ran dry: recorded, never sent  |
 | `filtered`  | the transform returned no output                                                    |
 | `failed`    | the transform failed, the source stored it as failed, or a delivery failed for good |
 | `cleared`   | it failed, and an operator cleared it                                               |

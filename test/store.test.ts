@@ -91,6 +91,7 @@ for (const database of TEST_DATABASES) {
         delivered: 4,
         failed: 0,
         cleared: 0,
+        "dry-run": 0,
       });
       await store.close();
     });
@@ -133,6 +134,7 @@ for (const database of TEST_DATABASES) {
         delivered: 0,
         failed: 1,
         cleared: 0,
+        "dry-run": 0,
       });
       expect(await store.retryingDeliveries("a")).toBe(0);
       await store.close();
@@ -155,6 +157,7 @@ for (const database of TEST_DATABASES) {
         delivered: 0,
         failed: 0,
         cleared: 0,
+        "dry-run": 0,
       });
       await store.close();
     });
@@ -266,7 +269,7 @@ for (const database of TEST_DATABASES) {
         size: 1,
         duplicateOf: null,
         generation: 0,
-        deliveries: { pending: 0, retrying: 0, delivered: 0, failed: 0, cleared: 0 },
+        deliveries: { pending: 0, retrying: 0, delivered: 0, failed: 0, cleared: 0, "dry-run": 0 },
       });
       expect(await store.nextToTransform("a")).toBeUndefined();
       expect(await store.message(999)).toBeUndefined();

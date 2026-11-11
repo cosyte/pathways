@@ -24,6 +24,7 @@ entry.
 | `clear`        | `pathways clear <id>`, whether it was done or refused                                                                      |
 | `retention`    | each retention run, from the engine or `pathways retention`, but not a dry run                                             |
 | `config`       | `pathways start` finds `pathways.yaml`, a `channel.yaml` or a transform added, changed or removed since the last start     |
+| `verify`       | `pathways verify` reads a stored message to run it through the project's transform; written before its content is read     |
 
 Each entry holds the time, the operating system user who acted, the action, its outcome (`ok`,
 `refused` or `not-found`), the channel and the message, and a detail of counts, states, codes and

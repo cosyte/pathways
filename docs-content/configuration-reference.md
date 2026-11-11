@@ -195,7 +195,14 @@ Its token is read from `PATHWAYS_HTTP_TOKEN` when `auth` is not set.
 
 ### Destinations
 
-Each entry is exactly one of `file`, `http`, `mllp` or `module`.
+Each entry is exactly one of `file`, `http`, `mllp` or `module`, and may also set `dryRun`:
+
+| Key      | Type    | Default | Meaning                                                                                                                                                            |
+| -------- | ------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `dryRun` | boolean | `false` | transform and record each output, mark its delivery `dry-run`, and never send it: no connector is built, so no TLS file or secret is read and no connection opened |
+
+`pathways start --dry-run` runs every destination dry. See
+[Upgrade Pathways](./upgrade-pathways.md#watch-a-destination-before-it-sends).
 
 #### File destination
 

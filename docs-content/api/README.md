@@ -229,7 +229,7 @@ const line = (entry: AuditEntry): string => `${entry.at} ${entry.actor} ${entry.
 
 ##### action
 
-> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"`
+> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"verify"`
 
 ##### actor
 
@@ -349,7 +349,7 @@ await store.appendAudit("noah", [{ action: "content-view", channel: "adt", messa
 
 ##### action
 
-> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"`
+> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"verify"`
 
 ##### channel?
 
@@ -385,7 +385,7 @@ const views = await store.auditEntries({ action: "content-view", since: "2026-11
 
 ##### action?
 
-> `readonly` `optional` **action?**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"`
+> `readonly` `optional` **action?**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"verify"`
 
 ##### before?
 
@@ -1653,7 +1653,7 @@ Received at or after this time (ISO 8601, UTC).
 
 ##### state?
 
-> `readonly` `optional` **state?**: `"received"` \| `"filtered"` \| `"delivered"` \| `"failed"` \| `"cleared"` \| `"queued"` \| `"retrying"`
+> `readonly` `optional` **state?**: `"received"` \| `"filtered"` \| `"delivered"` \| `"failed"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
 
 ##### until?
 
@@ -1908,8 +1908,9 @@ How many deliveries of a channel stand at each status.
 
 > **expire**(`channel`, `cutoff`, `dryRun`): `Promise`\<[`ExpireResult`](#expireresult)\>
 
-Deletes a channel's messages that are done (delivered, filtered or cleared) and whose last
-activity is before `cutoff` (ISO 8601), with their deliveries. With `dryRun`, counts them only.
+Deletes a channel's messages that are done (delivered, dry-run, filtered or cleared) and whose
+last activity is before `cutoff` (ISO 8601), with their deliveries. With `dryRun`, counts them
+only.
 
 ###### Parameters
 
@@ -2034,6 +2035,28 @@ A channel's retrying deliveries, oldest first, at most `limit`.
 > **markDelivered**(`deliveryId`, `epoch?`): `Promise`\<`void`\>
 
 Fenced by `epoch` when it is given.
+
+###### Parameters
+
+###### deliveryId
+
+`number`
+
+###### epoch?
+
+`number`
+
+###### Returns
+
+`Promise`\<`void`\>
+
+##### markDryRun()?
+
+> `optional` **markDryRun**(`deliveryId`, `epoch?`): `Promise`\<`void`\>
+
+Marks a delivery `dry-run`: its output stays recorded, it was never sent, and its destination
+moves on to the next. Clears the marker. Fenced by `epoch` when it is given. Optional: an engine
+with a destination that runs dry refuses to start on a store without it.
 
 ###### Parameters
 
@@ -2381,7 +2404,7 @@ The body's size in bytes, or null for a message stored before sizes were kept.
 
 ##### state
 
-> `readonly` **state**: `"received"` \| `"filtered"` \| `"delivered"` \| `"failed"` \| `"cleared"` \| `"queued"` \| `"retrying"`
+> `readonly` **state**: `"received"` \| `"filtered"` \| `"delivered"` \| `"failed"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
 
 The status and the current deliveries, as an operator sees them.
 
@@ -3344,7 +3367,7 @@ The body's size in bytes, or null for a message stored before sizes were kept.
 
 ##### state
 
-> `readonly` **state**: `"received"` \| `"filtered"` \| `"delivered"` \| `"failed"` \| `"cleared"` \| `"queued"` \| `"retrying"`
+> `readonly` **state**: `"received"` \| `"filtered"` \| `"delivered"` \| `"failed"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
 
 The status and the current deliveries, as an operator sees them.
 
@@ -3665,13 +3688,13 @@ const detail: AuditDetail = { status: "transformed", queued: 2 };
 
 ### AuditEventAction
 
-> **AuditEventAction** = `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"`
+> **AuditEventAction** = `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"verify"`
 
 Every action the audit log records, as an [AuditEvent](#auditevent)'s `action`: `search` (messages
 listed), `view` (one message's details, without content), `content-view`, `replay`, `resend`,
 `clear`, `retention` (a run, with what it deleted), `config` (a configuration change seen when
-the engine started) and `lease-release` (the engine lease freed by force). Kept equal to the
-audit log's own list by a test.
+the engine started), `lease-release` (the engine lease freed by force) and `verify` (a stored
+message read by `pathways verify`). Kept equal to the audit log's own list by a test.
 
 #### Example
 
@@ -3803,10 +3826,11 @@ const table: ContentTable = "deliveries";
 
 ### DeliveryStatus
 
-> **DeliveryStatus** = `"pending"` \| `"delivered"` \| `"failed"` \| `"cleared"`
+> **DeliveryStatus** = `"pending"` \| `"delivered"` \| `"failed"` \| `"cleared"` \| `"dry-run"`
 
 Where one delivery of a message to one destination stands. `cleared`: it failed for good, and an
-operator cleared it, or replayed its message.
+operator cleared it, or replayed its message. `dry-run`: its destination runs dry (`dryRun: true`,
+or `pathways start --dry-run`), so its output was recorded and never sent.
 
 #### Example
 

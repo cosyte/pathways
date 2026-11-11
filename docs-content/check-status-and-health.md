@@ -59,7 +59,14 @@ A `GET` or `HEAD` on any path answers with JSON:
       "status": "retrying",
       "source": "up",
       "messages": { "received": 0, "transformed": 41, "filtered": 3, "failed": 1, "cleared": 0 },
-      "deliveries": { "pending": 2, "delivered": 39, "failed": 0, "cleared": 0, "retrying": 1 }
+      "deliveries": {
+        "pending": 2,
+        "delivered": 39,
+        "failed": 0,
+        "cleared": 0,
+        "dry-run": 0,
+        "retrying": 1
+      }
     }
   }
 }

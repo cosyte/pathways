@@ -177,6 +177,7 @@ for (const database of SERVER_DATABASES) {
           delivered: 1,
           failed: 0,
           cleared: 0,
+          "dry-run": 0,
         });
       } finally {
         await store.close();

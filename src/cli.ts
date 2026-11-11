@@ -42,6 +42,7 @@ import {
   type OperatorContext,
 } from "./operator/commands.js";
 import { recordConfigChanges } from "./operator/config-audit.js";
+import { verifyCommand, type VerifySelection } from "./operator/verify.js";
 import { InitError, initProject, STARTER_CHANNEL, STARTER_KEY_FILE } from "./starter/init.js";
 import { openRawStore, openStore, startingKeys, type OpenStoreContext } from "./storage/open.js";
 import {
@@ -90,6 +91,12 @@ Commands:
                       database is refused
   test [name...]      Run each channel's tests/ inputs through its transform
                       and compare the output with the saved .expected files
+  verify              Run stored messages, or samples, through this project's
+                      transforms and compare each output with the recorded
+                      one, per channel and destination: same, different (a
+                      field path, JSON pointer or byte offset, never a value)
+                      or failed. Writes nothing to the message tables; each
+                      stored message read is written to the audit log first
   validate            Check pathways.yaml and every channel.yaml as start
                       does, with every file they name, without reading a
                       secret or opening a connection: for a project's CI
@@ -125,26 +132,32 @@ Options:
       --standby         start: hold no lease and open no source until the
                         engine holding the lease stops, then take over.
                         Needs a database server
+      --dry-run         start: run every destination dry: transform and
+                        record each output, mark its delivery dry-run, send
+                        nothing. retention: say what would be deleted,
+                        delete nothing
       --force           lease release: say the lease's host is gone
       --update          test: save the current outputs as the expected ones
       --json            status, messages, replay, clear, retention, audit,
-                        lease: print one JSON document instead of text
-      --channel <name>  messages, audit: only this channel
+                        lease, verify: print one JSON document instead of text
+      --channel <name>  messages, audit, verify: only this channel
       --status <state>  messages: only this state: received, queued, retrying,
-                        delivered, filtered, failed or cleared
-      --since <time>    messages, audit: from this time: 2026-11-07,
+                        delivered, dry-run, filtered, failed or cleared
+      --since <time>    messages, audit, verify: from this time: 2026-11-07,
                         2026-11-07T12:00:00Z (UTC unless a zone is given), or
-                        a duration ago, such as 24h or 7d
+                        a duration ago, such as 24h or 7d. verify: default 24h
+      --ids <id,...>    verify: these stored messages, by id
+      --samples <dir>   verify: the inputs in dir/<channel>/ instead of stored
+                        messages, each against its .expected file, as in tests/
       --until <time>    messages, audit: before this time
       --limit <n>       messages, audit: at most n rows (default ${DEFAULT_LIMIT}, at most 1000)
       --before <id>     messages, audit: the next page, as the last one says
       --content         messages show: print the content, which is PHI. The
                         view is written to the audit log first
       --resend          replay: send the stored outputs again, untransformed
-      --dry-run         retention: say what would be deleted, delete nothing
       --action <name>   audit: only this action: search, view, content-view,
-                        replay, resend, clear, retention, config or
-                        lease-release
+                        replay, resend, clear, retention, config,
+                        lease-release or verify
       --message <id>    audit: only entries about this message
       --encrypt-plaintext
                         rekey: also encrypt what was stored while encryption
@@ -161,7 +174,8 @@ Exit codes: 0 done; 1 a test failed, the engine, a command or an extension
 module could not start or stopped on an error, init could not write the
 project, rekey left a value not under the current key, a replay, resend or
 clear was refused or the message failed again, another engine holds the lease,
-the engine lost its lease, or there was no lease to release; 2 the command line was not
+the engine lost its lease, there was no lease to release, or verify found a
+difference or a failure; 2 the command line was not
 understood; 3 the configuration is invalid; 4 a message named does not exist.
 `;
 
@@ -177,7 +191,7 @@ type OptionName = Exclude<keyof Values, "help" | "version" | "project">;
 /** The options each command takes, beyond --project, --help and --version. */
 const OPTIONS: Readonly<Record<string, readonly OptionName[]>> = {
   init: [],
-  start: ["once", "standby"],
+  start: ["once", "standby", "dry-run"],
   test: ["update"],
   validate: [],
   status: ["json"],
@@ -188,6 +202,7 @@ const OPTIONS: Readonly<Record<string, readonly OptionName[]>> = {
   audit: ["json", "action", "message", "channel", "since", "until", "limit", "before"],
   rekey: ["encrypt-plaintext"],
   lease: ["json", "force"],
+  verify: ["json", "channel", "since", "ids", "samples"],
 };
 
 /**
@@ -239,7 +254,11 @@ export async function run(argv: readonly string[], io: CliIo): Promise<number> {
     case "start":
       if (rest.length > 0) return usage(io);
       if (values.once === true && values.standby === true) return usage(io);
-      return start(projectDir, { once: values.once === true, standby: values.standby }, io);
+      return start(
+        projectDir,
+        { once: values.once === true, standby: values.standby, dryRun: values["dry-run"] === true },
+        io,
+      );
     case "test":
       return test(projectDir, rest, values.update === true, io);
     case "validate":
@@ -248,6 +267,14 @@ export async function run(argv: readonly string[], io: CliIo): Promise<number> {
     case "rekey":
       if (rest.length > 0) return usage(io);
       return rekeyStore(projectDir, values["encrypt-plaintext"] === true, io);
+    case "verify": {
+      const parsed = parseVerify(rest, values, io);
+      if (typeof parsed === "number") return parsed;
+      if (parsed.selection.kind === "samples") {
+        return verifySamples(projectDir, parsed, values.json === true, io);
+      }
+      return operator(command, rest, values, projectDir, io);
+    }
     default:
       return operator(command, rest, values, projectDir, io);
   }
@@ -404,10 +431,14 @@ function auditFor(store: MessageStore, io: CliIo, onListenerError: (error: unkno
 /** What a standby's health endpoint answers until it takes the lease: 503, and no counts. */
 const STANDBY_REPORT: HealthReport = { status: "standby", storage: "ok", channels: {} };
 
-/** How `pathways start` runs: one pass, or as a standby (`undefined` leaves it to pathways.yaml). */
+/**
+ * How `pathways start` runs: one pass, or as a standby (`undefined` leaves it to pathways.yaml), and
+ * with every destination dry or not.
+ */
 interface StartMode {
   readonly once: boolean;
   readonly standby: boolean | undefined;
+  readonly dryRun: boolean;
 }
 
 async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<number> {
@@ -435,6 +466,8 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
     return EXIT.failed;
   }
   if (leases === undefined) logger.warn({ event: "lease-unsupported" });
+  // Said once at start, so a log reader knows why nothing goes out.
+  if (mode.dryRun) logger.warn({ event: "dry-run", destinations: "all" });
   // Aborted by the caller's signal, or at once when the lease is lost.
   const stopping = new AbortController();
   const signal = AbortSignal.any([io.signal ?? new AbortController().signal, stopping.signal]);
@@ -459,6 +492,7 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
     logger,
     env,
     audit,
+    dryRun: mode.dryRun,
     ...(lease === undefined ? {} : { fence: lease }),
   });
   let active = !standby;
@@ -907,6 +941,13 @@ function parseOperator(
     case "retention":
       if (rest.length > 0) return usage(io);
       return (context) => retentionCommand(context, values["dry-run"] === true);
+    case "verify": {
+      // run() parsed these already, and sent samples elsewhere.
+      const parsed = parseVerify(rest, values, io) as ParsedVerify;
+      return (context) =>
+        knownChannel(context.project, parsed.channel, io) ??
+        verifyCommand(context, parsed.selection, parsed.channel);
+    }
     case "lease":
       if (rest.length !== 1) return usage(io);
       if (rest[0] === "status") {
@@ -936,6 +977,75 @@ function parseOperator(
       return (context) => auditCommand(context, { ...filters, action, messageId });
     }
   }
+}
+
+/** `pathways verify`'s arguments, parsed. */
+interface ParsedVerify {
+  readonly selection: VerifySelection;
+  readonly channel: string | undefined;
+}
+
+/** How far back `pathways verify` reads stored messages when no selection is given. */
+const VERIFY_DEFAULT_SINCE = "24h";
+
+/**
+ * `pathways verify`'s arguments, parsed, or the exit code of a usage error: at most one of
+ * `--since`, `--ids` and `--samples`, stored messages since {@link VERIFY_DEFAULT_SINCE} by default.
+ */
+function parseVerify(rest: readonly string[], values: Values, io: CliIo): ParsedVerify | number {
+  if (rest.length > 0) return usage(io);
+  const chosen = [values.since, values.ids, values.samples].filter((v) => v !== undefined);
+  if (chosen.length > 1) return invalid(io, "verify takes one of --since, --ids and --samples.");
+  if (values.channel !== undefined && !isChannelName(values.channel)) {
+    return invalid(io, "--channel takes a channel name.");
+  }
+  const { channel } = values;
+  if (values.samples !== undefined) {
+    return { selection: { kind: "samples", dir: values.samples }, channel };
+  }
+  if (values.ids !== undefined) {
+    const ids = values.ids.split(",").map(parseId);
+    if (ids.some((id) => id === undefined)) {
+      return invalid(io, "--ids takes message ids, positive whole numbers joined by commas.");
+    }
+    return { selection: { kind: "ids", ids: [...new Set(ids as number[])] }, channel };
+  }
+  const since = parseTime(values.since ?? VERIFY_DEFAULT_SINCE, Date.now());
+  if (since === undefined) {
+    return invalid(io, "--since takes a date, a date and time, or a duration such as 24h or 7d.");
+  }
+  return { selection: { kind: "since", since }, channel };
+}
+
+/** Undefined when `channel` is not given or the project has it; else says so and returns 2. */
+function knownChannel(
+  project: ProjectConfig,
+  channel: string | undefined,
+  io: CliIo,
+): Promise<number> | undefined {
+  if (channel === undefined || project.channels.some((c) => c.name === channel)) return undefined;
+  io.err(
+    `pathways: no such channel. The channels are: ${project.channels.map((c) => c.name).join(", ")}\n`,
+  );
+  return Promise.resolve(EXIT.usage);
+}
+
+/**
+ * `pathways verify --samples`: synthetic inputs, so no store is opened and nothing is audited. The
+ * project is loaded as `test` loads it.
+ */
+async function verifySamples(
+  projectDir: string,
+  parsed: ParsedVerify,
+  json: boolean,
+  io: CliIo,
+): Promise<number> {
+  const project = await load(projectDir, io);
+  if (project === undefined) return EXIT.config;
+  return (
+    (await knownChannel(project, parsed.channel, io)) ??
+    verifyCommand({ project, json, out: io.out, err: io.err }, parsed.selection, parsed.channel)
+  );
 }
 
 /** The filters `messages` and `audit` share, parsed, or the exit code of a usage error. */
@@ -999,6 +1109,8 @@ function parseCli(argv: readonly string[]) {
       action: { type: "string" },
       message: { type: "string" },
       "encrypt-plaintext": { type: "boolean" },
+      ids: { type: "string" },
+      samples: { type: "string" },
     },
     allowPositionals: true,
     strict: true,
