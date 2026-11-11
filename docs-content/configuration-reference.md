@@ -59,6 +59,12 @@ Exactly one of these keys:
 | `sqlserver` | a [database server](#database-server) block                                                               |
 | `module`    | a path to a module whose default export builds a `MessageStore`; with `options`, any mapping handed to it |
 
+A `MessageStore` from a module keeps the marker the engine writes before each send: `markSending`
+stores the attempt and its start, `nextDelivery` returns it as `sending`, and `markDelivered`,
+`scheduleRetry` and `failDelivery` clear it in the same write as their outcome. That is how a resend
+after a crash is flagged; see
+[Delivery and errors](./delivery-and-errors.md#a-resend-after-a-crash-is-flagged).
+
 #### Database server
 
 | Key                | Type               | Default                          |
