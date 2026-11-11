@@ -12,7 +12,7 @@ import {
   type SecretProvider,
   type SecretRef,
 } from "./provider.js";
-import { secretUses, type SecretScope } from "./sources.js";
+import { secretUses, type DrySkip, type SecretScope } from "./sources.js";
 
 // The one resolver every secret goes through: a token, a header, a connection URL, a master key.
 // `{ env: NAME }` and `{ file: path }` are the built-in env and file providers by another spelling,
@@ -191,6 +191,11 @@ export interface ResolveContext {
   readonly signal?: AbortSignal | undefined;
   /** Epoch milliseconds now, to judge an expiry. Tests pass their own. */
   readonly now?: () => number;
+  /**
+   * A start's dry destinations, whose secrets are not resolved: `"each"` for those whose block sets
+   * `dryRun: true`, `"all"` under `pathways start --dry-run`. Unset, every destination's are.
+   */
+  readonly skipDry?: DrySkip | undefined;
 }
 
 /**
@@ -214,7 +219,7 @@ export async function resolveSecrets(
   scope: SecretScope,
 ): Promise<Secrets> {
   const wanted = new Map<string, Map<string, Request>>();
-  for (const { source, where } of secretUses(project, scope)) {
+  for (const { source, where } of secretUses(project, scope, context.skipDry)) {
     const reference = referenceOf(source);
     if (builtIn(reference.provider)) continue;
     const byKey = wanted.get(reference.provider) ?? new Map<string, Request>();

@@ -3,7 +3,7 @@ import type {
   AuditInput,
   AuditQuery,
   ClearResult,
-  DeliveryStatus,
+  DeliveryCounts,
   ExpireResult,
   LeaseClaim,
   LeaseClaimant,
@@ -72,6 +72,8 @@ abstract class CodecStore implements MessageStore {
   readonly renewLease?: (name: string, epoch: number, ttlMs: number) => Promise<boolean>;
   readonly releaseLease?: (name: string, epoch?: number) => Promise<boolean>;
   readonly leaseHolder?: (name: string) => Promise<LeaseHolder | undefined>;
+  /** Straight through, present only when the store underneath has it. */
+  readonly markDryRun?: (deliveryId: number, epoch?: number) => Promise<void>;
 
   protected constructor(inner: MessageStore, codec: Codec) {
     this.#inner = inner;
@@ -83,6 +85,7 @@ abstract class CodecStore implements MessageStore {
       this.releaseLease = leases.releaseLease;
       this.leaseHolder = leases.leaseHolder;
     }
+    if (inner.markDryRun !== undefined) this.markDryRun = inner.markDryRun.bind(inner);
     this.#innerCopies = copiesBodies(inner);
     // A codec that copies keeps no body it is handed and reads each into a new buffer; one that does
     // not passes bodies straight through, so this store copies when the one underneath does.
@@ -197,7 +200,7 @@ abstract class CodecStore implements MessageStore {
   }
 
   /** How many deliveries of `channel` stand at each status. */
-  deliveryCounts(channel: string): Promise<Record<DeliveryStatus, number>> {
+  deliveryCounts(channel: string): Promise<DeliveryCounts> {
     return this.#inner.deliveryCounts(channel);
   }
 

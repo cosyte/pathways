@@ -1646,10 +1646,16 @@ const destination = restate(
       module: modulePath.optional(),
       options: moduleOptions.optional(),
       retry: settingsShape.retry,
+      dryRun: envable(
+        z.boolean().meta({
+          description:
+            "Run dry: transform and record each output, mark its delivery dry-run, and never send it or open a connection. Default false.",
+        }),
+      ).optional(),
     })
     .meta({
       description:
-        "One destination: exactly one of file, http, mllp or module, and its own retry settings.",
+        "One destination: exactly one of file, http, mllp or module, its own retry settings, and dryRun.",
     })
     .superRefine(oneKind(DESTINATION_KINDS))
     .superRefine(optionsWithModule),
@@ -2263,16 +2269,21 @@ export type HookConfig =
 /**
  * One destination, resolved. `retry` is set when the destination's block has a `retry:` of its own:
  * that block over the channel's settings, key by key. Without it, the channel's `settings.retry`
- * applies.
+ * applies. `dryRun` is `true` when the destination runs dry: each output is recorded, its delivery
+ * marked `dry-run`, and nothing is sent.
  *
  * @example
  * ```ts
- * const destination: DestinationConfig = { kind: "file", dir: "/srv/project/out" };
+ * const destination: DestinationConfig = { kind: "file", dir: "/srv/project/out", dryRun: true };
  * ```
  */
 export type DestinationConfig = (
   FileDestination | HttpDestination | MllpDestination | ModuleConnector
-) & { readonly retry?: RetryPolicy };
+) & {
+  readonly retry?: RetryPolicy;
+  /** True when the destination runs dry: each output recorded, marked `dry-run`, never sent. */
+  readonly dryRun?: boolean | undefined;
+};
 
 /** One channel, loaded, validated and resolved. */
 export interface ChannelConfig {
