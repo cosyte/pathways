@@ -164,9 +164,9 @@ interface MessagesTable {
   generation: Generated<number>;
   /** A hash of what names this one message to its source, so it is stored once. Since 0004. */
   idempotency_key: string | null;
-  /** The SHA-256 of the body as received, in hex, when the engine passed one. Since 0007. */
+  /** The SHA-256 of the body as received, in hex, when the engine passed one. Since 0008. */
   content_hash: string | null;
-  /** When the bodies were dropped after the last delivery; null while they are kept. Since 0007. */
+  /** When the bodies were dropped after the last delivery; null while they are kept. Since 0008. */
   content_dropped_at: string | null;
 }
 

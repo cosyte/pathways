@@ -93,13 +93,19 @@ deletes the message's body as it was received and the body of every one of its d
 deliveries of the message's current generation count: one that failed for good before a replay or
 resend does not hold the drop back. While any delivery of the current generation has failed or waits
 to be tried again, every body is kept, so you can still replay or resend it. A filtered message, and
-one whose transform failed, keeps its content until retention deletes it.
+one whose transform failed, keeps its content until retention deletes it. So does a message with a
+delivery that was cleared or sent as a dry run: neither is delivered, so the drop never comes.
 
 What stays is the message's metadata: its id, channel, times, status and its deliveries' statuses,
 attempts and times, its size, the possible-duplicate flag, and a SHA-256 hash of the body as it was
 received, which the engine works out as it stores the message. `pathways messages show` prints the
 hash and when the content was dropped. Each delivery's last error text goes with the bodies, since
 encryption treats it as content too; its attempts count stays.
+
+The hash is plain SHA-256 with no key, and it is stored unencrypted, even with encryption at rest.
+Anyone who can read the database and can guess a message's exact text, which for a short or
+predictable message may not be hard, can hash the guess and confirm whether that message passed
+through. Protect the hash as you would the content.
 
 Once the content is dropped:
 

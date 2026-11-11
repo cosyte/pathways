@@ -13,6 +13,7 @@ import { rekey } from "../src/encryption/rekey.js";
 import { Engine } from "../src/engine/engine.js";
 import { AuditLog } from "../src/operator/audit.js";
 import { replayMessages } from "../src/operator/actions.js";
+import { emptySqliteLog } from "../src/storage/dialects.js";
 import { LeaseLostError, Store, type MessageStore } from "../src/storage/store.js";
 import {
   available,
@@ -304,6 +305,30 @@ describe("dropping content in a SQLite file", () => {
   it("finds no copy of the marker once a message on overflow pages is dropped", async () => {
     expect(await scan("drop", 64 * 1024)).toBe(false);
   });
+
+  // While a connection is open, the write-ahead log still holds the frames written when the message
+  // was received: the drop zeroes the file's pages, not the log's earlier copies of them. Emptying
+  // the log beside the open store (a running engine's, idle between queries) leaves no copy in
+  // either file.
+  for (const size of [100, 64 * 1024]) {
+    it(`finds the marker in the open log after a drop, and none once the log is emptied (${size} bytes)`, async () => {
+      const file = join(await makeProject({}), "pathways.db");
+      const store = await Store.open(file);
+      closables.push(store);
+      const body = `MSH|^~\\&|SYNTH|${MARKER}|${"Z".repeat(size)}|${MARKER}`;
+      const { id } = await store.receive("a", bytes(body));
+      await store.completeTransform(id, [bytes(`OUT|${MARKER}|${"Y".repeat(size)}`)], 1);
+      for (const delivery of await store.deliveries(id)) {
+        await store.markDeliveredAndDropContent(delivery.id);
+      }
+      expect((await store.message(id))?.contentDroppedAt).toBeDefined();
+
+      expect((await readFile(`${file}-wal`)).includes(MARKER)).toBe(true);
+      expect(emptySqliteLog(file)).toBe(true);
+      expect((await readFile(`${file}-wal`)).length).toBe(0);
+      expect((await readFile(file)).includes(MARKER)).toBe(false);
+    });
+  }
 });
 
 describe("dropping content through the encryption layer", () => {

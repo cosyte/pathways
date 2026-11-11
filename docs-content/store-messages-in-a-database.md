@@ -80,32 +80,88 @@ server or the login.
 
 Retention deletes messages, and [`storage.content:
 dropAfterDelivery`](./set-message-retention.md#drop-content-after-delivery) empties their bodies once
-they are delivered. Either way the delete goes through the database, and a database does not always
-erase at once what it deletes:
+they are delivered, with an `UPDATE` that sets each body to an empty value. Either way the change goes
+through the database, and a database does not always erase at once what it deletes or overwrites.
+Below is what each vendor's documentation says, as we read it on 2026-11-11. Where it does not say
+whether freed space is overwritten, assume the old bytes stay on disk until something else is written
+there.
 
-- **SQLite.** Pathways opens the file with `secure_delete` on, so the space a deleted or emptied value
-  held is overwritten with zeros in the same transaction. The write-ahead log beside the file
-  (`pathways.db-wal`) can still hold pages as they were before, until later writes overwrite them; when
-  the last connection closes, SQLite copies the log into the file and removes it. Our tests drop a
-  message holding a synthetic marker, close the database, and find no copy of the marker in the file.
-- **PostgreSQL.** A delete or update leaves the old row version in the table as a dead row until
-  `VACUUM` (autovacuum, by default) marks its space free. `VACUUM` does not overwrite that space, so the
-  bytes stay until a new row reuses it, or `VACUUM FULL` rewrites the table. A body of more than about
-  2 KB can be kept in the table's TOAST table instead, which works the same way. The write-ahead log holds the row as
-  it was written until its segments are recycled, and archived segments keep it.
-- **MySQL and MariaDB (InnoDB).** A delete marks the row and a background purge removes it later; an
-  update keeps the old version in the undo log until purge. Freed space is not overwritten. The redo
-  log holds the row until it is written over, and with the binary log on and row-based logging, each
-  binary log file holds the row until the file expires.
-- **SQL Server.** A deleted row becomes a ghost record, which a background task cleans up later, and the
-  freed space is not overwritten. The transaction log holds the row until the log is truncated: after a
-  checkpoint under the simple recovery model, after a log backup under full, and log backups keep it.
-- **Every database.** Backups, snapshots and replicas made before the delete keep the content until
-  they expire, and a replica deletes it only once it has caught up.
+- **SQLite.** Pathways opens the file with
+  [`secure_delete`](https://www.sqlite.org/pragma.html#pragma_secure_delete) on, so the space a deleted
+  or emptied value held is overwritten with zeros in the same transaction. The
+  [write-ahead log](https://www.sqlite.org/wal.html) beside the file (`pathways.db-wal`) still holds
+  the pages as they were written before, the received body among them, until a checkpoint copies the
+  log into the file and later writes reuse the log from its start; when the last connection closes,
+  SQLite checkpoints the log and removes it. To empty it beside a running engine, run
+  `PRAGMA wal_checkpoint(TRUNCATE)` on the file, for example
+  `sqlite3 pathways.db "PRAGMA wal_checkpoint(TRUNCATE)"`; if a read is under way it cannot finish,
+  and you run it again. `pathways rekey` does the same when it finishes. Our tests drop a message
+  holding a synthetic marker, find the marker in the log while the store is open, empty the log with
+  the store still open, and then find no copy of it in the file or the log.
+- **PostgreSQL.** A delete or update leaves the old row version in the table until
+  [`VACUUM`](https://www.postgresql.org/docs/current/sql-vacuum.html) makes its space available for
+  reuse; [autovacuum](https://www.postgresql.org/docs/current/runtime-config-autovacuum.html) runs it
+  and is on by default. The documentation does not say `VACUUM` overwrites that space, so assume the
+  bytes stay until a new row reuses it. `VACUUM FULL` writes the table into a new file, and the
+  documentation does not say the old file's blocks are cleared either. When a row is wider than about
+  2 kB, PostgreSQL may compress its larger values and move them out of the row into the table's
+  [TOAST table](https://www.postgresql.org/docs/current/storage-toast.html), where each chunk is a row
+  of its own, and `VACUUM` processes that table too. With
+  [`full_page_writes`](https://www.postgresql.org/docs/current/runtime-config-wal.html) on, the
+  default, the first change to a page after a checkpoint writes the whole page into the write-ahead
+  log, so the log can hold a body that was on that page; a log segment is recycled or removed only
+  once a [checkpoint](https://www.postgresql.org/docs/current/wal-configuration.html) has passed it.
+  [Archived segments](https://www.postgresql.org/docs/current/continuous-archiving.html), and segments
+  kept for standbys or by
+  [replication slots](https://www.postgresql.org/docs/current/runtime-config-replication.html), keep
+  it longer.
+- **MySQL (InnoDB).** A delete marks the row, and purge removes it later; an update keeps the old
+  version in the undo log until purge
+  ([multi-versioning](https://dev.mysql.com/doc/refman/8.4/en/innodb-multi-versioning.html)). A long
+  value can be stored
+  [off the page](https://dev.mysql.com/doc/refman/8.4/en/innodb-row-format.html), on overflow pages.
+  The documentation says only that whether
+  [freed space](https://dev.mysql.com/doc/refman/8.4/en/innodb-file-space.html) is reused depends on
+  the pages and extents freed, not that it is overwritten, so assume the bytes stay. The
+  [redo log](https://dev.mysql.com/doc/refman/8.4/en/innodb-redo-log.html) holds the change until its
+  oldest data is truncated as the checkpoint progresses. The
+  [binary log](https://dev.mysql.com/doc/refman/8.4/en/replication-options-binary-log.html) is on by
+  default in MySQL 8.4, in row format, and with `binlog_row_image=full`, the default, each event holds
+  every column of the row before and after the change, so a binary log file holds the body until the
+  file expires (30 days by default).
+- **MariaDB (InnoDB).** As on MySQL, an update keeps the old version in the
+  [undo log](https://mariadb.com/kb/en/innodb-undo-log/) until purge removes it, and the documentation
+  does not say freed space is overwritten, so assume the bytes stay. The
+  [redo log](https://mariadb.com/kb/en/innodb-redo-log/) is circular, of a fixed size, and its older
+  records are overwritten by newer ones. The binary log's
+  [default format](https://mariadb.com/kb/en/binary-log-formats/) is mixed; we could not read
+  MariaDB's page on what a row-based event holds, so assume, as on MySQL, that a binary log file can
+  hold the body until it is removed.
+- **SQL Server.** A deleted row becomes a
+  [ghost record](https://learn.microsoft.com/en-us/sql/relational-databases/ghost-record-cleanup-process-guide):
+  it stays on its page, marked as a ghost in its header, until a background task physically removes
+  it. `dropAfterDelivery` does not delete a row; it updates each body to an empty value. A body too
+  long to fit in its row is kept on separate
+  [large-object pages](https://learn.microsoft.com/en-us/sql/relational-databases/pages-and-extents-architecture-guide),
+  and Microsoft says
+  [large-object pages are not deallocated when empty](https://learn.microsoft.com/en-us/sql/relational-databases/system-dynamic-management-views/sys-dm-db-index-physical-stats-transact-sql).
+  The documentation does not say what an update to an empty value, ghost cleanup or a freed page does
+  to the old bytes, so assume they stay on disk until reused. The transaction log's records hold
+  [the before and after images](https://learn.microsoft.com/en-us/sql/relational-databases/sql-server-transaction-log-architecture-and-management-guide)
+  of each change, so the log holds the body as it was, after an update as after a delete, until the
+  log is [truncated](https://learn.microsoft.com/en-us/sql/relational-databases/logs/the-transaction-log-sql-server):
+  after a checkpoint under the simple recovery model, after a log backup under full. Truncation frees
+  that space for reuse and is not documented to clear it.
+  [Log backups](https://learn.microsoft.com/en-us/sql/relational-databases/backup-restore/transaction-log-backups-sql-server)
+  keep it as long as they are kept, and the primary of an availability group sends every log record
+  to its secondary replicas.
+- **Every database.** A backup, snapshot or copy taken before the drop or delete holds the content
+  until it is destroyed.
 
-With encryption at rest, every one of these copies is ciphertext under the master key in use when it
-was written, and stays unreadable without that key. How long your backups and logs keep what was
-deleted is yours to set.
+With encryption at rest, every one of these copies of a body is ciphertext under the master key in
+use when it was written, and stays unreadable without that key. The content hash is never encrypted
+([Drop content after delivery](./set-message-retention.md#drop-content-after-delivery) says why that
+matters). How long your backups and logs keep what was deleted is yours to set.
 
 ## One engine per database
 
