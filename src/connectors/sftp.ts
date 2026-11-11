@@ -546,7 +546,7 @@ export class SftpLocation implements Location {
     const client = new Ssh();
     let refused: HostKeyError | undefined;
     let up: Session | undefined;
-    const connected = Promise.withResolvers<Session>();
+    const connected = withResolvers<Session>();
     const timer = setTimeout(() => {
       connected.reject(timedOut("connection"));
       client.destroy();
@@ -630,6 +630,21 @@ export class SftpLocation implements Location {
     this.live = session;
     return session;
   }
+}
+
+/** A promise and the two ways to settle it, as `Promise.withResolvers` gives on ES2024. */
+function withResolvers<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (error: Error) => void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((settle, fail) => {
+    resolve = settle;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
 }
 
 /** The extensions an SFTP channel's server named in its first answer. */
