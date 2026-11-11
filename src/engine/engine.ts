@@ -519,6 +519,11 @@ interface RunningChannel {
   writes: Promise<unknown>;
   /** Whether its listening source was started and not closed since. */
   open: boolean;
+  /**
+   * Its source's starts and stops, one after another, each matching the source to the state as it
+   * is when that one runs: two commands at once never leave a paused source listening.
+   */
+  sourcing: Promise<unknown>;
   /** Set while its source polls, so a pause can wait for the poll under way. */
   polling: Promise<void> | undefined;
   /** Set while a pass works on this channel, so a stop can wait for it. */
@@ -592,6 +597,12 @@ export interface ChannelCommandReport {
 
 /** How long `stop` waits for a channel's work in flight, unless told otherwise. */
 export const STOP_DEADLINE_MS = 30_000;
+
+/**
+ * The longest a `stop` waits for a channel's work in flight: 24 days, inside the longest wait a
+ * Node timer holds (2^31 - 1 ms, about 24.8 days). A longer one is waited as this.
+ */
+export const MAX_STOP_DEADLINE_MS = 24 * 24 * 60 * 60 * 1000;
 
 /** The parts of a channel's configuration a reload cannot change: they need the engine restarted. */
 const RESTART_ONLY = ["source", "destinations", "format", "hooks"] as const;
@@ -749,6 +760,7 @@ export class Engine {
           changes: 0,
           writes: Promise.resolve(),
           open: false,
+          sourcing: Promise.resolve(),
           polling: undefined,
           busy: undefined,
           halt: new AbortController(),
@@ -762,7 +774,7 @@ export class Engine {
         await this.warnDryBacklog(config);
         await worker.start();
         // A channel paused or stopped before this start stays so: its source is not opened.
-        if (channel.state === "running") await this.startSource(channel);
+        if (channel.state === "running") await this.matchSource(channel);
         else logger.info({ event: "channel-state", channel: config.name, state: channel.state });
       }
     } catch (error) {
@@ -868,7 +880,26 @@ export class Engine {
     },
   ): Promise<ChannelCommandReport> {
     const channel = this.channels.find((c) => c.config.name === name);
-    if (channel === undefined) return { channel: name, refused: "no-such-channel" };
+    const report =
+      channel === undefined
+        ? { channel: name, refused: "no-such-channel" as const }
+        : await this.commandOn(channel, command, options);
+    // A refusal is recorded too, the command for a channel this engine does not run among them.
+    await this.audit.recordAs(options.actor, {
+      action: `channel-${command}` satisfies AuditAction,
+      outcome: report.refused === undefined ? "ok" : "refused",
+      channel: name,
+      detail: auditDetail(report),
+    });
+    return report;
+  }
+
+  private async commandOn(
+    channel: RunningChannel,
+    command: ChannelCommand,
+    options: Parameters<Engine["command"]>[2],
+  ): Promise<ChannelCommandReport> {
+    const name = channel.config.name;
     let report: ChannelCommandReport;
     switch (command) {
       case "pause":
@@ -889,12 +920,6 @@ export class Engine {
         );
         break;
     }
-    await this.audit.recordAs(options.actor, {
-      action: `channel-${command}` satisfies AuditAction,
-      outcome: report.refused === undefined ? "ok" : "refused",
-      channel: name,
-      detail: auditDetail(report),
-    });
     return report;
   }
 
@@ -1096,7 +1121,7 @@ export class Engine {
   private async pass(channel: RunningChannel): Promise<void> {
     if (channel.state === "running") {
       if (channel.down !== undefined && channel.down.nextAt <= this.now()) {
-        await this.startSource(channel);
+        await this.syncSource(channel);
       }
       const { source } = channel.connectors;
       if (source.poll !== undefined) {
@@ -1182,13 +1207,28 @@ export class Engine {
     return written.status === "fulfilled";
   }
 
-  /** Opens or closes the channel's source to match `state`. */
-  private async applyState(channel: RunningChannel, state: ChannelRunState): Promise<void> {
-    if (channel.state === state) return;
+  /**
+   * Sets the channel's state at once, then opens or closes its source to match, after any start or
+   * stop of it already under way.
+   */
+  private applyState(channel: RunningChannel, state: ChannelRunState): Promise<void> {
+    if (channel.state === state) return Promise.resolve();
     channel.state = state;
     this.options.logger.info({ event: "channel-state", channel: channel.config.name, state });
-    if (state === "running") {
-      await this.startSource(channel);
+    return this.syncSource(channel);
+  }
+
+  /** Matches the channel's source to its state, after any start or stop of it under way. */
+  private syncSource(channel: RunningChannel): Promise<void> {
+    const run = channel.sourcing.then(() => this.matchSource(channel));
+    channel.sourcing = settled(run);
+    return run;
+  }
+
+  /** Opens or closes the channel's source to match its state as it is now. */
+  private async matchSource(channel: RunningChannel): Promise<void> {
+    if (channel.state === "running") {
+      if (!channel.open) await this.startSource(channel);
       return;
     }
     // Paused or stopped: the source takes nothing more in. One that could not listen is not down
@@ -1230,7 +1270,9 @@ export class Engine {
         const deadline = new AbortController();
         drained = await Promise.race([
           busy.then(() => true),
-          sleep(deadlineMs, false, { signal: deadline.signal }).catch(() => false),
+          sleep(Math.min(deadlineMs, MAX_STOP_DEADLINE_MS), false, {
+            signal: deadline.signal,
+          }).catch(() => false),
         ]);
         deadline.abort();
       }
@@ -1265,6 +1307,8 @@ export class Engine {
     projectConfig: TransformConfigBlock,
   ): Promise<ChannelCommandReport> {
     const name = channel.config.name;
+    // A reload queued behind another is refused too when a stop began while it waited.
+    if (channel.draining) return { channel: name, refused: "draining" };
     if (typeof next === "string") return { channel: name, refused: next };
     const changed = RESTART_ONLY.filter(
       (key) => JSON.stringify(channel.config[key]) !== JSON.stringify(next[key]),
@@ -1296,6 +1340,11 @@ export class Engine {
       if (!(error instanceof TransformLoadError)) throw error;
       return { channel: name, refused: "transform-load-failed", failure: error.failure.name };
     }
+    if (channel.draining) {
+      // A stop began while the new transform loaded: the old one stays, as for a reload asked then.
+      await worker.stop();
+      return { channel: name, refused: "draining" };
+    }
     // Swapped between messages: the pass reads the worker afresh for each one, and the old worker
     // finishes the message it holds before it stops.
     const old = channel.worker;
@@ -1312,7 +1361,6 @@ export class Engine {
     const { logger } = this.options;
     try {
       await source.start(this.sinkFor(channel));
-      channel.open = true;
     } catch (error) {
       const attempts = (channel.down?.attempts ?? 0) + 1;
       const wait = retryDelay(attempts);
@@ -1337,6 +1385,12 @@ export class Engine {
       }));
       return;
     }
+    if (channel.state !== "running") {
+      // A pause or stop came while the source started: it closes again before it takes anything in.
+      await source.stop?.();
+      return;
+    }
+    channel.open = true;
     if (channel.down !== undefined) {
       channel.down = undefined;
       logger.info({ event: "source-started", channel: channel.config.name });

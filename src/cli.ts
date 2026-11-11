@@ -22,6 +22,7 @@ import {
 import {
   Engine,
   errorCode,
+  MAX_STOP_DEADLINE_MS,
   STOP_DEADLINE_MS,
   type ChannelCommand,
   type ChannelCommandReport,
@@ -1014,6 +1015,9 @@ async function channelCommand(
   const deadlineMs = values.deadline === undefined ? undefined : parseDuration(values.deadline);
   if (values.deadline !== undefined && deadlineMs === undefined) {
     return invalid(io, "--deadline takes a duration, such as 30s or 2m.");
+  }
+  if (deadlineMs !== undefined && deadlineMs > MAX_STOP_DEADLINE_MS) {
+    return invalid(io, "--deadline is at most 24 days, the longest wait a timer holds.");
   }
   let reply;
   try {

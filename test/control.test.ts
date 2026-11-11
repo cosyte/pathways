@@ -306,6 +306,9 @@ describe("ControlServer", () => {
     expect(await reply(`${JSON.stringify({ ...request, command: "drop" })}\n`)).toMatchObject({
       error: "bad-request",
     });
+    expect(
+      await reply(`${JSON.stringify({ ...request, command: "stop", deadlineMs: 2 ** 31 })}\n`),
+    ).toMatchObject({ error: "bad-request" });
     expect(await reply(`${JSON.stringify({ ...request, v: 2 })}\n`)).toMatchObject({
       error: "unsupported-version",
     });
@@ -418,6 +421,13 @@ describe("pathways channel", () => {
     expect(await run(["channel", "pause", "ADT!"], io)).toBe(2);
     expect(await run(["channel", "pause", "adt", "--deadline", "5s"], io)).toBe(2);
     expect(await run(["channel", "stop", "adt", "--deadline", "soon"], io)).toBe(2);
+  });
+
+  it("refuses a deadline longer than a timer holds, saying the limit", async () => {
+    const errors: string[] = [];
+    const io = { out: () => undefined, err: (text: string) => errors.push(text) };
+    expect(await run(["channel", "stop", "adt", "--deadline", "25d"], io)).toBe(2);
+    expect(errors.join("")).toContain("--deadline is at most 24 days");
   });
 
   it("asks the engine and prints the report", async () => {

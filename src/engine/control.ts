@@ -4,7 +4,12 @@ import { createConnection, createServer, type Server, type Socket } from "node:n
 import { tmpdir } from "node:os";
 import { posix, resolve } from "node:path";
 
-import { errorCode, type ChannelCommand, type ChannelCommandReport } from "./engine.js";
+import {
+  errorCode,
+  MAX_STOP_DEADLINE_MS,
+  type ChannelCommand,
+  type ChannelCommandReport,
+} from "./engine.js";
 
 /**
  * The control socket: `pathways start` listens on it, and `pathways channel` asks the running
@@ -14,7 +19,8 @@ import { errorCode, type ChannelCommand, type ChannelCommandReport } from "./eng
  * credentials from a Unix socket, so the socket sits in a folder only its user can open (mode
  * 0700, made so, never changed afterwards), and a request names its user as the client reports
  * it, for the audit log. On Windows it is a named pipe, which carries the default access list of
- * the user who made it.
+ * the user who made it: a weaker boundary, since its name follows from the project path and another
+ * local user can make a pipe of that name first.
  *
  * The protocol is one line of JSON each way, over the socket: a request of at most
  * {@link CONTROL_MAX_REQUEST} bytes with `v` set to {@link CONTROL_VERSION}, and a reply that
@@ -384,7 +390,10 @@ function parseRequest(line: string): ControlRequest | "bad-request" | "unsupport
     user.length === 0 ||
     user.length > 256 ||
     (deadlineMs !== undefined &&
-      (typeof deadlineMs !== "number" || !Number.isInteger(deadlineMs) || deadlineMs < 0))
+      (typeof deadlineMs !== "number" ||
+        !Number.isInteger(deadlineMs) ||
+        deadlineMs < 0 ||
+        deadlineMs > MAX_STOP_DEADLINE_MS))
   ) {
     return "bad-request";
   }

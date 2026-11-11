@@ -12,6 +12,7 @@ import type {
   OutgoingMessage,
   SourceConnector,
 } from "../src/connectors/types.js";
+import { ChannelWorker } from "../src/engine/channel-worker.js";
 import { Engine } from "../src/engine/engine.js";
 import type { ChannelRunState, Store } from "../src/storage/store.js";
 import {
@@ -28,6 +29,7 @@ const engines: Engine[] = [];
 const stores: Store[] = [];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(engines.splice(0).map((engine) => engine.stop()));
   await Promise.all(stores.splice(0).map((store) => store.close()));
   await dropDatabases();
@@ -79,11 +81,41 @@ class TestSource implements SourceConnector {
   starts = 0;
   stops = 0;
   polls = 0;
+  /** While set, a start waits for it: it settles as the start does, and fails when it rejects. */
+  gate: Promise<void> | undefined;
 
   start(sink: MessageSink): Promise<void> {
     this.starts += 1;
-    this.sink = sink;
-    return Promise.resolve();
+    const listen = (): void => {
+      this.sink = sink;
+    };
+    if (this.gate === undefined) {
+      listen();
+      return Promise.resolve();
+    }
+    return this.gate.then(listen);
+  }
+
+  /** Holds the next starts until `open` is called, or fails them with `fail`. */
+  hold(): { open: () => void; fail: () => void } {
+    let open: () => void = () => undefined;
+    let fail: () => void = () => undefined;
+    this.gate = new Promise<void>((resolve, reject) => {
+      open = resolve;
+      fail = () => {
+        reject(Object.assign(new Error("TESTPATIENT"), { code: "EADDRINUSE" }));
+      };
+    });
+    return {
+      open: () => {
+        this.gate = undefined;
+        open();
+      },
+      fail: () => {
+        this.gate = undefined;
+        fail();
+      },
+    };
   }
 
   stop(): Promise<void> {
@@ -768,7 +800,11 @@ for (const database of TEST_DATABASES) {
       });
       expect(await resuming).toEqual({ channel: "adt", state: "running" });
       expect(engine.channelStates()).toEqual({ adt: "running" });
-      expect(source.starts).toBe(2);
+      // The source follows the state as it is when it is opened or closed: running by then, so it
+      // was never closed.
+      expect(source.starts).toBe(1);
+      expect(source.stops).toBe(0);
+      expect(source.sink).toBeDefined();
       expect(await store.channelStates()).toEqual({});
     });
 
@@ -815,13 +851,165 @@ export default (msg: unknown): unknown => {
       });
     });
 
-    it("answers a command for a channel it does not run", async () => {
+    it("answers a command for a channel it does not run, and audits it", async () => {
       const { store, engineOn } = await setUp(database);
       const { engine } = await engineOn(store);
       expect(await engine.command("pause", "nope", actor)).toEqual({
         channel: "nope",
         refused: "no-such-channel",
       });
+      const entries = await store.auditEntries({ limit: 10 });
+      expect(
+        entries.items.map((entry) => [entry.action, entry.outcome, entry.actor, entry.channel]),
+      ).toEqual([["channel-pause", "refused", "test-operator", "nope"]]);
+      expect(entries.items[0]?.detail).toEqual({ reason: "no-such-channel" });
+    });
+
+    it.each([
+      ["pause", "paused"],
+      ["stop", "stopped"],
+    ] as const)(
+      "closes a source that finished starting after a %s came, so it takes nothing in",
+      async (command, state) => {
+        const { store, engineOn } = await setUp(database);
+        const { engine, source } = await engineOn(store);
+        await engine.command("pause", "adt", actor);
+        expect(source.stops).toBe(1);
+        const start = source.hold();
+        const resuming = engine.command("resume", "adt", actor);
+        await vi.waitFor(() => {
+          expect(source.starts).toBe(2);
+        });
+        const stopping = engine.command(command, "adt", actor);
+        start.open();
+        expect(await resuming).toMatchObject({ channel: "adt" });
+        expect(await stopping).toMatchObject({ channel: "adt", state: state });
+        // Closed again once its start resolved: nothing listens, so no message comes in.
+        expect(source.stops).toBe(2);
+        expect(source.sink).toBeUndefined();
+        await engine.tick();
+        expect(source.polls).toBe(0);
+        expect(engine.channelStates()).toEqual({ adt: state });
+        expect(await store.channelStates()).toEqual({ adt: state });
+        expect(await store.messageCounts("adt")).toMatchObject({ received: 0 });
+      },
+    );
+
+    it("starts a source once when a resume, a pause and a resume come while it starts", async () => {
+      const { store, engineOn } = await setUp(database);
+      const { engine, source } = await engineOn(store);
+      await engine.command("pause", "adt", actor);
+      const start = source.hold();
+      const commands = [engine.command("resume", "adt", actor)];
+      await vi.waitFor(() => {
+        expect(source.starts).toBe(2);
+      });
+      commands.push(engine.command("pause", "adt", actor), engine.command("resume", "adt", actor));
+      start.open();
+      await Promise.all(commands);
+      expect(source.starts).toBe(2);
+      expect(source.stops).toBe(1);
+      expect(source.sink).toBeDefined();
+      expect(engine.channelStates()).toEqual({ adt: "running" });
+      await engine.tick();
+      expect(source.polls).toBe(1);
+    });
+
+    it("keeps a paused source closed when its retry after a failed start resolves during the pause", async () => {
+      const { store, clock, engineOn } = await setUp(database);
+      const { engine, source } = await engineOn(store);
+      await engine.command("pause", "adt", actor);
+      const first = source.hold();
+      const resuming = engine.command("resume", "adt", actor);
+      await vi.waitFor(() => {
+        expect(source.starts).toBe(2);
+      });
+      first.fail();
+      await resuming;
+      expect((await engine.health()).status).toBe("unavailable");
+
+      // The pass tries the source again; a pause comes while that start is under way.
+      clock.now += 60_000;
+      const retry = source.hold();
+      const pass = engine.tick();
+      await vi.waitFor(() => {
+        expect(source.starts).toBe(3);
+      });
+      const pausing = engine.command("pause", "adt", actor);
+      retry.open();
+      await pass;
+      expect(await pausing).toEqual({ channel: "adt", state: "paused" });
+      expect(source.sink).toBeUndefined();
+      expect(source.stops).toBe(2);
+      expect((await engine.health()).status).toBe("ok");
+    });
+
+    it("is not left down when a start fails after a pause came", async () => {
+      const { store, engineOn } = await setUp(database);
+      const { engine, source } = await engineOn(store);
+      await engine.command("pause", "adt", actor);
+      const start = source.hold();
+      const resuming = engine.command("resume", "adt", actor);
+      await vi.waitFor(() => {
+        expect(source.starts).toBe(2);
+      });
+      const pausing = engine.command("pause", "adt", actor);
+      start.fail();
+      await resuming;
+      expect(await pausing).toEqual({ channel: "adt", state: "paused" });
+      // Paused, not down: the health endpoint answers, and a resume opens the source at once.
+      expect((await engine.health()).status).toBe("ok");
+      await engine.command("resume", "adt", actor);
+      expect(source.starts).toBe(3);
+      expect(source.sink).toBeDefined();
+    });
+
+    it("refuses a reload a stop overtook, while it loaded or while it waited, keeping the old transform", async () => {
+      const { root, store, destination, engineOn } = await setUp(database, tagging("FIRST"));
+      const { engine, source } = await engineOn(store);
+      destination.plan.push("hold");
+      await source.sink?.receive(body());
+      const sent = destination.sent();
+      const pass = engine.tick();
+      await sent;
+
+      await writeFile(join(root, "channels/adt/transform.ts"), tagging("SECOND"));
+      const config = await channelNow(root);
+      let open: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => {
+        open = resolve;
+      });
+      // The method as the class has it, called from the spy once the gate opens.
+      const load = Object.getOwnPropertyDescriptor(ChannelWorker.prototype, "start")?.value as (
+        this: ChannelWorker,
+      ) => Promise<void>;
+      const starting = vi
+        .spyOn(ChannelWorker.prototype, "start")
+        .mockImplementation(async function (this: ChannelWorker) {
+          await gate;
+          await load.call(this);
+        });
+      const loading = engine.command("reload", "adt", { ...actor, config });
+      const waiting = engine.command("reload", "adt", { ...actor, config });
+      await vi.waitFor(() => {
+        expect(starting).toHaveBeenCalledTimes(1);
+      });
+      const stopping = engine.command("stop", "adt", { ...actor, deadlineMs: 5_000 });
+      open();
+      expect(await loading).toEqual({ channel: "adt", refused: "draining" });
+      expect(await waiting).toEqual({ channel: "adt", refused: "draining" });
+      // The queued reload loaded nothing.
+      expect(starting).toHaveBeenCalledTimes(1);
+      await engine.command("halt", "adt", actor);
+      await pass;
+      await stopping;
+
+      await engine.command("resume", "adt", actor);
+      await source.sink?.receive(body());
+      await engine.tick();
+      await engine.tick();
+      const tags = destination.delivered.map((m) => new TextDecoder().decode(m.body).split("|")[4]);
+      expect(tags).toEqual(["FIRST", "FIRST"]);
     });
   });
 }

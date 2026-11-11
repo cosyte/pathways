@@ -339,10 +339,10 @@ log (`channel-pause` and the like) with the operating system user who ran it. Wh
 answers, it says `engine not running` and exits 1. See
 [pause, stop and reload a channel](./pause-stop-and-reload-a-channel.md).
 
-| Option              | Meaning                                                                |
-| ------------------- | ---------------------------------------------------------------------- |
-| `--deadline <time>` | `stop`, `halt`: how long to wait for the work in flight, such as `30s` |
-| `--json`            | print the engine's report as one JSON document                         |
+| Option              | Meaning                                                                               |
+| ------------------- | ------------------------------------------------------------------------------------- |
+| `--deadline <time>` | `stop`, `halt`: how long to wait for the work in flight, such as `30s`, at most `24d` |
+| `--json`            | print the engine's report as one JSON document                                        |
 
 ## Exit codes
 
