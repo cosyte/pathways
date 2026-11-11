@@ -24,7 +24,15 @@ const race = vi.hoisted(() => ({
   then: (): void => undefined,
   after: (): void => undefined,
   unsteady: false,
+  fail: undefined as ((what: string, path: string) => boolean) | undefined,
 }));
+
+/** Throws EIO when `race.fail` picks this call: once, as it then clears itself. */
+function failing(what: string, path: unknown): void {
+  if (race.fail?.(what, String(path)) !== true) return;
+  race.fail = undefined;
+  throw Object.assign(new Error(`EIO: i/o error, ${what}`), { code: "EIO" });
+}
 
 // The move the file source makes after its last check can be raced: just before it, `race.then`
 // runs, as a writer in the source folder could between the check and the move, and just after it,
@@ -34,6 +42,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   return {
     ...actual,
     rename: async (...args: Parameters<typeof actual.rename>) => {
+      failing("rename", args[1]);
       if (race.when?.(String(args[1])) !== true) {
         await actual.rename(...args);
         return;
@@ -43,7 +52,16 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       await actual.rename(...args);
       race.after();
     },
+    unlink: async (...args: Parameters<typeof actual.unlink>) => {
+      failing("unlink", args[0]);
+      await actual.unlink(...args);
+    },
+    writeFile: async (...args: Parameters<typeof actual.writeFile>) => {
+      failing("writeFile", args[0]);
+      await actual.writeFile(...args);
+    },
     lstat: async (...args: Parameters<typeof actual.lstat>) => {
+      failing("lstat", args[0]);
       const stats = await actual.lstat(...args);
       // Only in a folder inside .claimed/, where a claim or the check's own file is moved to.
       if (!race.unsteady || !/[\\/]\.claimed[\\/][^\\/]+[\\/]/.test(String(args[0]))) {
@@ -59,6 +77,7 @@ afterEach(async () => {
   race.when = undefined;
   race.after = () => undefined;
   race.unsteady = false;
+  race.fail = undefined;
   await cleanUp();
 });
 
@@ -305,6 +324,67 @@ describe("FileSource moving a refused file back", () => {
     ]);
     expect(await readFile(join(dir, "sub", "x.hl7"), "utf8")).toBe("in big");
     expect(await heldIn(dir)).toEqual(["outside"]);
+  });
+});
+
+describe("FileSource when a step of moving a refused file back fails", () => {
+  it.skipIf(windows)(
+    "holds the copy left in the claim folder when the unlink after the link fails",
+    async () => {
+      const dir = join(await makeProject({}), "inbox");
+      const outside = await makeProject({ "x.hl7": "outside" });
+      await dropFile(join(dir, "sub", "x.hl7"), "in");
+      const { source, errors } = recursiveSource(dir);
+      swapBefore(dir, outside, claims);
+      race.after = () => {
+        race.fail = (what, path) => what === "unlink" && path.includes(claims);
+      };
+      expect(await pass(source)).toEqual([]);
+      expect(errors).toEqual([expect.objectContaining({ code: "ERR_PATHWAYS_FILE_HELD" })]);
+      // Back where it came from, and the second name it had is held, never in the claim folder.
+      expect(await readFile(join(outside, "x.hl7"), "utf8")).toBe("outside");
+      expect(await heldIn(dir)).toEqual(["outside"]);
+      expect(await readdir(join(dir, CLAIMED_DIR, "adt"))).toEqual([]);
+    },
+  );
+
+  it.skipIf(windows)(
+    "never stores a refused file that could not be held either, while it runs",
+    async () => {
+      const dir = join(await makeProject({}), "inbox");
+      const outside = await makeProject({ "x.hl7": "outside" });
+      await dropFile(join(dir, "sub", "x.hl7"), "in");
+      const { source, errors } = recursiveSource(dir);
+      swapBefore(dir, outside, claims);
+      race.after = () => {
+        renameSync(join(dir, "sub"), join(dir, "gone"));
+        race.fail = (what, path) => what === "rename" && path.includes("refused-");
+      };
+      expect(await pass(source)).toEqual([]);
+      expect(errors).toEqual([expect.objectContaining({ code: "ERR_PATHWAYS_FILE_HELD" })]);
+      expect(await readdir(join(dir, CLAIMED_DIR, "adt"))).toHaveLength(1);
+      // The next pass takes the file that was in the source folder all along, never the claim.
+      expect(await pass(source)).toEqual(["in"]);
+      // A pass that cannot read the claim's id leaves it too, and still knows it after.
+      race.fail = (what, path) => what === "lstat" && path.includes(claims);
+      expect(await pass(source)).toEqual([]);
+      expect(await pass(source)).toEqual([]);
+      expect(await readdir(join(dir, CLAIMED_DIR, "adt"))).toHaveLength(1);
+      // A claim left by a run that stopped part way is still stored beside it.
+      await dropFile(join(dir, claims, "000001700000001.00000000.0000000a-y.hl7"), "unfinished");
+      expect(await pass(source)).toEqual(["unfinished"]);
+      expect(await readdir(join(dir, CLAIMED_DIR, "adt"))).toHaveLength(1);
+    },
+  );
+
+  it("says a check of the file system that fails, claims nothing, and checks again next pass", async () => {
+    const dir = join(await makeProject({}), "inbox");
+    await dropFile(join(dir, "a.hl7"), "in");
+    const { source, errors } = recursiveSource(dir);
+    race.fail = (what, path) => what === "writeFile" && path.includes("probe-");
+    expect(await pass(source)).toEqual([]);
+    expect(errors).toEqual([expect.objectContaining({ code: "EIO" })]);
+    expect(await pass(source)).toEqual(["in"]);
   });
 });
 

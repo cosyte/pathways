@@ -423,12 +423,22 @@ export class FileSource implements SourceConnector {
     for (const file of await this.claim(claims, refused)) await this.store(file, sink, false);
   }
 
-  /** Whether the file at `path` is one a move refused; if so, it is kept in `refused`. */
+  /**
+   * Whether the file at `path` is one a move refused; if so, it is kept in `refused`. A claim whose
+   * id cannot be read while any file is refused waits for a later pass, and every refused id is
+   * kept meanwhile.
+   */
   private async isRefused(path: string, refused: Set<string>): Promise<boolean> {
     if (this.refused.size === 0) return false;
-    const stats = await lstat(path, { bigint: true }).catch(() => undefined);
-    if (stats === undefined || !this.refused.has(idKey(stats))) return false;
-    refused.add(idKey(stats));
+    let key: string;
+    try {
+      key = idKey(await lstat(path, { bigint: true }));
+    } catch {
+      for (const kept of this.refused) refused.add(kept);
+      return true;
+    }
+    if (!this.refused.has(key)) return false;
+    refused.add(key);
     return true;
   }
 
@@ -465,11 +475,15 @@ export class FileSource implements SourceConnector {
 
   /**
    * Moves a refused file into `.claimed/` under a `refused-` name of its own, where no pass reads.
-   * A move that fails leaves it, and its noted id keeps it from being stored.
+   * A move that fails leaves it, and its noted id keeps this run from storing it.
    */
   private async hold(path: string): Promise<void> {
     const name = `refused-${randomBytes(8).toString("hex")}`;
-    await rename(path, join(this.options.dir, CLAIMED_DIR, name)).catch(() => undefined);
+    try {
+      await rename(path, join(this.options.dir, CLAIMED_DIR, name));
+    } catch {
+      // Left where it is: the error the caller throws says it is held either way.
+    }
   }
 
   /**
