@@ -17,7 +17,9 @@ export type HttpOutcome = "delivered" | "retry" | "redirect" | "rejected";
  *   answer nobody expected.
  * - A 3xx is a redirect. It is never followed, since following one could send a message to a host
  *   nobody configured: the sender holds it instead, and an operator fixes the URL.
- * - A final 1xx, and any other 4xx, is a rejection that sending again will not fix.
+ * - A 1xx, and any other 4xx, is a rejection that sending again will not fix. Node waits past an
+ *   interim 1xx (100, 102, 103) for the final answer, so the 1xx a sender sees here is a 101
+ *   Switching Protocols, which no sender of ours asks for.
  *
  * @example
  * ```ts
@@ -202,10 +204,15 @@ function httpDate(value: string, now: number): number | undefined {
   const rfc850 = fields(RFC850_DATE, value);
   if (rfc850 !== undefined) {
     const [day, month, year, hour, minute, second] = rfc850;
-    // RFC 9110: a two-digit year more than 50 years ahead is the most recent such year past.
-    const current = new Date(now).getUTCFullYear();
+    // RFC 9110: a date that appears more than 50 years ahead is in the most recent such year past.
+    // The whole date counts, not the year alone: in the year 50 years ahead, a date later than
+    // now (10-Dec-76, read on 10 Nov 2026) is more than 50 years ahead too. Month, day and time are
+    // compared as fixed-width text, which orders them as time does.
+    const today = new Date(now).toISOString();
+    const current = Number(today.slice(0, 4));
     let full = current - (current % 100) + Number(year);
-    if (full > current + 50) full -= 100;
+    const rest = `${String(MONTHS.indexOf(month) + 1).padStart(2, "0")}-${day}T${hour}:${minute}:${second}`;
+    if (full > current + 50 || (full === current + 50 && rest > today.slice(5, 19))) full -= 100;
     return utc(String(full), month, day, `${hour}:${minute}:${second}`);
   }
   const asctime = fields(ASCTIME_DATE, value);

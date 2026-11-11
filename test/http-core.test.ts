@@ -153,6 +153,16 @@ describe("parseRetryAfter", () => {
     const in2095 = Date.UTC(2095, 0, 1);
     expect(after("Sunday, 01-Jan-96 00:00:00 GMT", in2095)).toBe(Date.UTC(2096, 0, 1) - in2095);
   });
+
+  // The rule compares the whole date, not the year: in the year 50 years ahead, a date later than
+  // today's is more than 50 years ahead, so it is read in the century before.
+  it("reads an rfc850 date more than 50 years ahead by its month, day or time as the past", () => {
+    expect(after("Thursday, 10-Dec-76 12:00:00 GMT")).toBe(0);
+    expect(after("Wednesday, 11-Nov-76 00:00:00 GMT")).toBe(0);
+    expect(after("Tuesday, 10-Nov-76 12:00:01 GMT")).toBe(0);
+    expect(after("Saturday, 10-Oct-76 12:00:00 GMT")).toBe(Date.UTC(2076, 9, 10, 12) - NOW);
+    expect(after("Tuesday, 10-Nov-76 11:59:59 GMT")).toBe(Date.UTC(2076, 10, 10, 11, 59, 59) - NOW);
+  });
 });
 
 describe("the retry errors", () => {
