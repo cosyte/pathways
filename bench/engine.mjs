@@ -13,7 +13,17 @@
 
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { linkSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  linkSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -37,6 +47,11 @@ export const TRANSFORMS = {
  * and the head of a comparison each run their own bin.
  */
 export function binOf(pathways) {
+  return fileURLToPath(new URL("bin/pathways.mjs", entryOf(pathways)));
+}
+
+/** The URL of the built entry the suite was handed, found as {@link binOf} describes. */
+export function entryOf(pathways) {
   let stack = "";
   const request = {
     get header() {
@@ -51,11 +66,25 @@ export function binOf(pathways) {
   }
   const bench = new URL(".", import.meta.url).href;
   for (const match of stack.matchAll(/(file:\/\/[^\s)]+?):\d+:\d+/g)) {
-    if (!match[1].startsWith(bench)) {
-      return fileURLToPath(new URL("bin/pathways.mjs", match[1]));
-    }
+    if (!match[1].startsWith(bench)) return match[1];
   }
   throw new Error("@cosyte/pathways bench: could not find the built entry the suite was handed");
+}
+
+/**
+ * The `@cosyte/hl7` the handed entry itself imports: the copy installed beside that build, which a
+ * comparison's base and head each have their own of. An `Hl7Message` from one copy is not one to
+ * the other, so a header handed to a build's ACK builder is parsed by that build's own copy. Found
+ * through the package's `import` entry and loaded with `require`, which for an ES module returns
+ * the instance the entry already loaded.
+ */
+export function hl7Of(pathways) {
+  const require = createRequire(entryOf(pathways));
+  let dir = dirname(require.resolve("@cosyte/hl7"));
+  while (!existsSync(join(dir, "package.json"))) dir = dirname(dir);
+  const manifest = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
+  const entry = manifest.exports?.["."]?.import?.default ?? manifest.module;
+  return require(join(dir, entry));
 }
 
 /** The worker module beside a bin: decode, transform and encode, as the channel's worker runs them. */

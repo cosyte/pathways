@@ -30,9 +30,8 @@
 // code by bench/shapes.mjs.
 
 import { defineBenchmark, defineSuite } from "@cosyte/bench";
-import { parseHL7 } from "@cosyte/hl7";
 
-import { TRANSFORMS, binOf, makeProject, removeProject, runPass } from "./engine.mjs";
+import { TRANSFORMS, binOf, hl7Of, makeProject, removeProject, runPass } from "./engine.mjs";
 import * as S from "./shapes.mjs";
 
 const { MIB } = S;
@@ -194,12 +193,19 @@ function engineBenchmark(channel) {
   });
 }
 
-/** The ACK requests an MLLP source makes: a stored message, and one refused for its header. */
+/**
+ * The ACK requests an MLLP source makes for stored messages. Each carries its MSH segment as text,
+ * parsed once per build by that build's own `@cosyte/hl7` (see `bind`), as the source parses it
+ * before it asks for an ACK.
+ */
 function ackRequests(count) {
-  return Array.from({ length: count }, (_v, i) => {
-    const header = parseHL7(S.adtMessage(i).split("\r")[0]);
-    return { code: "AA", reason: "stored", problem: undefined, header, messageId: i + 1 };
-  });
+  return Array.from({ length: count }, (_v, i) => ({
+    code: "AA",
+    reason: "stored",
+    problem: undefined,
+    msh: S.adtMessage(i).split("\r")[0],
+    messageId: i + 1,
+  }));
 }
 
 const ack = defineBenchmark({
@@ -219,14 +225,28 @@ const ack = defineBenchmark({
             code: "AR",
             reason: "unreadable",
             problem: "NO_MSH_SEGMENT",
-            header: undefined,
+            msh: undefined,
             messageId: 1,
           },
         ],
       }),
     },
   ],
-  bind: (pathways) => (request) => pathways.defaultAckBuilder(request),
+  bind: (pathways) => {
+    const { parseHL7 } = hl7Of(pathways);
+    // Each input's request, its header parsed on its first call (a warmup call), never in a timed one.
+    const requests = new WeakMap();
+    const requestOf = (input) => {
+      let request = requests.get(input);
+      if (request === undefined) {
+        const { msh, ...rest } = input;
+        request = { ...rest, header: msh === undefined ? undefined : parseHL7(msh) };
+        requests.set(input, request);
+      }
+      return request;
+    };
+    return (input) => pathways.defaultAckBuilder(requestOf(input));
+  },
   weigh: (bytes) => bytes.byteLength,
 });
 
