@@ -142,23 +142,47 @@ export function delivered(project) {
 /**
  * One pass of the built bin over a reset project, its output to /dev/null. `nodeArgs` go before the
  * bin (a probe, a profiler). An exit other than 0, or a pass that delivered fewer files than it took
- * in, is a broken case and never a number: the error names the exit and the counts, never content.
+ * in, is a broken case and never a number: the error names the exit and the counts, and the failure
+ * kinds and codes the engine logged, never content. The engine logs ids, counts and codes only.
  */
 export function runPass(bin, project, { nodeArgs = [], env } = {}) {
   resetProject(project);
   const result = spawnSync(
     process.execPath,
     [...nodeArgs, bin, "start", "--once", "--project", project.root],
-    { stdio: ["ignore", "ignore", "ignore"], env: env ?? process.env },
+    { stdio: ["ignore", "pipe", "ignore"], env: env ?? process.env, maxBuffer: 64 * 1024 * 1024 },
   );
   if (result.status !== 0) {
-    throw new Error(`pathways exited ${String(result.status ?? result.signal)}`);
+    throw new Error(
+      `pathways exited ${String(result.status ?? result.signal)}${failures(result.stdout)}`,
+    );
   }
   const out = delivered(project);
   if (out !== project.count) {
-    throw new Error(`pathways delivered ${String(out)} of ${String(project.count)}`);
+    throw new Error(
+      `pathways delivered ${String(out)} of ${String(project.count)}${failures(result.stdout)}`,
+    );
   }
   return out;
+}
+
+/** The failures an engine's log names, as `event kind code`, each once. */
+function failures(stdout) {
+  const seen = new Set();
+  for (const line of String(stdout ?? "").split("\n")) {
+    if (!line.includes("fail")) continue;
+    try {
+      const entry = JSON.parse(line);
+      if (typeof entry.event === "string" && entry.event.includes("fail")) {
+        seen.add(
+          [entry.event, entry.kind, entry.code].filter((x) => typeof x === "string").join(" "),
+        );
+      }
+    } catch {
+      // Not a log line.
+    }
+  }
+  return seen.size === 0 ? "" : ` (${[...seen].join("; ")})`;
 }
 
 export function removeProject(project) {

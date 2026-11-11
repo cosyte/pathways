@@ -238,6 +238,16 @@ function engineSection(bin, quick) {
           memory,
           baseMemory: base.memory,
         });
+      } catch (error) {
+        // A pass that does not deliver is a finding, not a number: it is listed with what failed.
+        rows.push({
+          channel: channel.name,
+          shape: channel.shape,
+          size: s.label,
+          count: s.count,
+          bytes,
+          failure: error instanceof Error ? error.message : String(error),
+        });
       } finally {
         removeProject(project);
       }
@@ -582,6 +592,8 @@ async function profileSection(bin, worker, quick, dir) {
     const project = makeProject(spec);
     try {
       out.push(profileEngine(bin, label, project, dir));
+    } catch (error) {
+      out.push({ label, failure: error instanceof Error ? error.message : String(error) });
     } finally {
       removeProject(project);
     }
@@ -603,8 +615,18 @@ function worstBy(rows, key) {
  * read by bytes from the smallest such input to the largest, and by messages from a pass of 100 in a
  * row to the longest, past the fixed cost of a pass, which a single message cannot be told from.
  */
-function budgets({ imports, engine, transform }) {
+function budgets({ imports, engine: all, transform }) {
   const lines = [];
+  const failed = all.filter((r) => r.failure !== undefined);
+  const engine = all.filter((r) => r.failure === undefined);
+  lines.push({
+    budget: "every engine pass delivers every message it takes in",
+    worst:
+      failed.length === 0
+        ? "all delivered"
+        : failed.map((r) => `${r.channel}, ${r.size}: ${r.failure}`).join("; "),
+    within: failed.length === 0,
+  });
   const entry = imports.rows[0];
   lines.push({
     budget: `cold import of the package entry under ${String(BUDGETS.coldImportMs)} ms`,
@@ -706,6 +728,12 @@ function markdown(result) {
     "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
   );
   for (const r of result.engine) {
+    if (r.failure !== undefined) {
+      out.push(
+        `| ${r.channel} | ${r.size} | ${size(r.bytes)} | **failed: ${r.failure}** | | | | | |`,
+      );
+      continue;
+    }
     out.push(
       `| ${r.channel} | ${r.size} | ${size(r.bytes)} | ${ms(r.passMs)} | ${ms(r.emptyMs)} | ${ms(r.perMessageMs)} | ${r.messagesPerSecond.toFixed(0)} | ${times(r.engineThreadMultiple)} | ${times(r.residentMultiple)} |`,
     );
@@ -730,6 +758,10 @@ function markdown(result) {
     `${String(l.calls)} calls over ${String(l.rounds)} rounds; fitted heap growth over the last ${String(l.rounds - LONG_RUN_SETTLE)} rounds ${size(l.growthBytes)} (${l.growing ? "**growing**" : "flat"}, the line is ${size(LONG_RUN_GROWTH_BYTES)}).`,
   );
   for (const p of result.profiles) {
+    if (p.failure !== undefined) {
+      out.push("", `#### Profile: ${p.label}`, "", `Not taken: ${p.failure}.`);
+      continue;
+    }
     out.push("", `#### Profile: ${p.label}`, "", "| CPU, self time | share |", "| --- | --- |");
     for (const c of p.cpu) out.push(`| ${c.where} | ${(c.share * 100).toFixed(1)}% |`);
     out.push("", "| allocations, sampled | bytes | share |", "| --- | --- | --- |");
