@@ -384,6 +384,28 @@ for (const database of TEST_DATABASES) {
       expect(await store.deliveryCounts("adt")).toMatchObject({ pending: 0, delivered: 1 });
     });
 
+    it("cuts off at once an attempt that starts under a halt signal already aborted", async () => {
+      const { store, destination, engineOn } = await setUp(database);
+      const { logger, events } = captureLogger();
+      const { engine, source } = await engineOn(store, logger);
+      // A halt replaces the signal it aborts at once, so no command leaves it aborted: set it here,
+      // as a later change that kept a used signal would leave it.
+      const channels = (engine as unknown as { channels: { halt: AbortController }[] }).channels;
+      channels[0]?.halt.abort();
+      destination.plan.push("hold");
+      await source.sink?.receive(body());
+
+      // The held send would wait for its 30 s deadline; a cut attempt ends the pass at once.
+      const ended = await Promise.race([
+        engine.tick().then(() => "ended"),
+        new Promise((resolve) => setTimeout(resolve, 2_000, "held")),
+      ]);
+      expect(ended).toBe("ended");
+      expect(destination.sends).toBe(0);
+      expect(events.filter((event) => event.event === "delivery-halted")).toHaveLength(1);
+      expect(await store.deliveryCounts("adt")).toMatchObject({ pending: 1, delivered: 0 });
+    });
+
     it("stops after the work in hand and reports what it left, or that the deadline passed", async () => {
       const { store, destination, engineOn } = await setUp(database);
       const { engine, source } = await engineOn(store);

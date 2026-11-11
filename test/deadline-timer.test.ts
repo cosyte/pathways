@@ -109,6 +109,28 @@ describe("DeadlineTimer", () => {
     expect(clock.parked).toBe(0);
   });
 
+  it("keeps a deadline longer than the longest wait, arming again until it is due", async () => {
+    // As the engine's own wait does, each wait is cut to the longest a Node timer holds.
+    const cap = 1_000;
+    const clock = new FakeClock();
+    const timer = new DeadlineTimer(
+      () => clock.now,
+      (ms, signal) => clock.wait(Math.min(ms, cap), signal),
+    );
+    let expired = 0;
+    timer.set(2_500, () => (expired += 1));
+    await clock.advance(1_000);
+    expect(expired).toBe(0);
+    await clock.advance(1_000);
+    expect(expired).toBe(0);
+    await clock.advance(499);
+    expect(expired).toBe(0);
+    await clock.advance(1);
+    expect(expired).toBe(1);
+    expect(clock.asked).toEqual([1_000, 1_000, 500]);
+    expect(clock.parked).toBe(0);
+  });
+
   it("calls nothing once closed, and leaves no wait parked", async () => {
     const clock = new FakeClock();
     const timer = timerOn(clock);

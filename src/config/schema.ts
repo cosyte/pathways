@@ -1036,14 +1036,24 @@ function optionsWithModule(
   }
 }
 
-/** Whether `expression` is a cron expression of five fields, as the engine reads one. */
-function isCron(expression: string): boolean {
+/**
+ * What is wrong with `expression` as a cron expression of five fields, as the engine reads one, or
+ * undefined when nothing is. When croner itself will not load, that is what it says, with the load
+ * error's code and never its text, since then no expression can be read.
+ */
+function cronProblem(expression: string): string | undefined {
+  let Cron: ReturnType<typeof cronClass>;
   try {
-    const Cron = cronClass();
+    Cron = cronClass();
+  } catch (error) {
+    const code = (error as { code?: unknown } | undefined)?.code;
+    return `croner, which reads cron expressions, could not be loaded${typeof code === "string" ? ` (${code})` : ""}: reinstall the project's dependencies`;
+  }
+  try {
     new Cron(expression, { mode: "5-part", paused: true });
-    return true;
+    return undefined;
   } catch {
-    return false;
+    return 'a cron expression of five fields, such as "0 2 * * *"';
   }
 }
 
@@ -1080,10 +1090,16 @@ const pollBlock = z
           "A pass this long after the last one ended: a duration such as 30s, or a number of milliseconds.",
         ).optional(),
         cron: envable(
-          z.string().refine(isCron, 'a cron expression of five fields, such as "0 2 * * *"').meta({
-            description:
-              "A pass at each time this cron expression of five fields names (minute, hour, day of month, month, day of week), such as 0 2 * * *.",
-          }),
+          z
+            .string()
+            .superRefine((expression, ctx) => {
+              const message = cronProblem(expression);
+              if (message !== undefined) ctx.addIssue({ code: "custom", message });
+            })
+            .meta({
+              description:
+                "A pass at each time this cron expression of five fields names (minute, hour, day of month, month, day of week), such as 0 2 * * *.",
+            }),
         ).optional(),
         timezone: envable(
           z.string().refine(isTimeZone, "a time zone name, such as UTC or America/Chicago").meta({
