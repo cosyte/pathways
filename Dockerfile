@@ -25,9 +25,17 @@
 # above it. To move one, look up the tag's current index digest and change the two together.
 #
 # .github/workflows/docker.yml builds this and runs it against a starter project made by
-# `pathways init`, on SQLite and on PostgreSQL, MySQL and SQL Server.
+# `pathways init`, on SQLite and on PostgreSQL, MySQL and SQL Server. Each release builds it for
+# linux/amd64 and linux/arm64 and publishes it to ghcr.io/cosyte/pathways (release.yml), signed and
+# with an SBOM and provenance. The image stays lean: the four database drivers and nothing else. A
+# project's own image adds extension and cloud packages on top of it (templates/starter/Dockerfile).
+#
+# A multi-platform build runs the toolchain stages below on the builder's own platform, since what
+# they make (the bundled JavaScript, the pure JavaScript drivers) is the same on every platform. Only
+# `deps` runs on the target platform: it keeps that platform's native SQLite binary.
 
-# node:24-trixie-slim (Node 24, Debian 13), pinned 2026-11-07.
+# node:24-trixie-slim (Node 24, Debian 13), pinned 2026-11-07. `build-toolchain` below names the same
+# digest: move the two together.
 FROM node:24-trixie-slim@sha256:0820eaa85e07d0490446dd01d14707e17e6108a36988cf374899cd057eb3812d AS toolchain
 ENV CI=true \
     SKIP_INSTALL_SIMPLE_GIT_HOOKS=1 \
@@ -41,6 +49,20 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
 # hadolint ignore=DL3016
 RUN npm install --global "$(node -p 'require("./package.json").packageManager')"
 
+# The same toolchain on the builder's own platform, for the stages whose output is the same on
+# every platform. On a one-platform build the two are the same image.
+# node:24-trixie-slim (Node 24, Debian 13), pinned 2026-11-07, the digest `toolchain` names.
+FROM --platform=$BUILDPLATFORM node:24-trixie-slim@sha256:0820eaa85e07d0490446dd01d14707e17e6108a36988cf374899cd057eb3812d AS build-toolchain
+ENV CI=true \
+    SKIP_INSTALL_SIMPLE_GIT_HOOKS=1 \
+    NPM_CONFIG_UPDATE_NOTIFIER=false \
+    NPM_CONFIG_FUND=false \
+    NPM_CONFIG_AUDIT=false
+WORKDIR /build
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
+# hadolint ignore=DL3016
+RUN npm install --global "$(node -p 'require("./package.json").packageManager')"
+
 # dist/: the bundled command and its transform worker, side by side in dist/bin/.
 #
 # Both installs skip install scripts. better-sqlite3 carries its native binaries inside the package,
@@ -50,8 +72,9 @@ RUN npm install --global "$(node -p 'require("./package.json").packageManager')"
 #
 # The database server drivers are optional peer dependencies, which a production install leaves
 # out. scripts/copy-drivers.ts copies each one package.json's peerDependencies names, with every
-# package it loads, from this full install into /drivers, at the versions the lockfile pins.
-FROM toolchain AS build
+# package it loads, from this full install into /drivers, at the versions the lockfile pins. They are
+# pure JavaScript, so the copy made on the builder's platform loads on every target.
+FROM build-toolchain AS build
 RUN pnpm install --frozen-lockfile --ignore-scripts
 COPY scripts/copy-drivers.ts ./scripts/
 RUN node scripts/copy-drivers.ts . /drivers

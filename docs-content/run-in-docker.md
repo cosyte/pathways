@@ -12,7 +12,22 @@ Node.js 24 image: no shell and no package manager, so it has few packages to pat
 database driver, so one image stores messages in SQLite, PostgreSQL, MySQL or MariaDB, or SQL Server,
 as `pathways.yaml` says. It runs as the distroless `nonroot` user (uid 65532).
 
-We do not publish the image yet; build it from a clone of the repository:
+From the first release on, each release publishes the image to `ghcr.io/cosyte/pathways`, tagged
+with its version, for `linux/amd64` and `linux/arm64`, with an SBOM and build provenance, signed with
+cosign keyless signing by the release workflow. Pull it by version, or by digest once you have
+checked its signature:
+
+```bash
+docker pull ghcr.io/cosyte/pathways:<version>
+cosign verify ghcr.io/cosyte/pathways@sha256:<digest> \
+  --certificate-identity https://github.com/cosyte/pathways/.github/workflows/release.yml@refs/heads/main \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+To run your channels in production, build your project's own image on it, with the channels inside:
+see [Deploy the image](./deploy-the-image.md). The commands below mount a project folder instead,
+which suits development and trying it out. They name the image `pathways`; tag the pulled image so,
+or build it from a clone of the repository:
 
 ```bash
 git clone https://github.com/cosyte/pathways.git
@@ -114,6 +129,8 @@ docker run --rm -it --entrypoint /busybox/sh --volume "$PWD:/project" pathways:d
 
 ## Related
 
+- [Deploy the image](./deploy-the-image.md): your project's own image, built on this one, and
+  rollbacks.
 - [Store messages in a database server](./store-messages-in-a-database.md).
 - [Check status and health](./check-status-and-health.md): the health endpoint, for a monitor, and
   the probe listener, for a load balancer or an orchestrator.
