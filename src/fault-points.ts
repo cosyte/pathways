@@ -1,10 +1,14 @@
 // A test-only seam: named points in the engine and in storage where a crash test stops a real
-// process. It does nothing unless the process was started with PATHWAYS_TEST_FAULT_POINT set, which
-// no deployment sets. A test starts `pathways` in a child process with the variable naming one
-// point; when the child reaches that point it says so on stderr and freezes, with its connections
-// and transactions open, until the test ends it with SIGKILL (TerminateProcess on Windows). The
-// database then sees a dropped connection, as it would after a power cut, and the test restarts
-// the engine and checks what was kept.
+// process. It exists only in the source the tests run. The published build defines
+// `__PATHWAYS_FAULT_POINTS__` as false (tsup.config.ts), so there every point is a function that
+// does nothing, the code below that reads the variable or freezes is dropped from `dist`, and
+// PATHWAYS_TEST_FAULT_POINT, set or malformed, changes nothing; the tarball smoke checks both.
+//
+// In the source, a test starts `pathways` in a child process with PATHWAYS_TEST_FAULT_POINT naming
+// one point; when the child reaches that point it says so on stderr and freezes, with its
+// connections and transactions open, until the test ends it with SIGKILL (TerminateProcess on
+// Windows). The database then sees a dropped connection, as it would after a power cut, and the
+// test restarts the engine and checks what was kept.
 
 import { writeSync } from "node:fs";
 
@@ -85,14 +89,22 @@ function freeze(point: FaultPoint): void {
 /* v8 ignore stop */
 
 /**
- * Marks a named point. Inert, a call that returns at once, unless {@link FAULT_POINT_ENV} armed it.
+ * Whether this is the source the tests run. The build replaces the name with `false`; nothing
+ * defines it when the source runs directly, as the tests run it.
+ */
+declare const __PATHWAYS_FAULT_POINTS__: boolean | undefined;
+
+/**
+ * Marks a named point. Inert, a call that returns at once, unless {@link FAULT_POINT_ENV} armed it
+ * in the source the tests run; in the published build, always inert.
  *
  * @example
  * ```ts
  * faultPoint("after-send-before-record");
  * ```
  */
-export const faultPoint: (point: FaultPoint) => void = faultPoints(
-  process.env[FAULT_POINT_ENV],
-  freeze,
-);
+export const faultPoint: (point: FaultPoint) => void =
+  /* v8 ignore next 3 -- the build's branch: the tests run the source, where the name is undefined */
+  typeof __PATHWAYS_FAULT_POINTS__ !== "undefined" && !__PATHWAYS_FAULT_POINTS__
+    ? () => undefined
+    : faultPoints(process.env[FAULT_POINT_ENV], freeze);

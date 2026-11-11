@@ -248,24 +248,25 @@ async function killAt(setup: Project, args: readonly string[], armed: string): P
 }
 
 /**
- * Ends a run cleanly with exit code 0, or fails the test. On stderr the only line allowed is the
- * operator commands' warning that storage runs without TLS, as the test servers do.
+ * Ends a run cleanly with exit code 0 and nothing on stderr, or fails the test. `plaintextWarnings`
+ * is how many of the operator commands' warning that storage runs without TLS stderr must hold, and
+ * nothing else: one for `pathways replay` on a test server, which runs without TLS; none otherwise
+ * (`pathways start` logs it to stdout, and SQLite has no connection to warn about).
  */
-async function cleanly(ended: Promise<Ended>): Promise<void> {
+async function cleanly(ended: Promise<Ended>, plaintextWarnings = 0): Promise<void> {
   const { code, signal, stderr } = await ended;
-  const unexpected = stderr
-    .split("\n")
-    .filter(Boolean)
-    .filter((line) => {
-      let warning: { event?: unknown; endpoint?: unknown } = {};
-      try {
-        warning = JSON.parse(line) as typeof warning;
-      } catch {
-        // Not a log line: unexpected, and shown as it is.
-      }
-      return !(warning.event === "plaintext" && warning.endpoint === "storage");
-    });
-  expect({ code, signal, unexpected }).toEqual({ code: 0, signal: null, unexpected: [] });
+  const warning =
+    /^\{"level":40,"time":\d+,"pid":\d+,"hostname":"[^"]*","event":"plaintext","endpoint":"storage"\}$/;
+  const lines = stderr.split("\n").filter(Boolean);
+  expect({
+    code,
+    signal,
+    lines: lines.map((line) => (warning.test(line) ? "warning" : line)),
+  }).toEqual({
+    code: 0,
+    signal: null,
+    lines: Array.from({ length: plaintextWarnings }, () => "warning"),
+  });
 }
 
 /** Opens the project's database in this process, hands it to `read`, and closes it. */
@@ -402,7 +403,11 @@ for (const database of TEST_DATABASES) {
           expect((await store.auditEntries({ action: "resend", limit: 10 })).items).toEqual([]);
         });
 
-        await cleanly(run(setup, ["replay", "2", "--resend"]));
+        // On a server, the one line on stderr is the warning that storage runs without TLS.
+        await cleanly(
+          run(setup, ["replay", "2", "--resend"]),
+          setup.storage.url === undefined ? 0 : 1,
+        );
         await inStore(setup, async (store) => {
           expect(await store.message(2)).toMatchObject({ generation: 1 });
           const entries = (await store.auditEntries({ action: "resend", limit: 10 })).items;

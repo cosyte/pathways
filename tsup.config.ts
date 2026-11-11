@@ -17,6 +17,10 @@ import { configJsonSchemas } from "./src/config/schema.js";
  *
  * `shims` gives the CJS builds a working `import.meta.url`.
  *
+ * `define` sets `__PATHWAYS_FAULT_POINTS__` to false, which turns every crash-test fault point in
+ * src/fault-points.ts into a function that does nothing and drops the code that would freeze the
+ * process: the published package has no fault points, whatever PATHWAYS_TEST_FAULT_POINT says.
+ *
  * Once the entries are built, `onSuccess` writes the JSON Schemas of `channel.yaml` and
  * `pathways.yaml`, from the Zod schemas in src/config/schema.ts, to `schema/channel.json` and
  * `schema/project.json` at the package root, beside `dist/`. package.json exports each at its own
@@ -31,6 +35,7 @@ export default cosyteTsup({
     "bin/pathways-worker": "src/engine/worker-entry.ts",
   },
   shims: true,
+  define: { __PATHWAYS_FAULT_POINTS__: "false" },
   onSuccess: async () => {
     const dir = "schema";
     await mkdir(dir, { recursive: true });

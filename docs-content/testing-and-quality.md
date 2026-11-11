@@ -98,6 +98,12 @@ administrator URL is set, in `PATHWAYS_TEST_POSTGRES_URL` and its siblings;
 `PATHWAYS_TEST_ALL_DATABASES=1` for all four, and a missing URL fails the run instead of skipping
 that server.
 
+The crash tests stop a `pathways` process they start themselves at a named point, through the
+environment variable `PATHWAYS_TEST_FAULT_POINT`. It works only in the source the tests run. In a
+released build, the package from npm or the Docker image, it does nothing at all: the build leaves
+out the code that reads it, so setting it, to any value, changes nothing about how Pathways runs.
+The tarball smoke checks this on Linux, Windows and macOS.
+
 ## Current numbers
 
 The numbers for this section are measured on `main` at each release and filled in when the release
