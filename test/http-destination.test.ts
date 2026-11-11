@@ -8,7 +8,7 @@ import { RedirectHeld, RetryableError } from "../src/connectors/http-core.js";
 import { DeliveryRejected } from "../src/connectors/types.js";
 import { ADT_A01 } from "./helpers.js";
 import {
-  freePort,
+  CLOSED_PORT,
   makeCertificates,
   receiver,
   removeCertificates,
@@ -143,9 +143,8 @@ describe("HttpDestination", () => {
   );
 
   it("retries a refused connection with the network's code", async () => {
-    const port = await freePort();
     const error = await outcomeOf(
-      destination({ url: `http://127.0.0.1:${port}/in` }).deliver({
+      destination({ url: `http://127.0.0.1:${CLOSED_PORT}/in` }).deliver({
         messageId: 1,
         seq: 0,
         body: BODY,

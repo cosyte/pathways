@@ -22,13 +22,17 @@ import {
   type LogEvent,
 } from "./helpers.js";
 import {
-  freePort,
+  CLOSED_PORT,
   makeCertificates,
+  onPickedPorts,
+  pickPorts,
   receiver,
   removeCertificates,
   send,
+  sourceListening,
   status,
   type Certificates,
+  type PickOptions,
   type Receiver,
 } from "./net-helpers.js";
 
@@ -81,8 +85,8 @@ async function setUp(
     /** The source's block, or how to write it for the port picked for it. */
     source?: string | ((port: number) => string);
     destination?: string;
-    /** Picks the source's port: {@link freePort} unless a test says otherwise. */
-    pick?: () => Promise<number>;
+    /** Picks the source's port: {@link pickPorts} unless a test says otherwise. */
+    pick?: PickOptions["pick"];
   } = {},
 ): Promise<Setup> {
   const lab = await receiver(status(labAnswer), { cert: certs.serverCert, key: certs.serverKey });
@@ -94,9 +98,7 @@ async function setUp(
   const destination =
     options.destination ??
     `http: { url: "${lab.url}", headers: { Authorization: { env: LAB_AUTH } }, tls: { ca: ${certs.files.ca} } }`;
-  for (let attempt = 1; ; attempt += 1) {
-    const port = await (options.pick ?? freePort)();
-    const source = typeof write === "string" ? write : write(port);
+  const start = async (source: string, port: number): Promise<Setup> => {
     const root = await makeProject({
       "channels/adt/channel.yaml": `source:\n  ${source}\ntransform: ./transform.ts\ndestinations:\n  - ${destination}\n`,
       "channels/adt/transform.ts": LAB_TRANSFORM,
@@ -115,17 +117,19 @@ async function setUp(
     });
     engines.push(engine);
     await engine.start();
-    // freePort closes the port it found before the source binds it, and a test file in another
-    // worker can take it in between: the source is then down, and a request to the port reaches
-    // that file's listener instead. A port picked here is picked again; a block a test wrote
-    // itself, or a fifth try, is kept as it is.
-    const taken =
-      typeof write !== "string" &&
-      attempt < 5 &&
-      (await engine.health()).channels["adt"]?.source === "down";
-    if (!taken) return { engine, store, events, lines, clock, port, lab };
-    await engine.stop();
-  }
+    return { engine, store, events, lines, clock, port, lab };
+  };
+  // A block a test wrote itself is kept as it is, its port included.
+  if (typeof write === "string") return start(write, CLOSED_PORT);
+  return onPickedPorts(
+    1,
+    async ([port = 0]) => {
+      const setup = await start(write(port), port);
+      await sourceListening(setup.engine, "adt");
+      return setup;
+    },
+    options.pick === undefined ? {} : { pick: options.pick },
+  );
 }
 
 function post(port: number, body = ADT_A01, token = TOKEN): ReturnType<typeof send> {
@@ -140,13 +144,15 @@ function post(port: number, body = ADT_A01, token = TOKEN): ReturnType<typeof se
 describe("an HTTP channel in the engine", () => {
   it("is set up on another port when the one picked is taken before the source listens", async () => {
     // A listener in another test file's worker, which drops every connection, takes the port
-    // between freePort closing it and the source binding it.
+    // between its picking and the source binding it.
     const taken = createServer((socket) => socket.destroy());
     await new Promise<void>((resolve) => taken.listen(0, "127.0.0.1", resolve));
     closers.push(() => new Promise((resolve) => taken.close(() => resolve())));
     const { port: held } = taken.address() as AddressInfo;
-    const picks = [held];
-    const { port } = await setUp(200, { pick: () => Promise.resolve(picks.shift() ?? freePort()) });
+    const picks = [[held]];
+    const { port } = await setUp(200, {
+      pick: (count) => Promise.resolve(picks.shift() ?? pickPorts(count)),
+    });
     expect(port).not.toBe(held);
     expect((await post(port)).status).toBe(202);
   });
@@ -233,7 +239,7 @@ describe("an HTTP channel in the engine", () => {
     expect(lab.received).toEqual([]);
     await expect(
       setUp(200, {
-        source: `http: { port: ${await freePort()}, ${response}, ${tls} }`,
+        source: `http: { port: ${CLOSED_PORT}, ${response}, ${tls} }`,
         env: { PATHWAYS_HTTP_TOKEN: TOKEN, LAB_AUTH },
       }),
     ).rejects.toThrow(
@@ -366,7 +372,8 @@ describe("an HTTP channel in the engine", () => {
   });
 
   it("builds HTTP connectors from a channel's configuration", async () => {
-    const port = await freePort();
+    // Built, never started: nothing listens on the port.
+    const port = CLOSED_PORT;
     const root = await makeProject({
       "channels/adt/channel.yaml": `source:\n  http: { port: ${port}, plaintext: true, auth: none }\ndestinations:\n  - http: { url: "https://lab.example.test/", headers: { content-type: text/plain } }\n`,
     });
@@ -535,11 +542,10 @@ describe("health", () => {
       "pathways.yaml: health.auth: the environment variable PATHWAYS_HEALTH_TOKEN is not set",
     );
 
-    const port = await freePort();
     const secured = healthEndpointFor(
       {
         host: "127.0.0.1",
-        port,
+        port: 0,
         tls: { cert: certs.files.serverCert, key: certs.files.serverKey, ca: undefined },
         plaintext: false,
         auth: { kind: "bearer", env: "PATHWAYS_HEALTH_TOKEN" },
@@ -550,6 +556,7 @@ describe("health", () => {
     );
     await secured.start();
     closers.push(() => secured.stop());
+    const port = secured.port ?? 0;
     expect((await send(port, { method: "GET", ca: certs.ca })).status).toBe(401);
     expect(events.at(-1)).toMatchObject({ event: "http-refused", endpoint: "health", status: 401 });
   });
