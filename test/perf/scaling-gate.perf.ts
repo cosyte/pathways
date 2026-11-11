@@ -111,7 +111,9 @@ const jsonOptions: ScalingGateOptions<JsonInput, Promise<unknown>> = {
   name: "@cosyte/pathways decode, json",
   parse: decodeJson,
   weigh: () => 1,
-  count: { n: 2_000, generate: (i) => jsonInput(jsonRecord(i)) },
+  // 2,000 records measured a base phase of 3.8 ms once the read checked numbers in one pass, under
+  // the 4 ms floor, so the count axis runs at 6,000.
+  count: { n: 6_000, generate: (i) => jsonInput(jsonRecord(i)) },
   size: {
     // At 400 records against 1,600 the quadratic self-check measured a signal of 7.2, under the
     // ceiling of 8: the reviver's own cost per record is high enough that the hops need more
