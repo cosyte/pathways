@@ -247,10 +247,25 @@ async function killAt(setup: Project, args: readonly string[], armed: string): P
   return exited;
 }
 
-/** Ends a run cleanly with exit code 0 and nothing on stderr, or fails the test. */
+/**
+ * Ends a run cleanly with exit code 0, or fails the test. On stderr the only line allowed is the
+ * operator commands' warning that storage runs without TLS, as the test servers do.
+ */
 async function cleanly(ended: Promise<Ended>): Promise<void> {
   const { code, signal, stderr } = await ended;
-  expect({ code, signal, stderr }).toEqual({ code: 0, signal: null, stderr: "" });
+  const unexpected = stderr
+    .split("\n")
+    .filter(Boolean)
+    .filter((line) => {
+      let warning: { event?: unknown; endpoint?: unknown } = {};
+      try {
+        warning = JSON.parse(line) as typeof warning;
+      } catch {
+        // Not a log line: unexpected, and shown as it is.
+      }
+      return !(warning.event === "plaintext" && warning.endpoint === "storage");
+    });
+  expect({ code, signal, unexpected }).toEqual({ code: 0, signal: null, unexpected: [] });
 }
 
 /** Opens the project's database in this process, hands it to `read`, and closes it. */
