@@ -404,13 +404,16 @@ export class FakeClient extends EventEmitter {
     if (fakeServer.stallConnect) return;
     setImmediate(() => {
       if (fakeServer.connectError !== undefined) {
+        // As the real client can: a second error, a reset, after the first.
         this.emit("error", fakeServer.connectError);
+        this.emit("error", Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }));
         this.emit("close");
         return;
       }
       const accepted = config.hostVerifier?.(fakeServer.hostKey) ?? true;
       if (!accepted) {
         this.emit("error", Object.assign(new Error("Host denied"), { level: "handshake" }));
+        this.emit("error", Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }));
         this.emit("close");
         return;
       }

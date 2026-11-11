@@ -545,79 +545,79 @@ export class SftpLocation implements Location {
     } = this.options;
     const client = new Ssh();
     let refused: HostKeyError | undefined;
-    const session = await new Promise<Session>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        reject(timedOut("connection"));
-        client.destroy();
-      }, connectTimeoutMs);
-      const fail = (error: Error): void => {
-        clearTimeout(timer);
-        reject(error);
-      };
-      client.once("error", (error: Error & { level?: unknown }) => {
-        fail(refused ?? connectError(error));
-      });
-      client.once("close", () => {
-        fail(refused ?? lost());
-      });
-      client.once("ready", () => {
-        client.sftp((error, sftp) => {
-          if (error !== undefined) {
-            fail(lost());
-            client.destroy();
-            return;
-          }
-          clearTimeout(timer);
-          resolve({
-            client,
-            sftp,
-            extensions: extensionsOf(sftp),
-            pending: new Set(),
-            closed: false,
-          });
-        });
-      });
-      const config: ConnectConfig = {
-        host,
-        port,
-        username: user,
-        privateKey,
-        ...(passphrase === undefined ? {} : { passphrase }),
-        readyTimeout: connectTimeoutMs,
-        keepaliveInterval: keepaliveMs,
-        keepaliveCountMax: KEEPALIVE_COUNT_MAX,
-        algorithms: algorithms(weakAlgorithms),
-        // Always set: the client accepts any key when it has no check.
-        hostVerifier: (key: Buffer) => {
-          try {
-            verifyHost(host, port, key);
-            return true;
-          } catch (error) {
-            refused = Object.assign(error as HostKeyError, { down: true });
-            return false;
-          }
-        },
-      };
-      try {
-        client.connect(config);
-      } catch {
-        // The client reads the key before it connects, and throws when it cannot: never its words.
-        fail(
-          failure(
-            "ERR_PATHWAYS_SFTP_KEY_INVALID",
-            "the SFTP private key could not be read, or its passphrase is wrong",
-            true,
-          ),
-        );
-      }
-    });
-    // Once up, a drop fails each request in flight and the next one connects again.
-    client.on("error", () => {
-      this.drop(session, lost());
+    let up: Session | undefined;
+    const connected = Promise.withResolvers<Session>();
+    const timer = setTimeout(() => {
+      connected.reject(timedOut("connection"));
+      client.destroy();
+    }, connectTimeoutMs);
+    const fail = (error: Error): void => {
+      clearTimeout(timer);
+      connected.reject(error);
+    };
+    // For the client's whole life, and never once: a client can emit more than one error (a reset
+    // after a refused handshake), and an error with no listener would stop the process. Before the
+    // connection is up each fails the connect; after, each drops it.
+    client.on("error", (error: Error & { level?: unknown }) => {
+      if (up === undefined) fail(refused ?? connectError(error));
+      else this.drop(up, lost());
     });
     client.on("close", () => {
-      this.drop(session, lost());
+      if (up === undefined) fail(refused ?? lost());
+      else this.drop(up, lost());
     });
+    client.once("ready", () => {
+      client.sftp((error, sftp) => {
+        if (error !== undefined) {
+          fail(lost());
+          client.destroy();
+          return;
+        }
+        clearTimeout(timer);
+        up = {
+          client,
+          sftp,
+          extensions: extensionsOf(sftp),
+          pending: new Set(),
+          closed: false,
+        };
+        connected.resolve(up);
+      });
+    });
+    const config: ConnectConfig = {
+      host,
+      port,
+      username: user,
+      privateKey,
+      ...(passphrase === undefined ? {} : { passphrase }),
+      readyTimeout: connectTimeoutMs,
+      keepaliveInterval: keepaliveMs,
+      keepaliveCountMax: KEEPALIVE_COUNT_MAX,
+      algorithms: algorithms(weakAlgorithms),
+      // Always set: the client accepts any key when it has no check.
+      hostVerifier: (key: Buffer) => {
+        try {
+          verifyHost(host, port, key);
+          return true;
+        } catch (error) {
+          refused = Object.assign(error as HostKeyError, { down: true });
+          return false;
+        }
+      },
+    };
+    try {
+      client.connect(config);
+    } catch {
+      // The client reads the key before it connects, and throws when it cannot: never its words.
+      fail(
+        failure(
+          "ERR_PATHWAYS_SFTP_KEY_INVALID",
+          "the SFTP private key could not be read, or its passphrase is wrong",
+          true,
+        ),
+      );
+    }
+    const session = await connected.promise;
     if (!session.extensions.posixRename) {
       session.closed = true;
       client.destroy();
