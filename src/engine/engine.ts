@@ -26,6 +26,7 @@ import { HookSet } from "../extensions/hooks.js";
 import type { ChannelContext } from "../extensions/types.js";
 import { AuditLog, auditEvent } from "../operator/audit.js";
 import { recordRetention, runRetention, type RetentionReport } from "../operator/retention.js";
+import { copiesBodies, markCopiesBodies, release } from "../storage/ownership.js";
 import type { MessageStore, ReceivedMessage } from "../storage/store.js";
 import { ChannelWorker, type TransformOutcome } from "./channel-worker.js";
 import { channelStatus, type ChannelHealth, type HealthReport } from "./health.js";
@@ -592,7 +593,7 @@ export class Engine {
   private sinkFor(channel: RunningChannel): MessageSink {
     const { config } = channel;
     const { store, logger } = this.options;
-    return {
+    const sink: MessageSink = {
       receive: async (body, options = {}) => {
         const { duplicateKey, idempotencyKey, resumed, failure } = options;
         let received: ReceivedMessage;
@@ -650,17 +651,24 @@ export class Engine {
         return received.id;
       },
     };
+    // A store that copies each body it stores makes a sink that keeps none, so a source may free a
+    // body it is done with once it is stored.
+    return copiesBodies(store) ? markCopiesBodies(sink) : sink;
   }
 
   private async transformAll(channel: RunningChannel): Promise<void> {
     const { config, worker } = channel;
     const { store, logger } = this.options;
+    // A store that copies bodies hands each one over to whoever reads it, and keeps none it stores:
+    // the body moves to the worker rather than being copied, and the outputs are freed once stored.
+    const owned = copiesBodies(store);
     for (;;) {
       const next = await store.nextToTransform(config.name);
       if (next === undefined) return;
-      const outcome: TransformOutcome = await worker.run(next.body);
+      const outcome: TransformOutcome = await worker.run(next.body, { transfer: owned });
       if (outcome.ok) {
         await store.completeTransform(next.id, outcome.outputs, config.destinations.length);
+        if (owned) for (const output of outcome.outputs) release(output);
         const outputs = outcome.outputs.length;
         logger.info({
           event: outputs === 0 ? "filtered" : "transformed",
@@ -768,6 +776,8 @@ export class Engine {
           }));
           break;
         }
+        // Delivered: freed now when the store handed it over and the destination kept none of it.
+        if (copiesBodies(store) && copiesBodies(destination)) release(delivery.body);
         await store.markDelivered(delivery.id);
         logger.info({
           event: "delivered",

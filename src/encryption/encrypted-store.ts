@@ -20,6 +20,7 @@ import type {
   StoredMessage,
   StoreReceiveOptions,
 } from "../storage/store.js";
+import { copiesBodies, markCopiesBodies, release } from "../storage/ownership.js";
 import {
   decrypt,
   decryptText,
@@ -41,6 +42,8 @@ interface Codec {
   storeText(text: string): Promise<string>;
   /** An error text, on its way out of storage: to an operator command, never to a log. */
   readText(stored: string): Promise<string>;
+  /** Whether a stored body is a copy of its own, never the body handed in or read out. */
+  readonly copies: boolean;
 }
 
 /**
@@ -51,10 +54,38 @@ interface Codec {
 abstract class CodecStore implements MessageStore {
   readonly #inner: MessageStore;
   readonly #codec: Codec;
+  /** Whether the store underneath keeps no body it is handed, and reads each into a buffer of its own. */
+  readonly #innerCopies: boolean;
 
   protected constructor(inner: MessageStore, codec: Codec) {
     this.#inner = inner;
     this.#codec = codec;
+    this.#innerCopies = copiesBodies(inner);
+    // A codec that copies keeps no body it is handed and reads each into a new buffer; one that does
+    // not passes bodies straight through, so this store copies when the one underneath does.
+    if (codec.copies || this.#innerCopies) markCopiesBodies(this);
+  }
+
+  /**
+   * Passes a body through the codec on its way in, runs `write` with what is to be stored, then
+   * frees that copy when the store underneath has kept none of it.
+   */
+  async #stored<T>(
+    bodies: readonly Uint8Array[],
+    write: (stored: Uint8Array[]) => Promise<T>,
+  ): Promise<T> {
+    const stored: Uint8Array[] = [];
+    for (const body of bodies) stored.push(await this.#codec.storeBody(body));
+    const result = await write(stored);
+    if (this.#codec.copies && this.#innerCopies) for (const copy of stored) release(copy);
+    return result;
+  }
+
+  /** Reads a stored body back through the codec, then frees the stored copy when it is this store's own. */
+  async #read(stored: Uint8Array): Promise<Uint8Array> {
+    const body = await this.#codec.readBody(stored);
+    if (this.#codec.copies && this.#innerCopies) release(stored);
+    return body;
   }
 
   /** Stores an incoming message, its body and any failure reason passed through the codec. */
@@ -64,18 +95,18 @@ abstract class CodecStore implements MessageStore {
     options: StoreReceiveOptions = {},
   ): Promise<ReceivedMessage> {
     const { failure } = options;
-    return this.#inner.receive(channel, await this.#codec.storeBody(body), {
-      ...options,
-      failure: failure === undefined ? undefined : await this.#codec.storeText(failure),
-    });
+    return this.#stored([body], async ([stored]) =>
+      this.#inner.receive(channel, stored as Uint8Array, {
+        ...options,
+        failure: failure === undefined ? undefined : await this.#codec.storeText(failure),
+      }),
+    );
   }
 
   /** The oldest message of `channel` waiting for its transform, its body read back. */
   async nextToTransform(channel: string): Promise<PendingMessage | undefined> {
     const next = await this.#inner.nextToTransform(channel);
-    return next === undefined
-      ? undefined
-      : { ...next, body: await this.#codec.readBody(next.body) };
+    return next === undefined ? undefined : { ...next, body: await this.#read(next.body) };
   }
 
   /** Records a transform's outputs, each passed through the codec once for every destination. */
@@ -84,9 +115,9 @@ abstract class CodecStore implements MessageStore {
     outputs: readonly Uint8Array[],
     destinations: number,
   ): Promise<void> {
-    const stored: Uint8Array[] = [];
-    for (const output of outputs) stored.push(await this.#codec.storeBody(output));
-    await this.#inner.completeTransform(messageId, stored, destinations);
+    await this.#stored(outputs, (stored) =>
+      this.#inner.completeTransform(messageId, stored, destinations),
+    );
   }
 
   /** Marks a message failed, its error passed through the codec. */
@@ -97,9 +128,7 @@ abstract class CodecStore implements MessageStore {
   /** The oldest pending delivery for one destination, its body read back. */
   async nextDelivery(channel: string, destination: number): Promise<PendingDelivery | undefined> {
     const next = await this.#inner.nextDelivery(channel, destination);
-    return next === undefined
-      ? undefined
-      : { ...next, body: await this.#codec.readBody(next.body) };
+    return next === undefined ? undefined : { ...next, body: await this.#read(next.body) };
   }
 
   /** Marks a delivery done. */
@@ -157,7 +186,7 @@ abstract class CodecStore implements MessageStore {
   /** One message's body as it arrived, read back. */
   async messageBody(id: number): Promise<Uint8Array | undefined> {
     const body = await this.#inner.messageBody(id);
-    return body === undefined ? undefined : this.#codec.readBody(body);
+    return body === undefined ? undefined : this.#read(body);
   }
 
   /** A message's deliveries, without bodies, each error text read back. */
@@ -173,9 +202,7 @@ abstract class CodecStore implements MessageStore {
   /** The outputs of a message's current generation, each read back. */
   async outputs(messageId: number): Promise<Uint8Array[]> {
     const read: Uint8Array[] = [];
-    for (const output of await this.#inner.outputs(messageId)) {
-      read.push(await this.#codec.readBody(output));
-    }
+    for (const output of await this.#inner.outputs(messageId)) read.push(await this.#read(output));
     return read;
   }
 
@@ -194,17 +221,17 @@ abstract class CodecStore implements MessageStore {
    * passed through the codec.
    */
   async requeue(messageId: number, request: RequeueRequest, actor: string): Promise<RequeueResult> {
-    const outputs: Uint8Array[] = [];
-    for (const output of request.outputs) outputs.push(await this.#codec.storeBody(output));
     const { failure } = request;
-    return this.#inner.requeue(
-      messageId,
-      {
-        ...request,
-        outputs,
-        failure: failure === undefined ? undefined : await this.#codec.storeText(failure),
-      },
-      actor,
+    return this.#stored(request.outputs, async (outputs) =>
+      this.#inner.requeue(
+        messageId,
+        {
+          ...request,
+          outputs,
+          failure: failure === undefined ? undefined : await this.#codec.storeText(failure),
+        },
+        actor,
+      ),
     );
   }
 
@@ -266,6 +293,7 @@ export class EncryptedStore extends CodecStore {
       readBody: (stored) => decrypt(stored, keys),
       storeText: (text) => encryptText(text, keys),
       readText: (stored) => decryptText(stored, keys),
+      copies: true,
     });
   }
 }
@@ -295,6 +323,7 @@ export class UnencryptedStore extends CodecStore {
         isEncryptedText(stored)
           ? Promise.reject(new EncryptionError("ERR_PATHWAYS_ENCRYPTED"))
           : Promise.resolve(stored),
+      copies: false,
     });
   }
 }

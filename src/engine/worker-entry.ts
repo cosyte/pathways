@@ -539,6 +539,31 @@ function locate(error: unknown, transformFile: string): string | undefined {
   return undefined;
 }
 
+/**
+ * The buffers of `outputs` that can move to the engine rather than be copied: each a view over the
+ * whole of its own buffer (as `encode` makes them), each buffer once. The worker keeps none of them.
+ *
+ * @example
+ * ```ts
+ * transferable([new TextEncoder().encode("a")]).length; // 1
+ * ```
+ */
+export function transferable(outputs: readonly Uint8Array[]): ArrayBuffer[] {
+  const buffers = new Set<ArrayBuffer>();
+  for (const output of outputs) {
+    const { buffer } = output;
+    if (
+      buffer instanceof ArrayBuffer &&
+      output.byteOffset === 0 &&
+      output.byteLength === buffer.byteLength &&
+      buffer.byteLength > 0
+    ) {
+      buffers.add(buffer);
+    }
+  }
+  return [...buffers];
+}
+
 /* v8 ignore start: runs only inside a worker thread, which the coverage of the test process does not
    reach. The functions above carry the logic and are tested directly. */
 // No top-level await: the shared build also emits this entry as CommonJS.
@@ -553,7 +578,10 @@ if (!isMainThread && parentPort !== null && isWorkerSetup(workerData)) {
       port.on("message", (request: TransformRequest) => {
         runTransform(transform, setup.format, request.body).then(
           (outputs) =>
-            port.postMessage({ id: request.id, ok: true, outputs } satisfies TransformReply),
+            port.postMessage(
+              { id: request.id, ok: true, outputs } satisfies TransformReply,
+              transferable(outputs),
+            ),
           (error: unknown) =>
             port.postMessage({
               id: request.id,

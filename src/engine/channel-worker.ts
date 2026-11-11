@@ -1,5 +1,6 @@
 import { Worker } from "node:worker_threads";
 
+import { ownsBuffer } from "../storage/ownership.js";
 import type {
   FailureSummary,
   TransformReply,
@@ -97,9 +98,14 @@ export class ChannelWorker {
     this.worker ??= await this.spawn();
   }
 
-  /** Transforms one message. Calls are queued, so outputs come back in the order messages went in. */
-  run(body: Uint8Array): Promise<TransformOutcome> {
-    const result = this.queue.then(() => this.runOne(body));
+  /**
+   * Transforms one message. Calls are queued, so outputs come back in the order messages went in.
+   * With `transfer`, a body over the whole of its own buffer moves to the worker instead of being
+   * copied, and reads as empty here once sent: pass it only for a body nothing else holds.
+   */
+  run(body: Uint8Array, options: { readonly transfer?: boolean } = {}): Promise<TransformOutcome> {
+    const transfer = options.transfer === true;
+    const result = this.queue.then(() => this.runOne(body, transfer));
     this.queue = result.catch(() => undefined);
     return result;
   }
@@ -159,7 +165,7 @@ export class ChannelWorker {
     });
   }
 
-  private async runOne(body: Uint8Array): Promise<TransformOutcome> {
+  private async runOne(body: Uint8Array, transfer: boolean): Promise<TransformOutcome> {
     await this.start();
     const worker = this.worker;
     /* v8 ignore next: start() either sets the worker or throws */
@@ -210,7 +216,10 @@ export class ChannelWorker {
       worker.on("message", onReply);
       worker.on("error", onError);
       worker.on("exit", onExit);
-      worker.postMessage({ id, body } satisfies TransformRequest);
+      worker.postMessage(
+        { id, body } satisfies TransformRequest,
+        transfer && ownsBuffer(body) ? [body.buffer as ArrayBuffer] : [],
+      );
     });
   }
 }
