@@ -1,7 +1,19 @@
 import { randomBytes } from "node:crypto";
-import { mkdir, open, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { constants } from "node:fs";
+import {
+  lstat,
+  mkdir,
+  open,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
+import { dirname, join, posix, resolve } from "node:path";
 
+import { DEFAULT_READ_TRIES, type PathPattern } from "../config/schema.js";
 import { copiesBodies, markCopiesBodies, ownsBuffer, release } from "../storage/ownership.js";
 import type {
   DestinationConnector,
@@ -26,51 +38,63 @@ export const PROCESSED_DIR = "processed";
 export const CLAIMED_DIR = ".claimed";
 
 /**
- * A claimed file's name: the claim's id, then a hyphen and the file's own name. The id is the pass's
- * time in epoch milliseconds, 15 digits, the file's place in the pass, 8 digits, so claims sort in
- * the order they were made, and a random part: 33 bytes. When the whole name does not fit in
- * {@link NAME_MAX} bytes, the claim keeps as much of the end of the file's name as fits.
+ * A claimed file's name: the claim's id, then a hyphen and the file's path from the source folder,
+ * with each `%` written `%25` and each `/` written `%2F`, so the name is one segment and two files
+ * of one name in different subfolders never share a claim. The id is the pass's time in epoch
+ * milliseconds, 15 digits, the file's place in the pass, 8 digits, so claims sort in the order they
+ * were made, and a random part: 33 bytes. When the whole name does not fit in {@link NAME_MAX}
+ * bytes, the claim keeps as much of the end of the path as fits.
  */
 const CLAIM_NAME = /^\d{15}\.\d{8}\.[0-9a-f]{8}-(.+)$/s;
 
 /** The longest file name, in bytes, that the common Linux file systems take. */
 const NAME_MAX = 255;
 
-/** A file in a file source, ready to be read. */
+/** A file in a file source, claimed or ready to be claimed. */
 export interface SourceFile {
   readonly name: string;
   readonly path: string;
 }
 
+/** Why a file source set a file aside, or would have with an error folder. */
+export type FileFaultReason = "too-large" | "unreadable";
+
 /**
- * The files in `dir` ready to be read, oldest name first: regular files, not hidden, untouched for at
- * least `minAgeMs` so a file still being written is left for a later pass. Creates `dir` if missing.
- *
- * @example
- * ```ts
- * const files = await readyFiles("./inbox", 1_000, Date.now());
- * ```
+ * A file a source will not store: larger than `maxSize`, or one it failed to open on `readTries`
+ * passes in a row. `moved` says whether it went into `errorDir`; `error` is why it could not, when
+ * a move was tried and failed.
  */
-export async function readyFiles(
-  dir: string,
-  minAgeMs: number,
-  now: number,
-): Promise<SourceFile[]> {
-  await mkdir(dir, { recursive: true });
-  const entries = await readdir(dir, { withFileTypes: true });
-  const ready: SourceFile[] = [];
-  for (const entry of entries) {
-    if (!entry.isFile() || entry.name.startsWith(".")) continue;
-    const path = join(dir, entry.name);
-    const { mtimeMs } = await stat(path);
-    if (now - mtimeMs >= minAgeMs) ready.push({ name: entry.name, path });
-  }
-  return byName(ready);
+export interface FileFault {
+  readonly reason: FileFaultReason;
+  readonly moved: boolean;
+  readonly error?: unknown;
+}
+
+/** A file found in a pass: its path from the source folder, with `/`, and where it is. */
+interface Found {
+  readonly rel: string;
+  readonly path: string;
+}
+
+/** A found file that is ready to be claimed, with its size and change time. */
+interface Ready extends Found {
+  readonly size: number;
+  readonly mtimeMs: number;
+}
+
+/** A claimed file, with its path from the source folder when it was claimed. */
+interface Claimed extends SourceFile {
+  readonly rel: string;
 }
 
 /** Sorts files by name, as code units compare (not by locale), oldest claim or name first. */
 function byName<T extends { readonly name: string }>(files: T[]): T[] {
-  return files.sort((a, b) => Number(a.name > b.name) - Number(a.name < b.name));
+  return files.sort((a, b) => compare(a.name, b.name));
+}
+
+/** Compares two strings as code units, not by locale. */
+function compare(a: string, b: string): number {
+  return Number(a > b) - Number(a < b);
 }
 
 /**
@@ -86,6 +110,23 @@ function fitted(prefix: string, name: string): string {
     kept.push(character);
   }
   return prefix + kept.reverse().join("");
+}
+
+/** A path from the source folder as one name: `%` as `%25`, then `/` as `%2F`. */
+function encodePath(rel: string): string {
+  return rel.replaceAll("%", "%25").replaceAll("/", "%2F");
+}
+
+/** The path {@link encodePath} wrote. */
+function decodePath(name: string): string {
+  return name.replace(/%(25|2F)/g, (_, code: string) => (code === "25" ? "%" : "/"));
+}
+
+/** A test of a path against one {@link PathPattern}. */
+function matcher(pattern: PathPattern): (rel: string) => boolean {
+  if ("glob" in pattern) return (rel) => posix.matchesGlob(rel, pattern.glob);
+  const expression = new RegExp(pattern.regex, "u");
+  return (rel) => expression.test(rel);
 }
 
 /**
@@ -119,6 +160,47 @@ export interface FileSourceOptions {
    * message in plaintext, outside the encrypted store, so it is off by default.
    */
   readonly keepProcessed?: boolean;
+  /**
+   * Only files whose path from `dir`, written with `/` on every platform, matches one of these are
+   * taken. A glob's `*` never matches a leading dot. Default: every file.
+   */
+  readonly include?: readonly PathPattern[];
+  /** Files whose path matches one of these are left. Default: none. */
+  readonly exclude?: readonly PathPattern[];
+  /**
+   * Reads the subfolders too, but never `.claimed/`, `processed/` or `errorDir`. Default false.
+   * Symbolic links, to files or folders, are never followed.
+   */
+  readonly recursive?: boolean;
+  /** Leaves files and folders whose name starts with a dot. Default true. */
+  readonly ignoreDot?: boolean;
+  /** The smallest file taken, in bytes; a smaller one is left. Default 1: an empty file is left. */
+  readonly minSize?: number;
+  /** The largest file taken, in bytes; a larger one is set aside. Default: no limit. */
+  readonly maxSize?: number | undefined;
+  /** The most files claimed in one pass. Default: no limit. */
+  readonly maxPerPoll?: number | undefined;
+  /** The order files are claimed in: by path (the default) or oldest change first. */
+  readonly sortBy?: "name" | "mtime";
+  /**
+   * Takes a file only once a pass finds the size and change time the pass before it found, as well
+   * as `minAgeMs` old. Held in memory, so the first pass after a start takes nothing. Default false.
+   */
+  readonly stable?: boolean;
+  /**
+   * Takes a file only once a file of the same path plus this suffix is there (`a.hl7.done` for
+   * `a.hl7` with `.done`), and deletes that marker once the file is claimed. Default: none.
+   */
+  readonly doneFile?: string | undefined;
+  /**
+   * Where a file goes, under its path from `dir`, when it is larger than `maxSize` or fails to open
+   * on `readTries` passes in a row. Never a message that fails later. Default: none, so it stays.
+   */
+  readonly errorDir?: string | undefined;
+  /** How many passes in a row a file fails to open before it goes into `errorDir`. Default 3. */
+  readonly readTries?: number;
+  /** Told of each file set aside, or that would have been with an `errorDir`. */
+  readonly onFileFault?: (fault: FileFault) => void;
 }
 
 /**
@@ -132,7 +214,15 @@ export interface FileSourceOptions {
  * `resumed`, the store answers with the message it already holds, and the file is deleted. Because
  * the moves are on disk before anything is stored, a power cut cannot put a stored file back in the
  * folder to be claimed again. So nothing is lost and nothing is stored twice. With `keepProcessed`,
- * the file moves into `processed/`, prefixed with the message id, instead of being deleted.
+ * the file moves into `processed/`, under its path from the folder, prefixed with the message id,
+ * instead of being deleted.
+ *
+ * A file is ready when it is a regular file (never a symbolic link), its path passes `include` and
+ * `exclude`, it has sat for `minAgeMs`, it holds at least `minSize` bytes, and, as set, it was the
+ * same at the pass before (`stable`) and its marker is there (`doneFile`). A ready file larger than
+ * `maxSize`, by the size read before the claim or by the open file's own, is not claimed: it moves
+ * into `errorDir` when one is set and otherwise stays where it is. So does one that fails to open on
+ * `readTries` passes in a row.
  *
  * How the moves reach the disk depends on the platform. On Linux and macOS the pass flushes the
  * folders the files moved between. On Windows a folder cannot be flushed that way: Node's `fsync`
@@ -152,13 +242,21 @@ export interface FileSourceOptions {
  */
 export class FileSource implements SourceConnector {
   private readonly options: FileSourceOptions;
+  private readonly include: readonly ((rel: string) => boolean)[];
+  private readonly exclude: readonly ((rel: string) => boolean)[];
+  /** The size and change time of each file the last pass found, for `stable`. */
+  private seen = new Map<string, string>();
+  /** How many passes in a row each file has failed to open, for `readTries`. */
+  private tries = new Map<string, number>();
 
   /**
    * @param options The folder to read, the channel it is read for, how long a file must sit before
-   * it is read, and what to keep.
+   * it is read, which files to take, and what to keep.
    */
   constructor(options: FileSourceOptions) {
     this.options = options;
+    this.include = (options.include ?? []).map(matcher);
+    this.exclude = (options.exclude ?? []).map(matcher);
   }
 
   /**
@@ -176,47 +274,189 @@ export class FileSource implements SourceConnector {
     for (const file of await this.claim(claims)) await this.store(file, sink, false);
   }
 
+  /** Whether a path from the source folder passes `include` and `exclude`. */
+  private matches(rel: string): boolean {
+    const included = this.include.length === 0 || this.include.some((test) => test(rel));
+    return included && !this.exclude.some((test) => test(rel));
+  }
+
+  /**
+   * The files the pass finds: regular files whose path matches, in `dir` and, with `recursive`, its
+   * subfolders, never `.claimed/`, `processed/` or `errorDir`. With `doneFile`, the markers found
+   * are returned apart. Creates `dir` if missing.
+   */
+  private async find(): Promise<{ found: Found[]; markers: Set<string> }> {
+    const {
+      dir,
+      recursive = false,
+      ignoreDot = true,
+      doneFile,
+      errorDir,
+      onReadError,
+    } = this.options;
+    const errors = errorDir === undefined ? undefined : resolve(errorDir);
+    await mkdir(dir, { recursive: true });
+    const found: Found[] = [];
+    const markers = new Set<string>();
+    const walk = async (folder: string, under: string): Promise<void> => {
+      for (const entry of await readdir(folder, { withFileTypes: true })) {
+        const rel = `${under}${entry.name}`;
+        const path = join(folder, entry.name);
+        // The claim folder is passed over even when dot files are read.
+        if (rel === CLAIMED_DIR || (ignoreDot && entry.name.startsWith("."))) continue;
+        if (entry.isDirectory()) {
+          if (!recursive || rel === PROCESSED_DIR || resolve(path) === errors) continue;
+          // A subfolder that cannot be read is said, and the rest of the pass goes on.
+          await walk(path, `${rel}/`).catch((error: unknown) => onReadError?.(error));
+        } else if (!entry.isFile()) {
+          // A symbolic link, to a file or a folder, a pipe or a device: never read.
+        } else if (doneFile !== undefined && rel.endsWith(doneFile)) {
+          markers.add(rel);
+        } else if (this.matches(rel)) {
+          found.push({ rel, path });
+        }
+      }
+    };
+    await walk(dir, "");
+    return { found, markers };
+  }
+
+  /** The files ready to be claimed this pass, in the order they are to be claimed. */
+  private async ready(now: number): Promise<Ready[]> {
+    const { minAgeMs, minSize = 1, stable = false, doneFile, sortBy = "name" } = this.options;
+    const { found, markers } = await this.find();
+    const seen = new Map<string, string>();
+    const tries = new Map<string, number>();
+    const ready: Ready[] = [];
+    for (const file of found) {
+      // lstat, not stat: a file swapped for a link meanwhile is refused when it is opened below.
+      const { size, mtimeMs } = await lstat(file.path);
+      const state = `${String(size)}:${String(mtimeMs)}`;
+      const unchanged = this.seen.get(file.rel) === state;
+      seen.set(file.rel, state);
+      const tried = this.tries.get(file.rel);
+      if (tried !== undefined) tries.set(file.rel, tried);
+      if (now - mtimeMs < minAgeMs || size < minSize || (stable && !unchanged)) continue;
+      if (doneFile !== undefined && !markers.has(`${file.rel}${doneFile}`)) continue;
+      ready.push({ ...file, size, mtimeMs });
+    }
+    // Only files found this pass are remembered, so a file that left is forgotten.
+    this.seen = seen;
+    this.tries = tries;
+    return ready.sort(
+      (a, b) => (sortBy === "mtime" ? a.mtimeMs - b.mtimeMs : 0) || compare(a.rel, b.rel),
+    );
+  }
+
   /**
    * Moves each ready file into the channel's claim folder, then flushes the moves to disk, once a
-   * pass that claims anything: on Linux and macOS the claim folder, `.claimed/` and the source
-   * folder; on Windows each claimed file, under its claimed name.
+   * pass that claims anything: on Linux and macOS the claim folder, `.claimed/`, the source folder
+   * and each subfolder a file left; on Windows each claimed file, under its claimed name.
    */
-  private async claim(claims: string): Promise<SourceFile[]> {
-    const { dir, minAgeMs, now = Date.now, onReadError } = this.options;
+  private async claim(claims: string): Promise<Claimed[]> {
+    const { dir, now = Date.now, onReadError, doneFile } = this.options;
+    const { maxSize = Infinity, maxPerPoll = Infinity } = this.options;
     // Read on each pass, not at load, so the Windows path can be driven from any platform's tests.
     const windows = process.platform === "win32";
+    // Never through a symbolic link: O_NOFOLLOW refuses one put in a file's place since it was found.
+    // Windows has no such flag, and Node gives it as undefined there.
+    const flags = windows ? constants.O_RDWR : constants.O_RDONLY | constants.O_NOFOLLOW;
     const at = String(now()).padStart(15, "0");
-    const taken: SourceFile[] = [];
-    for (const file of await readyFiles(dir, minAgeMs, now())) {
+    const taken: Claimed[] = [];
+    for (const file of await this.ready(now())) {
+      if (taken.length >= maxPerPoll) break;
+      if (file.size > maxSize) {
+        await this.setAside(file, "too-large");
+        continue;
+      }
       const place = String(taken.length).padStart(8, "0");
-      const name = fitted(`${at}.${place}.${randomBytes(4).toString("hex")}-`, file.name);
+      const name = fitted(
+        `${at}.${place}.${randomBytes(4).toString("hex")}-`,
+        encodePath(file.rel),
+      );
       const path = join(claims, name);
+      let handle;
       try {
         // Opened before the move, so a file that cannot be read stays where it is. On Windows it is
         // opened to write too, as flushing it below needs, so a file that cannot be flushed stays.
-        const handle = await open(file.path, windows ? "r+" : "r");
-        try {
-          await rename(file.path, path);
-        } finally {
-          await handle.close();
-        }
+        handle = await open(file.path, flags);
+      } catch (error) {
+        onReadError?.(error);
+        await this.unreadable(file);
+        continue;
+      }
+      this.tries.delete(file.rel);
+      let grown: boolean;
+      try {
+        // The open file's own size: a file that grew since it was found is held to maxSize too.
+        grown = (await handle.stat()).size > maxSize;
+        if (!grown) await rename(file.path, path);
       } catch (error) {
         onReadError?.(error);
         continue;
+      } finally {
+        await handle.close();
       }
-      taken.push({ name, path });
+      if (grown) {
+        await this.setAside(file, "too-large");
+        continue;
+      }
+      taken.push({ name, path, rel: file.rel });
     }
     if (windows) {
       for (const file of taken) await flush(file.path, "r+");
     } else if (taken.length > 0) {
       await flush(claims, "r");
       await flush(join(dir, CLAIMED_DIR), "r");
-      await flush(dir, "r");
+      const left = new Set(taken.map((file) => dirname(join(dir, ...file.rel.split("/")))));
+      for (const folder of left) await flush(folder, "r");
+    }
+    // Each marker goes once its file's claim is on disk, so a power cut cannot leave a file unmarked.
+    if (doneFile !== undefined) {
+      for (const file of taken) await rm(join(dir, `${file.rel}${doneFile}`), { force: true });
     }
     return taken;
   }
 
-  /** Stores a claimed file under its claimed name, then deletes it or moves it into processed/. */
+  /** Counts a pass that failed to open `file`, and sets it aside after `readTries` in a row. */
+  private async unreadable(file: Found): Promise<void> {
+    const { errorDir, readTries = DEFAULT_READ_TRIES } = this.options;
+    const tries = (this.tries.get(file.rel) ?? 0) + 1;
+    this.tries.set(file.rel, tries);
+    if (errorDir !== undefined && tries >= readTries) await this.setAside(file, "unreadable");
+  }
+
+  /**
+   * Moves `file` into `errorDir` under its path from the source folder, as it arrived, never over a
+   * file already there; or, with no `errorDir`, leaves it. Either way says so.
+   */
+  private async setAside(file: Found, reason: FileFaultReason): Promise<void> {
+    const { errorDir, onFileFault } = this.options;
+    if (errorDir === undefined) {
+      onFileFault?.({ reason, moved: false });
+      return;
+    }
+    const target = join(errorDir, ...file.rel.split("/"));
+    try {
+      await mkdir(dirname(target), { recursive: true });
+      const taken = await lstat(target).then(
+        () => true,
+        () => false,
+      );
+      if (taken) throw Object.assign(new Error("a file is already there"), { code: "EEXIST" });
+      await rename(file.path, target);
+    } catch (error) {
+      onFileFault?.({ reason, moved: false, error });
+      return;
+    }
+    this.tries.delete(file.rel);
+    onFileFault?.({ reason, moved: true });
+  }
+
+  /**
+   * Stores a claimed file under its claimed name, then deletes it or moves it into `processed/`,
+   * under its path from the source folder.
+   */
   private async store(file: SourceFile, sink: MessageSink, resumed: boolean): Promise<void> {
     const { dir, keepProcessed = false, onReadError } = this.options;
     let body: Uint8Array;
@@ -236,10 +476,15 @@ export class FileSource implements SourceConnector {
       await unlink(file.path);
       return;
     }
-    const processed = join(dir, PROCESSED_DIR);
-    await mkdir(processed, { recursive: true });
     const original = CLAIM_NAME.exec(file.name)?.[1] ?? file.name;
-    await rename(file.path, join(processed, fitted(`${String(id)}-`, original)));
+    const segments = decodePath(original).split("/");
+    // A claim made by hand could name a path that leaves processed/: it keeps its name, flat.
+    const parts = segments.some((part) => part === "" || part === "." || part === "..")
+      ? [original]
+      : segments;
+    const folder = join(dir, PROCESSED_DIR, ...parts.slice(0, -1));
+    await mkdir(folder, { recursive: true });
+    await rename(file.path, join(folder, fitted(`${String(id)}-`, String(parts.at(-1)))));
   }
 }
 

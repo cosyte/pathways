@@ -17,6 +17,7 @@ import {
   DEFAULT_LEASE_TTL_MS,
   DEFAULT_MAX_BYTES,
   DEFAULT_MIN_AGE_MS,
+  DEFAULT_READ_TRIES,
   DEFAULT_POOL_IDLE_TIMEOUT_MS,
   DEFAULT_POOL_MAX,
   DEFAULT_SETTINGS,
@@ -31,6 +32,7 @@ import {
   type ListenerConfig,
   type ModuleConnector,
   type OnStoreFailure,
+  type PathPattern,
   type ProjectConfig,
   type ServerTlsFiles,
   type Settings,
@@ -354,7 +356,28 @@ function resolveSource(
     dir: resolve(dir, file.dir),
     minAgeMs: file.minAge ?? DEFAULT_MIN_AGE_MS,
     keepProcessed: file.keepProcessed ?? false,
+    include: patterns(file.include),
+    exclude: patterns(file.exclude),
+    recursive: file.recursive ?? false,
+    ignoreDot: file.ignoreDot ?? true,
+    minSize: file.minSize ?? 1,
+    maxSize: file.maxSize,
+    maxPerPoll: file.maxPerPoll,
+    sortBy: file.sortBy ?? "name",
+    stable: file.stable ?? false,
+    doneFile: file.doneFile,
+    errorDir: file.errorDir === undefined ? undefined : resolve(dir, file.errorDir),
+    readTries: file.readTries ?? DEFAULT_READ_TRIES,
   };
+}
+
+/** A file source's `include` or `exclude` as written, each glob made a `{ glob }`. */
+function patterns(
+  written: readonly (string | { readonly regex: string })[] | undefined,
+): PathPattern[] {
+  return (written ?? []).map((pattern) =>
+    typeof pattern === "string" ? { glob: pattern } : { regex: pattern.regex },
+  );
 }
 
 function resolveDestination(

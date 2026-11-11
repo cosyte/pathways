@@ -162,15 +162,23 @@ export async function connectorsFor(
   switch (source.kind) {
     case "file":
       sourceConnector = new FileSource({
-        dir: source.dir,
+        ...source,
         channel: channel.name,
-        minAgeMs: source.minAgeMs,
-        keepProcessed: source.keepProcessed,
         now,
         onReadError: (error) => {
           logger.warn({
             event: "source-read-failed",
             channel: channel.name,
+            code: errorCode(error),
+          });
+        },
+        // The reason and a code, never the file's name: a name can carry an identifier.
+        onFileFault: ({ reason, moved, error }) => {
+          logger.warn({
+            event: "source-file-set-aside",
+            channel: channel.name,
+            reason,
+            moved,
             code: errorCode(error),
           });
         },

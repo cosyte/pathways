@@ -161,11 +161,28 @@ Exactly one of `file`, `http`, `mllp` or `module`.
 
 #### File source
 
-| Key             | Type     | Default  | Meaning                                                        |
-| --------------- | -------- | -------- | -------------------------------------------------------------- |
-| `dir`           | path     | required | the folder to read; created if missing                         |
-| `minAge`        | duration | `1s`     | how long a file must sit unchanged before it is read           |
-| `keepProcessed` | boolean  | `false`  | move each stored file into `processed/` instead of deleting it |
+| Key             | Type                           | Default    | Meaning                                                              |
+| --------------- | ------------------------------ | ---------- | -------------------------------------------------------------------- |
+| `dir`           | path                           | required   | the folder to read; created if missing                               |
+| `minAge`        | duration                       | `1s`       | how long a file must sit unchanged before it is read                 |
+| `keepProcessed` | boolean                        | `false`    | move each stored file into `processed/` instead of deleting it       |
+| `include`       | a list of globs or `{ regex }` | every file | take only a file whose path from `dir` matches one                   |
+| `exclude`       | a list of globs or `{ regex }` | none       | leave a file whose path from `dir` matches one                       |
+| `recursive`     | boolean                        | `false`    | read the subfolders too, never `.claimed`, `processed` or `errorDir` |
+| `ignoreDot`     | boolean                        | `true`     | leave files and folders whose name starts with a dot                 |
+| `minSize`       | byte size, or `0`              | `1B`       | leave a smaller file; by default an empty file is left               |
+| `maxSize`       | byte size                      | no limit   | set a larger file aside: into `errorDir`, or left where it is        |
+| `maxPerPoll`    | a whole number, 1 or more      | no limit   | the most files claimed in one pass                                   |
+| `sortBy`        | `name` or `mtime`              | `name`     | the order files are taken in                                         |
+| `stable`        | boolean                        | `false`    | take a file only once two passes in a row find it unchanged          |
+| `doneFile`      | a suffix, such as `.done`      | none       | take a file only once its marker is there, then delete the marker    |
+| `errorDir`      | path                           | none       | where a file set aside goes, under its path from `dir`               |
+| `readTries`     | a whole number, 1 or more      | `3`        | passes in a row a file fails to open before it goes into `errorDir`  |
+
+A path from `dir` is written with `/` on every system. A glob is read as Node.js's
+`path.matchesGlob` reads it, and its `*` never matches a leading dot. A `regex` is at most 256
+characters. [Choose which files a source takes](./read-and-write-files.md#choose-which-files-a-source-takes)
+shows each in use.
 
 #### HTTP source
 
