@@ -128,6 +128,13 @@ for (const database of TEST_DATABASES) {
       stores.push(store);
       expect(await store.receive("adt", bytes("x"))).toMatchObject({ id: 1 });
       expect(await applied(db)).toEqual(before);
+      expect(await store.schema()).toMatchObject({
+        generation: 99,
+        minEngine: "0.0.1",
+        changedBy: "99.0.0",
+        unknown: ["0099-from-pathways-99"],
+        pending: [],
+      });
     });
 
     it("refuses a schema a newer Pathways contracted past this version, naming both versions", async () => {

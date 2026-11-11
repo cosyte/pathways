@@ -82,6 +82,7 @@ describe("compareVersions", () => {
     expect(compareVersions("1.0.0", "0.99.99")).toBeGreaterThan(0);
     expect(compareVersions("1.2.3", "1.2.3")).toBe(0);
     expect(compareVersions("1.2", "1.2.0")).toBe(0);
+    expect(compareVersions("1.2.0", "1.2")).toBe(0);
     expect(compareVersions("1.0.0-rc.1", "1.0.0")).toBeLessThan(0);
     expect(compareVersions("1.0.0", "1.0.0-rc.1")).toBeGreaterThan(0);
     expect(compareVersions("1.0.0-rc.1", "1.0.0-rc.2")).toBeLessThan(0);

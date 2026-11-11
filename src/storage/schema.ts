@@ -110,8 +110,8 @@ interface GateTables {
  * ```
  */
 export function compareVersions(a: string, b: string): number {
-  const [coreA = "", preA] = splitVersion(a);
-  const [coreB = "", preB] = splitVersion(b);
+  const [coreA, preA] = splitVersion(a);
+  const [coreB, preB] = splitVersion(b);
   const partsA = coreA.split(".").map(Number);
   const partsB = coreB.split(".").map(Number);
   for (let i = 0; i < Math.max(partsA.length, partsB.length); i += 1) {
@@ -215,7 +215,9 @@ export async function readSchema(
   );
   const names = Object.keys(steps).sort();
   const appliedNames = tables.has("kysely_migration")
-    ? (await gate.selectFrom("kysely_migration").select("name").execute()).map((row) => row.name)
+    ? (await gate.selectFrom("kysely_migration").select("name").execute())
+        .map((row) => row.name)
+        .sort()
     : [];
   const rows = tables.has("schema_info")
     ? await gate.selectFrom("schema_info").selectAll().execute()
