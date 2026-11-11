@@ -216,6 +216,7 @@ export async function loadProject(root: string): Promise<ProjectConfig> {
     hooks,
     health,
     lease,
+    migrations: { rollbackWindowMs: project.migrations?.rollbackWindow ?? 0 },
     encryption,
     channels,
   };
