@@ -45,7 +45,7 @@ jobs:
       contents: write # create tags / the GitHub release
       id-token: write # npm trusted publishing and provenance
       pull-requests: write # open the "Version Packages" PR
-    uses: cosyte/.github/.github/workflows/release.yml@402d4e1568e7078f69af42908ab1559ec44e1682 # workflows-2026-11-09-402d4e1568e7
+    uses: cosyte/.github/.github/workflows/release.yml@0be6757a773885cbd5165dbfa0f93772d907b3e8 # workflows-2026-11-10-0be6757a7738
     with:
       package-name: "@cosyte/pathways"
       # Every dependency is on npm, so nothing is excused: the same empty allowance ci.yml gives the

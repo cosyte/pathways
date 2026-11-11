@@ -1,0 +1,126 @@
+name: Bench reading
+
+# A reading of this build on a GitHub-hosted runner, from bench/pathways.bench.mjs: throughput and
+# latency p50/p95/p99 of one engine pass (`pathways start --once`, file to file through SQLite,
+# encrypted) on every channel and size, each pass a fresh process; and `defaultAckBuilder` in
+# process with its allocations, peak heap and a long run for leaks, beside the cold import of the
+# built entry with every file it loads and its gzip size. Then the profile (bench/profile.mjs): the
+# cold import of the transform worker and the bin's start, the memory of one whole engine pass on
+# each input, the worker's transform path in process (throughput from the smallest size to the
+# largest, allocations, peak heap, a long run for leaks), a CPU and a sampled heap profile of the
+# hottest paths, and the budgets read from them.
+#
+# On demand, and on a pull request that changes the bench or this file, so a change to what is
+# measured is measured where it will be read. ADVISORY: it fails only when it cannot measure (a
+# suite that does not load, a process that dies, a results file that does not match the schema),
+# never on a number, and it is never a required check. The numbers are kept as artifacts and shown
+# in each job's summary.
+#
+# One reading job per group of channels, side by side, so the reading finishes inside a pull
+# request's wait. Jobs on different runners are not compared with each other; each reading names
+# the machine it ran on.
+
+on:
+  workflow_dispatch: {}
+  pull_request:
+    branches: [main]
+    paths:
+      - "bench/**"
+      - ".github/workflows/bench-reading.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  reading:
+    name: reading (${{ matrix.group }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [ack, hl7, fhir, other, json]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      # The lowest Node line the package supports, the one the bench-compare job runs on.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Read ${{ matrix.group }}
+        env:
+          GROUP: ${{ matrix.group }}
+          COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p bench-results
+          # The ack group is the in-process benchmark, with its memory and the cold import of the
+          # built entry. Every other group runs the engine as a process, whose memory the measuring
+          # process cannot see: the profile job reads it.
+          mapfile -t names < <(node bench/names.mjs "${GROUP}")
+          flags=()
+          if [ "${GROUP}" != "ack" ]; then flags+=(--no-memory --no-import); fi
+          for name in "${names[@]}"; do flags+=(--only "${name}"); done
+          status=0
+          pnpm exec cosyte-bench run --suite bench/pathways.bench.mjs --target dist/index.mjs \
+            --commit "${COMMIT}" "${flags[@]}" \
+            --out "bench-results/reading-${GROUP}.json" \
+            --summary "bench-results/reading-${GROUP}.md" || status=$?
+          case "${status}" in
+            0) ;;
+            2) echo "::notice::bench-reading: at least one case could not be measured; a skip is not a pass" ;;
+            *) echo "::warning::bench-reading: cosyte-bench exited ${status}" ;;
+          esac
+          if [ ! -f "bench-results/reading-${GROUP}.json" ]; then
+            echo "::error::bench-reading: no reading was written"
+            exit 1
+          fi
+          pnpm exec cosyte-bench check "bench-results/reading-${GROUP}.json"
+          cat "bench-results/reading-${GROUP}.md" >> "${GITHUB_STEP_SUMMARY}"
+      - name: Keep the reading
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bench-reading-${{ matrix.group }}
+          path: bench-results/
+          if-no-files-found: warn
+          retention-days: 30
+
+  profile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Profile and budgets
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm bench:profile --out bench-results/profile
+          cat bench-results/profile/profile.md >> "${GITHUB_STEP_SUMMARY}"
+      - name: Keep the profile
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bench-profile
+          path: bench-results/
+          if-no-files-found: warn
+          retention-days: 30

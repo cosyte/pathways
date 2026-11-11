@@ -25,9 +25,25 @@ jobs:
   # test/package.test.ts fails when they disagree. Each value is a required check
   # (`ci / verify (24, ubuntu-latest)`, `ci / verify (26, ubuntu-latest)`), so change the ruleset
   # first when adding a line, and never drop one before removing its context from the ruleset.
+  #
+  # The performance standard's two jobs run beside `verify`, never after it, so a pull request waits
+  # for the slowest job rather than their sum:
+  # - `scaling-gate`: `pnpm test:perf`, the scaling gates in test/perf/ and their self-checks,
+  #   never under coverage;
+  # - `bench-compare` (pull requests only): bench/pathways.bench.mjs timed on the base build and the
+  #   head build, interleaved on one runner. Advisory: it never fails, so never require it.
+  # A skipped job satisfies a required check, so require `scaling-gate` only while its input below
+  # stays on. The full reading, the budgets and the profile are in bench-reading.yml. This caller
+  # moved to the 2026-11-10 reference, the first with those two jobs, and release.yml with it, since
+  # test/package.test.ts holds the two to one commit (its release workflow is unchanged between the
+  # two references); the other callers stay where they were. The jobs that reference added beside
+  # these two (bun, deno, coverage-ratchet, mutation) stay off, as their inputs default to.
   ci:
-    uses: cosyte/.github/.github/workflows/ci.yml@402d4e1568e7078f69af42908ab1559ec44e1682 # workflows-2026-11-09-402d4e1568e7
+    uses: cosyte/.github/.github/workflows/ci.yml@0be6757a773885cbd5165dbfa0f93772d907b3e8 # workflows-2026-11-10-0be6757a7738
     with:
       run-phi-scan: true
       node-versions: '["24", "26"]'
       expect-unpublished-deps: ""
+      run-scaling-gate: true
+      run-bench-compare: true
+      bench-suites: bench/pathways.bench.mjs
