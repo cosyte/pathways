@@ -278,6 +278,30 @@ describe.each([
     expect(await tree(dir)).toEqual([name]);
   });
 
+  it("leaves a file a glob runs too long on, says so, and does not run it on that path again", async () => {
+    const dir = await inbox();
+    // A name built to make a glob of several * in one segment backtrack: unguarded, one test of
+    // it takes seconds, and longer names take minutes.
+    const glob = "*_*_*_*_*.hl7";
+    const name = "_".repeat(200);
+    await dropFile(join(dir, name), "slow");
+    await dropFile(join(dir, "FAC_ADT_A01_20261111_0001.hl7"), "fast");
+    const errors: unknown[] = [];
+    const source = sourceOn(dir, { include: [{ glob }], onReadError: (e) => errors.push(e) });
+    const started = performance.now();
+    expect(await pass(source)).toEqual(["fast"]);
+    expect(await pass(source)).toEqual([]);
+    expect(performance.now() - started).toBeLessThan(REGEX_TIME_LIMIT_MS * 20);
+    expect(errors).toEqual([expect.objectContaining({ code: "ERR_SCRIPT_EXECUTION_TIMEOUT" })]);
+    expect(await tree(dir)).toEqual([name]);
+    // An exclude glob that runs too long leaves the file too, never takes it.
+    const excluded: unknown[] = [];
+    const other = sourceOn(dir, { exclude: [{ glob }], onReadError: (e) => excluded.push(e) });
+    expect(await pass(other)).toEqual([]);
+    expect(excluded).toEqual([expect.objectContaining({ code: "ERR_SCRIPT_EXECUTION_TIMEOUT" })]);
+    expect(await tree(dir)).toEqual([name]);
+  });
+
   it("never moves a file into errorDir once it is gone from where the pass found it", async () => {
     const dir = await inbox();
     const errorDir = join(dir, "errors");

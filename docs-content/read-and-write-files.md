@@ -102,11 +102,12 @@ destinations:
   as `wards/east/a.hl7`. A file is taken when it matches one `include` (or there is none) and no
   `exclude`. Each entry is a glob, read as Node.js's `path.matchesGlob` reads it (`**/*.hl7` matches
   `a.hl7` and `wards/east/a.hl7`), or `{ regex: ... }`, a JavaScript regular expression of at most 256
-  characters. A glob's `*` never matches a name that starts with a dot. A regex runs on names the
-  writer chooses: one with a repeat inside a repeated group, such as `^(a+)+$`, can take minutes on
-  a name built for it. Each run stops after 50 ms, and that file is left where it is and logged as
-  `source-read-failed` with `ERR_SCRIPT_EXECUTION_TIMEOUT`. Prefer a glob, or a regex with no
-  nested repeat.
+  characters. A glob's `*` never matches a name that starts with a dot. Each pattern runs on names
+  the writer chooses, and can take minutes on a name built for it: a regex with a repeat inside a
+  repeated group, such as `^(a+)+$`, or a glob with several `*` in one segment, such as
+  `*_*_*_*_*.hl7`. Each run stops after 50 ms, and that file is left where it is and logged as
+  `source-read-failed` with `ERR_SCRIPT_EXECUTION_TIMEOUT`. Write a regex with no nested repeat,
+  and a glob with few `*` in a segment (`FAC_*.hl7` rather than `*_*_*_*_*.hl7`).
 - **`recursive: true`** reads the subfolders of `dir` as well. It never reads `.claimed/`,
   `processed/` (in `dir` itself) or `errorDir`. A file's path from `dir` goes into its claimed name
   and its idempotency key, so `wards/east/a.hl7` and `wards/west/a.hl7` are two messages that never

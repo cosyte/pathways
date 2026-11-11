@@ -126,20 +126,33 @@ function decodePath(name: string): string {
 }
 
 /**
- * The longest a `{ regex }` pattern may run on one path, in milliseconds. A file's name is chosen by
- * whoever writes it, and a pattern that backtracks (nested repeats, such as `^(a+)+$`) can take
- * minutes or years on a name built for it, holding the whole engine meanwhile. A path that takes
- * longer is left where it is and said, with the code `ERR_SCRIPT_EXECUTION_TIMEOUT`.
+ * The longest one pattern, a glob or a `{ regex }`, may run on one path, in milliseconds. A file's
+ * name is chosen by whoever writes it, and a pattern can backtrack on a name built for it: a regex
+ * with nested repeats, such as `^(a+)+$`, or a glob with several `*` in one segment, such as
+ * `*_*_*_*_*.hl7`, which Node compiles to a regex of as many lazy repeats. Either can take minutes
+ * on such a name, holding the whole engine meanwhile. A path that takes longer is left where it is
+ * and said, with the code `ERR_SCRIPT_EXECUTION_TIMEOUT`.
  */
 export const REGEX_TIME_LIMIT_MS = 50;
 
-/** The one script each regex runs through, so a run can be stopped at {@link REGEX_TIME_LIMIT_MS}. */
-const TEST_SCRIPT = new Script("expression.test(path)");
+/**
+ * The one script each pattern runs through, so a run can be stopped at {@link REGEX_TIME_LIMIT_MS}.
+ * Its text is fixed and its context holds only the pattern, the path and, for a glob, Node's own
+ * matcher, so neither a pattern nor a name can run code of its own. The timeout stops the matcher
+ * too, though it comes from the main realm.
+ */
+const TEST_SCRIPT = new Script("glob === undefined ? expression.test(path) : matches(path, glob)");
 
-/** A test of a path against one {@link PathPattern}; a regex that runs too long throws. */
+/** A test of a path against one {@link PathPattern}; a pattern that runs too long throws. */
 function matcher(pattern: PathPattern): (rel: string) => boolean {
-  if ("glob" in pattern) return (rel) => posix.matchesGlob(rel, pattern.glob);
-  const context = { expression: new RegExp(pattern.regex, "u"), path: "" };
+  const context =
+    "glob" in pattern
+      ? {
+          glob: pattern.glob,
+          matches: (path: string, glob: string) => posix.matchesGlob(path, glob),
+          path: "",
+        }
+      : { glob: undefined, expression: new RegExp(pattern.regex, "u"), path: "" };
   createContext(context);
   return (rel) => {
     context.path = rel;
@@ -158,6 +171,20 @@ function moved(): Error {
   return Object.assign(new Error("the file left the source folder or was replaced"), {
     code: "ESTALE",
   });
+}
+
+/**
+ * Moves the file `id` names from `from` to `to`, and checks after the move that the file now at `to`
+ * is that one. A folder on `from` swapped for a link between the last check and the move would move
+ * a file from outside the source folder: then it goes back where it came from and the move is
+ * refused, with {@link moved}'s error.
+ */
+async function relocate(from: string, to: string, id: FileId): Promise<void> {
+  await rename(from, to);
+  const now = await lstat(to, { bigint: true });
+  if (now.dev === id.dev && now.ino === id.ino) return;
+  await rename(to, from);
+  throw moved();
 }
 
 /**
@@ -279,7 +306,7 @@ export class FileSource implements SourceConnector {
   private seen = new Map<string, string>();
   /** How many passes in a row each file has failed to open, for `readTries`. */
   private tries = new Map<string, number>();
-  /** Paths a regex ran too long on, so each costs one run, not one a pass. */
+  /** Paths a pattern ran too long on, so each costs one run, not one a pass. */
   private slow = new Set<string>();
 
   /**
@@ -308,7 +335,7 @@ export class FileSource implements SourceConnector {
   }
 
   /**
-   * Whether a path from the source folder passes `include` and `exclude`. A path a regex ran too
+   * Whether a path from the source folder passes `include` and `exclude`. A path a pattern ran too
    * long on passes neither, so it is left, and is noted in `slow` to be left on later passes too.
    */
   private matches(rel: string, slow: Set<string>): boolean {
@@ -328,15 +355,15 @@ export class FileSource implements SourceConnector {
 
   /**
    * Whether `path` is in a folder that is `root` or under it once every link on the way is
-   * resolved, and, given `id`, is still the file `id` names. A folder on a file's path swapped for a link since the pass found
-   * it would otherwise lead an open or a move outside the source folder: `O_NOFOLLOW` refuses a
-   * link only in a path's last part.
+   * resolved, and is still the file `id` names. A folder on a file's path swapped for
+   * a link since the pass found it would otherwise lead an open or a move outside the source folder:
+   * `O_NOFOLLOW` refuses a link only in a path's last part. Each move is checked again after it is
+   * made, by {@link relocate}, for a swap between this check and the move.
    */
-  private async inside(path: string, root: string, id?: FileId): Promise<boolean> {
+  private async inside(path: string, root: string, id: FileId): Promise<boolean> {
     try {
       const folder = await realpath(dirname(path));
       if (folder !== root && !folder.startsWith(join(root, sep))) return false;
-      if (id === undefined) return true;
       const now = await lstat(path, { bigint: true });
       return now.dev === id.dev && now.ino === id.ino;
     } catch {
@@ -481,7 +508,7 @@ export class FileSource implements SourceConnector {
         if (!(await this.inside(file.path, root, id))) throw moved();
         // The open file's own size: a file that grew since it was found is held to maxSize too.
         grown = Number(stats.size) > maxSize;
-        if (!grown) await rename(file.path, path);
+        if (!grown) await relocate(file.path, path, id);
       } catch (error) {
         onReadError?.(error);
         continue;
@@ -505,10 +532,22 @@ export class FileSource implements SourceConnector {
     }
     // Each marker goes once its file's claim is on disk, so a power cut cannot leave a file unmarked.
     // Never through a folder swapped for a link since: a marker outside dir is not ours to delete.
+    // So it is moved into .claimed/ first, where the move is checked, and deleted only from there.
     if (doneFile !== undefined) {
       for (const file of taken) {
         const marker = join(dir, `${file.rel}${doneFile}`);
-        if (await this.inside(marker, root)) await rm(marker, { force: true });
+        const found = await lstat(marker, { bigint: true }).catch(() => undefined);
+        if (found === undefined) continue;
+        const id = { dev: found.dev, ino: found.ino };
+        if (!(await this.inside(marker, root, id))) continue;
+        const doomed = join(dir, CLAIMED_DIR, `marker-${randomBytes(8).toString("hex")}`);
+        try {
+          await relocate(marker, doomed, id);
+        } catch (error) {
+          onReadError?.(error);
+          continue;
+        }
+        await rm(doomed);
       }
     }
     return taken;
@@ -549,7 +588,7 @@ export class FileSource implements SourceConnector {
       );
       if (taken) throw Object.assign(new Error("a file is already there"), { code: "EEXIST" });
       if (!(await this.inside(file.path, root, id))) throw moved();
-      await rename(file.path, target);
+      await relocate(file.path, target, id);
     } catch (error) {
       onFileFault?.({ reason, moved: false, error });
       return;
