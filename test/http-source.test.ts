@@ -43,7 +43,7 @@ async function started(
   const source = new HttpSource({
     host: "127.0.0.1",
     port: 0,
-    path: "/messages",
+    paths: ["/messages"],
     maxBytes: 1_024,
     tls: { cert: certs.serverCert, key: certs.serverKey, ca: undefined },
     token: TOKEN,
@@ -233,7 +233,7 @@ describe("HttpSource", () => {
     const unstarted = new HttpSource({
       host: "127.0.0.1",
       port: 0,
-      path: "/",
+      paths: ["/"],
       maxBytes: 1,
       tls: undefined,
       token: undefined,
