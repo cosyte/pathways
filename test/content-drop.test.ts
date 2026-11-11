@@ -370,6 +370,16 @@ describe("storage.content in the configuration", () => {
       "channels/a/transform.ts": LAB_TRANSFORM,
     });
     expect((await loadProject(plain)).channels[0]?.settings.content).toBe("keep");
+
+    // Read from the environment, as every setting can be.
+    const fromEnv = await makeProject({
+      "pathways.yaml": "storage:\n  content: { env: PATHWAYS_CONTENT, default: keep }\n",
+      "channels/a/channel.yaml": channelYaml("a"),
+      "channels/a/transform.ts": LAB_TRANSFORM,
+    });
+    const env = { PATHWAYS_CONTENT: "dropAfterDelivery" };
+    expect((await loadProject(fromEnv, { env })).settings.content).toBe("dropAfterDelivery");
+    expect((await loadProject(fromEnv, { env: {} })).settings.content).toBe("keep");
   });
 
   it("refuses a value it does not know, and a storage block naming two databases", async () => {
@@ -404,8 +414,11 @@ describe("storage.content in the configuration", () => {
   it("is in the JSON Schemas, where a storage block may name content alone", () => {
     const { channel, project } = configJsonSchemas();
     const storage = (project.properties as Record<string, Record<string, unknown>>)["storage"];
-    expect(storage?.["properties"]).toHaveProperty("content.enum", ["keep", "dropAfterDelivery"]);
-    expect(storage?.["oneOf"]).toContainEqual({
+    expect(storage?.["properties"]).toHaveProperty("content.anyOf.0.enum", [
+      "keep",
+      "dropAfterDelivery",
+    ]);
+    expect((storage?.["else"] as Record<string, unknown> | undefined)?.["oneOf"]).toContainEqual({
       required: ["content"],
       not: {
         anyOf: ["sqlite", "postgres", "mysql", "sqlserver", "module"].map((k) => ({
@@ -416,7 +429,7 @@ describe("storage.content in the configuration", () => {
     const channelStorage = (channel.properties as Record<string, Record<string, unknown>>)[
       "storage"
     ];
-    expect(channelStorage?.["properties"]).toHaveProperty("content.enum", [
+    expect(channelStorage?.["properties"]).toHaveProperty("content.anyOf.0.enum", [
       "keep",
       "dropAfterDelivery",
     ]);
