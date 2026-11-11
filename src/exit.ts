@@ -12,7 +12,8 @@ export const EXIT = {
   /**
    * A test failed, the engine, a command or an extension module could not start or stopped on an
    * error, init could not write, rekey left a value that is not under the current key, or a replay,
-   * resend or clear was refused or ended with the message failed.
+   * resend or clear was refused or ended with the message failed, or `secrets check` found a secret
+   * or the key provider that could not be had.
    */
   failed: 1,
   /** The arguments were not understood; nothing was done. */
