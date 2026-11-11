@@ -64,7 +64,10 @@ export interface CliIo {
   readonly signal?: AbortSignal;
   /** The engine's logger. Defaults to JSON lines on stdout. */
   readonly logger?: Logger;
-  /** Where tokens, secret headers and master keys are read from. Defaults to `process.env`. */
+  /**
+   * Where tokens, secret headers, master keys and the settings written as `{ env: NAME }` are read
+   * from. Defaults to `process.env`.
+   */
   readonly env?: Env;
   /**
    * Told of every audit entry a command writes, once it is stored: replays, resends, clears,
@@ -92,7 +95,9 @@ Commands:
                       and compare the output with the saved .expected files
   validate            Check pathways.yaml and every channel.yaml as start
                       does, with every file they name, without reading a
-                      secret or opening a connection: for a project's CI
+                      secret or opening a connection: for a project's CI.
+                      Settings written as { env: NAME } are read as start
+                      reads them
   status [name...]    Each channel's counts, retrying deliveries and failed
                       messages, read from the database
   messages            List stored messages, newest first: ids, states, times,
@@ -127,6 +132,9 @@ Options:
                         Needs a database server
       --force           lease release: say the lease's host is gone
       --update          test: save the current outputs as the expected ones
+      --print           validate: print the configuration as start reads it,
+                        as JSON, with each setting read from the environment
+                        and the variable it named; secrets stay references
       --json            status, messages, replay, clear, retention, audit,
                         lease: print one JSON document instead of text
       --channel <name>  messages, audit: only this channel
@@ -179,7 +187,7 @@ const OPTIONS: Readonly<Record<string, readonly OptionName[]>> = {
   init: [],
   start: ["once", "standby"],
   test: ["update"],
-  validate: [],
+  validate: ["print"],
   status: ["json"],
   messages: ["json", "channel", "status", "since", "until", "limit", "before", "content"],
   replay: ["json", "resend"],
@@ -244,7 +252,7 @@ export async function run(argv: readonly string[], io: CliIo): Promise<number> {
       return test(projectDir, rest, values.update === true, io);
     case "validate":
       if (rest.length > 0) return usage(io);
-      return validate(projectDir, io);
+      return validate(projectDir, values.print === true, io);
     case "rekey":
       if (rest.length > 0) return usage(io);
       return rekeyStore(projectDir, values["encrypt-plaintext"] === true, io);
@@ -304,7 +312,7 @@ const INIT_REFUSALS: Readonly<Record<InitError["reason"], string>> = {
 
 async function load(projectDir: string, io: CliIo): Promise<ProjectConfig | undefined> {
   try {
-    return await loadProject(projectDir);
+    return await loadProject(projectDir, { env: io.env ?? process.env });
   } catch (error) {
     if (!(error instanceof ConfigError)) throw error;
     reportConfigError(error, io);
@@ -659,14 +667,21 @@ async function runEngine(
  * store or listens, with the same messages and exit code. That is everything `loadProject` checks
  * (the schema with its refinements, and every transform, module and hook file named), and that
  * `pathways.yaml` sets `encryption`. Secrets, TLS files and connections are left to `start`, since a
- * CI run seldom has them.
+ * CI run seldom has them. With `--print`, the configuration as `start` reads it goes to stdout as
+ * JSON in place of the summary: every setting resolved, secrets as the references start reads.
  */
-async function validate(projectDir: string, io: CliIo): Promise<number> {
+async function validate(projectDir: string, print: boolean, io: CliIo): Promise<number> {
   const project = await load(projectDir, io);
   if (project === undefined) return EXIT.config;
   if (project.encryption === undefined) {
     reportConfigError(new ConfigError([ENCRYPTION_REQUIRED]), io);
     return EXIT.config;
+  }
+  if (print) {
+    // The configuration holds no secret: tokens, secret headers, connection URLs and master keys
+    // stay the names of the variables or files start reads them from.
+    io.out(`${JSON.stringify(project, null, 2)}\n`);
+    return EXIT.ok;
   }
   const names = project.channels.map((channel) => channel.name);
   io.out(
@@ -986,6 +1001,7 @@ function parseCli(argv: readonly string[]) {
       standby: { type: "boolean" },
       force: { type: "boolean" },
       update: { type: "boolean" },
+      print: { type: "boolean" },
       json: { type: "boolean" },
       channel: { type: "string" },
       status: { type: "string" },

@@ -1,6 +1,9 @@
 import { z } from "zod";
 
 import { LIFECYCLE_EVENTS, type LifecycleEventType } from "../extensions/events.js";
+import { ENV_NAME, fromEnvironment, type EnvReference } from "./env-ref.js";
+
+export type { EnvReference } from "./env-ref.js";
 
 /**
  * The message formats a channel can declare.
@@ -56,12 +59,51 @@ const PLAINTEXT_TRUE: JsonSchema = {
   required: ["plaintext"],
 };
 
+/**
+ * JSON Schema for `plaintext: true`, or `plaintext:` read from the environment, which may hold true:
+ * what a rule that needs plaintext accepts, so the JSON Schema never refuses what start may accept.
+ */
+const PLAINTEXT_MAYBE_TRUE: JsonSchema = {
+  properties: { plaintext: { anyOf: [{ const: true }, { type: "object" }] } },
+  required: ["plaintext"],
+};
+
 /** JSON Schema for "TLS unless `plaintext: true`, and never both". */
 const TLS_OR_PLAINTEXT: JsonSchema = {
   if: PLAINTEXT_TRUE,
   then: { not: { required: ["tls"] } },
-  else: { required: ["tls"] },
+  else: { anyOf: [{ required: ["tls"] }, PLAINTEXT_MAYBE_TRUE] },
 };
+
+/**
+ * The JSON Schema of an `{ env: NAME, default? }` reference, written out:
+ * Zod writes its default as a list of types, which strict validators refuse.
+ */
+const ENV_REFERENCE_JSON: JsonSchema = {
+  type: "object",
+  properties: {
+    env: { type: "string", pattern: ENV_NAME.source },
+    default: { anyOf: [{ type: "string" }, { type: "number" }, { type: "boolean" }] },
+  },
+  required: ["env"],
+  additionalProperties: false,
+  description:
+    "Read from this environment variable when the configuration is loaded, or default when it is unset or empty.",
+};
+
+/**
+ * `schema`, also accepting `{ env: NAME, default? }` ({@link fromEnvironment}), and in the JSON
+ * Schema either the value `schema` describes or a reference, with the hover text on the key.
+ */
+function envable<T extends z.ZodType>(schema: T) {
+  return restate(fromEnvironment(schema), (json) => {
+    const { $schema: _draft, description, ...value } = toJsonSchema(schema);
+    const text = json.description ?? description;
+    for (const key of Object.keys(json)) delete json[key];
+    if (text !== undefined) json.description = text;
+    json.anyOf = [value, ENV_REFERENCE_JSON];
+  });
+}
 
 const DURATION = /^(\d+)(ms|s|m|h|d)$/;
 const UNIT_MS = { ms: 1, s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 } as const;
@@ -98,31 +140,47 @@ const durationValue = z
     return parseDuration(value) ?? 0;
   });
 
-/** A duration, with the hover text an editor shows for the key that holds it. */
-const duration = (description: string) => durationValue.meta({ description });
+/**
+ * A duration, with the hover text an editor shows for the key that holds it, and the least it may
+ * be when there is one.
+ */
+const duration = (description: string, least?: { ms: number; message: string }) =>
+  envable(
+    (least === undefined
+      ? durationValue
+      : durationValue.refine((value) => value >= least.ms, least.message)
+    ).meta({ description }),
+  );
 
 /** A size in megabytes, written as a number of megabytes or as `256MB`. */
-const megabytes = z
-  .union([z.number().int().positive(), z.string().regex(SIZE, 'a size such as "256MB"')])
-  .transform((value) => (typeof value === "number" ? value : Number(SIZE.exec(value)?.[1])))
-  .meta({
-    description:
-      "The memory cap of each channel's transform worker: a size such as 256MB, or a number of megabytes. Default 256MB.",
-  });
+const megabytes = envable(
+  z
+    .union([z.number().int().positive(), z.string().regex(SIZE, 'a size such as "256MB"')])
+    .transform((value) => (typeof value === "number" ? value : Number(SIZE.exec(value)?.[1])))
+    .meta({
+      description:
+        "The memory cap of each channel's transform worker: a size such as 256MB, or a number of megabytes. Default 256MB.",
+    }),
+);
 
 /** A size in bytes, written as a number of bytes or as `512B`, `64KB`, `10MB` (1 KB is 1,024 bytes). */
-const bytes = z
-  .union([z.number().int().positive(), z.string().regex(BYTES, 'a size such as "64KB" or "10MB"')])
-  .transform((value) => {
-    if (typeof value === "number") return value;
-    /* v8 ignore next -- the string matched BYTES above, so exec finds it again */
-    const [, amount, unit] = BYTES.exec(value) ?? [];
-    return Number(amount) * UNIT_BYTES[unit as keyof typeof UNIT_BYTES];
-  })
-  .meta({
-    description:
-      "The largest body accepted: a size such as 512B, 64KB or 10MB (1 KB is 1,024 bytes), or a number of bytes. Default 10MB.",
-  });
+const bytes = envable(
+  z
+    .union([
+      z.number().int().positive(),
+      z.string().regex(BYTES, 'a size such as "64KB" or "10MB"'),
+    ])
+    .transform((value) => {
+      if (typeof value === "number") return value;
+      /* v8 ignore next -- the string matched BYTES above, so exec finds it again */
+      const [, amount, unit] = BYTES.exec(value) ?? [];
+      return Number(amount) * UNIT_BYTES[unit as keyof typeof UNIT_BYTES];
+    })
+    .meta({
+      description:
+        "The largest body accepted: a size such as 512B, 64KB or 10MB (1 KB is 1,024 bytes), or a number of bytes. Default 10MB.",
+    }),
+);
 
 /**
  * What an MLLP source does when a message cannot be stored: `close` sends no ACK and closes the
@@ -133,10 +191,12 @@ export const ON_STORE_FAILURE = ["close", "AE", "AR"] as const;
 /** One of {@link ON_STORE_FAILURE}. */
 export type OnStoreFailure = (typeof ON_STORE_FAILURE)[number];
 
-const onStoreFailure = z.enum(ON_STORE_FAILURE).meta({
-  description:
-    "What an MLLP source does when a message cannot be stored: close sends no ACK and closes the connection, so the sender sends again; AE and AR answer with that negative ACK. Default close.",
-});
+const onStoreFailure = envable(
+  z.enum(ON_STORE_FAILURE).meta({
+    description:
+      "What an MLLP source does when a message cannot be stored: close sends no ACK and closes the connection, so the sender sends again; AE and AR answer with that negative ACK. Default close.",
+  }),
+);
 
 /** Settings an engine sets as defaults and a channel can override. */
 const settingsShape = {
@@ -154,19 +214,17 @@ const settingsShape = {
   retention: duration(
     "How long a delivered, filtered or cleared message is kept after its last activity before it is deleted: a duration such as 30d, or a number of milliseconds. Default 30d.",
   ).optional(),
-  resendFlag: z
-    .boolean()
-    .meta({
+  resendFlag: envable(
+    z.boolean().meta({
       description:
         "Write a marker before each send, so a resend after a crash is flagged as a possible duplicate. false saves one write per attempt, and such a resend goes unflagged. Default true.",
-    })
-    .optional(),
+    }),
+  ).optional(),
   retentionInterval: duration(
     "How often a running engine runs retention: a duration such as 1h, or a number of milliseconds. Default 1h. Engine-wide.",
   ).optional(),
 };
 
-const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 /** What an HTTP header value may hold: tab, space, visible ASCII and bytes above 0x7f. */
 export const HEADER_VALUE = /^[\t\x20-\x7e\x80-\xff]*$/;
@@ -180,14 +238,17 @@ const MANAGED_HEADERS = new Set([
   "keep-alive",
 ]);
 
-const path = z.string().min(1);
-const port = z.number().int().min(1).max(65_535).meta({ description: "A port, 1 to 65535." });
-const host = z.string().min(1);
+const path = envable(z.string().min(1));
+const port = envable(
+  z.number().int().min(1).max(65_535).meta({ description: "A port, 1 to 65535." }),
+);
+const host = envable(z.string().min(1));
 /** `plaintext:`, the one way to run an endpoint without TLS. */
-const plaintext = z
-  .boolean()
-  .meta({ description: "true runs without TLS. Cannot be set alongside tls. Default false." })
-  .optional();
+const plaintext = envable(
+  z
+    .boolean()
+    .meta({ description: "true runs without TLS. Cannot be set alongside tls. Default false." }),
+).optional();
 
 /** A value read from an environment variable at startup: `{ env: NAME }`. */
 const fromEnv = z.strictObject({
@@ -268,11 +329,12 @@ const httpSource = restate(
   z
     .strictObject({
       ...listenerShape,
-      path: z
-        .string()
-        .regex(/^\//, "a path starting with /")
-        .meta({ description: "The path each message is POSTed to, starting with /. Default /." })
-        .optional(),
+      path: envable(
+        z
+          .string()
+          .regex(/^\//, "a path starting with /")
+          .meta({ description: "The path each message is POSTed to, starting with /. Default /." }),
+      ).optional(),
       maxBytes: bytes.optional(),
     })
     .meta({ description: "Take each POST to path as one message, over HTTPS unless plaintext." })
@@ -282,16 +344,18 @@ const httpSource = restate(
 
 /** What an HTTP client endpoint (an HTTP destination, a webhook hook) is configured with. */
 const httpClientShape = {
-  url: z
-    .string()
-    .refine((value) => {
-      const url = URL.parse(value);
-      return url !== null && (url.protocol === "https:" || url.protocol === "http:");
-    }, "an https:// URL")
-    .meta({
-      description:
-        "Where to POST: an https:// URL, or http:// with plaintext: true. No user name or password.",
-    }),
+  url: envable(
+    z
+      .string()
+      .refine((value) => {
+        const url = URL.parse(value);
+        return url !== null && (url.protocol === "https:" || url.protocol === "http:");
+      }, "an https:// URL")
+      .meta({
+        description:
+          "Where to POST: an https:// URL, or http:// with plaintext: true. No user name or password.",
+      }),
+  ),
   headers: z
     .record(z.string(), z.union([z.string(), fromEnv]))
     .meta({
@@ -317,7 +381,7 @@ function restateHttpClient(json: JsonSchema): void {
   });
   json.allOf = [
     { if: PLAINTEXT_TRUE, then: { not: { required: ["tls"] } } },
-    { if: scheme("^[Hh][Tt][Tt][Pp]:"), then: PLAINTEXT_TRUE },
+    { if: scheme("^[Hh][Tt][Tt][Pp]:"), then: PLAINTEXT_MAYBE_TRUE },
     { if: scheme("^[Hh][Tt][Tt][Pp][Ss]:"), then: { not: PLAINTEXT_TRUE } },
   ];
 }
@@ -389,13 +453,12 @@ const httpDestination = restate(
       timeout: duration(
         "How long to wait for an answer before the attempt is retried: a duration such as 30s, or a number of milliseconds. Default 30s.",
       ).optional(),
-      resendHeader: z
-        .string()
-        .meta({
+      resendHeader: envable(
+        z.string().meta({
           description:
             "A header sent only on a possible duplicate, a resend after an attempt was cut off, its value the number of attempts before. Default: none is sent.",
-        })
-        .optional(),
+        }),
+      ).optional(),
     })
     .meta({ description: "POST each output to url." })
     .superRefine(httpClientChecks)
@@ -418,7 +481,8 @@ const httpDestination = restate(
     restateHttpClient(json);
     // The name rule alone: the reserved names and those headers sets are left to start.
     const properties = json.properties as Record<string, JsonSchema>;
-    properties["resendHeader"] = { ...properties["resendHeader"], pattern: HEADER_NAME.source };
+    const [written] = properties["resendHeader"]?.anyOf as [JsonSchema];
+    written.pattern = HEADER_NAME.source;
   },
 );
 
@@ -496,13 +560,14 @@ const urlFromEnv = z.strictObject(
 /** A database server's connection pool. */
 const storagePool = z
   .strictObject({
-    max: z
-      .number()
-      .int()
-      .min(1)
-      .max(1_000)
-      .meta({ description: "The most connections the pool opens, 1 to 1000. Default 10." })
-      .optional(),
+    max: envable(
+      z
+        .number()
+        .int()
+        .min(1)
+        .max(1_000)
+        .meta({ description: "The most connections the pool opens, 1 to 1000. Default 10." }),
+    ).optional(),
     idleTimeout: duration(
       "How long an idle connection stays open: a duration such as 30s, or a number of milliseconds. Default 30s.",
     ).optional(),
@@ -613,7 +678,8 @@ const STORAGE_BLOCK_KINDS = [...STORAGE_KINDS, "module"] as const;
 /** A hook's time limit: a duration above zero. */
 const hookTimeout = duration(
   "How long one call to the hook may run: a duration above zero, such as 5s, or a number of milliseconds. Default 5s.",
-).refine((value) => value > 0, 'a duration above zero, such as "5s"');
+  { ms: 1, message: 'a duration above zero, such as "5s"' },
+);
 
 /** One hook in a `hooks:` list, written out. */
 const hookObject = restate(
@@ -623,7 +689,7 @@ const hookObject = restate(
       options: moduleOptions.optional(),
       webhook: webhook.optional(),
       events: z
-        .array(z.enum(LIFECYCLE_EVENTS))
+        .array(envable(z.enum(LIFECYCLE_EVENTS)))
         .min(1, "at least one event")
         .meta({ description: "The events the hook receives, at least one. Default: every event." })
         .optional(),
@@ -649,9 +715,18 @@ const hookMapping = restate(z.record(z.string(), z.unknown()), (json) => {
  * `{ webhook: { url, headers } }`, each with optional `events` and `timeout`.
  */
 const hookEntry = z
-  .union([path.transform((module) => ({ module })), hookMapping], {
-    error: "a module path, { module: path, options }, or { webhook: { url } }",
-  })
+  .union(
+    [
+      z
+        .string()
+        .min(1)
+        .transform((module) => ({ module })),
+      hookMapping,
+    ],
+    {
+      error: "a module path, { module: path, options }, or { webhook: { url } }",
+    },
+  )
   .pipe(hookObject);
 
 const hooks = z
@@ -674,12 +749,14 @@ const hooks = z
  */
 export const MASTER_KEY_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
-const keyId = z
-  .string()
-  .regex(
-    MASTER_KEY_ID,
-    "letters, digits, dots, hyphens and underscores, at most 64, starting with a letter or digit",
-  );
+const keyId = envable(
+  z
+    .string()
+    .regex(
+      MASTER_KEY_ID,
+      "letters, digits, dots, hyphens and underscores, at most 64, starting with a letter or digit",
+    ),
+);
 
 /** One master key: its id, and where its value is read when the engine starts. Never the value. */
 const masterKey = restate(
@@ -748,16 +825,22 @@ const encryption = z
       "How stored messages are encrypted: { keys: [{ id, env: NAME } or { id, file: path }], current: id }, { provider: { module, options } }, or none. pathways start needs it.",
   });
 
-/** A `storage:` block: exactly one database, or a custom store's module. */
+/**
+ * A `storage:` block: exactly one database, or a custom store's module; or, with `kind`, a block for
+ * each kind the deployments use and `kind` naming the one this one uses.
+ */
 const storage = restate(
   z
     .strictObject({
+      kind: envable(
+        z.enum(STORAGE_BLOCK_KINDS).meta({
+          description:
+            "Which block is used: sqlite, postgres, mysql, sqlserver or module, usually read from the environment, so one file holds a block for each deployment. The blocks it does not name are checked, not used. kind: sqlite needs no block. Default: the one block written.",
+        }),
+      ).optional(),
       sqlite: z
         .strictObject({
-          file: z
-            .string()
-            .min(1)
-            .meta({ description: "The database file, relative to this file." }),
+          file: path.meta({ description: "The database file, relative to this file." }),
         })
         .meta({ description: "SQLite, bundled. Default { file: .pathways/pathways.db }." })
         .optional(),
@@ -773,11 +856,26 @@ const storage = restate(
     })
     .meta({
       description:
-        "Where messages are stored: exactly one of sqlite, postgres, mysql, sqlserver or module. Default SQLite at .pathways/pathways.db.",
+        "Where messages are stored: exactly one of sqlite, postgres, mysql, sqlserver or module, or with kind, the one kind names. Default SQLite at .pathways/pathways.db.",
     })
-    .superRefine(oneKind(STORAGE_BLOCK_KINDS))
+    .superRefine((value, ctx) => {
+      if (value.kind === undefined) {
+        oneKind(STORAGE_BLOCK_KINDS)(value, ctx);
+      } else if (value.kind !== "sqlite" && value[value.kind] === undefined) {
+        // The kind may come from the environment, so the problem names no kind.
+        ctx.addIssue({
+          code: "custom",
+          path: ["kind"],
+          message: "names a kind with no block here; add that block, or name another kind",
+        });
+      }
+    })
     .superRefine(optionsWithModule),
-  restateKinds(STORAGE_BLOCK_KINDS),
+  (json) => {
+    json["dependencies"] = { options: ["module"] };
+    json.if = { required: ["kind"] };
+    json.else = { oneOf: exactlyOneOf(STORAGE_BLOCK_KINDS) };
+  },
 );
 
 /** The health endpoint: a listener. */
@@ -797,16 +895,14 @@ const lease = z
   .strictObject({
     ttl: duration(
       "How long the engine lease lasts unless its holder renews it, which it does every third of this: a duration of at least 1s, such as 15s, or a number of milliseconds. Default 15s.",
-    )
-      .refine((value) => value >= 1_000, 'a duration of at least 1s, such as "15s"')
-      .optional(),
-    standby: z
-      .boolean()
-      .meta({
+      { ms: 1_000, message: 'a duration of at least 1s, such as "15s"' },
+    ).optional(),
+    standby: envable(
+      z.boolean().meta({
         description:
           "true starts this engine as a standby: it holds no lease and opens no source until the engine holding the lease stops, then takes over. Needs a database server. Default false.",
-      })
-      .optional(),
+      }),
+    ).optional(),
   })
   .meta({
     description:
@@ -838,19 +934,18 @@ const source = restate(
     .strictObject({
       file: z
         .strictObject({
-          dir: z.string().min(1).meta({
+          dir: path.meta({
             description: "The folder to read, relative to this file. Created if missing.",
           }),
           minAge: duration(
             "How long a file must sit unchanged before it is read: a duration such as 1s, or a number of milliseconds. Default 1s.",
           ).optional(),
-          keepProcessed: z
-            .boolean()
-            .meta({
+          keepProcessed: envable(
+            z.boolean().meta({
               description:
                 "Move each stored file into processed/ instead of deleting it. Those copies are plaintext. Default false.",
-            })
-            .optional(),
+            }),
+          ).optional(),
         })
         .meta({ description: "Read each file dropped into dir as one message." })
         .optional(),
@@ -873,7 +968,7 @@ const destination = restate(
     .strictObject({
       file: z
         .strictObject({
-          dir: z.string().min(1).meta({
+          dir: path.meta({
             description: "The folder to write into, relative to this file. Created if missing.",
           }),
         })
@@ -913,9 +1008,7 @@ export const channelSchema = restate(
         })
         .optional(),
       source,
-      transform: z
-        .string()
-        .min(1)
+      transform: path
         .meta({
           description:
             "The transform module, relative to this file. Default: none, each message passes through unchanged.",
@@ -1464,4 +1557,10 @@ export interface ProjectConfig {
    */
   readonly encryption: EncryptionConfig | undefined;
   readonly channels: readonly ChannelConfig[];
+  /**
+   * Each setting `pathways.yaml` and the channels' `channel.yaml` files read from the environment
+   * with `{ env: NAME }`: its key and the variable it names, never the value. Empty when none does;
+   * `undefined` in a configuration built by hand rather than loaded.
+   */
+  readonly environment?: readonly EnvReference[] | undefined;
 }
