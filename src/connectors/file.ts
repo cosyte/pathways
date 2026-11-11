@@ -131,9 +131,27 @@ function decodePath(name: string): string {
  * with nested repeats, such as `^(a+)+$`, or a glob with several `*` in one segment, such as
  * `*_*_*_*_*.hl7`, which Node compiles to a regex of as many lazy repeats. Either can take minutes
  * on such a name, holding the whole engine meanwhile. A path that takes longer is left where it is
- * and said, with the code `ERR_SCRIPT_EXECUTION_TIMEOUT`.
+ * and said, with the code `ERR_SCRIPT_EXECUTION_TIMEOUT`. The limit is time on the clock, not work
+ * done, so a pause of the host can stop a harmless run too: see {@link SLOW_TRIES}.
  */
 export const REGEX_TIME_LIMIT_MS = 50;
+
+/**
+ * Passes in a row a pattern may run too long on one path before the path is set aside. A single
+ * timeout is never final, since a busy host or a garbage collection can stop a harmless run: the path
+ * is tried again on the next pass, and taken once a run finishes. Set aside, it is tried again after
+ * 1 pass, then 2, 4 and so on up to {@link SLOW_WAIT_MAX}, and each run that times out is said again.
+ */
+const SLOW_TRIES = 3;
+
+/** The most passes a path set aside by {@link SLOW_TRIES} waits before it is tried again. */
+const SLOW_WAIT_MAX = 64;
+
+/** A path a pattern ran too long on: the runs in a row that did, and the passes left to wait. */
+interface Slow {
+  readonly runs: number;
+  readonly wait: number;
+}
 
 /**
  * The one script each pattern runs through, so a run can be stopped at {@link REGEX_TIME_LIMIT_MS}.
@@ -143,7 +161,11 @@ export const REGEX_TIME_LIMIT_MS = 50;
  */
 const TEST_SCRIPT = new Script("glob === undefined ? expression.test(path) : matches(path, glob)");
 
-/** A test of a path against one {@link PathPattern}; a pattern that runs too long throws. */
+/**
+ * A test of a path against one {@link PathPattern}; a pattern that runs too long throws. The test is
+ * run once here, on an empty path, so the first run on a real one is not also the script's first run
+ * in its context, which is slower.
+ */
 function matcher(pattern: PathPattern): (rel: string) => boolean {
   const context =
     "glob" in pattern
@@ -154,10 +176,16 @@ function matcher(pattern: PathPattern): (rel: string) => boolean {
         }
       : { glob: undefined, expression: new RegExp(pattern.regex, "u"), path: "" };
   createContext(context);
-  return (rel) => {
+  const test = (rel: string): boolean => {
     context.path = rel;
     return TEST_SCRIPT.runInContext(context, { timeout: REGEX_TIME_LIMIT_MS }) === true;
   };
+  try {
+    test("");
+  } catch {
+    // A warm run stopped by a pause is no file's fault; a real path's run says its own.
+  }
+  return test;
 }
 
 /** A file's device and inode, as `lstat` and the open file's `stat` give them. */
@@ -306,8 +334,8 @@ export class FileSource implements SourceConnector {
   private seen = new Map<string, string>();
   /** How many passes in a row each file has failed to open, for `readTries`. */
   private tries = new Map<string, number>();
-  /** Paths a pattern ran too long on, so each costs one run, not one a pass. */
-  private slow = new Set<string>();
+  /** Paths a pattern ran too long on, so one set aside costs a run only now and then. */
+  private slow = new Map<string, Slow>();
 
   /**
    * @param options The folder to read, the channel it is read for, how long a file must sit before
@@ -336,11 +364,13 @@ export class FileSource implements SourceConnector {
 
   /**
    * Whether a path from the source folder passes `include` and `exclude`. A path a pattern ran too
-   * long on passes neither, so it is left, and is noted in `slow` to be left on later passes too.
+   * long on passes neither this pass, so it is left, and is noted in `slow`: it is tried again on the
+   * next pass, and after {@link SLOW_TRIES} timeouts in a row only after a wait, as that says.
    */
-  private matches(rel: string, slow: Set<string>): boolean {
-    if (this.slow.has(rel)) {
-      slow.add(rel);
+  private matches(rel: string, slow: Map<string, Slow>): boolean {
+    const last = this.slow.get(rel);
+    if (last !== undefined && last.wait > 0) {
+      slow.set(rel, { runs: last.runs, wait: last.wait - 1 });
       return false;
     }
     try {
@@ -348,7 +378,9 @@ export class FileSource implements SourceConnector {
       return included && !this.exclude.some((test) => test(rel));
     } catch (error) {
       this.options.onReadError?.(error);
-      slow.add(rel);
+      const runs = (last?.runs ?? 0) + 1;
+      const wait = runs < SLOW_TRIES ? 0 : Math.min(2 ** (runs - SLOW_TRIES), SLOW_WAIT_MAX);
+      slow.set(rel, { runs, wait });
       return false;
     }
   }
@@ -392,7 +424,7 @@ export class FileSource implements SourceConnector {
       errorDir === undefined ? undefined : await realpath(errorDir).catch(() => resolve(errorDir));
     const found: Found[] = [];
     const markers = new Set<string>();
-    const slow = new Set<string>();
+    const slow = new Map<string, Slow>();
     const walk = async (folder: string, under: string): Promise<void> => {
       for (const entry of await readdir(folder, { withFileTypes: true })) {
         const rel = `${under}${entry.name}`;

@@ -1,8 +1,9 @@
 import { appendFileSync, renameSync, symlinkSync, unlinkSync } from "node:fs";
 import { appendFile, chmod, mkdir, readdir, readFile, symlink, utimes } from "node:fs/promises";
 import { join } from "node:path";
+import { Script } from "node:vm";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { loadProject } from "../src/config/load.js";
 import type { ChannelConfig } from "../src/config/schema.js";
@@ -250,7 +251,7 @@ describe.each([
     expect(await readFile(join(dir, "big.hl7"), "utf8")).toBe("second");
   });
 
-  it("leaves a file a regex runs too long on, says so, and does not run it on that path again", async () => {
+  it("leaves a file a regex runs too long on, says so, and sets it aside after three passes", async () => {
     const dir = await inbox();
     // A name built to make ^(a+)+$ backtrack: unguarded, one test of it takes many seconds.
     const name = `${"a".repeat(30)}!`;
@@ -263,9 +264,15 @@ describe.each([
     });
     const started = performance.now();
     expect(await pass(source)).toEqual(["fast"]);
-    expect(await pass(source)).toEqual([]);
+    // Tried on three passes in a row, each stopped and said; the fourth pass passes it over.
+    for (let index = 0; index < 3; index += 1) expect(await pass(source)).toEqual([]);
     expect(performance.now() - started).toBeLessThan(REGEX_TIME_LIMIT_MS * 20);
-    expect(errors).toEqual([expect.objectContaining({ code: "ERR_SCRIPT_EXECUTION_TIMEOUT" })]);
+    expect(errors).toEqual(
+      Array.from(
+        { length: 3 },
+        (): unknown => expect.objectContaining({ code: "ERR_SCRIPT_EXECUTION_TIMEOUT" }) as unknown,
+      ),
+    );
     expect(await tree(dir)).toEqual([name]);
     // An exclude that runs too long leaves the file too, never takes it.
     const excluded: unknown[] = [];
@@ -278,7 +285,7 @@ describe.each([
     expect(await tree(dir)).toEqual([name]);
   });
 
-  it("leaves a file a glob runs too long on, says so, and does not run it on that path again", async () => {
+  it("leaves a file a glob runs too long on, says so, and sets it aside after three passes", async () => {
     const dir = await inbox();
     // A name built to make a glob of several * in one segment backtrack: unguarded, one test of
     // it takes seconds, and longer names take minutes.
@@ -290,9 +297,15 @@ describe.each([
     const source = sourceOn(dir, { include: [{ glob }], onReadError: (e) => errors.push(e) });
     const started = performance.now();
     expect(await pass(source)).toEqual(["fast"]);
-    expect(await pass(source)).toEqual([]);
+    // Tried on three passes in a row, each stopped and said; the fourth pass passes it over.
+    for (let index = 0; index < 3; index += 1) expect(await pass(source)).toEqual([]);
     expect(performance.now() - started).toBeLessThan(REGEX_TIME_LIMIT_MS * 20);
-    expect(errors).toEqual([expect.objectContaining({ code: "ERR_SCRIPT_EXECUTION_TIMEOUT" })]);
+    expect(errors).toEqual(
+      Array.from(
+        { length: 3 },
+        (): unknown => expect.objectContaining({ code: "ERR_SCRIPT_EXECUTION_TIMEOUT" }) as unknown,
+      ),
+    );
     expect(await tree(dir)).toEqual([name]);
     // An exclude glob that runs too long leaves the file too, never takes it.
     const excluded: unknown[] = [];
@@ -499,6 +512,126 @@ describe.each([
       "2-x%2F.%2Fy.hl7",
       "3-x%2F",
     ]);
+  });
+});
+
+/** The error node:vm throws when a script runs past its timeout. */
+function timedOut(): Error {
+  return Object.assign(new Error("Script execution timed out after 50ms"), {
+    code: "ERR_SCRIPT_EXECUTION_TIMEOUT",
+  });
+}
+
+// The limit is time on the clock, so a pause of the host can stop a harmless run: these force a
+// timeout through node:vm, where a real one could come from a busy runner at any moment.
+describe("FileSource and a pattern run that times out", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("takes the file on the next pass after one run of its pattern timed out", async () => {
+    const dir = await inbox();
+    await dropFile(join(dir, "ADT_1.hl7"), "first");
+    const errors: unknown[] = [];
+    const source = sourceOn(dir, {
+      include: [{ regex: "^ADT_\\d+\\.hl7$" }],
+      onReadError: (error) => errors.push(error),
+    });
+    vi.spyOn(Script.prototype, "runInContext").mockImplementationOnce(() => {
+      throw timedOut();
+    });
+    expect(await pass(source)).toEqual([]);
+    expect(await tree(dir)).toEqual(["ADT_1.hl7"]);
+    expect(await pass(source)).toEqual(["first"]);
+    expect(errors).toEqual([expect.objectContaining({ code: "ERR_SCRIPT_EXECUTION_TIMEOUT" })]);
+  });
+
+  it("tries a path again on each pass until three runs in a row time out, and a match resets the count", async () => {
+    const dir = await inbox();
+    await dropFile(join(dir, "a.hl7"), "body");
+    const errors: unknown[] = [];
+    const source = sourceOn(dir, {
+      include: [{ glob: "*.hl7" }],
+      onReadError: (error) => errors.push(error),
+    });
+    const run = vi.spyOn(Script.prototype, "runInContext");
+    run.mockImplementationOnce(() => {
+      throw timedOut();
+    });
+    run.mockImplementationOnce(() => {
+      throw timedOut();
+    });
+    expect(await pass(source)).toEqual([]);
+    expect(await pass(source)).toEqual([]);
+    expect(await pass(source)).toEqual(["body"]);
+    expect(errors).toHaveLength(2);
+    // The count starts again from a match: two more timeouts in a row do not set the path aside.
+    await dropFile(join(dir, "a.hl7"), "again");
+    run.mockImplementationOnce(() => {
+      throw timedOut();
+    });
+    run.mockImplementationOnce(() => {
+      throw timedOut();
+    });
+    expect(await pass(source)).toEqual([]);
+    expect(await pass(source)).toEqual([]);
+    expect(await pass(source)).toEqual(["again"]);
+    expect(errors).toHaveLength(4);
+  });
+
+  it("sets a path aside after three timeouts in a row, then tries it at doubling waits up to 64 passes, saying each timeout", async () => {
+    const dir = await inbox();
+    await dropFile(join(dir, "a.hl7"), "body");
+    const said: number[] = [];
+    let passes = 0;
+    const source = sourceOn(dir, {
+      include: [{ glob: "*.hl7" }],
+      exclude: [{ glob: "*.txt" }],
+      onReadError: () => said.push(passes),
+    });
+    const run = vi.spyOn(Script.prototype, "runInContext").mockImplementation(() => {
+      throw timedOut();
+    });
+    for (passes = 1; passes <= 210; passes += 1) expect(await pass(source)).toEqual([]);
+    // Passes 1 to 3 try it; then it waits 1, 2, 4, 8, 16, 32 and 64 passes, and 64 again.
+    expect(said).toEqual([1, 2, 3, 5, 8, 13, 22, 39, 72, 137, 202]);
+    // A pass it waits runs no pattern on it at all.
+    expect(run).toHaveBeenCalledTimes(said.length);
+    // Once a run matches, the file is taken at its next try, and forgotten.
+    run.mockRestore();
+    for (passes = 211; passes < 267; passes += 1) expect(await pass(source)).toEqual([]);
+    expect(await pass(source)).toEqual(["body"]);
+    expect(said).toHaveLength(11);
+  });
+
+  it("forgets a set-aside path once its file is gone", async () => {
+    const dir = await inbox();
+    await dropFile(join(dir, "a.hl7"), "first");
+    const source = sourceOn(dir, { include: [{ glob: "*.hl7" }] });
+    const run = vi.spyOn(Script.prototype, "runInContext").mockImplementation(() => {
+      throw timedOut();
+    });
+    for (let index = 0; index < 3; index += 1) expect(await pass(source)).toEqual([]);
+    unlinkSync(join(dir, "a.hl7"));
+    expect(await pass(source)).toEqual([]);
+    run.mockRestore();
+    await dropFile(join(dir, "a.hl7"), "second");
+    expect(await pass(source)).toEqual(["second"]);
+  });
+
+  it("runs each pattern once when the source is built, so the first real run is not a cold one", () => {
+    const run = vi.spyOn(Script.prototype, "runInContext").mockImplementation(() => {
+      throw timedOut();
+    });
+    // A warm run that times out is no fault of any file, and is not said.
+    const errors: unknown[] = [];
+    sourceOn("unused", {
+      include: [{ glob: "*.hl7" }, { regex: "^ADT" }],
+      exclude: [{ glob: "*.tmp" }],
+      onReadError: (error) => errors.push(error),
+    });
+    expect(run).toHaveBeenCalledTimes(3);
+    expect(errors).toEqual([]);
   });
 });
 

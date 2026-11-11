@@ -288,10 +288,13 @@ A path from `dir` is written with `/` on every system. A glob is read as Node.js
 characters. Each pattern runs on names whoever writes the files chooses, and can take minutes on a
 name built for it: a regex with nested repeats, such as `^(a+)+$`, and a glob with several `*` in
 one segment, such as `*_*_*_*_*.hl7`, which Node.js turns into as many repeats. So each run of a
-glob or a regex on a path stops after 50 ms: that file is left where it is, taken by neither
-`include` nor `exclude`, the engine logs `source-read-failed` with the code
-`ERR_SCRIPT_EXECUTION_TIMEOUT`, and the pattern is not run on that path again while the file
-stays. Write a regex with no repeat inside a repeated group, and a glob with few `*` in a segment.
+glob or a regex on a path stops after 50 ms: that file is left where it is this pass, taken by
+neither `include` nor `exclude`, and the engine logs `source-read-failed` with the code
+`ERR_SCRIPT_EXECUTION_TIMEOUT`. The 50 ms are time on the clock, not work done, so a pause of a busy
+host can stop a harmless run too: the path is tried again on the next pass, and taken once a run
+finishes. After three timeouts in a row on one path it is set aside, and tried again after 1 pass,
+then 2, 4 and so on up to 64, each timeout logged again, for as long as the file stays. Write a
+regex with no repeat inside a repeated group, and a glob with few `*` in a segment.
 `errorDir` is compared with `dir`'s subfolders after symbolic links are resolved.
 [Choose which files a source takes](./read-and-write-files.md#choose-which-files-a-source-takes)
 shows each in use.

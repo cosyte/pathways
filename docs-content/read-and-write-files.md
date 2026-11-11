@@ -106,8 +106,11 @@ destinations:
   the writer chooses, and can take minutes on a name built for it: a regex with a repeat inside a
   repeated group, such as `^(a+)+$`, or a glob with several `*` in one segment, such as
   `*_*_*_*_*.hl7`. Each run stops after 50 ms, and that file is left where it is and logged as
-  `source-read-failed` with `ERR_SCRIPT_EXECUTION_TIMEOUT`. Write a regex with no nested repeat,
-  and a glob with few `*` in a segment (`FAC_*.hl7` rather than `*_*_*_*_*.hl7`).
+  `source-read-failed` with `ERR_SCRIPT_EXECUTION_TIMEOUT`. The 50 ms are time on the clock, so a
+  busy host can stop a harmless run too: the file is tried again on the next pass, and after three
+  timeouts in a row at longer and longer waits, up to every 64 passes, each logged again. Write a
+  regex with no nested repeat, and a glob with few `*` in a segment (`FAC_*.hl7` rather than
+  `*_*_*_*_*.hl7`).
 - **`recursive: true`** reads the subfolders of `dir` as well. It never reads `.claimed/`,
   `processed/` (in `dir` itself) or `errorDir`. A file's path from `dir` goes into its claimed name
   and its idempotency key, so `wards/east/a.hl7` and `wards/west/a.hl7` are two messages that never
