@@ -63,10 +63,12 @@ jobs:
   # THE IMAGE. Once a version has its GitHub release (the shared pipeline cuts it after npm serves
   # the version, in this run or, for a staged version, in a later one), the image of that version is
   # published to ghcr.io/cosyte/pathways for linux/amd64 and linux/arm64, with buildx's SBOM and
-  # max-mode provenance attached to the index, tagged with the version, signed by digest with cosign
-  # keyless signing (this workflow's identity, from the job's OIDC token, logged in Sigstore's public
-  # transparency log), then pulled back by digest and checked. No `latest` tag: a deployment names a
-  # version or a digest, so a rollback is the tag before.
+  # max-mode provenance attached to the index. It is pushed by digest alone, signed by digest with
+  # cosign keyless signing (this workflow's identity, from the job's OIDC token, logged in Sigstore's
+  # public transparency log), pulled back by digest and checked, and only then tagged with the
+  # version. A run that fails before the tag leaves no version tag, only an untagged digest that
+  # nothing points at, and the next run starts again from the build. No `latest` tag: a deployment
+  # names a version or a digest, so a rollback is the tag before.
   #
   # The release tag is made through the API with the job's token, which starts no workflow, so this
   # cannot run on the tag. It runs after the release job on every push to main, and publishes only
@@ -75,9 +77,11 @@ jobs:
   #
   # `image-version` decides with a token that can only read; `image-publish`, the only job that can
   # write to GHCR, runs only when it says so. docker.yml's `platforms` job runs the same steps on
-  # every pull request up to the login, with `push: false`, and test/package.test.ts holds the two
-  # equal. Before the first push the GHCR package does not exist: the push creates it, linked to
-  # this repository, and a maintainer makes it public in the package's settings.
+  # every pull request, in the same order, against a registry that lives for the job on the
+  # runner's loopback instead of GHCR, without the login and the two cosign steps, and
+  # test/package.test.ts holds the two equal. Before the first push the GHCR package does not exist:
+  # the push creates it, linked to this repository, and a maintainer makes it public in the
+  # package's settings.
   image-version:
     needs: release
     # Also after a failed release run: a version released by an earlier run is still published.
@@ -200,29 +204,36 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # After the wait for the concurrency group: an earlier run may have published it meanwhile.
+      # After the wait for the concurrency group: an earlier run may have published it meanwhile. It
+      # matches the same not-found answers as `image-version`, and any other answer from the registry
+      # stops the run, so an error never reads as "not published".
       - name: The version is still not published
         id: absent
         run: |
           set -euo pipefail
-          if docker buildx imagetools inspect "$IMAGE:$VERSION" > /dev/null 2>&1; then
+          if docker buildx imagetools inspect "$IMAGE:$VERSION" > "$RUNNER_TEMP/absent.txt" 2>&1; then
             echo "::notice::$IMAGE:$VERSION was published by another run; nothing to do"
             echo "absent=false" >> "$GITHUB_OUTPUT"
-          else
+          elif grep -qiE 'not found|manifest unknown|name unknown|denied' "$RUNNER_TEMP/absent.txt"; then
             echo "absent=true" >> "$GITHUB_OUTPUT"
+          else
+            cat "$RUNNER_TEMP/absent.txt"
+            echo "::error::could not tell whether $IMAGE:$VERSION is published"
+            exit 1
           fi
 
-      - name: Build both platforms with SBOM and provenance
+      # By digest alone: no version tag exists until the steps below have signed and checked this
+      # digest. A run that fails before the tag leaves an untagged digest that nothing points at.
+      - name: Build both platforms with SBOM and provenance, and push them by digest
         id: build
         if: steps.absent.outputs.absent == 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: true
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           sbom: true
           provenance: mode=max
-          tags: ${{ env.IMAGE }}:${{ env.VERSION }}
           labels: |
             org.opencontainers.image.version=${{ env.VERSION }}
             org.opencontainers.image.revision=${{ env.REVISION }}
@@ -237,24 +248,57 @@ jobs:
         run: cosign sign --yes "$IMAGE@$DIGEST"
 
       # As a deployment checks it: by digest, from the registry, against this workflow's identity.
-      - name: Pull the image by digest and check its signature
+      - name: Check the signature by digest
+        if: steps.absent.outputs.absent == 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          cosign verify "$IMAGE@$DIGEST" \
+            --certificate-identity "https://github.com/cosyte/pathways/.github/workflows/release.yml@refs/heads/main" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" > /dev/null
+
+      - name: Pull the image by digest and check both platforms and their attestations
         if: steps.absent.outputs.absent == 'true'
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           set -euo pipefail
           ref="$IMAGE@$DIGEST"
-          cosign verify "$ref" \
-            --certificate-identity "https://github.com/cosyte/pathways/.github/workflows/release.yml@refs/heads/main" \
-            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" > /dev/null
           for platform in linux/amd64 linux/arm64; do
             docker pull --platform "$platform" "$ref"
             test "$(docker run --rm --platform "$platform" "$ref" --version)" = "$VERSION"
           done
-          # The index holds both platforms and an attestation manifest (SBOM and provenance) for each.
-          docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}' > "$RUNNER_TEMP/index.json"
+          # The index holds both platforms, and one attestation manifest for each that names it.
+          docker buildx imagetools inspect "$ref" --raw > "$RUNNER_TEMP/index.json"
           test "$(jq -c '[.manifests[] | select(.platform.os == "linux") | .platform.architecture] | sort' "$RUNNER_TEMP/index.json")" = '["amd64","arm64"]'
-          test "$(jq '[.manifests[] | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest")] | length' "$RUNNER_TEMP/index.json")" = 2
+          images="$(jq -c '[.manifests[] | select(.platform.os == "linux") | .digest] | sort' "$RUNNER_TEMP/index.json")"
+          attested="$(jq -c '[.manifests[] | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest") | .annotations["vnd.docker.reference.digest"]] | sort' "$RUNNER_TEMP/index.json")"
+          echo "platform manifests $images, attested $attested"
+          test "$images" = "$attested"
+          # Each attestation manifest carries an SPDX SBOM and SLSA provenance.
+          for attestation in $(jq -r '.manifests[] | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest") | .digest' "$RUNNER_TEMP/index.json"); do
+            docker buildx imagetools inspect "$IMAGE@$attestation" --raw > "$RUNNER_TEMP/attestation.json"
+            jq -e '[.layers[].annotations["in-toto.io/predicate-type"]] | (any(startswith("https://spdx.dev/"))) and (any(startswith("https://slsa.dev/provenance/")))' "$RUNNER_TEMP/attestation.json"
+          done
+
+      # Last, and only on the checked digest. With one source index and no annotations, imagetools
+      # copies the index byte for byte; the dry run proves the digest is unchanged before the tag is
+      # written, and the read back after it proves the tag names the checked digest.
+      - name: Tag the verified digest with the version
+        if: steps.absent.outputs.absent == 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          ref="$IMAGE@$DIGEST"
+          docker buildx imagetools create --dry-run --tag "$IMAGE:$VERSION" "$ref" > "$RUNNER_TEMP/planned.json"
+          planned="sha256:$(printf '%s' "$(cat "$RUNNER_TEMP/planned.json")" | sha256sum | cut -d ' ' -f 1)"
+          echo "tagging $ref as $IMAGE:$VERSION, which would name $planned"
+          test "$planned" = "$DIGEST"
+          docker buildx imagetools create --tag "$IMAGE:$VERSION" "$ref"
+          docker buildx imagetools inspect "$IMAGE:$VERSION" --raw > "$RUNNER_TEMP/tagged.json"
+          tagged="sha256:$(printf '%s' "$(cat "$RUNNER_TEMP/tagged.json")" | sha256sum | cut -d ' ' -f 1)"
+          test "$tagged" = "$DIGEST"
           {
             echo "### $IMAGE $VERSION"
             echo

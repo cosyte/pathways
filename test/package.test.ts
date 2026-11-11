@@ -1,4 +1,7 @@
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
@@ -220,8 +223,9 @@ const SIGNER = "https://github.com/cosyte/pathways/.github/workflows/release.yml
 const ISSUER = "https://token.actions.githubusercontent.com";
 
 // Each release publishes the image to GHCR, signed, for two platforms, with an SBOM and provenance.
-// A pull request cannot push, so docker.yml's `platforms` job runs the same steps with `push:
-// false`; these hold the two equal, so what a pull request proves is what a release runs.
+// A pull request cannot push to GHCR, so docker.yml's `platforms` job runs the same steps against a
+// registry of its own on the runner's loopback; these hold the two equal, so what a pull request
+// proves is what a release runs.
 describe("the image release", () => {
   const publish = job("release.yml", "image-publish");
   const decide = job("release.yml", "image-version");
@@ -231,8 +235,11 @@ describe("the image release", () => {
   const SHARED = [
     "Read the version and the commit",
     "docker/setup-qemu-action",
-    "docker/setup-buildx-action",
     "Build each platform alone and run it on a starter project",
+    "The version is still not published",
+    "Build both platforms with SBOM and provenance, and push them by digest",
+    "Pull the image by digest and check both platforms and their attestations",
+    "Tag the verified digest with the version",
   ];
 
   it("runs after the release job, deciding with a read-only token, and publishes only when told", () => {
@@ -254,10 +261,15 @@ describe("the image release", () => {
     );
   });
 
-  it("runs the same steps on a pull request as on a release, up to the login", () => {
-    expect(platforms.env).toEqual({ IMAGE: "ghcr.io/cosyte/pathways" });
+  it("runs the same steps on a pull request as on a release, against its own registry", () => {
+    expect(platforms.env).toEqual({ IMAGE: "localhost:5000/cosyte/pathways" });
     expect(publish.env?.["IMAGE"]).toBe("ghcr.io/cosyte/pathways");
     for (const name of SHARED) expect(step(platforms, name), name).toEqual(step(publish, name));
+    // The one difference: the dry run's builder is on the host's network, to reach that registry.
+    const buildx = "docker/setup-buildx-action";
+    expect(step(platforms, buildx).uses).toBe(step(publish, buildx).uses);
+    expect(step(platforms, buildx).with).toEqual({ "driver-opts": "network=host" });
+    expect(step(publish, buildx).with).toBeUndefined();
     const order = (of: Job): number[] => SHARED.map((name) => of.steps.indexOf(step(of, name)));
     expect(order(platforms)).toEqual([...order(platforms)].sort((a, b) => a - b));
     expect(order(publish)).toEqual([...order(publish)].sort((a, b) => a - b));
@@ -267,21 +279,24 @@ describe("the image release", () => {
     expect(smoke).toContain('"${run[@]}" "pathways:$arch" start --once');
   });
 
-  it("builds both platforms with an SBOM and max-mode provenance, and pushes only from a release", () => {
-    const name = "Build both platforms with SBOM and provenance";
-    const released = step(publish, name);
-    const dryRun = step(platforms, name);
+  it("builds both platforms with an SBOM and max-mode provenance, and pushes them by digest", () => {
+    const released = step(
+      publish,
+      "Build both platforms with SBOM and provenance, and push them by digest",
+    );
     expect(released.with).toMatchObject({
       platforms: "linux/amd64,linux/arm64",
-      push: true,
+      outputs: "type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true",
       sbom: true,
       provenance: "mode=max",
-      tags: "${{ env.IMAGE }}:${{ env.VERSION }}",
     });
-    expect(dryRun.with).toEqual({ ...released.with, push: false });
-    expect(dryRun.uses).toBe(released.uses);
-    // No `latest`: a deployment names a version or a digest.
-    expect(String(released.with?.["tags"])).not.toContain("latest");
+    // No `latest`: a deployment names a version or a digest, and the version tag is the only tag.
+    const workflow = readFileSync(".github/workflows/release.yml", "utf8");
+    expect(workflow).not.toMatch(/:latest/);
+    expect(workflow.match(/--tag "\$IMAGE[^"]*"/g)).toEqual([
+      '--tag "$IMAGE:$VERSION"',
+      '--tag "$IMAGE:$VERSION"',
+    ]);
   });
 
   it("pushes, logs in and signs nowhere but the release", () => {
@@ -290,8 +305,10 @@ describe("the image release", () => {
       expect(docker, word).not.toContain(word);
     }
     expect(platforms.permissions).toEqual({ contents: "read" });
-    // The only `docker push` in docker.yml is to the job's own registry on the runner's loopback.
+    // The only `docker push` in docker.yml is to the job's own registry on the runner's loopback,
+    // and the dry run's image lives there too.
     expect(docker.match(/docker push .*/g)).toEqual(["docker push localhost:5000/pathways:ci"]);
+    expect(platforms.env?.["IMAGE"]).toMatch(/^localhost:5000\//);
   });
 
   it("signs the pushed digest keylessly and checks it by digest, as a deployment does", () => {
@@ -300,15 +317,21 @@ describe("the image release", () => {
     expect(sign.env).toEqual({ DIGEST: "${{ steps.build.outputs.digest }}" });
     expect(step(publish, "sigstore/cosign-installer").uses).toMatch(/@[0-9a-f]{40}$/);
 
-    const verify = step(publish, "Pull the image by digest and check its signature");
+    const verify = step(publish, "Check the signature by digest");
     expect(verify.env).toEqual({ DIGEST: "${{ steps.build.outputs.digest }}" });
-    expect(verify.run).toContain('ref="$IMAGE@$DIGEST"');
+    expect(verify.run).toContain('cosign verify "$IMAGE@$DIGEST"');
     expect(verify.run).toContain(`--certificate-identity "${SIGNER}"`);
     expect(verify.run).toContain(`--certificate-oidc-issuer "${ISSUER}"`);
-    expect(verify.run).toContain('docker pull --platform "$platform" "$ref"');
+    const pull = step(
+      publish,
+      "Pull the image by digest and check both platforms and their attestations",
+    );
+    expect(pull.env).toEqual({ DIGEST: "${{ steps.build.outputs.digest }}" });
+    expect(pull.run).toContain('ref="$IMAGE@$DIGEST"');
+    expect(pull.run).toContain('docker pull --platform "$platform" "$ref"');
     const names = publish.steps.map((s) => s.name ?? s.uses?.split("@")[0]);
     expect(names.indexOf("Sign the image by digest")).toBeLessThan(
-      names.indexOf("Pull the image by digest and check its signature"),
+      names.indexOf("Check the signature by digest"),
     );
   });
 
@@ -332,5 +355,124 @@ describe("the image release", () => {
         if (s.uses !== undefined) expect(s.uses).toMatch(/^[a-z-]+\/[a-z-]+@[0-9a-f]{40}$/);
       }
     }
+  });
+});
+
+// The version tag is the one name a deployment trusts, so it goes on last: the image is pushed by
+// digest alone, signed, pulled back and checked, and only then tagged. A run that fails before the
+// tag leaves at most an untagged digest that nothing points at, and the next run starts clean.
+describe("the image's version tag", () => {
+  const publish = job("release.yml", "image-publish");
+  const decide = job("release.yml", "image-version");
+  const platforms = job("docker.yml", "platforms");
+  const TAG = "Tag the verified digest with the version";
+  const CHECKS = [
+    "Sign the image by digest",
+    "Check the signature by digest",
+    "Pull the image by digest and check both platforms and their attestations",
+  ];
+
+  /** The steps that can put a tag on an image in a registry. */
+  const writesTag = (s: Step): boolean =>
+    s.with?.["tags"] !== undefined ||
+    /imagetools create|docker (image )?push|docker tag|crane|oras|skopeo/.test(s.run ?? "");
+
+  it("is written only after the signature and the attestations are checked", () => {
+    const names = publish.steps.map((s) => s.name ?? s.uses?.split("@")[0]);
+    expect(publish.steps.filter(writesTag).map((s) => s.name)).toEqual([TAG]);
+    for (const check of CHECKS) {
+      expect(names.indexOf(check), check).toBeGreaterThanOrEqual(0);
+      expect(names.indexOf(check), check).toBeLessThan(names.indexOf(TAG));
+    }
+    const build = step(
+      publish,
+      "Build both platforms with SBOM and provenance, and push them by digest",
+    );
+    expect(build.with?.["tags"]).toBeUndefined();
+    expect(String(build.with?.["outputs"])).toContain("push-by-digest=true");
+    const tag = step(publish, TAG);
+    expect(tag.env).toEqual({ DIGEST: "${{ steps.build.outputs.digest }}" });
+    expect(tag.run).toContain('docker buildx imagetools create --tag "$IMAGE:$VERSION" "$ref"');
+    // The tag names the digest that was checked, or the step fails.
+    expect(tag.run).toContain('test "$tagged" = "$DIGEST"');
+  });
+
+  it("goes on the same way in the pull request's dry run, against a throwaway registry", () => {
+    expect(platforms.steps.filter(writesTag).map((s) => s.name)).toEqual([TAG]);
+    expect(step(platforms, TAG)).toEqual(step(publish, TAG));
+    expect(platforms.env?.["IMAGE"]).toMatch(/^localhost:5000\//);
+  });
+
+  const ABSENT = "The version is still not published";
+  const notFound = (s: Step | undefined): string | undefined =>
+    /grep -qiE '([^']+)'/.exec(s?.run ?? "")?.[1];
+
+  it("is checked for again just before the push, failing closed on an answer it does not know", () => {
+    const absent = step(publish, ABSENT);
+    expect(notFound(absent)).toBeDefined();
+    expect(notFound(absent)).toBe(
+      notFound(step(decide, "Has this version a GitHub release, and no image yet?")),
+    );
+    expect(absent.run).toContain("exit 1");
+    expect(step(platforms, ABSENT)).toEqual(absent);
+  });
+
+  // The step's own script, with a stand-in `docker` that gives the registry's answer.
+  describe.skipIf(process.platform === "win32")("the recheck's answers", () => {
+    function recheck(output: string, status: number): { status: number | null; outputs: string } {
+      const dir = mkdtempSync(join(tmpdir(), "pathways-recheck-"));
+      try {
+        const bin = join(dir, "bin");
+        mkdirSync(bin);
+        writeFileSync(
+          join(bin, "docker"),
+          '#!/bin/sh\nprintf \'%s\\n\' "$FAKE_OUT"\nexit "$FAKE_STATUS"\n',
+        );
+        chmodSync(join(bin, "docker"), 0o755);
+        const outputs = join(dir, "outputs");
+        writeFileSync(outputs, "");
+        const result = spawnSync("bash", ["-c", step(publish, ABSENT).run ?? "exit 0"], {
+          env: {
+            ...process.env,
+            PATH: `${bin}:${process.env["PATH"] ?? ""}`,
+            IMAGE: "ghcr.io/cosyte/pathways",
+            VERSION: "0.0.0-example",
+            RUNNER_TEMP: dir,
+            GITHUB_OUTPUT: outputs,
+            FAKE_OUT: output,
+            FAKE_STATUS: String(status),
+          },
+          encoding: "utf8",
+        });
+        return { status: result.status, outputs: readFileSync(outputs, "utf8") };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+
+    it("publishes on the not-found answer", () => {
+      const answer = recheck("ERROR: ghcr.io/cosyte/pathways:0.0.0-example: not found", 1);
+      expect(answer).toEqual({ status: 0, outputs: "absent=true\n" });
+    });
+
+    it("stands down when the version is there", () => {
+      expect(recheck("Name: ghcr.io/cosyte/pathways:0.0.0-example", 0)).toEqual({
+        status: 0,
+        outputs: "absent=false\n",
+      });
+    });
+
+    it("fails, and publishes nothing, on any other answer", () => {
+      for (const answer of [
+        "ERROR: unexpected status from HEAD request: 503 Service Unavailable",
+        "ERROR: toomanyrequests: retry later",
+        "ERROR: failed to do request: dial tcp: i/o timeout",
+        "",
+      ]) {
+        const result = recheck(answer, 1);
+        expect(result.status, answer).not.toBe(0);
+        expect(result.outputs, answer).not.toContain("absent=true");
+      }
+    });
   });
 });

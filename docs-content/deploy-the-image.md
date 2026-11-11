@@ -20,6 +20,16 @@ carries an SBOM and build provenance, and is signed with cosign keyless signing 
 workflow. It holds the `pathways` command and the four database drivers, nothing else; your
 project's image adds what your channels need. There is no `latest` tag.
 
+The image is built from the same commit and the same `pnpm-lock.yaml` as the npm package of that
+version, through the repository's `Dockerfile`. It is not the npm tarball: the two are built
+separately from one source, so their files are not byte for byte the same.
+
+The release pushes the image by digest first, with no tag. It signs that digest, pulls it back, and
+checks the signature and the SBOM and provenance of both platforms, and only then puts the version
+tag on it. So a version tag always names a signed, checked image. A release run that fails before
+the tag leaves no version tag, only an untagged digest that nothing points at, and the next run
+builds and checks the version again from the start.
+
 Look up the digest of the version you want, the `Digest:` line, and check its signature:
 
 ```bash

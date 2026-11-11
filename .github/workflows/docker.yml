@@ -10,10 +10,13 @@ name: Docker
 #
 # Two more jobs, which no ruleset names:
 #
-# - `platforms` runs the release's image steps (release.yml, `image-publish`) up to the registry
-#   login: each of linux/amd64 and linux/arm64 built alone (arm64 under QEMU) and run on a starter
-#   project on SQLite, then both built together with the SBOM and provenance the release attaches,
-#   with `push: false`. test/package.test.ts holds its steps equal to the release's.
+# - `platforms` runs the release's image steps (release.yml, `image-publish`) in the release's
+#   order, against a registry that lives for the job on the runner's loopback instead of GHCR: each
+#   of linux/amd64 and linux/arm64 built alone (arm64 under QEMU) and run on a starter project on
+#   SQLite; the check that the version is not published yet; both built together with the SBOM and
+#   provenance the release attaches and pushed by digest alone; both platforms pulled back by
+#   digest with their attestations checked; and only then the version tag put on that digest. It
+#   has no login and does not sign. test/package.test.ts holds its steps equal to the release's.
 # - `project-image` builds a starter project's own image from its Dockerfile (templates/starter/),
 #   FROM this image by digest, through a registry that lives for the job on the runner's loopback.
 #
@@ -270,16 +273,23 @@ jobs:
         run: |
           docker image ls --format '{{.Repository}}:{{.Tag}} {{.Size}}' pathways | tee -a "$GITHUB_STEP_SUMMARY"
 
-  # The release's image steps with `push: false`: keep them in step with release.yml's
-  # `image-publish` (test/package.test.ts compares them). No login, no push, no signature.
+  # The release's image steps, against the job's own registry: keep them in step with release.yml's
+  # `image-publish` (test/package.test.ts compares them). No login and no signature, and nothing
+  # leaves the runner.
   platforms:
     runs-on: ubuntu-latest
     # The arm64 builds run under QEMU on the hosted amd64 runner.
     timeout-minutes: 60
     permissions:
       contents: read
+    services:
+      # registry:3, pinned as in `project-image`.
+      registry:
+        image: registry@sha256:38907510915c3f1604c7e83d6ab602ab3020d092f73bdaed8696773693ff768c
+        ports:
+          - 5000:5000
     env:
-      IMAGE: ghcr.io/cosyte/pathways
+      IMAGE: localhost:5000/cosyte/pathways
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -294,7 +304,10 @@ jobs:
       - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
         with:
           platforms: arm64
+      # On the host's network, so the builder reaches the job's registry on the loopback.
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: network=host
 
       - name: Build each platform alone and run it on a starter project
         run: |
@@ -322,19 +335,87 @@ jobs:
           done
           docker image ls --format '{{.Repository}}:{{.Tag}} {{.Size}}' pathways | tee -a "$GITHUB_STEP_SUMMARY"
 
-      - name: Build both platforms with SBOM and provenance
+      # The job's registry is empty, so this takes the not-found arm. Any answer it does not know
+      # stops the run, as it does on a release.
+      - name: The version is still not published
+        id: absent
+        run: |
+          set -euo pipefail
+          if docker buildx imagetools inspect "$IMAGE:$VERSION" > "$RUNNER_TEMP/absent.txt" 2>&1; then
+            echo "::notice::$IMAGE:$VERSION was published by another run; nothing to do"
+            echo "absent=false" >> "$GITHUB_OUTPUT"
+          elif grep -qiE 'not found|manifest unknown|name unknown|denied' "$RUNNER_TEMP/absent.txt"; then
+            echo "absent=true" >> "$GITHUB_OUTPUT"
+          else
+            cat "$RUNNER_TEMP/absent.txt"
+            echo "::error::could not tell whether $IMAGE:$VERSION is published"
+            exit 1
+          fi
+
+      # By digest alone, as the release pushes it. The release signs it and checks the signature
+      # here, before the steps below.
+      - name: Build both platforms with SBOM and provenance, and push them by digest
         id: build
+        if: steps.absent.outputs.absent == 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: false
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           sbom: true
           provenance: mode=max
-          tags: ${{ env.IMAGE }}:${{ env.VERSION }}
           labels: |
             org.opencontainers.image.version=${{ env.VERSION }}
             org.opencontainers.image.revision=${{ env.REVISION }}
+
+      - name: Pull the image by digest and check both platforms and their attestations
+        if: steps.absent.outputs.absent == 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          ref="$IMAGE@$DIGEST"
+          for platform in linux/amd64 linux/arm64; do
+            docker pull --platform "$platform" "$ref"
+            test "$(docker run --rm --platform "$platform" "$ref" --version)" = "$VERSION"
+          done
+          # The index holds both platforms, and one attestation manifest for each that names it.
+          docker buildx imagetools inspect "$ref" --raw > "$RUNNER_TEMP/index.json"
+          test "$(jq -c '[.manifests[] | select(.platform.os == "linux") | .platform.architecture] | sort' "$RUNNER_TEMP/index.json")" = '["amd64","arm64"]'
+          images="$(jq -c '[.manifests[] | select(.platform.os == "linux") | .digest] | sort' "$RUNNER_TEMP/index.json")"
+          attested="$(jq -c '[.manifests[] | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest") | .annotations["vnd.docker.reference.digest"]] | sort' "$RUNNER_TEMP/index.json")"
+          echo "platform manifests $images, attested $attested"
+          test "$images" = "$attested"
+          # Each attestation manifest carries an SPDX SBOM and SLSA provenance.
+          for attestation in $(jq -r '.manifests[] | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest") | .digest' "$RUNNER_TEMP/index.json"); do
+            docker buildx imagetools inspect "$IMAGE@$attestation" --raw > "$RUNNER_TEMP/attestation.json"
+            jq -e '[.layers[].annotations["in-toto.io/predicate-type"]] | (any(startswith("https://spdx.dev/"))) and (any(startswith("https://slsa.dev/provenance/")))' "$RUNNER_TEMP/attestation.json"
+          done
+
+      # Last, and only on the checked digest. With one source index and no annotations, imagetools
+      # copies the index byte for byte; the dry run proves the digest is unchanged before the tag is
+      # written, and the read back after it proves the tag names the checked digest.
+      - name: Tag the verified digest with the version
+        if: steps.absent.outputs.absent == 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          ref="$IMAGE@$DIGEST"
+          docker buildx imagetools create --dry-run --tag "$IMAGE:$VERSION" "$ref" > "$RUNNER_TEMP/planned.json"
+          planned="sha256:$(printf '%s' "$(cat "$RUNNER_TEMP/planned.json")" | sha256sum | cut -d ' ' -f 1)"
+          echo "tagging $ref as $IMAGE:$VERSION, which would name $planned"
+          test "$planned" = "$DIGEST"
+          docker buildx imagetools create --tag "$IMAGE:$VERSION" "$ref"
+          docker buildx imagetools inspect "$IMAGE:$VERSION" --raw > "$RUNNER_TEMP/tagged.json"
+          tagged="sha256:$(printf '%s' "$(cat "$RUNNER_TEMP/tagged.json")" | sha256sum | cut -d ' ' -f 1)"
+          test "$tagged" = "$DIGEST"
+          {
+            echo "### $IMAGE $VERSION"
+            echo
+            echo "- \`$IMAGE:$VERSION\`"
+            echo "- \`$ref\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # A starter project's own image, as a team builds it: FROM the Pathways image by digest, with the
   # channels copied in, a dependency installed in the build stage, and `pathways validate` and
