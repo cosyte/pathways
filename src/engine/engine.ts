@@ -931,21 +931,22 @@ export class Engine {
    * messages go on through the transform and delivery; a stopped channel does nothing.
    */
   async tick(): Promise<void> {
-    await this.passes(false);
+    await this.passes("all");
   }
 
   /**
-   * One pass over every channel. Unscheduled (a {@link tick}), each polled source is polled and its
-   * pass waited for, up to its deadline; scheduled (in {@link run}), a source is polled only when its
-   * pass is due, and the pass runs beside the loop.
+   * One pass over every channel. With `all` (a {@link tick}), each polled source is polled and its
+   * pass waited for, up to its deadline; with `due` (in {@link run}), a source is polled only when
+   * its pass is due, and the pass runs beside the loop; with `none` (the end of a run), no source is
+   * polled, and what was taken in goes on through the transform and delivery.
    */
-  private async passes(scheduled: boolean): Promise<void> {
+  private async passes(polls: "all" | "due" | "none"): Promise<void> {
     await this.syncStates();
     for (const channel of this.channels) {
       this.step();
       this.options.fence?.check();
       if (channel.state === "stopped") continue;
-      const pass = this.pass(channel, scheduled);
+      const pass = this.pass(channel, polls);
       channel.busy = settled(pass);
       try {
         await pass;
@@ -1043,7 +1044,10 @@ export class Engine {
    * last `poll` call has not returned. A pass due while the engine was down is not made up. The loop
    * waits the poll interval between passes, or less when a source's pass is due sooner or one
    * ends. Retention runs after the first pass and then once every `retentionInterval`. A source's
-   * `poll` that rejects before its deadline ends the run with that error, as it would a tick.
+   * `poll` that rejects before its deadline ends the run with that error, as it would a tick. Once
+   * `signal` aborts, a source's pass under way is cut off after what it is storing is stored, and a
+   * last pass takes what the sources took in through the transform and delivery, as the end of a
+   * tick does.
    */
   async run(signal: AbortSignal): Promise<void> {
     const { pollIntervalMs, retentionIntervalMs } = this.options.project.settings;
@@ -1057,7 +1061,7 @@ export class Engine {
     }
     try {
       while (!signal.aborted) {
-        await this.passes(true);
+        await this.passes("due");
         this.step();
         if (this.now() >= retentionAt) {
           await this.retention();
@@ -1072,14 +1076,21 @@ export class Engine {
         );
         this.raise(schedule);
       }
+      await this.endPasses();
+      this.raise(schedule);
+      await this.passes("none");
     } finally {
       this.steppedAt = undefined;
       this.schedule = undefined;
-      // A pass under way is cut off: what it is storing is stored, and it takes nothing more in.
-      for (const channel of this.channels) channel.cut?.abort();
-      await Promise.all(this.channels.map((channel) => channel.polling ?? Promise.resolve()));
-      await Promise.all(this.channels.flatMap((channel) => [...channel.receiving]));
+      await this.endPasses();
     }
+  }
+
+  /** Cuts each source's pass under way off, once what it is storing is stored. */
+  private async endPasses(): Promise<void> {
+    for (const channel of this.channels) channel.cut?.abort();
+    await Promise.all(this.channels.map((channel) => channel.polling ?? Promise.resolve()));
+    await Promise.all(this.channels.flatMap((channel) => [...channel.receiving]));
   }
 
   /** Throws the failure of a pass that ran beside {@link run}'s loop, if one failed. */
@@ -1274,13 +1285,13 @@ export class Engine {
   }
 
   /** One channel's part of a pass. */
-  private async pass(channel: RunningChannel, scheduled: boolean): Promise<void> {
-    if (channel.state === "running") {
+  private async pass(channel: RunningChannel, polls: "all" | "due" | "none"): Promise<void> {
+    if (channel.state === "running" && polls !== "none") {
       if (channel.down !== undefined && channel.down.nextAt <= this.now()) {
         await this.syncSource(channel);
       }
       if (channel.connectors.source.poll !== undefined) {
-        if (!scheduled) await this.poll(channel);
+        if (polls === "all") await this.poll(channel);
         else if (channel.nextPollAt <= this.now()) this.pollBeside(channel);
       }
     }

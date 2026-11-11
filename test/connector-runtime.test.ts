@@ -431,13 +431,14 @@ describe("a pass's deadline", () => {
     await expect(running).rejects.toMatchObject({ code: "ESYNTH" });
   });
 
-  it("cuts a pass under way off when the run ends, after what it is storing is stored", async () => {
+  it("cuts a pass under way off when the run ends, after what it is storing is stored, and delivers it", async () => {
     const clock = new FakeClock();
     const slow = new FakePoll(clock);
+    const out = new Recorder();
     const release = slow.hang();
     const { engine, store, events } = await harness(
       { slow: channelYaml() },
-      { slow: { source: slow, destinations: [new Recorder()] } },
+      { slow: { source: slow, destinations: [out] } },
       clock,
     );
     const stop = new AbortController();
@@ -447,7 +448,9 @@ describe("a pass's deadline", () => {
     stop.abort();
     await running;
     expect(await storing).toBeGreaterThan(0);
-    expect((await store.messageCounts("slow")).received).toBe(1);
+    // The last pass took it through to delivery, as the end of a tick would.
+    expect(out.sent).toEqual(["SYNTH-1"]);
+    expect((await store.messageCounts("slow")).transformed).toBe(1);
     expect(slow.signals[0]?.aborted).toBe(true);
     await expect(slow.sink?.receive(bytes("SYNTH-2"))).rejects.toMatchObject({
       code: "POLL_DEADLINE",
