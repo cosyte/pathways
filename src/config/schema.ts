@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { normalisePath } from "../connectors/http-path.js";
+import { FORMATS } from "../engine/worker-entry.js";
 import { LIFECYCLE_EVENTS, type LifecycleEventType } from "../extensions/events.js";
 import type { JsonValue } from "../transform.js";
 import { ENV_NAME, fromEnvironment, type EnvReference } from "./env-ref.js";
@@ -9,14 +10,15 @@ import { MAX_INDEX_BITS, MIN_INDEX_BITS } from "./meta-index.js";
 export type { EnvReference } from "./env-ref.js";
 
 /**
- * The message formats a channel can declare.
+ * The message formats a channel can declare, read from the format registry in
+ * `src/engine/worker-entry.ts`.
  *
  * @example
  * ```ts
  * FORMATS.includes("fhir"); // true
  * ```
  */
-export const FORMATS = ["hl7v2", "fhir", "x12", "ccda", "json", "text"] as const;
+export { FORMATS };
 
 /**
  * A channel's message format, and so what its transform receives:

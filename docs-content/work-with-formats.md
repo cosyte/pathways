@@ -59,7 +59,9 @@ export default ((interchange) =>
 
 What a transform returns is written back like this, whatever the channel's format:
 
-- a string is sent as it is;
+- a string is sent as it is, in UTF-8;
+- bytes (a `Uint8Array`, which a `Buffer` is) are sent exactly as they are, so a body in another
+  character set, such as Latin-1, or a binary one keeps its bytes;
 - a model from `@cosyte/hl7`, `@cosyte/fhir`, `@cosyte/x12` or `@cosyte/ccda` is written by its own
   library;
 - on a `json` channel, a plain object, an array, a number or a boolean is written with
