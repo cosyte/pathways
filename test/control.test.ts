@@ -157,10 +157,15 @@ describe("ControlServer", () => {
     expect(await probe(at.path)).toBe(true);
   });
 
-  it.skipIf(!unix)("refuses a folder others may enter", async () => {
-    const at = await address();
-    await mkdir(at.dir ?? "", { mode: 0o700 });
-    await chmod(at.dir ?? "", 0o755);
+  it("refuses a folder others may enter", async () => {
+    // A folder address on every system: on Windows, where the engine uses a pipe, a folder's mode
+    // always gives others access, so it is refused there too.
+    const base = await mkdtemp(unix ? "/tmp/pwc-" : join(tmpdir(), "pwc-"));
+    folders.push(base);
+    const dir = join(base, "open");
+    const at: ControlAddress = { dir, path: join(dir, "x.sock") };
+    await mkdir(dir, { mode: 0o700 });
+    await chmod(dir, 0o755);
     const server = new ControlServer(at, () => Promise.resolve({ channel: "adt" }));
     await expect(server.start()).rejects.toMatchObject({ reason: "unsafe-folder" });
     // Never started, so there is nothing to stop.
@@ -328,7 +333,9 @@ describe("pathways channel", () => {
 
   it("refuses a command line it does not understand, before asking anything", async () => {
     const io = { out: () => undefined, err: () => undefined };
+    expect(await run(["channel"], io)).toBe(2);
     expect(await run(["channel", "drop", "adt"], io)).toBe(2);
+    expect(await run(["channel", "pause", "adt", "lab"], io)).toBe(2);
     expect(await run(["channel", "pause"], io)).toBe(2);
     expect(await run(["channel", "pause", "ADT!"], io)).toBe(2);
     expect(await run(["channel", "pause", "adt", "--deadline", "5s"], io)).toBe(2);
