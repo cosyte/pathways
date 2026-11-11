@@ -60,27 +60,35 @@ function check(ok: boolean, what: string): void {
 /** `text` in double quotes when it holds a space, for a Windows shell. */
 const quote = (text: string): string => (text.includes(" ") ? `"${text}"` : text);
 
+/** How long a command may take: npm's install of the tarball is the slowest, on Windows. */
+const INSTALL_MS = 600_000;
+/** How long a `pathways` run with a fault point named may take: one that froze fails the smoke. */
+const FAULT_RUN_MS = 120_000;
+
 /**
- * Runs `command` with `args` in `cwd`. On Windows npm and the installed bin are `.cmd` shims, which
- * only a shell can start, so there it runs through one. Only what holds a space is quoted: a shim
- * started by a quoted bare name (`"npm"`) looks for its own files in the wrong folder.
+ * Runs `command` with `args` in `cwd`, for at most `timeoutMs`. On Windows npm and the installed
+ * bin are `.cmd` shims, which only a shell can start, so there it runs through one. Only what holds
+ * a space is quoted: a shim started by a quoted bare name (`"npm"`) looks for its own files in the
+ * wrong folder.
  */
 function run(
   command: string,
   args: readonly string[],
   cwd: string,
   env: Readonly<Record<string, string>> = {},
+  timeoutMs = INSTALL_MS,
 ): SpawnSyncReturns<string> {
   const result = spawnSync(windows ? quote(command) : command, windows ? args.map(quote) : args, {
     cwd,
     encoding: "utf8",
     shell: windows,
-    // A minute at most: a process that froze must fail the smoke, not hang it.
-    timeout: 60_000,
+    timeout: timeoutMs,
     killSignal: "SIGKILL",
     env: { ...process.env, NO_UPDATE_NOTIFIER: "1", npm_config_fund: "false", ...env },
   });
-  if (result.error !== undefined) fail(`${command} did not start: ${result.error.message}`);
+  if (result.error !== undefined) {
+    fail(`${command} ${args.join(" ")} did not start or end in time: ${result.error.message}`);
+  }
   if (result.status !== 0) {
     process.stderr.write(result.stdout);
     process.stderr.write(result.stderr);
@@ -132,7 +140,13 @@ const faulty = builtFiles(join(installed, "dist")).filter((file) => {
   return code.includes(FAULT_POINT_ENV) || code.includes("Atomics.wait");
 });
 check(faulty.length === 0, `no built file reads ${FAULT_POINT_ENV} or can freeze the process`);
-const malformed = run(bin, ["--version"], install, { [FAULT_POINT_ENV]: "not-a-point@x" });
+const malformed = run(
+  bin,
+  ["--version"],
+  install,
+  { [FAULT_POINT_ENV]: "not-a-point@x" },
+  FAULT_RUN_MS,
+);
 check(
   malformed.stdout.trim() === manifest.version,
   `pathways --version runs with a malformed ${FAULT_POINT_ENV}`,
@@ -185,7 +199,13 @@ for (const name of ["a01.hl7", "a08.hl7"]) {
   utimesSync(join(inbox, name), minuteAgo, minuteAgo);
 }
 // With a fault point named, as a test would arm it: the build ignores it, delivers and exits.
-run(bin, ["start", "--once"], project, { [FAULT_POINT_ENV]: "after-send-before-record" });
+run(
+  bin,
+  ["start", "--once"],
+  project,
+  { [FAULT_POINT_ENV]: "after-send-before-record" },
+  FAULT_RUN_MS,
+);
 check(
   existsSync(join(project, ".pathways", "pathways.db")),
   "start --once stored the messages in SQLite through better-sqlite3's native addon",

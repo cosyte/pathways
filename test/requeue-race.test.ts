@@ -340,21 +340,29 @@ async function raceTwo(
   }
 }
 
-/** Waits until `count` sessions on this database wait for a lock, as the server reports it. */
+/**
+ * Waits until `count` statements on this database are blocked behind the locked message row, as
+ * the server's own view of running statements shows them: the process list on MySQL and MariaDB
+ * (a blocked update stays there with its text), and the lock views on PostgreSQL and SQL Server.
+ * Polls for up to 20 seconds, then fails saying the race's precondition was not observed, with the
+ * last count the server showed.
+ */
 async function waiting(database: TestDatabase, db: Kysely<unknown>, count: number): Promise<void> {
-  for (let i = 0; i < 500; i += 1) {
+  let seen = 0;
+  for (let i = 0; i < 400; i += 1) {
     let query;
     switch (database.kind) {
       case "postgres":
         query = sql<{ n: number | string }>`
           select count(*) as n from pg_stat_activity
-          where datname = current_database() and wait_event_type = 'Lock'`;
+          where datname = current_database() and pid <> pg_backend_pid()
+            and wait_event_type = 'Lock' and state = 'active'`;
         break;
       case "mysql":
         query = sql<{ n: number | string }>`
-          select count(*) as n from information_schema.innodb_trx t
-          join information_schema.processlist p on p.id = t.trx_mysql_thread_id
-          where t.trx_state = 'LOCK WAIT' and p.db = database()`;
+          select count(*) as n from information_schema.processlist
+          where db = database() and id <> connection_id() and command = 'Query'
+            and lower(info) like 'update%messages%'`;
         break;
       case "sqlite":
         throw new Error("SQLite runs this race in two processes, with no lock to wait on");
@@ -364,8 +372,12 @@ async function waiting(database: TestDatabase, db: Kysely<unknown>, count: numbe
           where blocking_session_id <> 0 and database_id = db_id()`;
     }
     const { rows } = await query.execute(db);
-    if (Number(rows[0]?.n ?? 0) >= count) return;
-    await sleep(20);
+    seen = Number(rows[0]?.n ?? 0);
+    if (seen >= count) return;
+    await sleep(50);
   }
-  throw new Error(`${String(count)} sessions never waited on the lock`);
+  throw new Error(
+    `the race's precondition was not observed: ${database.label} showed ${String(seen)} of ` +
+      `${String(count)} statements blocked behind the locked message row in 20 seconds`,
+  );
 }
