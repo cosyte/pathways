@@ -307,7 +307,13 @@ export class FileSource implements SourceConnector {
         if (entry.isDirectory()) {
           if (!recursive || rel === PROCESSED_DIR || resolve(path) === errors) continue;
           // A subfolder that cannot be read is said, and the rest of the pass goes on.
-          await walk(path, `${rel}/`).catch((error: unknown) => onReadError?.(error));
+          // A try, not a catch callback: on Windows no mode makes a folder unreadable, so a
+          // function here would go uncalled there.
+          try {
+            await walk(path, `${rel}/`);
+          } catch (error) {
+            onReadError?.(error);
+          }
         } else if (!entry.isFile()) {
           // A symbolic link, to a file or a folder, a pipe or a device: never read.
         } else if (doneFile !== undefined && rel.endsWith(doneFile)) {
@@ -408,7 +414,8 @@ export class FileSource implements SourceConnector {
     } else if (taken.length > 0) {
       await flush(claims, "r");
       await flush(join(dir, CLAIMED_DIR), "r");
-      const left = new Set(taken.map((file) => dirname(join(dir, ...file.rel.split("/")))));
+      const left = new Set<string>();
+      for (const file of taken) left.add(dirname(join(dir, ...file.rel.split("/"))));
       for (const folder of left) await flush(folder, "r");
     }
     // Each marker goes once its file's claim is on disk, so a power cut cannot leave a file unmarked.
