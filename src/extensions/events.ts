@@ -311,8 +311,9 @@ export interface SourceUpEvent extends LifecycleEventBase {
  * Every action the audit log records, as an {@link AuditEvent}'s `action`: `search` (messages
  * listed), `view` (one message's details, without content), `content-view`, `replay`, `resend`,
  * `clear`, `retention` (a run, with what it deleted), `config` (a configuration change seen when
- * the engine started), `lease-release` (the engine lease freed by force) and `migrate` (schema steps
- * applied by `pathways migrate`). Kept equal to the audit log's own list by a test.
+ * the engine started), `lease-release` (the engine lease freed by force), `migrate` (schema steps
+ * applied by `pathways migrate`) and `verify` (a stored message read by `pathways verify`). Kept
+ * equal to the audit log's own list by a test.
  *
  * @example
  * ```ts
@@ -329,7 +330,8 @@ export type AuditEventAction =
   | "retention"
   | "config"
   | "lease-release"
-  | "migrate";
+  | "migrate"
+  | "verify";
 
 /**
  * An entry of the audit log, once it is stored: who did what, to which message, and how it ended.

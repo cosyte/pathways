@@ -356,7 +356,7 @@ an API key header included.
 ### Destinations
 
 Each entry is exactly one of `file`, `http`, `mllp` or `module`, and may add a [`retry`](#retry)
-block of its own, beside that key:
+block of its own and `dryRun`, beside that key:
 
 ```yaml title="channels/results-out/channel.yaml"
 source:
@@ -365,6 +365,14 @@ destinations:
   - http: { url: "https://lab.example.test/results" }
     retry: { limit: 10, jitter: full }
 ```
+
+| Key      | Type    | Default | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| -------- | ------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dryRun` | boolean | `false` | transform and record each output, mark its delivery `dry-run`, and never send it: no connector is built, so no TLS file is read and no connection opened, and none of its secrets is read or resolved at start, a provider's (`secret:`) included, so a missing or expired one does not stop the start. Takes an environment reference. When `dryRun` is read from an environment variable, setting that variable to `false` makes the destination send for real, and the audit log does not record that change |
+
+`pathways start --dry-run` runs every destination dry. Turning dry run on marks every pending delivery
+of that destination `dry-run`, including those queued or waiting for a retry before. See
+[Upgrade Pathways](./upgrade-pathways.md#watch-a-destination-before-it-sends).
 
 #### File destination
 

@@ -6,6 +6,7 @@ import type {
   AuditInput,
   AuditQuery,
   ClearResult,
+  DeliveryCounts,
   DeliveryStatus,
   DeliveryTally,
   ExpireResult,
@@ -159,6 +160,11 @@ export class MemoryStore implements MessageStore {
     return Promise.resolve();
   }
 
+  markDryRun(deliveryId: number): Promise<void> {
+    Object.assign(this.delivery(deliveryId), { status: "dry-run", sending: undefined });
+    return Promise.resolve();
+  }
+
   markDelivered(deliveryId: number): Promise<void> {
     Object.assign(this.delivery(deliveryId), {
       status: "delivered",
@@ -200,14 +206,16 @@ export class MemoryStore implements MessageStore {
     return Promise.resolve(counts);
   }
 
-  deliveryCounts(channel: string): Promise<Record<DeliveryStatus, number>> {
-    const counts: Record<DeliveryStatus, number> = {
+  deliveryCounts(channel: string): Promise<DeliveryCounts> {
+    const counts: { -readonly [K in keyof DeliveryCounts]: DeliveryCounts[K] } = {
       pending: 0,
       delivered: 0,
       failed: 0,
       cleared: 0,
     };
-    for (const d of this.deliveryRows) if (d.channel === channel) counts[d.status] += 1;
+    for (const d of this.deliveryRows) {
+      if (d.channel === channel) counts[d.status] = (counts[d.status] ?? 0) + 1;
+    }
     return Promise.resolve(counts);
   }
 
@@ -480,10 +488,16 @@ export class MemoryStore implements MessageStore {
   }
 
   private summary(row: MessageRow): MessageSummary {
-    const tally = { pending: 0, retrying: 0, delivered: 0, failed: 0, cleared: 0 };
+    const tally: { -readonly [K in keyof DeliveryTally]: DeliveryTally[K] } = {
+      pending: 0,
+      retrying: 0,
+      delivered: 0,
+      failed: 0,
+      cleared: 0,
+    };
     for (const d of this.deliveryRows) {
       if (d.messageId !== row.id || d.generation !== row.generation) continue;
-      tally[d.status] += 1;
+      tally[d.status] = (tally[d.status] ?? 0) + 1;
       if (d.status === "pending" && d.attempts > 0) tally.retrying += 1;
     }
     return {
@@ -508,6 +522,7 @@ function stateOf(status: MessageStatus, deliveries: DeliveryTally): MessageState
   if (deliveries.retrying > 0) return "retrying";
   if (deliveries.pending > 0) return "queued";
   if (deliveries.cleared > 0) return "cleared";
+  if ((deliveries["dry-run"] ?? 0) > 0) return "dry-run";
   return "delivered";
 }
 

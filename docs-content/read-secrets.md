@@ -107,7 +107,8 @@ pathways: the configuration is invalid:
 A problem names the file and key, the secret's name, and the provider's error by name and code. It
 never holds a value, and never the error's own text, which a store may fill with anything. One log
 line per provider, `secrets-resolved`, gives the count it resolved. Values are read once, at start; a
-rotated secret is read at the next start.
+rotated secret is read at the next start. A destination that runs dry (`dryRun: true`, or
+`pathways start --dry-run`) never sends, so its secrets are not resolved and cannot stop the start.
 
 The operator commands read secrets the same way. Each one that opens the store resolves the store's
 connection URL and master keys, and those that write to the audit log (`messages`, `replay`,

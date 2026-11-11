@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { stderr } from "node:process";
 import { parseArgs } from "node:util";
 
@@ -56,9 +57,10 @@ import {
   type OperatorContext,
 } from "./operator/commands.js";
 import { recordConfigChanges } from "./operator/config-audit.js";
+import { verifyCommand, type VerifySelection } from "./operator/verify.js";
 import { InitError, initProject, STARTER_CHANNEL, STARTER_KEY_FILE } from "./starter/init.js";
 import { resolveSecrets, type Secrets } from "./secrets/resolve.js";
-import type { SecretScope } from "./secrets/sources.js";
+import type { DrySkip, SecretScope } from "./secrets/sources.js";
 import { openRawStore, openStore, startingKeys, type OpenStoreContext } from "./storage/open.js";
 import { SchemaVersionError } from "./storage/schema.js";
 import {
@@ -113,6 +115,13 @@ Commands:
                       expand schema steps first, unless --no-migrate
   test [name...]      Run each channel's tests/ inputs through its transform
                       and compare the output with the saved .expected files
+  verify              Run stored messages, or samples, through this project's
+                      transforms and compare each output with the recorded
+                      one, per channel and destination: same, different (a
+                      field path, JSON pointer or byte offset, never a value)
+                      or failed. Writes nothing to the message tables and
+                      applies no schema step; each stored message read is
+                      written to the audit log first
   validate            Check pathways.yaml and every channel.yaml as start
                       does, with every file they name, without reading a
                       secret or opening a connection: for a project's CI.
@@ -173,25 +182,31 @@ Options:
                         as JSON, with each setting read from the environment
                         and the variable it named; secrets stay references
       --json            status, messages, replay, clear, retention, audit,
-                        lease, migrate: print one JSON document instead of
-                        text
-      --channel <name>  messages, audit: only this channel
+                        lease, migrate, verify: print one JSON document
+                        instead of text
+      --channel <name>  messages, audit, verify: only this channel
       --status <state>  messages: only this state: received, queued, retrying,
-                        delivered, filtered, failed or cleared
-      --since <time>    messages, audit: from this time: 2026-11-07,
+                        delivered, dry-run, filtered, failed or cleared
+      --since <time>    messages, audit, verify: from this time: 2026-11-07,
                         2026-11-07T12:00:00Z (UTC unless a zone is given), or
-                        a duration ago, such as 24h or 7d
+                        a duration ago, such as 24h or 7d. verify: default 24h
+      --ids <id,...>    verify: these stored messages, by id
+      --samples <dir>   verify: the inputs in dir/<channel>/ instead of stored
+                        messages, each against its .expected file, as in tests/
       --until <time>    messages, audit: before this time
       --limit <n>       messages, audit: at most n rows (default ${DEFAULT_LIMIT}, at most 1000)
       --before <id>     messages, audit: the next page, as the last one says
       --content         messages show: print the content, which is PHI. The
                         view is written to the audit log first
       --resend          replay: send the stored outputs again, untransformed
-      --dry-run         retention: say what would be deleted, delete nothing;
-                        migrate: say which steps would be applied, apply none
+      --dry-run         start: run every destination dry: transform and
+                        record each output, mark its delivery dry-run, send
+                        nothing. retention: say what would be deleted, delete
+                        nothing. migrate: say which steps would be applied,
+                        apply none
       --action <name>   audit: only this action: search, view, content-view,
                         replay, resend, clear, retention, config,
-                        lease-release or migrate
+                        lease-release, migrate or verify
       --message <id>    audit: only entries about this message
       --encrypt-plaintext
                         rekey: also encrypt what was stored while encryption
@@ -209,8 +224,9 @@ module could not start or stopped on an error, init could not write the
 project, rekey left a value not under the current key, a replay, resend or
 clear was refused or the message failed again, another engine holds the lease,
 the engine lost its lease, there was no lease to release, the database schema
-is one this version will not run on or migrate, or probe found the engine not
-alive or not ready (probe exits only 0 or 1); 2 the command line was not
+is one this version will not run on or migrate, verify found a difference or a
+failure, or probe found the engine not alive or not ready (probe exits only 0
+or 1); 2 the command line was not
 understood; 3 the configuration is invalid; 4 a message named does not exist.
 `;
 
@@ -226,7 +242,7 @@ type OptionName = Exclude<keyof Values, "help" | "version" | "project">;
 /** The options each command takes, beyond --project, --help and --version. */
 const OPTIONS: Readonly<Record<string, readonly OptionName[]>> = {
   init: [],
-  start: ["once", "standby", "no-migrate"],
+  start: ["once", "standby", "no-migrate", "dry-run"],
   test: ["update"],
   validate: ["print"],
   status: ["json"],
@@ -237,6 +253,7 @@ const OPTIONS: Readonly<Record<string, readonly OptionName[]>> = {
   audit: ["json", "action", "message", "channel", "since", "until", "limit", "before"],
   rekey: ["encrypt-plaintext"],
   lease: ["json", "force"],
+  verify: ["json", "channel", "since", "ids", "samples"],
   probe: ["ready", "if-configured"],
   migrate: ["json", "contract", "dry-run"],
 };
@@ -296,6 +313,7 @@ export async function run(argv: readonly string[], io: CliIo): Promise<number> {
           once: values.once === true,
           standby: values.standby,
           noMigrate: values["no-migrate"] === true,
+          dryRun: values["dry-run"] === true,
         },
         io,
       );
@@ -307,6 +325,14 @@ export async function run(argv: readonly string[], io: CliIo): Promise<number> {
     case "rekey":
       if (rest.length > 0) return usage(io);
       return rekeyStore(projectDir, values["encrypt-plaintext"] === true, io);
+    case "verify": {
+      const parsed = parseVerify(rest, values, io);
+      if (typeof parsed === "number") return parsed;
+      if (parsed.selection.kind === "samples") {
+        return verifySamples(projectDir, parsed, values.json === true, io);
+      }
+      return operator(command, rest, values, projectDir, io);
+    }
     case "probe":
       if (rest.length > 0) return usage(io);
       return probe(
@@ -391,7 +417,10 @@ function reportConfigError(error: ConfigError, io: CliIo): void {
  */
 async function secretsOrExit(
   project: ProjectConfig,
-  context: OpenStoreContext & { readonly signal?: AbortSignal | undefined },
+  context: OpenStoreContext & {
+    readonly signal?: AbortSignal | undefined;
+    readonly skipDry?: DrySkip | undefined;
+  },
   scope: SecretScope,
   io: CliIo,
 ): Promise<Secrets | number> {
@@ -439,7 +468,7 @@ async function keysOrExit(
  * and key, or a database that cannot be opened, named by its driver's code. None names the
  * database, its server or its login.
  */
-function reportStoreError(error: unknown, io: CliIo): number {
+function reportStoreError(error: unknown, io: CliIo, command = "start"): number {
   if (error instanceof ConfigError) {
     reportConfigError(error, io);
     return EXIT.config;
@@ -449,9 +478,11 @@ function reportStoreError(error: unknown, io: CliIo): number {
     return EXIT.failed;
   }
   if (error instanceof SchemaVersionError) {
-    io.err(
-      `pathways: ${error.message}.${error.reason === "schema-too-old" ? " Run pathways migrate first, or start without --no-migrate." : ""}\n`,
-    );
+    const hint =
+      command === "verify"
+        ? " Run pathways migrate first: verify applies no schema step."
+        : " Run pathways migrate first, or start without --no-migrate.";
+    io.err(`pathways: ${error.message}.${error.reason === "schema-too-old" ? hint : ""}\n`);
     return EXIT.failed;
   }
   const refusal = error instanceof StorageError ? STORAGE_REFUSALS[error.reason] : undefined;
@@ -478,6 +509,7 @@ async function openWrapped(
   project: ProjectConfig,
   given: OpenStoreContext,
   io: CliIo,
+  command?: string,
 ): Promise<{ readonly store: MessageStore; readonly encrypted: boolean } | number> {
   const secrets = await secretsOrExit(project, given, "store", io);
   if (typeof secrets === "number") return secrets;
@@ -491,7 +523,7 @@ async function openWrapped(
   try {
     return { store: await openStore(project, { ...context, keys }), encrypted: keys !== undefined };
   } catch (error) {
-    return reportStoreError(error, io);
+    return reportStoreError(error, io, command);
   }
 }
 
@@ -509,12 +541,17 @@ function auditFor(store: MessageStore, io: CliIo, onListenerError: (error: unkno
  */
 const SCHEMA_GENERATION = Object.keys(migrations("sqlite")).length;
 
-/** How `pathways start` runs: one pass, or as a standby (`undefined` leaves it to pathways.yaml). */
+/**
+ * How `pathways start` runs: one pass, or as a standby (`undefined` leaves it to pathways.yaml), and
+ * with every destination dry or not.
+ */
 interface StartMode {
   readonly once: boolean;
   readonly standby: boolean | undefined;
   /** Apply no schema step, and refuse a database that lacks one this version needs. */
   readonly noMigrate: boolean;
+  /** Run every destination dry: record each output, send nothing. */
+  readonly dryRun: boolean;
 }
 
 async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<number> {
@@ -528,8 +565,14 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
   }
   const env = io.env ?? process.env;
   const logger = io.logger ?? pino({ redact: REDACT });
-  // Every secret is read now, at startup, master keys among them: a missing one stops the start.
-  const secrets = await secretsOrExit(project, { env, logger, signal: io.signal }, "all", io);
+  // Every secret is read now, at startup, master keys among them: a missing one stops the start. A
+  // destination that runs dry never sends, so its secrets are not read and cannot stop it.
+  const secrets = await secretsOrExit(
+    project,
+    { env, logger, signal: io.signal, skipDry: mode.dryRun ? "all" : "each" },
+    "all",
+    io,
+  );
   if (typeof secrets === "number") return secrets;
   const context: OpenStoreContext = mode.noMigrate
     ? { env, logger, secrets, migrate: "none" }
@@ -547,6 +590,8 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
     return EXIT.failed;
   }
   if (leases === undefined) logger.warn({ event: "lease-unsupported" });
+  // Said once at start, so a log reader knows why nothing goes out.
+  if (mode.dryRun) logger.warn({ event: "dry-run", destinations: "all" });
   // Aborted by the caller's signal, or at once when the lease is lost.
   const stopping = new AbortController();
   const signal = AbortSignal.any([io.signal ?? new AbortController().signal, stopping.signal]);
@@ -588,6 +633,7 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
     env,
     secrets,
     audit,
+    dryRun: mode.dryRun,
     ...(lease === undefined ? {} : { fence: lease }),
   });
   let active = !standby;
@@ -1035,6 +1081,18 @@ async function operator(
 
   const project = await load(projectDir, io);
   if (project === undefined) return EXIT.config;
+  // verify reads what a running engine stored, so where SQLite has no file there is nothing to read,
+  // and opening it would leave an empty database behind.
+  if (
+    command === "verify" &&
+    project.storage.kind === "sqlite" &&
+    !existsSync(project.storage.file)
+  ) {
+    io.err(
+      "pathways: there is no database to verify against; give --samples to verify synthetic inputs.\n",
+    );
+    return EXIT.failed;
+  }
   // Extensions log to stderr, so stdout holds only the report.
   const bare = { env: io.env ?? process.env, logger: io.logger ?? pino(STDERR_LOG, stderr) };
   // The engine-wide hooks receive each audit entry this command writes, as `pathways start`'s do.
@@ -1045,10 +1103,14 @@ async function operator(
   const secrets = await secretsOrExit(project, bare, withHooks ? "operator" : "store", io);
   if (typeof secrets === "number") return secrets;
   const context = { ...bare, secrets };
+  // verify runs a candidate project, which may be on a newer Pathways than the engine running on
+  // this database: it applies no schema step, so it never changes the schema under that engine.
   const wrapped =
     command === "migrate"
       ? await openForMigrate(project, context, io)
-      : await openWrapped(project, context, io);
+      : command === "verify"
+        ? await openWrapped(project, { ...context, migrate: "none" }, io, command)
+        : await openWrapped(project, context, io);
   if (typeof wrapped === "number") return wrapped;
   const { store } = wrapped;
   const audit = auditFor(store, io, (error) => {
@@ -1187,6 +1249,13 @@ function parseOperator(
     case "retention":
       if (rest.length > 0) return usage(io);
       return (context) => retentionCommand(context, values["dry-run"] === true);
+    case "verify": {
+      // run() parsed these already, and sent samples elsewhere.
+      const parsed = parseVerify(rest, values, io) as ParsedVerify;
+      return (context) =>
+        knownChannel(context.project, parsed.channel, io) ??
+        verifyCommand(context, parsed.selection, parsed.channel);
+    }
     case "migrate": {
       if (rest.length > 0) return usage(io);
       const flags = { contract: values.contract === true, dryRun: values["dry-run"] === true };
@@ -1223,6 +1292,79 @@ function parseOperator(
       return (context) => auditCommand(context, { ...filters, action, messageId });
     }
   }
+}
+
+/** `pathways verify`'s arguments, parsed. */
+interface ParsedVerify {
+  readonly selection: VerifySelection;
+  readonly channel: string | undefined;
+}
+
+/** How far back `pathways verify` reads stored messages when no selection is given. */
+const VERIFY_DEFAULT_SINCE = "24h";
+
+/**
+ * `pathways verify`'s arguments, parsed, or the exit code of a usage error: at most one of
+ * `--since`, `--ids` and `--samples`, stored messages since {@link VERIFY_DEFAULT_SINCE} by default.
+ */
+function parseVerify(rest: readonly string[], values: Values, io: CliIo): ParsedVerify | number {
+  if (rest.length > 0) return usage(io);
+  const chosen = [values.since, values.ids, values.samples].filter((v) => v !== undefined);
+  if (chosen.length > 1) return invalid(io, "verify takes one of --since, --ids and --samples.");
+  if (values.channel !== undefined && !isChannelName(values.channel)) {
+    return invalid(io, "--channel takes a channel name.");
+  }
+  const { channel } = values;
+  if (values.samples !== undefined) {
+    return { selection: { kind: "samples", dir: values.samples }, channel };
+  }
+  if (values.ids !== undefined) {
+    const ids = values.ids.split(",").map(parseId);
+    if (ids.some((id) => id === undefined)) {
+      return invalid(io, "--ids takes message ids, positive whole numbers joined by commas.");
+    }
+    return { selection: { kind: "ids", ids: [...new Set(ids as number[])] }, channel };
+  }
+  const since = parseTime(values.since ?? VERIFY_DEFAULT_SINCE, Date.now());
+  if (since === undefined) {
+    return invalid(io, "--since takes a date, a date and time, or a duration such as 24h or 7d.");
+  }
+  return { selection: { kind: "since", since }, channel };
+}
+
+/** Undefined when `channel` is not given or the project has it; else says so and returns 2. */
+function knownChannel(
+  project: ProjectConfig,
+  channel: string | undefined,
+  io: CliIo,
+): Promise<number> | undefined {
+  if (channel === undefined || project.channels.some((c) => c.name === channel)) return undefined;
+  io.err(
+    `pathways: no such channel. The channels are: ${project.channels.map((c) => c.name).join(", ")}\n`,
+  );
+  return Promise.resolve(EXIT.usage);
+}
+
+/**
+ * `pathways verify --samples`: synthetic inputs, so no store is opened and nothing is audited. The
+ * project is loaded as `test` loads it.
+ */
+async function verifySamples(
+  projectDir: string,
+  parsed: ParsedVerify,
+  json: boolean,
+  io: CliIo,
+): Promise<number> {
+  const project = await load(projectDir, io);
+  if (project === undefined) return EXIT.config;
+  return (
+    (await knownChannel(project, parsed.channel, io)) ??
+    verifyCommand(
+      { project, json, out: io.out, err: io.err, env: io.env ?? process.env },
+      parsed.selection,
+      parsed.channel,
+    )
+  );
 }
 
 /** The filters `messages` and `audit` share, parsed, or the exit code of a usage error. */
@@ -1291,6 +1433,8 @@ function parseCli(argv: readonly string[]) {
       action: { type: "string" },
       message: { type: "string" },
       "encrypt-plaintext": { type: "boolean" },
+      ids: { type: "string" },
+      samples: { type: "string" },
     },
     allowPositionals: true,
     strict: true,
