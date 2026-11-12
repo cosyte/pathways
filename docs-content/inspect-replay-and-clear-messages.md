@@ -93,7 +93,17 @@ for a destination that lost what it was sent, or one that rejected a message and
 
 On a channel with destination transforms, a resend queues each destination the outputs stored for
 it, even when its transform has changed since; a destination its transform filtered stays
-`filtered`, and one whose transform failed keeps its failure. A replay runs the channel's transform
+`filtered`, and one whose transform failed keeps its failure, even when that failed delivery was
+cleared since. A resend never sends one destination the outputs stored for another: a destination
+added to the channel after the message's last transform has nothing stored, so it is sent nothing
+and gets no delivery. The command counts those destinations, with the code `not-stored`, and the
+`resend` audit entry carries the count as `notStored`:
+
+```text
+message 17: resent: 1 delivery queued; 1 destination with nothing stored for this message was sent nothing (not-stored)
+```
+
+To send such a destination the message, replay it instead. A replay runs the channel's transform
 and every destination's transform as they are on disk now.
 
 ## Clear a failed message

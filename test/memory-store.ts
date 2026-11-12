@@ -37,9 +37,7 @@ import type {
 function statusOf(outputs: TransformOutputs): MessageStatus {
   if (Array.isArray(outputs)) return outputs.length === 0 ? "filtered" : "transformed";
   const { byDestination } = outputs as { readonly byDestination: readonly DestinationOutcome[] };
-  return byDestination.every(
-    (o) => "notStored" in o || ("outputs" in o && o.outputs.length === 0),
-  )
+  return byDestination.every((o) => "notStored" in o || ("outputs" in o && o.outputs.length === 0))
     ? "filtered"
     : "transformed";
 }

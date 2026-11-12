@@ -3738,7 +3738,8 @@ const request: RequeueRequest = { mode: "resend", expected: "transformed", outpu
 > `readonly` `optional` **byDestination?**: readonly [`DestinationOutcome`](#destinationoutcome)[]
 
 On a channel with destination transforms: what each destination gets, in order, in place of
-`outputs` for every one. A destination's failure is recorded as its failed delivery.
+`outputs` for every one. A destination's failure is recorded as its failed delivery, and one
+`notStored` gets no delivery; how many were is `notStored` in the result and its audit entry.
 
 ##### destinations
 
@@ -5189,11 +5190,13 @@ export default ((options) => ({
 
 ### DestinationOutcome
 
-> **DestinationOutcome** = (\{ `outputs`: readonly `Uint8Array`[]; \} \| \{ `failure`: `string`; \}) & `object`
+> **DestinationOutcome** = (\{ `outputs`: readonly `Uint8Array`[]; \} \| \{ `failure`: `string`; \} \| \{ `notStored`: `true`; \}) & `object`
 
 What one destination's transform gave for a message, as storage records it: its outputs, in
 order, none meaning it filtered the message for that destination; or why it failed, as stored,
-which fails that destination's delivery only.
+which fails that destination's delivery only. On a resend only, `{ notStored: true }`: nothing is
+stored for this destination in the message's generation (it was added to the channel since), so
+it gets no delivery at all, never another destination's outputs.
 
 #### Type Declaration
 
@@ -5605,7 +5608,7 @@ const retryable = (reason: RefusalReason): boolean => reason === "changed" || re
 
 ### RequeueResult
 
-> **RequeueResult** = \{ `done`: `true`; `entry`: [`AuditEntry`](#auditentry); `generation`: `number`; `queued`: `number`; `status`: [`MessageStatus`](#messagestatus); `superseded`: `number`; \} \| \{ `done`: `false`; `entry`: [`AuditEntry`](#auditentry); `reason`: `Extract`\<[`RefusalReason`](#refusalreason), `"not-found"` \| `"changed"` \| `"pending"` \| `"content-dropped"`\>; \}
+> **RequeueResult** = \{ `done`: `true`; `entry`: [`AuditEntry`](#auditentry); `generation`: `number`; `notStored?`: `number`; `queued`: `number`; `status`: [`MessageStatus`](#messagestatus); `superseded`: `number`; \} \| \{ `done`: `false`; `entry`: [`AuditEntry`](#auditentry); `reason`: `Extract`\<[`RefusalReason`](#refusalreason), `"not-found"` \| `"changed"` \| `"pending"` \| `"content-dropped"`\>; \}
 
 What a replay or a resend did, with the audit entry written in the same transaction.
 
@@ -5613,7 +5616,7 @@ What a replay or a resend did, with the audit entry written in the same transact
 
 ##### Type Literal
 
-\{ `done`: `true`; `entry`: [`AuditEntry`](#auditentry); `generation`: `number`; `queued`: `number`; `status`: [`MessageStatus`](#messagestatus); `superseded`: `number`; \}
+\{ `done`: `true`; `entry`: [`AuditEntry`](#auditentry); `generation`: `number`; `notStored?`: `number`; `queued`: `number`; `status`: [`MessageStatus`](#messagestatus); `superseded`: `number`; \}
 
 ###### done
 
@@ -5626,6 +5629,12 @@ What a replay or a resend did, with the audit entry written in the same transact
 ###### generation
 
 > `readonly` **generation**: `number`
+
+###### notStored?
+
+> `readonly` `optional` **notStored?**: `number`
+
+Destinations given `notStored` that got no delivery; absent when none.
 
 ###### queued
 

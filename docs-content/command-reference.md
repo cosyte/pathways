@@ -118,6 +118,15 @@ only, and each one is written to the audit log (`verify`) before its content is 
 written to the message or delivery tables. A message with no recorded outputs (received, failed or
 cleared) is skipped. Two outputs are the same only when they are the same bytes.
 
+On a channel with destination transforms, each destination is compared on its own: the outputs its
+transform gives now, in its own `format`, with the outputs stored for that destination, so a changed
+destination transform shows as different on its destination only. A destination its transform
+filtered was recorded with no output, as was one whose transform failed or one added to the channel
+since. A sample is compared per destination with
+`<sample without its extension>.expected.<destination name, or its place from 1>.<extension>`, named
+as [`pathways test`](./test-a-channel.md) names it, and a missing file expects that destination to
+filter the sample out.
+
 It opens the database as `start --no-migrate` does: it applies no schema step, and refuses, naming
 both versions, a database that lacks a step the candidate's Pathways needs. The candidate's
 transforms run with this process's environment, as the engine's do, and what they write to the

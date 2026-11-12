@@ -744,9 +744,9 @@ function transformedStatus(outputs: TransformOutputs): MessageStatus {
  * notStoredOf([{ outputs: [] }, { notStored: true }]); // { notStored: 1 }
  * ```
  */
-export function notStoredOf(
-  byDestination: readonly DestinationOutcome[] | undefined,
-): { readonly notStored?: number } {
+export function notStoredOf(byDestination: readonly DestinationOutcome[] | undefined): {
+  readonly notStored?: number;
+} {
   const count = byDestination?.filter((outcome) => "notStored" in outcome).length ?? 0;
   return count === 0 ? {} : { notStored: count };
 }

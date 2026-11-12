@@ -1,7 +1,7 @@
 // A transform per destination: the channel's transform runs, then each destination's own, once per
 // channel output, in the same worker pass. A destination's transform maps, fans out or filters the
 // message for that destination alone, and a throw fails only that destination's delivery.
-import { readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { afterAll, afterEach, describe, expect, it } from "vitest";
@@ -29,6 +29,7 @@ import {
 import { EXIT } from "../src/exit.js";
 import { replayMessages } from "../src/operator/actions.js";
 import { AuditLog } from "../src/operator/audit.js";
+import { verifyCommand } from "../src/operator/verify.js";
 import {
   replayCommand,
   showCommand,
@@ -966,5 +967,208 @@ describe("messages show for a channel no longer configured", () => {
     const shown = JSON.parse(printed) as { deliveries: Record<string, unknown>[] };
     expect(shown.deliveries[0]).toMatchObject({ destination: 0, seq: -1, status: "filtered" });
     expect(shown.deliveries[0]).not.toHaveProperty("destinationName");
+  });
+});
+
+describe("pathways verify with destination transforms", () => {
+  const VERIFY_CHANNEL = `
+format: text
+source:
+  file: { dir: in }
+destinations:
+  - file: { dir: out-0 }
+  - name: upper
+    file: { dir: out-1 }
+    transform: ./upper.ts
+  - name: only-alpha
+    file: { dir: out-2 }
+    transform: ./only-alpha.ts
+`;
+  const VERIFY_FILES = {
+    "channels/adt/channel.yaml": VERIFY_CHANNEL,
+    "channels/adt/upper.ts": "export default (msg: string) => msg.toUpperCase();\n",
+    "channels/adt/only-alpha.ts":
+      'export default (msg: string) => (msg.startsWith("alpha") ? msg : null);\n',
+  };
+
+  /** Stores alpha and beta as the channel above recorded them, then verifies both by id. */
+  async function verifyStored(files: Record<string, string>) {
+    const project = await loadProject(await makeProject({ ...VERIFY_FILES, ...files }));
+    const store = new MemoryStore();
+    const audit = new AuditLog(store, { actor: "tester" });
+    const alpha = await store.receive("adt", bytes("alpha"));
+    await store.completeTransform(
+      alpha.id,
+      {
+        byDestination: [
+          { outputs: [bytes("alpha")] },
+          { outputs: [bytes("ALPHA")] },
+          { outputs: [bytes("alpha")] },
+        ],
+      },
+      3,
+    );
+    const beta = await store.receive("adt", bytes("beta"));
+    await store.completeTransform(
+      beta.id,
+      {
+        byDestination: [
+          { outputs: [bytes("beta")] },
+          { outputs: [bytes("BETA")] },
+          { outputs: [] },
+        ],
+      },
+      3,
+    );
+    let printed = "";
+    const code = await verifyCommand(
+      {
+        project,
+        store,
+        audit,
+        json: false,
+        out: (line) => {
+          printed += line;
+        },
+        err: () => undefined,
+      },
+      { kind: "ids", ids: [alpha.id, beta.id] },
+      undefined,
+    );
+    return { code, lines: printed.trimEnd().split("\n") };
+  }
+
+  it("compares with each destination's own stored outputs, not the first destination's", async () => {
+    const project = await loadProject(
+      await makeProject({
+        ...VERIFY_FILES,
+        "channels/adt/channel.yaml": `
+format: text
+source:
+  file: { dir: in }
+destinations:
+  - name: upper
+    file: { dir: out-0 }
+    transform: ./upper.ts
+  - file: { dir: out-1 }
+`,
+      }),
+    );
+    const store = new MemoryStore();
+    const { id } = await store.receive("adt", bytes("alpha"));
+    await store.completeTransform(
+      id,
+      { byDestination: [{ outputs: [bytes("ALPHA")] }, { outputs: [bytes("alpha")] }] },
+      2,
+    );
+    let printed = "";
+    const code = await verifyCommand(
+      {
+        project,
+        store,
+        audit: new AuditLog(store, { actor: "tester" }),
+        json: true,
+        out: (line) => {
+          printed += line;
+        },
+        err: () => undefined,
+      },
+      { kind: "ids", ids: [id] },
+      "adt",
+    );
+    const report = JSON.parse(printed) as { channels: Record<string, unknown>[] };
+    expect(report.channels).toEqual([
+      {
+        channel: "adt",
+        destination: 0,
+        same: 1,
+        different: 0,
+        failed: 0,
+        results: [{ message: id, outcome: "same" }],
+      },
+      {
+        channel: "adt",
+        destination: 1,
+        same: 1,
+        different: 0,
+        failed: 0,
+        results: [{ message: id, outcome: "same" }],
+      },
+    ]);
+    expect(code).toBe(EXIT.ok);
+  });
+
+  it("finds every destination the same when nothing changed, a filtered one included", async () => {
+    const { code, lines } = await verifyStored({});
+    expect(lines).toEqual([
+      "Verified 2 messages named.",
+      "adt, destination 0: 2 same, 0 different, 0 failed",
+      "adt, destination 1: 2 same, 0 different, 0 failed",
+      "adt, destination 2: 2 same, 0 different, 0 failed",
+    ]);
+    expect(code).toBe(EXIT.ok);
+  });
+
+  it("finds a changed destination transform different on its own destination only", async () => {
+    const { code, lines } = await verifyStored({
+      "channels/adt/upper.ts": "export default (msg: string) => `${msg.toUpperCase()}!`;\n",
+    });
+    expect(lines).toEqual([
+      "Verified 2 messages named.",
+      "adt, destination 0: 2 same, 0 different, 0 failed",
+      "adt, destination 1: 0 same, 2 different, 0 failed",
+      "  message 1: different, output 1 at byte offset 5",
+      "  message 2: different, output 1 at byte offset 4",
+      "adt, destination 2: 2 same, 0 different, 0 failed",
+    ]);
+    expect(code).toBe(EXIT.failed);
+  });
+
+  it("finds a destination that now filters, or throws, on its own destination only", async () => {
+    const { lines } = await verifyStored({
+      "channels/adt/only-alpha.ts": "export default () => { throw new TypeError(); };\n",
+      "channels/adt/upper.ts":
+        'export default (msg: string) => (msg.startsWith("beta") ? null : msg.toUpperCase());\n',
+    });
+    expect(lines[1]).toBe("adt, destination 0: 2 same, 0 different, 0 failed");
+    expect(lines[2]).toBe("adt, destination 1: 1 same, 1 different, 0 failed");
+    expect(lines[3]).toBe(
+      "  message 2: different, 0 outputs from the transform, 1 output recorded",
+    );
+    expect(lines[4]).toBe("adt, destination 2: 0 same, 0 different, 2 failed");
+    expect(lines[5]).toMatch(
+      /^ {2}message 1: failed, the transform threw TypeError at only-alpha\.ts:1:\d+$/,
+    );
+  });
+
+  it("compares each destination with its own expected sample, a missing one expecting a filter", async () => {
+    const root = await makeProject(VERIFY_FILES);
+    const project = await loadProject(root);
+    const samples = join(root, "samples", "adt");
+    await mkdir(samples, { recursive: true });
+    await writeFile(join(samples, "beta.txt"), "beta");
+    await writeFile(join(samples, "beta.expected.1.txt"), "beta");
+    await writeFile(join(samples, "beta.expected.upper.txt"), "BETA?");
+    let printed = "";
+    const code = await verifyCommand(
+      {
+        project,
+        json: false,
+        out: (line) => {
+          printed += line;
+        },
+        err: () => undefined,
+      },
+      { kind: "samples", dir: join(root, "samples") },
+      undefined,
+    );
+    expect(printed.trimEnd().split("\n")).toEqual([
+      "Verified 1 sample from the samples folder.",
+      "adt, destination 0: 1 same, 0 different, 0 failed",
+      "adt, destination 1: 0 same, 1 different, 0 failed",
+      "  sample beta.txt: different, output 1 at byte offset 4",
+      "adt, destination 2: 1 same, 0 different, 0 failed",
+    ]);
+    expect(code).toBe(EXIT.failed);
   });
 });
