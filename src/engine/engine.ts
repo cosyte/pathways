@@ -2126,6 +2126,16 @@ export class Engine {
       receivePiece,
       batchDone: (result) => this.batchDone(config.name, result),
     };
+    if (store.heldIdempotencyKey !== undefined) {
+      const heldIdempotencyKey = store.heldIdempotencyKey.bind(store);
+      // Both keys are compared as the hashes the store keeps.
+      const digest = (text: string): string => createHash("sha256").update(text).digest("hex");
+      sink.heldOrigin = async (origin, key) => {
+        const held = await heldIdempotencyKey(config.name, digest(origin));
+        if (held === undefined) return "none";
+        return held === digest(key) ? "same" : "other";
+      };
+    }
     // A store that copies each body it stores makes a sink that keeps none, so a source may free a
     // body it is done with once it is stored.
     return copiesBodies(store) ? markCopiesBodies(sink) : sink;

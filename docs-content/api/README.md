@@ -2625,6 +2625,31 @@ as [receivePiece](#receivepiece) is.
 
 `Promise`\<`void`\>
 
+##### heldOrigin()?
+
+> `optional` **heldOrigin**(`origin`, `key`): `Promise`\<`"none"` \| `"same"` \| `"other"`\>
+
+What the store holds under a batch's `origin`, the `duplicateKey` its first piece was handed
+in with: `none` when no message carries it, `same` when the first that does was stored under
+`key` (the same batch, read again), and `other` when it was stored under another key (another
+batch under the same origin). The HTTP source asks this before it stores a batch sent with an
+`Idempotency-Key`, and answers 422 to `other`. The engine's own sink has it when its store has
+`heldIdempotencyKey`; a sink without it is never asked.
+
+###### Parameters
+
+###### origin
+
+`string`
+
+###### key
+
+`string`
+
+###### Returns
+
+`Promise`\<`"none"` \| `"same"` \| `"other"`\>
+
 ##### receive()
 
 > **receive**(`body`, `options?`): `Promise`\<`number`\>
@@ -3014,6 +3039,29 @@ Removes the row of `node` only while it is stale. Returns whether it did. Option
 ###### Returns
 
 `Promise`\<`boolean`\>
+
+##### heldIdempotencyKey()?
+
+> `optional` **heldIdempotencyKey**(`channel`, `duplicateKey`): `Promise`\<`string` \| `null` \| `undefined`\>
+
+The idempotency key of the channel's first message stored with `duplicateKey`: `null` when it
+was stored without one, `undefined` when no message of the channel has the key. A batch source
+reads it to tell a batch read again from another batch sent under the same origin. Optional: a
+store without it never has a batch refused for that.
+
+###### Parameters
+
+###### channel
+
+`string`
+
+###### duplicateKey
+
+`string`
+
+###### Returns
+
+`Promise`\<`string` \| `null` \| `undefined`\>
 
 ##### joinNode()?
 

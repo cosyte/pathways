@@ -561,3 +561,54 @@ describe("health", () => {
     expect(events.at(-1)).toMatchObject({ event: "http-refused", endpoint: "health", status: 401 });
   });
 });
+
+describe("an HTTP channel that reads batches", () => {
+  /** A synthetic ADT^A01 whose control ID is `MSG<n>`: every value is made up. */
+  const adt = (n: number): string =>
+    ADT_A01.replace("MSG00001", `MSG${String(n).padStart(5, "0")}`);
+
+  it("refuses a changed body under a key the store holds for another, and stores either at once once", async () => {
+    const tls = `tls: { cert: ${certs.files.serverCert}, key: ${certs.files.serverKey} }`;
+    const { store, port } = await setUp(200, {
+      source: (port) =>
+        `http: { port: ${String(port)}, path: /adt, batch: { split: hl7 }, ${tls} }`,
+    });
+    const batch = (key: string, body: string): ReturnType<typeof send> =>
+      send(port, {
+        path: "/adt",
+        headers: { Authorization: `Bearer ${TOKEN}`, "Idempotency-Key": `"${key}"` },
+        body,
+        ca: certs.ca,
+      });
+    const count = async (): Promise<number> =>
+      (await store.listMessages({ channel: "adt", limit: 100 })).items.length;
+
+    const first = await batch("synthetic-key-0001", `${adt(1)}${adt(2)}`);
+    expect([first.status, first.body]).toEqual([202, JSON.stringify({ ids: [1, 2] })]);
+    const changed = await batch("synthetic-key-0001", `${adt(1)}${adt(2)}${adt(3)}`);
+    expect([changed.status, changed.body]).toEqual([
+      422,
+      JSON.stringify({ error: "BATCH_KEY_REUSED" }),
+    ]);
+    const again = await batch("synthetic-key-0001", `${adt(1)}${adt(2)}`);
+    expect([again.status, again.body]).toEqual([202, JSON.stringify({ ids: [1, 2] })]);
+    expect(await count()).toBe(2);
+
+    // Sent at once under one new key: one body is stored whole, the other refused. A piece found
+    // stored already takes up an id it gives back, so ids are not counted on here.
+    const raced = await Promise.all([
+      batch("synthetic-key-0002", `${adt(4)}`),
+      batch("synthetic-key-0002", `${adt(4)}${adt(5)}`),
+    ]);
+    expect(raced.map((answer) => answer.status).sort()).toEqual([202, 422]);
+    const stored = raced[0]?.status === 202 ? 1 : 2;
+    expect(await count()).toBe(2 + stored);
+    // The same body at once twice under a third key: stored once, both told the same ids.
+    const twice = await Promise.all(
+      [1, 2].map(() => batch("synthetic-key-0003", `${adt(6)}${adt(7)}`)),
+    );
+    expect(twice.map((answer) => answer.status)).toEqual([202, 202]);
+    expect(twice[1]?.body).toBe(twice[0]?.body);
+    expect(await count()).toBe(4 + stored);
+  });
+});

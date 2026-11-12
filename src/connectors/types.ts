@@ -112,6 +112,15 @@ export interface MessageSink {
    */
   batchDone?(result: BatchResult): Promise<void>;
   /**
+   * What the store holds under a batch's `origin`, the `duplicateKey` its first piece was handed
+   * in with: `none` when no message carries it, `same` when the first that does was stored under
+   * `key` (the same batch, read again), and `other` when it was stored under another key (another
+   * batch under the same origin). The HTTP source asks this before it stores a batch sent with an
+   * `Idempotency-Key`, and answers 422 to `other`. The engine's own sink has it when its store has
+   * `heldIdempotencyKey`; a sink without it is never asked.
+   */
+  heldOrigin?(origin: string, key: string): Promise<"none" | "same" | "other">;
+  /**
    * Says the source lost what it reads from (a broker, a remote server, a socket it dialled) and
    * cannot take messages in until it is back. Until {@link sourceUp}, the health endpoint shows
    * the channel's source `down` and answers 503, readiness fails, and the hooks are sent a

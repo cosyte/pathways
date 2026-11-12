@@ -54,11 +54,13 @@ export { DEFAULT_BATCH_HOLD_MS } from "../config/schema.js";
  * - `BATCH_FILE_TOO_LARGE`: the file is larger than `maxFileSize`.
  * - `BATCH_EMPTY`: the file or body held no piece.
  * - `BATCH_INCOMPLETE`: an HL7 batch lacks a trailer, or a trailer's count does not match.
+ * - `BATCH_KEY_REUSED`: a request's `Idempotency-Key` was used before for another body.
  */
 export const BATCH_CODES = {
   tooLarge: "BATCH_FILE_TOO_LARGE",
   empty: "BATCH_EMPTY",
   incomplete: "BATCH_INCOMPLETE",
+  keyReused: "BATCH_KEY_REUSED",
 } as const;
 
 /**
@@ -497,6 +499,12 @@ export interface PieceHandOver {
   readonly key: (index: number) => string;
   /** Whether the batch may have been read before, so every piece is looked up first. */
   readonly resumed: boolean;
+  /**
+   * What names every batch sent under one name, such as a request's `Idempotency-Key`: handed in
+   * as the first piece's `duplicateKey`, so {@link MessageSink.heldOrigin} finds which batch holds
+   * it.
+   */
+  readonly origin?: string | undefined;
   /** What the transform reads in `ctx.source` for the piece at `index`. */
   readonly facts: (index: number) => Readonly<Record<string, JsonValue>>;
   /** Told of each piece's id once it is stored, in order. */
@@ -527,6 +535,9 @@ export async function receivePieces(
     const options: ReceiveOptions = {
       idempotencyKey: handOver.key(piece.index),
       resumed: handOver.resumed,
+      ...(piece.index === 0 && handOver.origin !== undefined
+        ? { duplicateKey: handOver.origin }
+        : {}),
       ...(piece.failure === undefined
         ? { source: handOver.facts(piece.index) }
         : { failure: `batch: ${piece.failure}` }),

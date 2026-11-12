@@ -177,45 +177,69 @@ interface Handed {
 
 /**
  * A sink that looks a resumed message's key up, as the engine's store does, and stores it once.
- * With `failAt`, it throws instead of storing the message handed to it that many times in.
+ * With `failAt`, it throws instead of storing the message handed to it that many times in. With
+ * `lag`, 20 milliseconds pass between each lookup and what follows it, as on a database
+ * whose transactions do not see each other's rows: two requests at once can both miss.
  */
-function batchSink(): {
+function batchSink(options: { lag?: boolean } = {}): {
   sink: MessageSink;
   handed: Handed[];
   stored: Map<string, number>;
   results: BatchResult[];
   failAt: { at: number };
+  /** How many messages it stored, each time, even under a key it held already. */
+  inserted: () => number;
 } {
   const handed: Handed[] = [];
   const stored = new Map<string, number>();
+  /** The idempotency key of the first message stored with each duplicate key. */
+  const firsts = new Map<string, string | undefined>();
   const results: BatchResult[] = [];
   const failAt = { at: 0 };
   let next = 1;
-  const receivePiece = (body: Uint8Array, options: ReceiveOptions = {}): Promise<ReceivedPiece> => {
+  const turn = async (): Promise<void> => {
+    if (options.lag === true) await new Promise((resolve) => setTimeout(resolve, 20));
+  };
+  const receivePiece = async (
+    body: Uint8Array,
+    receive: ReceiveOptions = {},
+  ): Promise<ReceivedPiece> => {
     handed.push({
       body: latin1(body),
-      key: options.idempotencyKey,
-      resumed: options.resumed,
-      failure: options.failure,
-      source: options.source,
+      key: receive.idempotencyKey,
+      resumed: receive.resumed,
+      failure: receive.failure,
+      source: receive.source,
     });
-    if (handed.length === failAt.at) return Promise.reject(new Error("synthetic stop"));
-    const key = options.idempotencyKey ?? `unkeyed-${String(next)}`;
-    const found = options.resumed === true ? stored.get(key) : undefined;
-    if (found !== undefined) return Promise.resolve({ id: found, alreadyStored: true });
+    if (handed.length === failAt.at) throw new Error("synthetic stop");
+    const key = receive.idempotencyKey ?? `unkeyed-${String(next)}`;
+    const found = receive.resumed === true ? stored.get(key) : undefined;
+    await turn();
+    if (found !== undefined) return { id: found, alreadyStored: true };
     const id = next++;
     stored.set(key, id);
-    return Promise.resolve({ id, alreadyStored: false });
+    const { duplicateKey } = receive;
+    if (duplicateKey !== undefined && !firsts.has(duplicateKey)) {
+      firsts.set(duplicateKey, receive.idempotencyKey);
+    }
+    return { id, alreadyStored: false };
   };
   const sink: MessageSink = {
     receive: async (body, options) => (await receivePiece(body, options)).id,
     receivePiece,
+    heldOrigin: async (origin, key) => {
+      const held = firsts.has(origin);
+      const first = firsts.get(origin);
+      await turn();
+      if (!held) return "none";
+      return first === key ? "same" : "other";
+    },
     batchDone: (result) => {
       results.push(result);
       return Promise.resolve();
     },
   };
-  return { sink, handed, stored, results, failAt };
+  return { sink, handed, stored, results, failAt, inserted: () => next - 1 };
 }
 
 const channel = "adt";
@@ -518,11 +542,13 @@ describe("An HTTP source with batch", () => {
     const again = await send(port, { path: "/batch", headers, body, ca: certs.ca });
     expect(JSON.parse(again.body)).toEqual({ ids: [1, 2] });
 
+    const hash = (handed[0]?.source?.["batch"] as { hash: string }).hash;
+    expect(hash).toMatch(/^[0-9a-f]{16}$/);
     expect(handed.map((piece) => [piece.key, piece.resumed])).toEqual([
-      ["http:key:synthetic-key-0001#0", true],
-      ["http:key:synthetic-key-0001#1", true],
-      ["http:key:synthetic-key-0001#0", true],
-      ["http:key:synthetic-key-0001#1", true],
+      [`http:key:synthetic-key-0001#${hash}#0`, true],
+      [`http:key:synthetic-key-0001#${hash}#1`, true],
+      [`http:key:synthetic-key-0001#${hash}#0`, true],
+      [`http:key:synthetic-key-0001#${hash}#1`, true],
     ]);
     expect(handed[1]?.source).toEqual(
       expect.objectContaining({
@@ -592,7 +618,7 @@ describe("An HTTP source with batch", () => {
       ca: certs.ca,
     });
     expect([answer.status, answer.body]).toEqual([200, "stored"]);
-    expect(handed[0]?.key).toBe("http:key:synthetic-key-0002#0");
+    expect(handed[0]?.key).toMatch(/^http:key:synthetic-key-0002#[0-9a-f]{16}#0$/);
     const twice = await send(port, {
       path: "/batch",
       headers: { ...AUTH, "Idempotency-Key": ["synthetic-a", "synthetic-b"] },
@@ -600,6 +626,75 @@ describe("An HTTP source with batch", () => {
       ca: certs.ca,
     });
     expect(twice.status).toBe(400);
+  });
+
+  it("answers 422 to a changed body under a key already used, and stores none of it", async () => {
+    const { sink, handed, stored, results } = batchSink();
+    const port = await listening(sink, { batch: { split: "lines" } });
+    const headers = { ...AUTH, "Idempotency-Key": '"synthetic-key-0003"' };
+    const first = await send(port, { path: "/batch", headers, body: "a\nb\nc", ca: certs.ca });
+    expect([first.status, JSON.parse(first.body)]).toEqual([202, { ids: [1, 2, 3] }]);
+    const changed = await send(port, {
+      path: "/batch",
+      headers,
+      body: "a\nb\nc\nd\ne",
+      ca: certs.ca,
+    });
+    expect([changed.status, JSON.parse(changed.body)]).toEqual([
+      422,
+      { error: "BATCH_KEY_REUSED" },
+    ]);
+    // Nothing of the changed body is stored or answered for, and the first body's pieces stand.
+    expect(handed.map((piece) => piece.body)).toEqual(["a", "b", "c"]);
+    expect(stored.size).toBe(3);
+    expect(results).toHaveLength(1);
+    // The first body sent again is still a retry of it.
+    const again = await send(port, { path: "/batch", headers, body: "a\nb\nc", ca: certs.ca });
+    expect([again.status, JSON.parse(again.body)]).toEqual([202, { ids: [1, 2, 3] }]);
+    expect(stored.size).toBe(3);
+  });
+
+  it("stores a request sent twice at once under one key once, and refuses a changed body sent with it", async () => {
+    const { sink, inserted } = batchSink({ lag: true });
+    const port = await listening(sink, { batch: { split: "lines" } });
+    const headers = { ...AUTH, "Idempotency-Key": '"synthetic-key-0004"' };
+    const same = await Promise.all(
+      [1, 2].map(() => send(port, { path: "/batch", headers, body: "a\nb\nc", ca: certs.ca })),
+    );
+    expect(same.map((answer) => [answer.status, JSON.parse(answer.body) as unknown])).toEqual([
+      [202, { ids: [1, 2, 3] }],
+      [202, { ids: [1, 2, 3] }],
+    ]);
+    expect(inserted()).toBe(3);
+
+    const other = { ...AUTH, "Idempotency-Key": '"synthetic-key-0005"' };
+    const raced = await Promise.all(
+      ["x\ny", "x\ny\nz"].map((body) =>
+        send(port, { path: "/batch", headers: other, body, ca: certs.ca }),
+      ),
+    );
+    expect(raced.map((answer) => answer.status).sort()).toEqual([202, 422]);
+    // One body's pieces only, two or three of them, never both bodies' five.
+    expect([5, 6]).toContain(inserted());
+  });
+
+  it("stores a changed body under a used key as a batch of its own on a sink that cannot say what a key holds", async () => {
+    const bodies: string[] = [];
+    const sink: MessageSink = {
+      receive: (body) => {
+        bodies.push(latin1(body));
+        return Promise.resolve(bodies.length);
+      },
+    };
+    const port = await listening(sink, { batch: { split: "lines" } });
+    const headers = { ...AUTH, "Idempotency-Key": '"synthetic-key-0006"' };
+    const first = await send(port, { path: "/batch", headers, body: "a\nb", ca: certs.ca });
+    const changed = await send(port, { path: "/batch", headers, body: "a\nb\nc", ca: certs.ca });
+    expect([first.body, changed.body]).toEqual([
+      JSON.stringify({ ids: [1, 2] }),
+      JSON.stringify({ ids: [3, 4, 5] }),
+    ]);
+    expect(bodies).toEqual(["a", "b", "a", "b", "c"]);
   });
 
   it("answers 503 when a piece cannot be stored", async () => {

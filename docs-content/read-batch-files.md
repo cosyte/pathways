@@ -145,11 +145,14 @@ Content-Type: application/json
 
 Send an `Idempotency-Key` header with each request, as the IETF HTTPAPI working group's draft
 describes it: a string of up to 255 visible ASCII characters, quoted or not, the same on every retry
-of one request. Each piece's key is built from it, so a retry after a 503 or a dropped connection
-stores no piece twice and answers with the same ids. Without the header the body's hash takes its
-place, so a body sent again byte for byte is stored once. A header that is not a key answers 400. A
-body with no piece answers 422 with `{"error":"BATCH_EMPTY"}`. `batch:` cannot go with
-`response: ack`, which answers one message with one ACK.
+of one request. Each piece's key is built from it and the body's hash, so a retry after a 503 or a
+dropped connection stores no piece twice and answers with the same ids. A key used before for
+another body answers 422 with `{"error":"BATCH_KEY_REUSED"}` and stores nothing, as the draft asks:
+send a new key with a new body. Requests under one key are stored one after another, so two sent at
+once store their pieces once. Without the header the body's hash takes its place, so a body sent
+again byte for byte is stored once. A header that is not a key answers 400. A body with no piece
+answers 422 with `{"error":"BATCH_EMPTY"}`. `batch:` cannot go with `response: ack`, which answers
+one message with one ACK.
 
 ## The audit log
 

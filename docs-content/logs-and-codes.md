@@ -185,7 +185,9 @@ Besides the operating system's codes (`EACCES`, `EEXIST` and the like), a `sourc
 A file source with `batch:` sets a file aside with the `reason` `batch-too-large`, `batch-empty` or
 `batch-incomplete`, and stores it as a failed message with the error `batch: BATCH_FILE_TOO_LARGE`,
 `batch: BATCH_EMPTY` or `batch: BATCH_INCOMPLETE`. A piece of an HL7 batch that cannot be read is
-stored as failed with `batch: ` and the parser's code, such as `batch: NO_MSH_SEGMENT`.
+stored as failed with `batch: ` and the parser's code, such as `batch: NO_MSH_SEGMENT`. An HTTP
+source with `batch:` answers 422 with `BATCH_EMPTY`, `BATCH_INCOMPLETE`, or `BATCH_KEY_REUSED` for an
+`Idempotency-Key` used before for another body, and stores nothing.
 
 ## SFTP codes
 
