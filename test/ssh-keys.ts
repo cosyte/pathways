@@ -5,8 +5,8 @@ import { createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes } f
 // Not the SSH package's `utils.generateKeyPairSync`: it strips every leading zero byte from the
 // public key as it drops the bit string's leading byte, so about one key in 256 (each whose public
 // key starts with a zero byte) comes out 31 bytes long or shorter, and the SSH package's own parser
-// then refuses that private key as malformed. With the dozen keys a run of the SFTP job makes, that
-// failed about one run in twenty, every test of a file at once, on code that never touched SFTP.
+// then refuses that private key as malformed. With the keys a run of the SFTP job makes, that failed
+// a run now and then, every test of a file at once, on code that never touched SFTP.
 // test/ssh-keys.test.ts holds this writer to a key that starts with a zero byte.
 
 /** An OpenSSH key pair: the private key file's text and the public key's line. */
