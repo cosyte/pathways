@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { normalisePath } from "../connectors/http-path.js";
+import { unknownPlaceholders } from "../connectors/smtp-template.js";
 import { FORMATS, type CsvSettings } from "../engine/worker-entry.js";
 import { LIFECYCLE_EVENTS, type LifecycleEventType } from "../extensions/events.js";
 import type { JsonValue } from "../transform.js";
@@ -1380,6 +1381,153 @@ const tcpDestination = restate(
 );
 
 /**
+ * An email address as an `smtp:` block takes one: a plain ASCII local part and a domain, with no
+ * display name, quotes or line breaks.
+ */
+const EMAIL =
+  /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}@[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$/;
+
+const emailAddress = (description: string) =>
+  envable(
+    z.string().regex(EMAIL, "an email address such as lab@example.test").meta({ description }),
+  );
+
+/** How an `smtp:` block's TLS starts: on connecting (port 465), or by STARTTLS (port 587). */
+export const SMTP_TLS_MODES = ["implicit", "starttls"] as const;
+
+/** What an email some of whose recipients the server refused is marked. */
+export const SMTP_PARTIAL_REFUSALS = ["rejected", "delivered"] as const;
+
+/** A subject or body template: placeholders name messageId, seq, channel or meta.<key> only. */
+const mailTemplate = (description: string) =>
+  envable(
+    z
+      .string()
+      .max(8_192)
+      .meta({ description })
+      .superRefine((value, ctx) => {
+        for (const name of unknownPlaceholders(value)) {
+          ctx.addIssue({
+            code: "custom",
+            message: `{{ ${name} }} is not a placeholder: use messageId, seq, channel or meta.<key>`,
+          });
+        }
+      }),
+  );
+
+/** A positive time limit of an `smtp:` block. */
+const smtpTimeout = (description: string) =>
+  duration(description, { ms: 1, message: 'a duration of at least 1ms, such as "10s"' });
+
+const smtpDestination = restate(
+  z
+    .strictObject({
+      host: host.meta({ description: "The SMTP server's host name or address." }),
+      port: port.optional(),
+      tls: z
+        .strictObject({
+          mode: envable(
+            z.enum(SMTP_TLS_MODES).meta({
+              description:
+                "implicit: TLS from the first byte (port 465, the default, preferred); starttls: upgrade by STARTTLS, and fail when the server does not take it (port 587).",
+            }),
+          ).optional(),
+          ca: path
+            .meta({
+              description:
+                "A CA to trust in place of Node.js's built-in roots, for a server with a private CA.",
+            })
+            .optional(),
+        })
+        .meta({
+          description:
+            "TLS 1.2 or later, the server's certificate always verified: { mode, ca }. tls: {} is implicit TLS against the built-in roots.",
+        })
+        .optional(),
+      plaintext,
+      user: secretSource("a user name", `the user is read at start: ${SECRET_SOURCES_TEXT}`)
+        .meta({ description: "The user to log in as, read at start. Goes with password." })
+        .optional(),
+      password: secretSource(
+        "a password",
+        `the password never goes in the YAML: ${SECRET_SOURCES_TEXT}`,
+      )
+        .meta({ description: "The password to log in with, read at start. Goes with user." })
+        .optional(),
+      from: emailAddress("The sender's address, also the envelope sender."),
+      to: z
+        .array(emailAddress("A recipient's address."))
+        .min(1)
+        .meta({ description: "The recipients, written here: never taken from a message." }),
+      cc: z
+        .array(emailAddress("A recipient's address."))
+        .meta({ description: "Copied recipients, written here. Default: none." })
+        .optional(),
+      subject: mailTemplate(
+        "The subject: a template where {{ messageId }}, {{ seq }}, {{ channel }} and {{ meta.<key> }} are filled. Line breaks are taken out. Default: Pathways message {{ messageId }}-{{ seq }}.",
+      ).optional(),
+      body: mailTemplate(
+        "The text: a template with the subject's placeholders. Default: a line naming the channel, the message id and the seq.",
+      ).optional(),
+      attach: envable(
+        z.boolean().meta({
+          description:
+            "Attach each output as a file. Default false: the email carries the filled templates only, never the message.",
+        }),
+      ).optional(),
+      onPartialRefusal: envable(
+        z.enum(SMTP_PARTIAL_REFUSALS).meta({
+          description:
+            "When the server takes some recipients and refuses others: rejected (the default) marks the message rejected so an operator sees it; delivered marks it delivered. The recipients it took have the email either way, and the refused count is logged.",
+        }),
+      ).optional(),
+      maxSize: bytes
+        .meta({
+          description:
+            "The largest email sent, as composed: a size such as 64KB or 10MB, or a number of bytes. A larger one is rejected without connecting. Default 10MB.",
+        })
+        .optional(),
+      connectTimeout: smtpTimeout(
+        "How long setting the session up may take: the connection, with implicit TLS its handshake, the greeting, and with STARTTLS the upgrade. Default 10s.",
+      ).optional(),
+      greetingTimeout: smtpTimeout(
+        "How long the server may take to greet once connected, within connectTimeout. Default 10s.",
+      ).optional(),
+      socketTimeout: smtpTimeout(
+        "How long the connection may sit idle waiting for a reply. Default 20s.",
+      ).optional(),
+    })
+    .meta({
+      description:
+        "Send each output as an email over SMTP. TLS unless plaintext: true; tls: {} is implicit TLS against Node.js's built-in roots.",
+    })
+    .superRefine((value, ctx) => {
+      tlsOrPlaintext(
+        value,
+        ctx,
+        "required: set tls: {} for implicit TLS on port 465, tls: { mode: starttls } for port 587, or plaintext: true to run without TLS",
+      );
+      if ((value.user === undefined) !== (value.password === undefined)) {
+        ctx.addIssue({
+          code: "custom",
+          path: [value.user === undefined ? "user" : "password"],
+          message: "user and password go together: set both, or neither",
+        });
+      } else if (value.user !== undefined && value.plaintext === true) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["user"],
+          message: "a login is never sent without TLS: set tls, or leave out user and password",
+        });
+      }
+    }),
+  (json) => {
+    Object.assign(json, TLS_OR_PLAINTEXT);
+    json["dependencies"] = { user: ["password"], password: ["user"] };
+  },
+);
+
+/**
  * A database server's connection URL, read at startup. It carries the password, so it never goes in
  * the YAML.
  */
@@ -1578,7 +1726,7 @@ const restateKinds =
   };
 
 const SOURCE_KINDS = ["file", "http", "mllp", "tcp", "module"] as const;
-const DESTINATION_KINDS = ["file", "http", "mllp", "tcp", "module"] as const;
+const DESTINATION_KINDS = ["file", "http", "mllp", "tcp", "smtp", "module"] as const;
 const HOOK_KINDS = ["module", "webhook"] as const;
 
 /**
@@ -2181,6 +2329,183 @@ function sftpPaths(keys: readonly string[]) {
   };
 }
 
+/** An object store's endpoint: an `https://` URL, or `http://` with `plaintext: true`. */
+function objectEndpoint(description: string) {
+  return envable(
+    z
+      .string()
+      .refine((value) => {
+        const url = URL.parse(value);
+        return (
+          url !== null &&
+          (url.protocol === "https:" || url.protocol === "http:") &&
+          url.username === "" &&
+          url.password === ""
+        );
+      }, "an https:// URL with no user name or password, or http:// with plaintext: true")
+      .meta({ description }),
+  );
+}
+
+/** How an object store's claim and write behave, the keys an `s3:` and an `azblob:` block share. */
+const objectStoreKeys = {
+  plaintext: z
+    .boolean()
+    .meta({
+      description:
+        "Allow an http:// endpoint, for a local emulator. Never read from the environment. Default false.",
+    })
+    .optional(),
+  singleNode: envable(
+    z.boolean().meta({
+      description:
+        "A source only: run on a store that does not honour If-None-Match, deleting each object once stored and claiming none. Safe only when one engine and one channel read dir. Default false, which refuses such a store at start.",
+    }),
+  ).optional(),
+  mode: envable(
+    z.enum(["create", "overwrite"]).meta({
+      description:
+        "A destination only: create (the default) writes an object only where none is (If-None-Match: *); overwrite replaces one.",
+    }),
+  ).optional(),
+};
+
+/** A file source's or destination's `s3:` block: the bucket `dir` is a key prefix in. */
+const s3Block = z
+  .strictObject({
+    bucket: envable(
+      z
+        .string()
+        .regex(/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/, "an S3 bucket name, such as inbound-adt")
+        .meta({ description: "The bucket's name." }),
+    ),
+    region: envable(
+      z.string().min(1).meta({
+        description: "The bucket's region, such as us-east-1. Default: the AWS SDK's own chain.",
+      }),
+    ).optional(),
+    endpoint: objectEndpoint(
+      "Another endpoint than Amazon's, for an S3-compatible server, such as https://s3.example.test.",
+    ).optional(),
+    pathStyle: envable(
+      z.boolean().meta({
+        description:
+          "Name the bucket in the path rather than the host, as most S3-compatible servers need. Default false.",
+      }),
+    ).optional(),
+    timeout: duration("How long one request may take. Default 30s.", {
+      ms: 1,
+      message: 'a duration of at least 1ms, such as "30s"',
+    }).optional(),
+    ...objectStoreKeys,
+  })
+  .meta({
+    description:
+      "Read or write objects in an Amazon S3 bucket, with dir as the key prefix. Credentials come from the AWS SDK's default chain, never the YAML.",
+  });
+
+/** A file source's or destination's `azblob:` block: the container `dir` is a prefix in. */
+const azblobBlock = z
+  .strictObject({
+    account: envable(
+      z
+        .string()
+        .regex(/^[a-z0-9]{3,24}$/, "a storage account name: 3 to 24 lowercase letters and digits")
+        .meta({ description: "The storage account's name." }),
+    ),
+    container: envable(
+      z
+        .string()
+        .regex(/^[a-z0-9](?!.*--)[a-z0-9-]{1,61}[a-z0-9]$/, "a container name, such as inbound")
+        .meta({ description: "The container's name." }),
+    ),
+    endpoint: objectEndpoint(
+      "The blob service's address. Default https://<account>.blob.core.windows.net; Azurite listens on http://127.0.0.1:10000/<account>.",
+    ).optional(),
+    connectionString: secretSource("a connection string")
+      .meta({
+        description:
+          "A connection string with the account key, read at start: { env: NAME }, { file: path } or { secret: { provider, name } }. Default: none, so the identity is Azure's default chain (a managed identity, a workload identity, or the environment).",
+      })
+      .optional(),
+    ...objectStoreKeys,
+  })
+  .meta({
+    description:
+      "Read or write blobs in an Azure Blob Storage container, with dir as the name prefix.",
+  });
+
+/** The kinds of remote location a file block can name, at most one. */
+const REMOTE_KINDS = ["sftp", "s3", "azblob"] as const;
+
+/** The source keys an object store has no use for: it claims by a marker and never moves a file. */
+const OBJECT_UNUSED_SOURCE_KEYS = ["keepProcessed", "doneFile", "errorDir", "readTries"] as const;
+
+/**
+ * With `s3:` or `azblob:`, `dir` is a key prefix: no slash at either end, and no empty, `.` or `..`
+ * part. At most one remote kind, and on a source none of the keys an object store does not use.
+ * `singleNode` goes on a source and `mode` on a destination.
+ */
+function objectRules(role: "source" | "destination") {
+  return (value: Readonly<Record<string, unknown>>, ctx: z.RefinementCtx): void => {
+    const named = REMOTE_KINDS.filter((kind) => value[kind] !== undefined);
+    if (named.length > 1) {
+      ctx.addIssue({ code: "custom", message: `name at most one of ${REMOTE_KINDS.join(", ")}` });
+    }
+    const kind = named.find((name) => name !== "sftp");
+    if (kind === undefined) return;
+    const dir = value["dir"];
+    if (
+      typeof dir === "string" &&
+      dir.split("/").some((part) => part === "" || part === "." || part === "..")
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["dir"],
+        message: "a key prefix such as inbox or adt/in, with no slash at either end",
+      });
+    }
+    const block = value[kind] as Readonly<Record<string, unknown>>;
+    const endpoint = block["endpoint"];
+    if (typeof endpoint === "string") {
+      const plain = endpoint.toLowerCase().startsWith("http:");
+      if (plain !== (block["plaintext"] === true)) {
+        ctx.addIssue({
+          code: "custom",
+          path: [kind, plain ? "endpoint" : "plaintext"],
+          message: plain
+            ? "an http:// endpoint sends in the clear: set plaintext: true to allow it"
+            : "plaintext: true goes only with an http:// endpoint",
+        });
+      }
+    } else if (block["plaintext"] === true && kind === "s3") {
+      ctx.addIssue({
+        code: "custom",
+        path: [kind, "plaintext"],
+        message: "plaintext: true goes only with an http:// endpoint",
+      });
+    }
+    const wrong = role === "source" ? "mode" : "singleNode";
+    if (block[wrong] !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: [kind, wrong],
+        message: `goes on a ${role === "source" ? "destination" : "source"} only`,
+      });
+    }
+    if (role === "destination") return;
+    for (const key of OBJECT_UNUSED_SOURCE_KEYS) {
+      if (value[key] !== undefined) {
+        ctx.addIssue({
+          code: "custom",
+          path: [key],
+          message: `is not used with ${kind}: an object store claims by a marker and moves no file`,
+        });
+      }
+    }
+  };
+}
+
 /** A channel's `source:` block: exactly one kind. */
 const source = restate(
   z
@@ -2271,9 +2596,12 @@ const source = restate(
             }),
           ).optional(),
           sftp: sftpBlock.optional(),
+          s3: s3Block.optional(),
+          azblob: azblobBlock.optional(),
         })
         .meta({ description: "Read each file dropped into dir as one message." })
         .superRefine(sftpPaths(["dir", "errorDir"]))
+        .superRefine(objectRules("source"))
         .optional(),
       http: httpSource.optional(),
       mllp: mllpSource.optional(),
@@ -2310,18 +2638,22 @@ const destination = restate(
             description: "The folder to write into, relative to this file. Created if missing.",
           }),
           sftp: sftpBlock.optional(),
+          s3: s3Block.optional(),
+          azblob: azblobBlock.optional(),
         })
         .meta({ description: "Write each output into dir as a file of its own." })
         .superRefine(sftpPaths(["dir"]))
+        .superRefine(objectRules("destination"))
         .optional(),
       http: httpDestination.optional(),
       mllp: mllpDestination.optional(),
       tcp: tcpDestination.optional(),
+      smtp: smtpDestination.optional(),
       module: modulePath.optional(),
       options: moduleOptions.optional(),
       retry: settingsShape.retry,
       timeout: duration(
-        "How long one delivery to a file or module destination may take in all before it is cut off and retried: a duration such as 30s, or a number of milliseconds. Default 30s. An http or tcp destination sets its own timeout, and an mllp one its ackTimeout.",
+        "How long one delivery to a file, smtp or module destination may take in all before it is cut off and retried: a duration such as 30s, or a number of milliseconds. Default 30s. An http or tcp destination sets its own timeout, and an mllp one its ackTimeout.",
         { ms: 1, message: 'a duration of at least 1ms, such as "30s"' },
       ).optional(),
       dryRun: envable(
@@ -2333,10 +2665,24 @@ const destination = restate(
     })
     .meta({
       description:
-        "One destination: exactly one of file, http, mllp, tcp or module, its own retry settings, and dryRun.",
+        "One destination: exactly one of file, http, mllp, tcp, smtp or module, its own retry settings, and dryRun.",
     })
     .superRefine(oneKind(DESTINATION_KINDS))
     .superRefine(optionsWithModule)
+    .superRefine((value, ctx) => {
+      // An smtp block's own time limits fit inside the delivery's.
+      const total = value.timeout ?? DEFAULT_DELIVERY_TIMEOUT_MS;
+      for (const key of ["connectTimeout", "greetingTimeout", "socketTimeout"] as const) {
+        const limit = value.smtp?.[key];
+        if (limit !== undefined && limit > total) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["smtp", key],
+            message: `longer than the delivery's timeout (${String(total)}ms), which cuts it off first`,
+          });
+        }
+      }
+    })
     .superRefine((value, ctx) => {
       const own = value.http ?? value.mllp ?? value.tcp;
       if (value.timeout === undefined || own === undefined) return;
@@ -2953,6 +3299,37 @@ export interface FileSource {
   readonly readTries: number;
   /** The SFTP server `dir` and `errorDir` are on, or `undefined` for a folder on this machine. */
   readonly sftp?: SftpConfig | undefined;
+  /** The S3 bucket `dir` is a key prefix in, or `undefined`. */
+  readonly s3?: S3Config | undefined;
+  /** The Azure Blob Storage container `dir` is a prefix in, or `undefined`. */
+  readonly azblob?: AzblobConfig | undefined;
+}
+
+/** How an object store block's source claims and its destination writes. */
+export interface ObjectStoreConfig {
+  /** A source runs on a store without conditional writes, claiming nothing. */
+  readonly singleNode: boolean;
+  /** How a destination writes: only where no object is, or over one. */
+  readonly mode: "create" | "overwrite";
+}
+
+/** An `s3:` block, resolved. Credentials come from the AWS SDK's default chain. */
+export interface S3Config extends ObjectStoreConfig {
+  readonly bucket: string;
+  readonly region: string | undefined;
+  readonly endpoint: string | undefined;
+  readonly pathStyle: boolean;
+  readonly timeoutMs: number | undefined;
+}
+
+/** An `azblob:` block, resolved, with its connection string as a reference. */
+export interface AzblobConfig extends ObjectStoreConfig {
+  readonly account: string;
+  readonly container: string;
+  readonly endpoint: string | undefined;
+  readonly connectionString: SecretSource | undefined;
+  /** Whether an http endpoint, in `endpoint` or the connection string, is allowed. */
+  readonly plaintext: boolean;
 }
 
 /**
@@ -2985,6 +3362,10 @@ export interface FileDestination {
   readonly dir: string;
   /** The SFTP server `dir` is on, or `undefined` for a folder on this machine. */
   readonly sftp?: SftpConfig | undefined;
+  /** The S3 bucket `dir` is a key prefix in, or `undefined`. */
+  readonly s3?: S3Config | undefined;
+  /** The Azure Blob Storage container `dir` is a prefix in, or `undefined`. */
+  readonly azblob?: AzblobConfig | undefined;
 }
 
 /**
@@ -3178,6 +3559,46 @@ export interface MllpDestination {
 }
 
 /**
+ * An SMTP destination: each output is sent as an email. `tls` is undefined exactly when
+ * `plaintext`; `user` and `password` are set together, and only with TLS.
+ *
+ * @example
+ * ```ts
+ * const smtp: SmtpDestination = {
+ *   kind: "smtp", host: "smtp.example.test", port: 465, tls: "implicit", ca: undefined, plaintext: false,
+ *   user: { env: "SMTP_USER" }, password: { env: "SMTP_PASSWORD" },
+ *   from: "pathways@example.test", to: ["lab@example.test"], cc: [],
+ *   subject: "Message {{ messageId }}", body: "A message is ready.", attach: false,
+ *   onPartialRefusal: "rejected", maxBytes: 10_485_760,
+ *   connectTimeoutMs: 10_000, greetingTimeoutMs: 10_000, socketTimeoutMs: 20_000,
+ * };
+ * ```
+ */
+export interface SmtpDestination {
+  readonly kind: "smtp";
+  readonly host: string;
+  readonly port: number;
+  readonly tls: (typeof SMTP_TLS_MODES)[number] | undefined;
+  /** The CA file to trust in place of the built-in roots, resolved to an absolute path. */
+  readonly ca: string | undefined;
+  readonly plaintext: boolean;
+  readonly user: SecretSource | undefined;
+  readonly password: SecretSource | undefined;
+  readonly from: string;
+  readonly to: readonly string[];
+  readonly cc: readonly string[];
+  readonly subject: string;
+  readonly body: string;
+  readonly attach: boolean;
+  /** What a message some of whose recipients were refused is marked. */
+  readonly onPartialRefusal: (typeof SMTP_PARTIAL_REFUSALS)[number];
+  readonly maxBytes: number;
+  readonly connectTimeoutMs: number;
+  readonly greetingTimeoutMs: number;
+  readonly socketTimeoutMs: number;
+}
+
+/**
  * How a tcp source or destination cuts messages from the stream, resolved: the delimiter, start and
  * end bytes in hex.
  *
@@ -3341,11 +3762,16 @@ export type HookConfig =
  * ```
  */
 export type DestinationConfig = (
-  FileDestination | HttpDestination | MllpDestination | TcpDestination | ModuleConnector
+  | FileDestination
+  | HttpDestination
+  | MllpDestination
+  | TcpDestination
+  | SmtpDestination
+  | ModuleConnector
 ) & {
   readonly retry?: RetryPolicy;
   /**
-   * For a file or module destination whose block sets `timeout`: how long one delivery may take in
+   * For a file, smtp or module destination whose block sets `timeout`: how long one delivery may take in
    * all, in milliseconds. Unset, it is {@link DEFAULT_DELIVERY_TIMEOUT_MS}. An HTTP destination's
    * `timeoutMs` is its own.
    */
@@ -3387,6 +3813,22 @@ export const DEFAULT_POLL_DEADLINE_MS = 300_000;
 
 /** How long one delivery to a file or module destination may take by default: 30 seconds. */
 export const DEFAULT_DELIVERY_TIMEOUT_MS = 30_000;
+
+/** How long an SMTP destination's connection may take by default: 10 seconds. */
+export const DEFAULT_SMTP_CONNECT_TIMEOUT_MS = 10_000;
+
+/** How long an SMTP server may take to greet by default: 10 seconds. */
+export const DEFAULT_SMTP_GREETING_TIMEOUT_MS = 10_000;
+
+/** How long an SMTP connection may sit idle waiting for a reply by default: 20 seconds. */
+export const DEFAULT_SMTP_SOCKET_TIMEOUT_MS = 20_000;
+
+/** An SMTP destination's subject when its block sets none: ids only, nothing of the message. */
+export const DEFAULT_SMTP_SUBJECT = "Pathways message {{ messageId }}-{{ seq }}";
+
+/** An SMTP destination's text when its block sets none: ids only, nothing of the message. */
+export const DEFAULT_SMTP_BODY =
+  "Channel {{ channel }} sent message {{ messageId }}, output {{ seq }}.";
 
 /** One channel, loaded, validated and resolved. */
 export interface ChannelConfig {

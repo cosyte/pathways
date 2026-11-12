@@ -344,24 +344,29 @@ error's code when it has one, rather than as an expression of the wrong shape.
 
 #### File source
 
-| Key             | Type                           | Default    | Meaning                                                              |
-| --------------- | ------------------------------ | ---------- | -------------------------------------------------------------------- |
-| `dir`           | path                           | required   | the folder to read; created if missing                               |
-| `minAge`        | duration                       | `1s`       | how long a file must sit unchanged before it is read                 |
-| `keepProcessed` | boolean                        | `false`    | move each stored file into `processed/` instead of deleting it       |
-| `include`       | a list of globs or `{ regex }` | every file | take only a file whose path from `dir` matches one                   |
-| `exclude`       | a list of globs or `{ regex }` | none       | leave a file whose path from `dir` matches one                       |
-| `recursive`     | boolean                        | `false`    | read the subfolders too, never `.claimed`, `processed` or `errorDir` |
-| `ignoreDot`     | boolean                        | `true`     | leave files and folders whose name starts with a dot                 |
-| `minSize`       | byte size, or `0`              | `1B`       | leave a smaller file; by default an empty file is left               |
-| `maxSize`       | byte size                      | no limit   | set a larger file aside: into `errorDir`, or left where it is        |
-| `maxPerPoll`    | a whole number, 1 or more      | no limit   | the most files claimed in one pass                                   |
-| `sortBy`        | `name` or `mtime`              | `name`     | the order files are taken in                                         |
-| `stable`        | boolean                        | `false`    | take a file only once two passes in a row find it unchanged          |
-| `doneFile`      | a suffix, such as `.done`      | none       | take a file only once its marker is there, then delete the marker    |
-| `errorDir`      | path                           | none       | where a file set aside goes, under its path from `dir`               |
-| `readTries`     | a whole number, 1 or more      | `3`        | passes in a row a file fails to open before it goes into `errorDir`  |
-| `sftp`          | an [SFTP block](#sftp-block)   | none       | read `dir` on an SFTP server; `dir` and `errorDir` are its paths     |
+| Key             | Type                                     | Default    | Meaning                                                              |
+| --------------- | ---------------------------------------- | ---------- | -------------------------------------------------------------------- |
+| `dir`           | path                                     | required   | the folder to read; created if missing                               |
+| `minAge`        | duration                                 | `1s`       | how long a file must sit unchanged before it is read                 |
+| `keepProcessed` | boolean                                  | `false`    | move each stored file into `processed/` instead of deleting it       |
+| `include`       | a list of globs or `{ regex }`           | every file | take only a file whose path from `dir` matches one                   |
+| `exclude`       | a list of globs or `{ regex }`           | none       | leave a file whose path from `dir` matches one                       |
+| `recursive`     | boolean                                  | `false`    | read the subfolders too, never `.claimed`, `processed` or `errorDir` |
+| `ignoreDot`     | boolean                                  | `true`     | leave files and folders whose name starts with a dot                 |
+| `minSize`       | byte size, or `0`                        | `1B`       | leave a smaller file; by default an empty file is left               |
+| `maxSize`       | byte size                                | no limit   | set a larger file aside: into `errorDir`, or left where it is        |
+| `maxPerPoll`    | a whole number, 1 or more                | no limit   | the most files claimed in one pass                                   |
+| `sortBy`        | `name` or `mtime`                        | `name`     | the order files are taken in                                         |
+| `stable`        | boolean                                  | `false`    | take a file only once two passes in a row find it unchanged          |
+| `doneFile`      | a suffix, such as `.done`                | none       | take a file only once its marker is there, then delete the marker    |
+| `errorDir`      | path                                     | none       | where a file set aside goes, under its path from `dir`               |
+| `readTries`     | a whole number, 1 or more                | `3`        | passes in a row a file fails to open before it goes into `errorDir`  |
+| `sftp`          | an [SFTP block](#sftp-block)             | none       | read `dir` on an SFTP server; `dir` and `errorDir` are its paths     |
+| `s3`            | an [S3 block](#s3-block)                 | none       | read objects in an S3 bucket; `dir` is the key prefix                |
+| `azblob`        | an [Azure Blob block](#azure-blob-block) | none       | read blobs in an Azure Blob Storage container; `dir` is the prefix   |
+
+With `s3` or `azblob`, `keepProcessed`, `doneFile`, `errorDir` and `readTries` are refused: an object
+store claims by a marker and moves no file. At most one of `sftp`, `s3` and `azblob`.
 
 A path from `dir` is written with `/` on every system. A glob is read as Node.js's
 `path.matchesGlob` reads it, and its `*` never matches a leading dot. A `regex` is at most 256
@@ -464,7 +469,7 @@ Hex goes in quotes, two digits a byte, such as `"0d0a"`: unquoted, YAML reads `1
 
 ### Destinations
 
-Each entry is exactly one of `file`, `http`, `mllp`, `tcp` or `module`, and may add a [`retry`](#retry)
+Each entry is exactly one of `file`, `http`, `mllp`, `tcp`, `smtp` or `module`, and may add a [`retry`](#retry)
 block of its own and `dryRun`, beside that key:
 
 ```yaml title="channels/results-out/channel.yaml"
@@ -479,7 +484,7 @@ destinations:
 | -------- | ------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `dryRun` | boolean | `false` | transform and record each output, mark its delivery `dry-run`, and never send it: no connector is built, so no TLS file is read and no connection opened, and none of its secrets is read or resolved at start, a provider's (`secret:`) included, so a missing or expired one does not stop the start. Takes an environment reference. When `dryRun` is read from an environment variable, setting that variable to `false` makes the destination send for real, and the audit log does not record that change |
 
-A `file` or `module` destination may also set `timeout`, a duration (`30s` by default): how long one
+A `file`, `smtp` or `module` destination may also set `timeout`, a duration (`30s` by default): how long one
 delivery may take in all before it is cut off and retried. See
 [Every delivery has a deadline](#every-delivery-has-a-deadline).
 
@@ -500,6 +505,7 @@ the attempt as failed with the code `DELIVERY_TIMEOUT`: it is retried by the des
 | `mllp`      | twice its `ackTimeout` (one to connect, one for the ACK) and one second             |
 | `tcp`       | twice its `timeout` (one to connect, one for the send and its reply) and one second |
 | `file`      | its `timeout`, `30s` by default                                                     |
+| `smtp`      | its `timeout`, `30s` by default                                                     |
 | `module`    | its `timeout`, `30s` by default                                                     |
 
 The second of grace lets an HTTP, MLLP or tcp destination's own timeout, with its own code, come first.
@@ -538,6 +544,44 @@ key is always checked.
 | `keepalive`      | duration                                              | `15s`    |
 
 [Read and write over SFTP](./read-and-write-files.md#read-and-write-over-sftp) says what each does.
+
+With an [S3 block](#s3-block) or an [Azure Blob block](#azure-blob-block), a file destination
+writes each output as an object under the prefix `dir`.
+
+#### S3 block
+
+A file source's or destination's `s3:`. Credentials come from the AWS SDK's default chain, never
+the YAML.
+
+| Key          | Type                                             | Default                 |
+| ------------ | ------------------------------------------------ | ----------------------- |
+| `bucket`     | an S3 bucket name                                | required                |
+| `region`     | a region, such as `us-east-1`                    | the AWS SDK's own chain |
+| `endpoint`   | an `https://` URL, or `http://` with `plaintext` | Amazon's                |
+| `plaintext`  | boolean, only with an `http://` endpoint         | `false`                 |
+| `pathStyle`  | boolean                                          | `false`                 |
+| `timeout`    | duration, for one request                        | `30s`                   |
+| `singleNode` | boolean, a source only                           | `false`                 |
+| `mode`       | `create` or `overwrite`, a destination only      | `create`                |
+
+[Read and write Amazon S3](./read-and-write-amazon-s3.md) says what each does.
+
+#### Azure Blob block
+
+A file source's or destination's `azblob:`. The identity is Azure's default chain unless
+`connectionString` is set.
+
+| Key                | Type                                             | Default                                   |
+| ------------------ | ------------------------------------------------ | ----------------------------------------- |
+| `account`          | a storage account name                           | required                                  |
+| `container`        | a container name                                 | required                                  |
+| `endpoint`         | an `https://` URL, or `http://` with `plaintext` | `https://<account>.blob.core.windows.net` |
+| `connectionString` | a [secret](#secrets): a connection string        | none                                      |
+| `plaintext`        | boolean: allow an `http://` endpoint             | `false`                                   |
+| `singleNode`       | boolean, a source only                           | `false`                                   |
+| `mode`             | `create` or `overwrite`, a destination only      | `create`                                  |
+
+[Read and write Azure Blob Storage](./read-and-write-azure-blob-storage.md) says what each does.
 
 #### HTTP destination
 
@@ -595,6 +639,33 @@ it is written; with it, the destination reads one framed reply, at most `maxMess
 `timeout`. `replyCheck` is a module whose default export, a
 [`TcpReplyCheck`](./api/README.md#tcpreplycheck), answers `delivered`, `retry` or `rejected`. An
 output the framing cannot carry fails for good.
+
+#### SMTP destination
+
+| Key                | Type                                                                                      | Default                                         |
+| ------------------ | ----------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| `host`             | host name or address                                                                      | required                                        |
+| `port`             | 1 to 65535                                                                                | `465`; `587` with `starttls`; `25` plaintext    |
+| `tls`              | `{ mode, ca }`: `mode` is `implicit` or `starttls`                                        | required unless `plaintext`; `{}` is `implicit` |
+| `plaintext`        | boolean; cannot go with `user` and `password`                                             | `false`                                         |
+| `user`             | a [secret](#secrets), with `password`                                                     | none                                            |
+| `password`         | a [secret](#secrets), with `user`                                                         | none                                            |
+| `from`             | an address                                                                                | required                                        |
+| `to`               | a list of addresses, at least one                                                         | required                                        |
+| `cc`               | a list of addresses                                                                       | none                                            |
+| `subject`          | a template                                                                                | `Pathways message {{ messageId }}-{{ seq }}`    |
+| `body`             | a template                                                                                | a line naming the channel, message and seq      |
+| `attach`           | boolean: attach the output as a file                                                      | `false`                                         |
+| `onPartialRefusal` | `rejected` or `delivered`: some recipients refused                                        | `rejected`                                      |
+| `maxSize`          | a size such as `10MB`, or a number of bytes                                               | `10MB`                                          |
+| `connectTimeout`   | duration, at most the destination's `timeout`; covers the greeting and a STARTTLS upgrade | `10s`                                           |
+| `greetingTimeout`  | duration, at most the destination's `timeout`                                             | `10s`                                           |
+| `socketTimeout`    | duration, at most the destination's `timeout`                                             | `20s`                                           |
+
+An address is plain, such as `lab@example.test`, with no display name. A template's placeholders
+are `{{ messageId }}`, `{{ seq }}`, `{{ channel }}` and `{{ meta.<key> }}`. The server's certificate is
+always verified, with TLS 1.2 or later. [Send email over SMTP](./send-email-over-smtp.md) says what
+each answer means.
 
 #### Module destination
 

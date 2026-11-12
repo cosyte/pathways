@@ -9,11 +9,13 @@ import { ConfigError } from "../config/load.js";
 import {
   DEFAULT_DELIVERY_TIMEOUT_MS,
   DEFAULT_RETRY,
+  type AzblobConfig,
   type ChannelConfig,
   type DestinationConfig,
   type Format,
   type ProjectConfig,
   type RetryPolicy,
+  type S3Config,
   type SftpConfig,
   type TransformConfigBlock,
 } from "../config/schema.js";
@@ -24,8 +26,11 @@ import {
   resolveHeaders,
   type Env,
 } from "../connectors/endpoint.js";
-import { FileDestination, FileSource } from "../connectors/file.js";
+import { AzureContainer } from "../connectors/azblob.js";
+import { type FileFault, FileDestination, FileSource } from "../connectors/file.js";
 import { KnownHosts, pinnedKey } from "../connectors/known-hosts.js";
+import { ObjectDestination, ObjectSource, type ObjectStore } from "../connectors/object-store.js";
+import { S3Bucket } from "../connectors/s3.js";
 import { SftpLocation } from "../connectors/sftp.js";
 import { HttpDestination, HttpSource } from "../connectors/http.js";
 import { RedirectHeld, RetryableError } from "../connectors/http-core.js";
@@ -37,6 +42,7 @@ import {
   type TcpReplyBuilder,
   type TcpReplyCheck,
 } from "../connectors/tcp.js";
+import { SmtpDestination } from "../connectors/smtp.js";
 import { framingOf } from "../connectors/tcp-framing.js";
 import { loadClientTls, loadServerTls } from "../connectors/tls.js";
 import {
@@ -378,7 +384,39 @@ export async function connectorsFor(
   const { source } = channel;
   let sourceConnector: SourceConnector;
   switch (source.kind) {
-    case "file":
+    case "file": {
+      const said = {
+        onReadError: (error: unknown) => {
+          logger.warn({
+            event: "source-read-failed",
+            channel: channel.name,
+            code: errorCode(error),
+          });
+        },
+        // The reason and a code, never the file's name: a name can carry an identifier.
+        onFileFault: ({ reason, moved, error }: FileFault) => {
+          logger.warn({
+            event: "source-file-set-aside",
+            channel: channel.name,
+            reason,
+            moved,
+            code: errorCode(error),
+          });
+        },
+      };
+      const store = objectStore(source, secretsOf(secrets), `${file}: source.file`);
+      if (store !== undefined) {
+        sourceConnector = new ObjectSource({
+          ...source,
+          ...said,
+          store,
+          prefix: source.dir,
+          channel: channel.name,
+          now,
+          singleNode: (source.s3 ?? source.azblob)?.singleNode === true,
+        });
+        break;
+      }
       sourceConnector = new FileSource({
         ...source,
         channel: channel.name,
@@ -388,25 +426,10 @@ export async function connectorsFor(
           : {
               location: sftpLocation(source.sftp, secretsOf(secrets), `${file}: source.file.sftp`),
             }),
-        onReadError: (error) => {
-          logger.warn({
-            event: "source-read-failed",
-            channel: channel.name,
-            code: errorCode(error),
-          });
-        },
-        // The reason and a code, never the file's name: a name can carry an identifier.
-        onFileFault: ({ reason, moved, error }) => {
-          logger.warn({
-            event: "source-file-set-aside",
-            channel: channel.name,
-            reason,
-            moved,
-            code: errorCode(error),
-          });
-        },
+        ...said,
       });
       break;
+    }
     case "http": {
       const { tls, token } = listenerSecurity(source, secrets, `${file}: source.http`);
       const { response } = source;
@@ -513,7 +536,20 @@ export async function connectorsFor(
       continue;
     }
     switch (destination.kind) {
-      case "file":
+      case "file": {
+        const where = `${file}: destinations.${index}.file`;
+        const store = objectStore(destination, secretsOf(secrets), where);
+        if (store !== undefined) {
+          destinations.push(
+            new ObjectDestination({
+              store,
+              prefix: destination.dir,
+              extension: EXTENSIONS[channel.format],
+              mode: (destination.s3 ?? destination.azblob)?.mode ?? "create",
+            }),
+          );
+          break;
+        }
         destinations.push(
           new FileDestination({
             dir: destination.dir,
@@ -530,6 +566,7 @@ export async function connectorsFor(
           }),
         );
         break;
+      }
       case "http": {
         const where = `${file}: destinations.${index}.http`;
         destinations.push(
@@ -568,6 +605,61 @@ export async function connectorsFor(
           }),
         );
         break;
+      case "smtp": {
+        const where = `${file}: destinations.${index}.smtp`;
+        const read = secretsOf(secrets);
+        destinations.push(
+          new SmtpDestination({
+            mailer: {
+              host: destination.host,
+              port: destination.port,
+              tls: destination.tls ?? "none",
+              ca:
+                destination.ca === undefined
+                  ? undefined
+                  : loadClientTls(
+                      { ca: destination.ca, cert: undefined, key: undefined },
+                      `${where}.tls`,
+                    ).ca,
+              user:
+                destination.user === undefined
+                  ? undefined
+                  : read.read(destination.user, `${where}.user`),
+              password:
+                destination.password === undefined
+                  ? undefined
+                  : read.read(destination.password, `${where}.password`),
+              connectTimeoutMs: destination.connectTimeoutMs,
+              greetingTimeoutMs: destination.greetingTimeoutMs,
+              socketTimeoutMs: destination.socketTimeoutMs,
+            },
+            channel: channel.name,
+            from: destination.from,
+            to: destination.to,
+            cc: destination.cc,
+            subject: destination.subject,
+            body: destination.body,
+            attach: destination.attach ? { extension: EXTENSIONS[channel.format] } : undefined,
+            maxBytes: destination.maxBytes,
+            now,
+            onPartialRefusal: destination.onPartialRefusal,
+            // How many recipients the server refused while it took others: a count, never an
+            // address, and whether the message is marked rejected or delivered for it.
+            onRefused: (message, refused, outcome) => {
+              logger.warn({
+                event: "smtp-recipients-refused",
+                channel: channel.name,
+                destination: index,
+                message: message.messageId,
+                seq: message.seq,
+                refused,
+                outcome,
+              });
+            },
+          }),
+        );
+        break;
+      }
       case "tcp": {
         const where = `${file}: destinations.${index}.tcp`;
         destinations.push(
@@ -1410,8 +1502,20 @@ export class Engine {
       logger.warn({ event: "plaintext-copies", channel: config.name, endpoint: "source" });
     }
     for (const [index, destination] of config.destinations.entries()) {
+      if (destination.kind === "smtp" && destination.attach) {
+        // Each email carries the message itself, which every mail server on its way can read.
+        logger.warn({
+          event: "smtp-attach",
+          channel: config.name,
+          endpoint: "destination",
+          destination: index,
+        });
+      }
       const connects =
-        destination.kind === "http" || destination.kind === "mllp" || destination.kind === "tcp";
+        destination.kind === "http" ||
+        destination.kind === "mllp" ||
+        destination.kind === "tcp" ||
+        destination.kind === "smtp";
       if (connects && destination.plaintext) {
         logger.warn({
           event: "plaintext",
@@ -2424,6 +2528,51 @@ function errorName(error: unknown): string {
 function hashed(key: string | undefined): string | undefined {
   return key === undefined ? undefined : createHash("sha256").update(key).digest("hex");
 }
+
+/**
+ * The object store a file block's `s3:` or `azblob:` names, or `undefined` when it names neither.
+ * An Azure connection string is read through `secrets` now; nothing else is secret, and the clients
+ * are made on the first request. `where` names the file block.
+ *
+ * @throws {ConfigError} when the connection string cannot be read.
+ */
+function objectStore(
+  block: { readonly s3?: S3Config | undefined; readonly azblob?: AzblobConfig | undefined },
+  secrets: Secrets,
+  where: string,
+): ObjectStore | undefined {
+  const { s3, azblob } = block;
+  if (s3 !== undefined) {
+    return new S3Bucket({
+      bucket: s3.bucket,
+      region: s3.region,
+      endpoint: s3.endpoint,
+      pathStyle: s3.pathStyle,
+      timeoutMs: s3.timeoutMs,
+    });
+  }
+  if (azblob === undefined) return undefined;
+  const at = `${where}.azblob.connectionString`;
+  const connectionString =
+    azblob.connectionString === undefined ? undefined : secrets.read(azblob.connectionString, at);
+  // TLS unless the block says plaintext: a connection string can name an http endpoint too. The
+  // error names the key, never the string, which holds the account key.
+  if (connectionString !== undefined && !azblob.plaintext && PLAIN_AZURE.test(connectionString)) {
+    throw new ConfigError([
+      `${at}: names an http endpoint, which sends in the clear: set plaintext: true to allow it`,
+    ]);
+  }
+  return new AzureContainer({
+    account: azblob.account,
+    container: azblob.container,
+    endpoint: azblob.endpoint,
+    connectionString,
+  });
+}
+
+/** A connection string that sends in the clear: an http protocol or endpoint, or Azurite's own. */
+const PLAIN_AZURE =
+  /(?:^|;)\s*(?:DefaultEndpointsProtocol\s*=\s*http\s*(?:;|$)|BlobEndpoint\s*=\s*http:|UseDevelopmentStorage\s*=\s*true)/i;
 
 /**
  * The location an `sftp:` block names: its key and passphrase read through `secrets`, and its host
