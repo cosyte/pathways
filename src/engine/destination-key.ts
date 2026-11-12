@@ -6,16 +6,24 @@ import type { DestinationConfig } from "../config/schema.js";
 /**
  * Where a destination sends, as its identity reads it when it has no `name:`: a local folder or a
  * module by its path from the project's root, so moving the project keeps it; an SFTP folder by its
- * server and path; an HTTP destination by its URL; an MLLP or tcp one by its host and port.
+ * server and path; an S3 or Azure Blob prefix by its bucket or container; an HTTP destination by its
+ * URL; an MLLP or tcp one by its host and port.
  */
 function target(root: string, destination: DestinationConfig): string {
   // The configuration resolves a local folder and a module to absolute paths.
   const fromRoot = (path: string): string => relative(root, path).split(sep).join("/");
   switch (destination.kind) {
-    case "file":
-      return destination.sftp === undefined
-        ? fromRoot(destination.dir)
-        : `sftp://${destination.sftp.user}@${destination.sftp.host}:${String(destination.sftp.port)}${destination.dir}`;
+    case "file": {
+      const { dir, sftp, s3, azblob } = destination;
+      if (sftp !== undefined) {
+        return `sftp://${sftp.user}@${sftp.host}:${String(sftp.port)}${dir}`;
+      }
+      if (s3 !== undefined) return `s3://${s3.endpoint ?? ""}/${s3.bucket}/${dir}`;
+      if (azblob !== undefined) {
+        return `azblob://${azblob.endpoint ?? ""}/${azblob.account}/${azblob.container}/${dir}`;
+      }
+      return fromRoot(dir);
+    }
     case "http":
       return destination.url;
     case "mllp":

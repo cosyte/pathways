@@ -104,7 +104,7 @@ The destination's three keys:
 | `format`    | the format the destination sends: what its transform's return is written in, the extension a `file` destination writes and the `Content-Type` an `http` destination sends. The channel's `format` by default.                 |
 
 Each delivery records the destination it was made for: by its `name`, or, without one, by its kind
-and target (a `file` destination's folder, an `http` destination's URL, an `mllp` or `tcp`
+and target (a `file` destination's folder, or its bucket or container and prefix, an `http` destination's URL, an `mllp` or `tcp`
 destination's host and port, a `module` destination's module). Adding a destination anywhere in the
 list, removing one or reordering them is safe: after a restart, each queued delivery goes to the
 destination it was made for, and a resend or `pathways verify` reads each destination's own stored

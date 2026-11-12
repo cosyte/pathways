@@ -427,6 +427,22 @@ describe("destinationKeys", () => {
     dir: "/upload",
     sftp: { host: "sftp.example.com", port: 22, user: "synthetic" },
   });
+  const s3 = as({ kind: "file", dir: "in/", s3: { bucket: "synthetic-bucket" } });
+  const s3At = as({
+    kind: "file",
+    dir: "in/",
+    s3: { bucket: "synthetic-bucket", endpoint: "https://s3.example.com" },
+  });
+  const azblob = as({
+    kind: "file",
+    dir: "in/",
+    azblob: { account: "synthetic", container: "inbound" },
+  });
+  const azblobAt = as({
+    kind: "file",
+    dir: "in/",
+    azblob: { account: "synthetic", container: "inbound", endpoint: "https://blob.example.com" },
+  });
   const http = as({ kind: "http", url: "https://lab.example.com/in" });
   const mllp = as({ kind: "mllp", host: "lab.example.com", port: 2575 });
   const tcp = as({ kind: "tcp", host: "lab.example.com", port: 2575 });
@@ -437,6 +453,8 @@ describe("destinationKeys", () => {
     const keys = destinationKeys(root, [file, sftp, http, mllp, tcp, module, named, http]);
     for (const key of keys) expect(key).toMatch(/^[0-9a-f]{32}$/);
     expect(new Set(keys).size).toBe(8);
+    const objectStores = destinationKeys(root, [s3, s3At, azblob, azblobAt]);
+    expect(new Set([...keys, ...objectStores]).size).toBe(12);
     // A name keeps its key whatever the destination's kind or target.
     expect(destinationKeys(root, [as({ ...mllp, name: "lab" })])).toEqual([keys[6]]);
     // The first of two alike keeps the key it has alone.
