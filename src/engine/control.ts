@@ -50,7 +50,7 @@ const DEFAULT_SOCKET_PATH_LIMIT = 103;
  *
  * @example
  * ```ts
- * const request: ControlRequest = { v: 1, command: "pause", channel: "adt", user: "noah" };
+ * const request: ControlRequest = { v: 1, command: "pause", channel: "adt", user: "ops" };
  * ```
  */
 export interface ControlRequest {

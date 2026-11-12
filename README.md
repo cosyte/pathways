@@ -221,6 +221,11 @@ These are on `main` and land in the next release, not in 0.0.4:
   the store-down alert can fire, instead of the scrape hanging with it. From when reads start
   until they answer or fail, neither a scrape nor the readiness check starts new ones.
   <!-- changesets: metrics-store-timeout -->
+- **What is safe to log from a channel.** The logs page now says what a transform or a channel
+  script may log (the ids the engine made, counts, sizes and codes) and what it must not (the
+  message, a field that identifies a person, the source's facts, the configuration, an error's own
+  text), and how `ctx.logger`, `console` and a thrown error each behave.
+  <!-- changesets: examples-print-nothing-identifying -->
 
 ---
 

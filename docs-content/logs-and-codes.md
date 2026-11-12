@@ -330,6 +330,69 @@ with the reason `OBJECT_EXISTS`.
 | `ERR_PATHWAYS_INTEGRITY`      | a value, or its wrapped data key, failed its integrity check: changed, damaged, or the key under its id is not the one that wrote it |
 | `ERR_PATHWAYS_KEY_PROVIDER`   | a key provider returned a key id or a key that cannot be used                                                                        |
 
+## What is safe to log from a channel
+
+The engine's own log keeps to ids, counts, codes and names, as the tables above show. Code you add
+to a channel (a transform, a destination's transform, `onStart` and `onStop`, a custom connector)
+writes wherever you send it, and the engine cannot filter it, so the same rule is yours to keep.
+
+Safe to log:
+
+- `ctx.messageId`, the id the engine gave the stored message, which `pathways messages show` and
+  `pathways replay` take (`0` under `pathways test`), and `ctx.attempt`.
+- The channel's name, and in a destination's transform `ctx.destination`'s `index`, `name` and
+  `kind`.
+- Counts and sizes: how many outputs, segments or results, a body's length in bytes.
+- Codes: the message type and event (MSH-9), an acknowledgement code (MSA-1), a result status, an
+  error's `name` and `code`.
+
+Never log:
+
+- The message, an output or a body, whole or as text (`msg.toString()`, `JSON.stringify(resource)`),
+  or any one segment of it.
+- A field that identifies a person: a name, a record number, a birth date, an address, a phone
+  number, an email, or free text such as a note or a text result. Check the field in code, and log
+  `ctx.messageId` so an operator can find the message.
+- `ctx.source`: a file's name, a request's path and headers, and a sender's address and certificate
+  name can each identify a patient or a person.
+- `ctx.config`: its values come from `config:` blocks and the environment, and can be secrets.
+- `ctx.meta`: a message's metadata, such as a record number. Nothing in the engine sets it in this
+  release, and it is meant for values like these once it does.
+- An error's own text (`error.message`), from a parser or from your code: it can quote the message.
+  Log its `name` and `code`. The engine does the same: a failed transform is logged with its stage,
+  name, code and place, and its text is stored, encrypted, with the message.
+
+How each way of writing behaves:
+
+- **`ctx.logger`**, which `onStart` receives, takes a code and numbers only. A code that is not
+  lower-case words joined by hyphens is logged as `script-log`, and an id that is not a finite
+  number, or whose name is not a letter then letters and digits, is dropped. Its lines are
+  `channel-script` events. A transform itself receives no logger.
+- **`console`**, in a transform or a script, writes to the standard output of the process it runs
+  in: beside the engine's JSON lines under `pathways start`, and in the command's output under
+  `pathways test`, `pathways replay` and `pathways verify`. It is not filtered.
+- **A thrown error** fails the message. Its text is stored, encrypted, with the message: the log,
+  `pathways messages show` and `pathways test` give its stage, name, code and place, never the text.
+  Anyone who reads the database with the keys reads it, so keep it to codes and ids too.
+
+```ts runnable title="channels/results-to-ehr/transform.ts"
+import type { OnStart, Transform } from "@cosyte/pathways";
+
+export const onStart: OnStart = (ctx) => {
+  // A code and a count: logged as a channel-script event.
+  ctx.logger.info("codes-loaded", { entries: 2 });
+};
+
+export default ((msg, ctx) => {
+  if (!msg.is("ORU^R01")) return null;
+  // Check the record number; never print it. The id to quote is the one the engine made.
+  if (msg.get("PID.3.1") === undefined) {
+    throw new Error(`message ${String(ctx?.messageId)}: no record number in PID-3`);
+  }
+  return msg;
+}) satisfies Transform;
+```
+
 ## Related
 
 - [Troubleshooting](./troubleshooting.md).

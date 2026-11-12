@@ -23,7 +23,7 @@ export type AuditListener = (entry: AuditEntry) => void | Promise<void>;
  *
  * @example
  * ```ts
- * operatingSystemUser(); // "noah"
+ * operatingSystemUser(); // "ops"
  * ```
  */
 export function operatingSystemUser(): string {
@@ -42,7 +42,7 @@ export function operatingSystemUser(): string {
  *
  * @example
  * ```ts
- * const audit = new AuditLog(store, { actor: "noah", onListenerError: (error) => log(error) });
+ * const audit = new AuditLog(store, { actor: "ops", onListenerError: (error) => log(error) });
  * ```
  */
 export interface AuditLogOptions {

@@ -135,7 +135,8 @@ transform if you list it. A custom source passes a map of plain JSON values,
 [Write custom connectors](./write-custom-connectors.md).
 
 A file's name, a header and a certificate's name can identify a patient or a person. Read them, and
-log them only where your own logs may hold such data.
+log them only where your own logs may hold such data. See
+[what is safe to log from a channel](./logs-and-codes.md#what-is-safe-to-log-from-a-channel).
 
 ### When the source facts are not known
 
