@@ -1,4 +1,4 @@
-import { appendFileSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
 import { mkdir, readdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -433,7 +433,9 @@ describe("SftpLocation, each request", () => {
     fakeServer.status = (op) => {
       if (op !== "mkdir" || made) return undefined;
       made = true;
-      void mkdir(join(root, "inbox", "d"));
+      // The other engine's folder is there before the failure is answered, as on a real server: an
+      // unawaited mkdir raced the adapter's look after the failure and lost on a busy runner.
+      mkdirSync(join(root, "inbox", "d"));
       return 4;
     };
     await location.mkdir("/inbox/d");
