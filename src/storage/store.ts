@@ -9,6 +9,7 @@ import {
   type ExpressionBuilder,
   type Generated,
   type Insertable,
+  type InsertObject,
   type RawBuilder,
   type Selectable,
   type SelectQueryBuilder,
@@ -2929,10 +2930,12 @@ export class Store implements MessageStore, ContentStore, MetaStore {
     const meta =
       options.storedMeta ?? (options.meta === undefined ? null : JSON.stringify(options.meta));
     const tags = options.metaTags ?? [];
-    const row = (claim: string | null): Insertable<MessagesTable> => ({
+    const row = (claim: string | null): MessageInsert => ({
       channel,
       received_at: at,
-      body: blob(body),
+      // A message a source could not read, such as a batch piece, is kept with an empty body, which
+      // goes in as each database takes one: see EMPTY_BODY.
+      body: body.byteLength === 0 ? EMPTY_BODY[this.kind] : blob(body),
       status: failure === undefined ? "received" : "failed",
       error: failure ?? null,
       updated_at: at,
@@ -4896,7 +4899,7 @@ export class Store implements MessageStore, ContentStore, MetaStore {
    */
   private async insertClaiming(
     db: Kysely<Tables>,
-    values: Insertable<MessagesTable>,
+    values: MessageInsert,
   ): Promise<number | undefined> {
     switch (this.kind) {
       case "postgres":
@@ -4921,10 +4924,7 @@ export class Store implements MessageStore, ContentStore, MetaStore {
   }
 
   /** Inserts a message and returns its id, which each database hands back its own way. */
-  private async insertMessage(
-    db: Kysely<Tables>,
-    values: Insertable<MessagesTable>,
-  ): Promise<number> {
+  private async insertMessage(db: Kysely<Tables>, values: MessageInsert): Promise<number> {
     const insert = db.insertInto("messages").values(values);
     switch (this.kind) {
       case "mysql":
@@ -4938,6 +4938,9 @@ export class Store implements MessageStore, ContentStore, MetaStore {
     }
   }
 }
+
+/** A message row to insert, whose body may be a literal (see EMPTY_BODY). */
+type MessageInsert = InsertObject<Tables, "messages">;
 
 /** The unique index that holds one message per channel to each idempotency key. */
 const CLAIM_INDEX = "messages_by_channel_idempotency_claim";
