@@ -66,7 +66,14 @@ const text = (body: Uint8Array | undefined): string | undefined =>
   body === undefined ? undefined : new TextDecoder().decode(body);
 
 /** The tag each of the two hand-ins carries, which the third connection holds until the race. */
-const TAGS = ["synthetic-gate-a", "synthetic-gate-b"] as const;
+const TAGS = ["synthetic-gate-a", "synthetic-gate-y"] as const;
+
+/**
+ * Committed tags between and after the two, so on MySQL and MariaDB each hand-in waits in a gap of
+ * the index of its own. Two inserts waiting in one gap each hold a lock on it once the third
+ * connection rolls back, and each then waits on the other's: InnoDB ends one as a deadlock.
+ */
+const SEPARATORS = ["synthetic-gate-m", "synthetic-gate-z"] as const;
 
 /** A connection of the test's own to the database `storage` names. */
 async function connect(storage: TestStorage): Promise<Kysely<Tables>> {
@@ -112,6 +119,10 @@ for (const database of TEST_DATABASES) {
           stores.push(...both);
           const db = await connect(storage);
           await sql`create unique index race_gate on meta_index (tag)`.execute(db);
+          for (const tag of SEPARATORS) {
+            await sql`insert into meta_index (message_id, channel, index_name, key_id, tag)
+              values (0, 'gate', 'gate', 'gate', ${tag})`.execute(db);
+          }
 
           let release: () => void = () => undefined;
           const released = new Promise<void>((resolve) => {
