@@ -313,7 +313,8 @@ The output it carried, in base64; `null` once its message's content was dropped.
 
 > `readonly` **destinationKey**: `string` \| `null`
 
-The key of the destination it was made for; null when it records none.
+The key of the destination it was made for; null when it records none. An archive written
+before deliveries recorded one leaves it out.
 
 ##### error
 
@@ -1678,7 +1679,7 @@ export default ((msg, ctx) => (ctx?.destination?.name === "billing" ? msg : null
 
 > `readonly` **kind**: `string`
 
-`file`, `http`, `mllp` or `module`.
+`file`, `http`, `mllp`, `tcp`, `smtp` or `module`.
 
 ##### name
 

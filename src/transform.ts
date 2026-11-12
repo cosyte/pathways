@@ -289,7 +289,7 @@ export interface TransformContext {
 export interface DestinationFacts {
   readonly index: number;
   readonly name: string | undefined;
-  /** `file`, `http`, `mllp` or `module`. */
+  /** `file`, `http`, `mllp`, `tcp`, `smtp` or `module`. */
   readonly kind: string;
 }
 

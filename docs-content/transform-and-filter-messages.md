@@ -110,7 +110,8 @@ list, removing one or reordering them is safe: after a restart, each queued deli
 destination it was made for, and a resend or `pathways verify` reads each destination's own stored
 outputs. A delivery queued for a destination the channel no longer has waits, and is logged at
 start as `deliveries-held` with the code `destination-gone`; it is sent if that destination comes
-back. Renaming a destination, setting a `name` on one that had none, or changing the target of one
+back. A destination given a removed one's identity, its `name`, or without one its kind and target,
+takes over that destination's pending deliveries and sends them. Renaming a destination, setting a `name` on one that had none, or changing the target of one
 without a name makes it a new destination, so what was queued for it waits in the same way: give
 each destination a `name` when you add it, and it stays the same destination when its URL, host or
 folder changes.
@@ -122,7 +123,7 @@ identity, and nothing would tell their deliveries apart once one of them is remo
 one is enough. Two `module` destinations of one module with different `options` are such a pair.
 
 Its context is the channel transform's, with `ctx.destination` beside it: the destination's `index`
-(from 0), its `name` and its `kind` (`file`, `http`, `mllp` or `module`).
+(from 0), its `name` and its `kind` (`file`, `http`, `mllp`, `tcp`, `smtp` or `module`).
 
 What each destination gets is recorded in one write with the message, so a destination's queue keeps
 the order messages arrived in:
