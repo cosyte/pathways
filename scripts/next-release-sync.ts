@@ -183,7 +183,11 @@ function moveUp(text: string, moved: readonly string[]): string | undefined {
 }
 
 /** The rewrite on a README with LF line endings. */
-function rewriteLf(readme: string, pending: readonly string[], version: string): NextReleaseRewrite {
+function rewriteLf(
+  readme: string,
+  pending: readonly string[],
+  version: string,
+): NextReleaseRewrite {
   let text = readme;
   const moved: string[] = [];
   let kept = 0;
@@ -298,9 +302,7 @@ export function syncNextRelease(root: string): NextReleaseResult {
     }
     writeFileSync(path, result.text);
     const narrowed =
-      result.narrowed === 0
-        ? ""
-        : `, ${String(result.narrowed)} naming only pending changesets`;
+      result.narrowed === 0 ? "" : `, ${String(result.narrowed)} naming only pending changesets`;
     return {
       code: 0,
       message: `sync-next-release: README.md moved ${String(result.moved)} released bullet(s) up; ${String(result.kept)} left${narrowed}; the version lines name ${version}`,

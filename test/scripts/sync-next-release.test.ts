@@ -346,10 +346,10 @@ describe("syncNextRelease and the script", () => {
   });
 
   // What npm shows for the release: every bullet it shipped is under What the latest release ships,
-  // without its comment, and the README names the new version as the one on npm.
+  // without its comment, and the README names the new version as the one on npm. On the Version
+  // Packages commit itself the README has no next-release bullets left, and this still holds.
   it("moves the repository's released bullets up and names the new version on npm", () => {
     const bullets = nextReleaseTexts(repoReadme);
-    expect(bullets.length).toBeGreaterThan(0);
     layout({ version: "9.9.9" }, repoReadme, []);
     expect(syncNextRelease(dir).code).toBe(0);
     const after = readFileSync(join(dir, "README.md"), "utf8");
@@ -364,11 +364,11 @@ describe("syncNextRelease and the script", () => {
 
   it("keeps the repository's pending bullets where they are", () => {
     const ids = bulletIds(repoReadme).flat();
-    const last = ids.at(-1) ?? "";
-    layout({ version: "9.9.9" }, repoReadme, [last]);
+    const last = ids.at(-1);
+    layout({ version: "9.9.9" }, repoReadme, last === undefined ? [] : [last]);
     expect(syncNextRelease(dir).code).toBe(0);
     const after = readFileSync(join(dir, "README.md"), "utf8");
-    expect(bulletIds(after)).toEqual([[last]]);
+    expect(bulletIds(after)).toEqual(last === undefined ? [] : [[last]]);
   });
 
   it("writes and says what it moved", () => {
