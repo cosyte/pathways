@@ -61,6 +61,11 @@ jobs:
             .env
           grep -c -E '^(PATHWAYS_VERSION|POSTGRES_PASSWORD|PATHWAYS_KEY)=.+$' .env | grep -qx 3
 
+      # PostgreSQL from Docker Hub, by its digest. The Pathways image is the one built above: `up`
+      # pulls nothing, so a published image of the same tag can never stand in for it.
+      - name: Pull the PostgreSQL image
+        run: docker compose pull postgres
+
       - name: Start the example and wait until both services are healthy
         run: docker compose up --detach --wait --wait-timeout 180 --pull never
 
