@@ -1034,6 +1034,12 @@ export interface MessageStore {
   message(id: number): Promise<StoredMessage | undefined>;
   /** One message's body as it arrived, or `undefined` if there is none or it was dropped. */
   messageBody(id: number): Promise<Uint8Array | undefined>;
+  /**
+   * One message's metadata (`ctx.meta`) as JSON text, through the codec like a body, or `undefined`
+   * when it has none or it was dropped. Optional: a store without it hands a destination that reads
+   * metadata none, so a URL placeholder fails its delivery.
+   */
+  messageMeta?(id: number): Promise<string | undefined>;
   /** A message's deliveries, every generation, oldest first, without bodies. */
   deliveries(messageId: number): Promise<StoredDelivery[]>;
   /** The outputs of a message's current generation, in order; none when it has none or they were dropped. */
@@ -2028,6 +2034,16 @@ export class Store implements MessageStore, ContentStore, MetaStore {
       .where("content_dropped_at", "is", null)
       .executeTakeFirst();
     return row?.body;
+  }
+
+  /** One message's metadata as stored, or undefined when it has none or it was dropped. */
+  async messageMeta(id: number): Promise<string | undefined> {
+    const row = await this.db
+      .selectFrom("messages")
+      .select("meta")
+      .where("id", "=", id)
+      .executeTakeFirst();
+    return row?.meta ?? undefined;
   }
 
   /** Every delivery of a message, oldest first, without bodies. */

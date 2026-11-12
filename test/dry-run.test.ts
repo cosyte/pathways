@@ -78,6 +78,7 @@ destinations:
   - http:
       url: http://127.0.0.1:${port}/in
       plaintext: true
+      allowNetworks: [127.0.0.1]
       headers: { Authorization: { env: SYNTHETIC_MISSING_TOKEN } }
 ${http}
   - file: { dir: ../../data/out }
@@ -107,6 +108,7 @@ destinations:
   - http:
       url: http://127.0.0.1:${port}/in
       plaintext: true
+      allowNetworks: [127.0.0.1]
       headers: { Authorization: { secret: { provider: vault, name: lab-token } } }
 ${http}
   - file: { dir: ../../data/out }

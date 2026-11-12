@@ -1,6 +1,8 @@
 import { z } from "zod";
 
+import { parseNetwork } from "../connectors/address-guard.js";
 import { normalisePath } from "../connectors/http-path.js";
+import { queryValueProblem, templateProblem } from "../connectors/http-template.js";
 import { FORMATS } from "../engine/worker-entry.js";
 import { LIFECYCLE_EVENTS, type LifecycleEventType } from "../extensions/events.js";
 import type { JsonValue } from "../transform.js";
@@ -314,6 +316,9 @@ export const HEADER_VALUE = /^[\t\x20-\x7e\x80-\xff]*$/;
 /** Header names that carry a credential, by the words they usually contain. */
 const SECRET_HEADER = /auth|cookie|token|secret|password|key|signature|credential/i;
 /** Headers Pathways sets itself, from the request it sends. */
+/** The methods an HTTP destination sends by. */
+const HTTP_DESTINATION_METHODS = ["POST", "PUT", "PATCH", "DELETE", "GET"] as const;
+
 const MANAGED_HEADERS = new Set([
   "content-length",
   "transfer-encoding",
@@ -877,22 +882,83 @@ const httpDestination = restate(
             "A header sent only on a possible duplicate, a resend after an attempt was cut off, its value the number of attempts before. Default: none is sent.",
         }),
       ).optional(),
+      method: envable(
+        z.enum(HTTP_DESTINATION_METHODS).meta({
+          description:
+            "The method each output is sent by: POST, PUT, PATCH, DELETE or GET. GET and DELETE send no body. Default POST.",
+        }),
+      ).optional(),
+      query: z
+        .record(z.string(), envable(z.string()))
+        .meta({
+          description:
+            "Query parameters added to the url's own, each value text that may hold {key} placeholders filled from ctx.meta. Default: none.",
+        })
+        .optional(),
+      idempotencyHeader: envable(
+        z.string().meta({
+          description:
+            "A header sent on every attempt, its value <messageId>-<seq>, the same for every attempt of one output. Default: none is sent.",
+        }),
+      ).optional(),
+      allowNetworks: z
+        .array(envable(z.string()))
+        .meta({
+          description:
+            "The loopback, link-local and private networks this destination may connect to, as addresses or CIDR ranges such as 10.20.0.0/16. Default: none.",
+        })
+        .optional(),
     })
-    .meta({ description: "POST each output to url." })
+    .meta({ description: "Send each output to url, by POST unless method names another." })
     .superRefine(httpClientChecks)
     .superRefine((value, ctx) => {
-      const name = value.resendHeader;
-      if (name === undefined) return;
-      const at = ["resendHeader"];
-      const taken = Object.keys(value.headers ?? {}).some(
-        (header) => header.toLowerCase() === name.toLowerCase(),
-      );
-      if (!HEADER_NAME.test(name)) {
-        ctx.addIssue({ code: "custom", path: at, message: "not a valid header name" });
-      } else if (MANAGED_HEADERS.has(name.toLowerCase()) || name.toLowerCase() === "content-type") {
-        ctx.addIssue({ code: "custom", path: at, message: "Pathways sets this header itself" });
-      } else if (taken) {
-        ctx.addIssue({ code: "custom", path: at, message: "already set in headers" });
+      const names: [string, string][] = [];
+      if (value.resendHeader !== undefined) names.push(["resendHeader", value.resendHeader]);
+      if (value.idempotencyHeader !== undefined) {
+        names.push(["idempotencyHeader", value.idempotencyHeader]);
+      }
+      for (const [field, name] of names) {
+        const at = [field];
+        const taken = Object.keys(value.headers ?? {}).some(
+          (header) => header.toLowerCase() === name.toLowerCase(),
+        );
+        if (!HEADER_NAME.test(name)) {
+          ctx.addIssue({ code: "custom", path: at, message: "not a valid header name" });
+        } else if (
+          MANAGED_HEADERS.has(name.toLowerCase()) ||
+          name.toLowerCase() === "content-type"
+        ) {
+          ctx.addIssue({ code: "custom", path: at, message: "Pathways sets this header itself" });
+        } else if (taken) {
+          ctx.addIssue({ code: "custom", path: at, message: "already set in headers" });
+        }
+      }
+      if (
+        value.resendHeader !== undefined &&
+        value.idempotencyHeader?.toLowerCase() === value.resendHeader.toLowerCase()
+      ) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["idempotencyHeader"],
+          message: "already named by resendHeader",
+        });
+      }
+      const problem = templateProblem(value.url);
+      if (problem !== undefined) ctx.addIssue({ code: "custom", path: ["url"], message: problem });
+      for (const [name, text] of Object.entries(value.query ?? {})) {
+        const wrong = queryValueProblem(text);
+        if (wrong !== undefined) {
+          ctx.addIssue({ code: "custom", path: ["query", name], message: wrong });
+        }
+      }
+      for (const [index, entry] of (value.allowNetworks ?? []).entries()) {
+        if (parseNetwork(entry) === undefined) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["allowNetworks", index],
+            message: "an address or a CIDR range, such as 10.20.0.0/16",
+          });
+        }
       }
     }),
   (json) => {
@@ -901,6 +967,8 @@ const httpDestination = restate(
     const properties = json.properties as Record<string, JsonSchema>;
     const [written] = properties["resendHeader"]?.anyOf as [JsonSchema];
     written.pattern = HEADER_NAME.source;
+    const [key] = properties["idempotencyHeader"]?.anyOf as [JsonSchema];
+    key.pattern = HEADER_NAME.source;
   },
 );
 
@@ -2495,14 +2563,23 @@ export interface HttpClientConfig {
 }
 
 /**
- * An HTTP destination: each output is POSTed to `url`. With `resendHeader`, a possible duplicate (a
- * resend after an attempt was cut off) carries that header, its value the number of attempts before.
+ * An HTTP destination: each output is sent to `url` by `method`, its path and `query` values filled
+ * from `ctx.meta`. With `resendHeader`, a possible duplicate (a resend after an attempt was cut off)
+ * carries that header, its value the number of attempts before.
  */
 export interface HttpDestination extends HttpClientConfig {
   readonly kind: "http";
   readonly timeoutMs: number;
   /** The header that flags a possible duplicate, or undefined to send none. */
   readonly resendHeader: string | undefined;
+  /** The method each output is sent by. */
+  readonly method: "POST" | "PUT" | "PATCH" | "DELETE" | "GET";
+  /** Query parameters added to the url's own, each value a template filled from `ctx.meta`. */
+  readonly query: Readonly<Record<string, string>>;
+  /** The header carrying `<messageId>-<seq>` on every attempt, or undefined to send none. */
+  readonly idempotencyHeader: string | undefined;
+  /** The loopback, link-local and private networks the destination may connect to. */
+  readonly allowNetworks: readonly string[];
 }
 
 /**
