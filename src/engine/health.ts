@@ -37,6 +37,11 @@ export interface ChannelHealth {
    */
   readonly deliveries?: DeliveryTally;
   /**
+   * The inbound warnings the channel's messages raised since the engine started, by code, such as
+   * `ENCODING_MISMATCH` when MSH-18 disagrees with the channel's `encoding:`. Absent while none has.
+   */
+  readonly warnings?: Readonly<Record<string, number>>;
+  /**
    * An MLLP or tcp source's connections: `refused` counts those closed at accept because the source
    * already held `maxConnections`, since the engine started. Absent for any other source.
    */

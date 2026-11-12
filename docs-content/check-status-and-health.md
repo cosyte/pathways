@@ -103,7 +103,7 @@ if a standby that answers at all counts as alive. See
 [a standby](./store-messages-in-a-database.md#a-standby).
 
 A channel's `deliveries` also counts `dry-run` once one of its destinations has
-[run dry](./upgrade-pathways.md#watch-a-destination-before-it-sends). The body holds states and counts, never content. `pathways start --once` does not serve the endpoint.
+[run dry](./upgrade-pathways.md#watch-a-destination-before-it-sends). A channel whose messages raised an inbound warning since the engine started also has `warnings`, a count by code, such as `{ "ENCODING_MISMATCH": 3 }` (see [Read another encoding](./work-with-formats.md#read-another-encoding)). The body holds states and counts, never content. `pathways start --once` does not serve the endpoint.
 
 `/livez` and `/readyz` on the health endpoint answer as the probe listener below does, behind the
 same token.

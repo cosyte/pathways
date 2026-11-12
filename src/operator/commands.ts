@@ -486,6 +486,9 @@ export async function showCommand(
       ...(message.contentHash === undefined
         ? []
         : [["  content hash", message.contentHash] as [string, string]]),
+      ...(message.warnings === undefined
+        ? []
+        : [["  warnings", message.warnings.join(", ")] as [string, string]]),
     ]),
     deliveries.length === 0 ? "No deliveries." : "Deliveries:",
     ...(deliveries.length === 0 ? [] : indent(deliveryTable(deliveries))),

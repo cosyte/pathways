@@ -460,6 +460,7 @@ for (const database of TEST_DATABASES) {
         json: "json",
         text: "txt",
         csv: "csv",
+        raw: "bin",
       });
       expect(CONTENT_TYPES).toEqual({
         hl7v2: "application/hl7-v2",
@@ -469,6 +470,7 @@ for (const database of TEST_DATABASES) {
         json: "application/json",
         text: "text/plain",
         csv: "text/csv",
+        raw: "application/octet-stream",
       });
     });
 

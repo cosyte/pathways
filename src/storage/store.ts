@@ -174,6 +174,11 @@ interface MessagesTable {
    * has none. Since 0010.
    */
   meta: string | null;
+  /**
+   * The inbound warning codes the message's parse raised, comma-separated (`ENCODING_MISMATCH`):
+   * codes only, never content. Null when it raised none. Since 0011.
+   */
+  warnings: string | null;
 }
 
 /**
@@ -385,6 +390,12 @@ export interface MessageSummary {
    * message cannot be replayed or resent, and its content cannot be shown.
    */
   readonly contentDroppedAt?: string | undefined;
+  /**
+   * The inbound warning codes the message's parse raised, such as `ENCODING_MISMATCH` when MSH-18
+   * disagrees with the channel's `encoding:`: codes only. Undefined when it raised none, or when
+   * the store does not keep them.
+   */
+  readonly warnings?: readonly string[] | undefined;
 }
 
 /**
@@ -985,6 +996,13 @@ export interface MessageStore {
    * with a destination that runs dry refuses to start on a store without it.
    */
   markDryRun?(deliveryId: number, epoch?: number): Promise<void>;
+  /**
+   * Stores the inbound warning codes a message's parse raised (`ENCODING_MISMATCH` and the like),
+   * before its transform is recorded: codes only, never content, replacing any stored before.
+   * Fenced by `epoch` when it is given. Optional: on a store without it the engine still counts and
+   * logs each warning, and stores none.
+   */
+  recordWarnings?(messageId: number, codes: readonly string[], epoch?: number): Promise<void>;
   /** Fenced by `epoch` when it is given. */
   scheduleRetry(
     deliveryId: number,
@@ -1533,6 +1551,15 @@ export function migrations(kind: StorageKind): Record<string, SchemaStep> {
           .execute();
       },
     },
+    "0011-message-warnings": {
+      // Expand only: a column that may be null, which an older Pathways never reads, so it is safe
+      // while deliveries are in flight. It holds warning codes, never content. To roll it back,
+      // stop every engine and drop the column; nothing else refers to it.
+      tag: "expand",
+      async up(db: Kysely<unknown>): Promise<void> {
+        await db.schema.alterTable("messages").addColumn("warnings", t.name).execute();
+      },
+    },
   };
 }
 
@@ -1700,6 +1727,7 @@ type MessageRow = Pick<
   | "generation"
   | "content_hash"
   | "content_dropped_at"
+  | "warnings"
 >;
 
 /** The columns a message's summary is read from. */
@@ -1714,6 +1742,7 @@ const SUMMARY_COLUMNS = [
   "generation",
   "content_hash",
   "content_dropped_at",
+  "warnings",
 ] as const;
 
 /** A nullable 64-bit column, read as a number. */
@@ -2425,6 +2454,17 @@ export class Store implements MessageStore, ContentStore, MetaStore {
     });
   }
 
+  /** Stores the inbound warning codes of a message still waiting for its transform. */
+  async recordWarnings(messageId: number, codes: readonly string[], epoch?: number): Promise<void> {
+    const updated = await this.db
+      .updateTable("messages")
+      .set({ warnings: codes.length === 0 ? null : codes.join(",") })
+      .where("id", "=", messageId)
+      .$if(epoch !== undefined, (q) => q.where(this.fence("received", epoch)))
+      .executeTakeFirst();
+    fenced(epoch, updated);
+  }
+
   /** Marks a delivery `dry-run`, recorded and never sent, and clears its marker. */
   async markDryRun(deliveryId: number, epoch?: number): Promise<void> {
     const updated = await this.db
@@ -3124,6 +3164,7 @@ export class Store implements MessageStore, ContentStore, MetaStore {
         deliveries,
         ...(row.content_hash === null ? {} : { contentHash: row.content_hash }),
         ...(row.content_dropped_at === null ? {} : { contentDroppedAt: row.content_dropped_at }),
+        ...(row.warnings === null ? {} : { warnings: row.warnings.split(",") }),
       };
     });
   }

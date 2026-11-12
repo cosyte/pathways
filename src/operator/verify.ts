@@ -6,6 +6,7 @@ import { transformConfigFor } from "../config/transform-config.js";
 import type { Env } from "../connectors/endpoint.js";
 import {
   ChannelWorker,
+  inboundOf,
   TransformLoadError,
   type TransformOutcome,
 } from "../engine/channel-worker.js";
@@ -166,6 +167,7 @@ class Runner {
     const started = new ChannelWorker({
       channel: config.name,
       transformFile: config.transform,
+      ...inboundOf(config),
       format: config.format,
       csv: config.csv,
       timeoutMs: config.settings.timeoutMs,

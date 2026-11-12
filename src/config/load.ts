@@ -249,6 +249,18 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
       );
       continue;
     }
+    const preprocess =
+      channel.preprocess === undefined ? undefined : resolve(channelDir, channel.preprocess);
+    if (preprocess !== undefined && !(await exists(preprocess))) {
+      problems.push(
+        `${show(file)}: preprocess: ${absent(preprocess, "preprocess", channelEnv, show)}`,
+      );
+      continue;
+    }
+    const inbound = {
+      ...(channel.encoding === undefined ? {} : { encoding: channel.encoding }),
+      ...(channel.parse === undefined ? {} : { parse: channel.parse }),
+    };
     const channelSettings = mergeSettings(settings, {
       ...channel,
       content: channel.storage?.content,
@@ -348,9 +360,18 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
       name: folder,
       dir: channelDir,
       format,
-      ...(channel.csv === undefined ? {} : { csv: channel.csv }),
+      // A csv channel's encoding: is how its csv: block reads and writes, where the block sets none.
+      ...(channel.format === "csv" &&
+      (channel.encoding === "utf-8" || channel.encoding === "latin1")
+        ? { csv: { ...channel.csv, encoding: channel.encoding } }
+        : channel.csv === undefined
+          ? {}
+          : { csv: channel.csv }),
       source,
       transform,
+      // Each set only when the channel sets it, so a channel without them resolves as it always has.
+      ...(preprocess === undefined ? {} : { preprocess }),
+      ...(Object.keys(inbound).length === 0 ? {} : { inbound }),
       destinations,
       settings: channelSettings,
       hooks: channelHooks,

@@ -1,7 +1,13 @@
 import { z } from "zod";
 
 import { normalisePath } from "../connectors/http-path.js";
-import { FORMATS, type CsvSettings } from "../engine/worker-entry.js";
+import {
+  ENCODINGS,
+  FORMAT_REGISTRY,
+  FORMATS,
+  type CsvSettings,
+  type InboundSettings,
+} from "../engine/worker-entry.js";
 import { LIFECYCLE_EVENTS, type LifecycleEventType } from "../extensions/events.js";
 import type { JsonValue } from "../transform.js";
 import { cronClass } from "./cron.js";
@@ -2496,11 +2502,43 @@ export const channelSchema = restate(
         .enum(FORMATS)
         .meta({
           description:
-            "What the transform receives: hl7v2 (the default), fhir, x12, ccda, json, text, the body unparsed, or csv, a table of rows. MLLP needs hl7v2.",
+            "What the transform receives: hl7v2 (the default), fhir, x12, ccda, json, text, the body unparsed, csv, a table of rows, or raw, the body's bytes. MLLP needs hl7v2.",
         })
         .optional(),
       csv: csvBlock.optional(),
       source,
+      preprocess: path
+        .meta({
+          description:
+            "A module, relative to this file, whose default export takes each body's bytes before they are decoded and returns the bytes or the text to decode. The stored body stays as it was received. Default: none.",
+        })
+        .optional(),
+      encoding: z
+        .enum(ENCODINGS)
+        .meta({
+          description:
+            "The character encoding of this channel's bodies, for hl7v2 and text: utf-8, latin1 or windows-1252. On hl7v2 it wins over what MSH-18 declares. Default: hl7v2 reads MSH-18, text reads UTF-8 leniently, every other format strict UTF-8.",
+        })
+        .optional(),
+      parse: z
+        .strictObject({
+          strict: z
+            .boolean()
+            .meta({
+              description:
+                "Fail a message that raises any parse warning rather than reading it. Default false.",
+            })
+            .optional(),
+          trimFields: z
+            .boolean()
+            .meta({
+              description:
+                "Trim the spaces around each field's value; false keeps them. Default true.",
+            })
+            .optional(),
+        })
+        .meta({ description: "@cosyte/hl7's parse options, for an hl7v2 channel." })
+        .optional(),
       transform: path
         .meta({
           description:
@@ -2552,6 +2590,42 @@ export const channelSchema = restate(
         "One Pathways channel: a source, an optional transform and its destinations. This schema checks a subset of what pathways start checks: run pathways validate for the rest.",
     })
     .superRefine((channel, ctx) => {
+      const format = channel.format ?? "hl7v2";
+      // Only a format that reads text in a charset of its choosing takes an encoding; the others
+      // read strict UTF-8, as their standards say.
+      const entry: { readonly takesEncoding?: true } = FORMAT_REGISTRY[format];
+      if (channel.encoding !== undefined && entry.takesEncoding !== true) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["encoding"],
+          message: `format ${format} is read as UTF-8 and takes no encoding; use format text, or a preprocess: module that returns text`,
+        });
+      }
+      if (channel.parse !== undefined && format !== "hl7v2") {
+        ctx.addIssue({
+          code: "custom",
+          path: ["parse"],
+          message: `parse: holds HL7 v2 parse options, and this channel's format is ${format}`,
+        });
+      }
+      if (format === "csv" && channel.encoding === "windows-1252") {
+        ctx.addIssue({
+          code: "custom",
+          path: ["encoding"],
+          message: "format csv reads utf-8 or latin1",
+        });
+      }
+      if (
+        channel.encoding !== undefined &&
+        channel.csv?.encoding !== undefined &&
+        channel.encoding !== channel.csv.encoding
+      ) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["encoding"],
+          message: `encoding: ${channel.encoding} disagrees with csv.encoding: ${channel.csv.encoding}; set one`,
+        });
+      }
       if (channel.csv !== undefined && channel.format !== "csv") {
         ctx.addIssue({
           code: "custom",
@@ -2560,7 +2634,7 @@ export const channelSchema = restate(
         });
       }
       // MLLP frames HL7 v2 and its ACKs are HL7 v2 messages, so an MLLP endpoint needs that format.
-      if ((channel.format ?? "hl7v2") === "hl7v2") return;
+      if (format === "hl7v2") return;
       const message = `MLLP carries HL7 v2 only, and this channel's format is ${String(channel.format)}; set format: hl7v2, or use another connector`;
       if (channel.source.http?.response === "ack") {
         ctx.addIssue({
@@ -3315,6 +3389,13 @@ export interface ChannelConfig {
   readonly source: FileSource | HttpSource | MllpSource | TcpSource | ModuleConnector;
   /** The transform module, or `undefined` to pass each message through unchanged. */
   readonly transform: string | undefined;
+  /**
+   * The preprocessor module, run on each body's bytes before they are decoded. Set only when the
+   * channel names one.
+   */
+  readonly preprocess?: string | undefined;
+  /** The channel's `encoding:` and `parse:` options. Set only when it sets either. */
+  readonly inbound?: InboundSettings | undefined;
   readonly destinations: readonly DestinationConfig[];
   readonly settings: Settings;
   /** The channel's own hooks, which receive its events beside the engine-wide ones. */

@@ -132,7 +132,7 @@ export interface FilteredEvent extends LifecycleEventBase {
  * ```
  */
 export type TransformFailureKind =
-  "load" | "parse" | "transform" | "output" | "timeout" | "memory" | "crash";
+  "load" | "preprocess" | "parse" | "transform" | "output" | "timeout" | "memory" | "crash";
 
 /**
  * A message's transform threw, timed out or ran out of memory, or its input or output could not be
