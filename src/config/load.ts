@@ -272,6 +272,7 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
     const channelSettings = mergeSettings(settings, {
       ...channel,
       content: channel.storage?.content,
+      passTimeout: channel.storage?.passTimeout,
     });
     const source = resolveSource(channel.source, channelDir, channelSettings);
     const destinations = channel.destinations.map(
@@ -589,7 +590,9 @@ function resolveSource(
     return {
       kind: "mllp",
       host: mllp.host ?? DEFAULT_HOST,
-      port: mllp.port,
+      // The schema lets a source without connect through only with a port; one with connect listens
+      // on none.
+      port: mllp.port ?? 0,
       tls: mllp.tls === undefined ? undefined : resolveMllpServerTls(mllp.tls, dir),
       plaintext: mllp.plaintext === true,
       onStoreFailure: mllp.onStoreFailure ?? settings.onStoreFailure,
@@ -599,6 +602,9 @@ function resolveSource(
       ...(mllp.maxConnectionAge === undefined ? {} : { maxConnectionAgeMs: mllp.maxConnectionAge }),
       ...(mllp.maxMessageSize === undefined ? {} : { maxMessageSize: mllp.maxMessageSize }),
       ...(mllp.keepOpen === undefined ? {} : { keepOpen: mllp.keepOpen }),
+      ...(mllp.connect === undefined ? {} : { connect: mllp.connect }),
+      ...(mllp.replyTo === undefined ? {} : { replyTo: mllp.replyTo }),
+      ...(mllp.connectTimeout === undefined ? {} : { connectTimeoutMs: mllp.connectTimeout }),
     };
   }
   if (http !== undefined) {
@@ -1011,6 +1017,7 @@ function mergeSettings(
     resendFlag?: boolean | undefined;
     retentionInterval?: number | undefined;
     content?: ContentPolicy | undefined;
+    passTimeout?: number | undefined;
     retry?: RetryYaml | undefined;
   },
 ): Settings {
@@ -1024,6 +1031,8 @@ function mergeSettings(
     retentionIntervalMs: override.retentionInterval ?? base.retentionIntervalMs,
     ...mergeRetention(base, override.retention),
     content: override.content ?? base.content,
+    // Set only by a channel with content: none, so every other channel's settings are as before.
+    ...(override.passTimeout === undefined ? {} : { passTimeoutMs: override.passTimeout }),
     retry: override.retry === undefined ? base.retry : mergeRetry(base.retry, override.retry),
   };
 }

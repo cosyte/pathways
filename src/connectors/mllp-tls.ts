@@ -1,9 +1,9 @@
 import { X509Certificate } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { isIP } from "node:net";
-import { createSecureContext, type SecureContextOptions } from "node:tls";
+import { createSecureContext, type ConnectionOptions, type SecureContextOptions } from "node:tls";
 
-import type { ServerTlsOptions, TlsOptions } from "@cosyte/mllp";
+import { resolveTlsCipherPolicy, type ServerTlsOptions, type TlsOptions } from "@cosyte/mllp";
 
 import { ConfigError } from "../config/load.js";
 import type {
@@ -177,6 +177,52 @@ export function mllpClientTlsOptions(material: MllpClientTlsMaterial, host: stri
     minVersion: material.minVersion ?? DEFAULT_MLLP_TLS_VERSION,
     ...cipherOptions(material),
   };
+}
+
+/**
+ * Node.js's `tls.connect` options for a connection an MLLP source opens itself: to the sender it
+ * dials (`connect`), or to the address it sends each ACK to (`replyTo`). The same choices as
+ * {@link mllpClientTlsOptions}: the peer's certificate is always verified, against `ca` when set and
+ * Node's built-in roots otherwise; `cert` and `key`, or `pfx`, are presented as a client certificate;
+ * TLS 1.2 is the floor unless `minVersion` raises it; and the cipher suites are the profile's or the
+ * `ciphers` list, resolved as `@cosyte/mllp` resolves them.
+ *
+ * @example
+ * ```ts
+ * const socket = tls.connect({ host, port, ...mllpDialTlsOptions(material, host) });
+ * ```
+ */
+export function mllpDialTlsOptions(
+  material: MllpClientTlsMaterial,
+  host: string,
+): ConnectionOptions {
+  const { ca, cert, key, pfx, passphrase } = material;
+  // Only the credentials that are set.
+  const credentials = Object.fromEntries(
+    Object.entries({ ca, cert, key, pfx, passphrase }).filter(([, value]) => value !== undefined),
+  ) as Pick<ConnectionOptions, "ca" | "cert" | "key" | "pfx" | "passphrase">;
+  return {
+    ...credentials,
+    // A name is sent for SNI; an IP address is not, and the certificate is checked against it all
+    // the same.
+    ...(isIP(host) === 0 ? { servername: host } : {}),
+    minVersion: material.minVersion ?? DEFAULT_MLLP_TLS_VERSION,
+    ...resolveTlsCipherPolicy(cipherOptions(material), "client"),
+    rejectUnauthorized: true,
+  };
+}
+
+/**
+ * An MLLP source's TLS read as a client's, for the connections the source opens itself: its `ca`
+ * verifies the peer, and its certificate and key (or pfx) are presented to it.
+ *
+ * @example
+ * ```ts
+ * const client = asClientTls(loadMllpServerTls(files, secrets, where));
+ * ```
+ */
+export function asClientTls(material: MllpServerTlsMaterial): MllpClientTlsMaterial {
+  return { ...material, cert: material.cert, key: material.key };
 }
 
 /** The cipher options for `policy`: the `ciphers` list, the ATNA suites, or the `bcp195` list. */

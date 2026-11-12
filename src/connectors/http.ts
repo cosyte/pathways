@@ -21,6 +21,7 @@ import { readHeader } from "./mllp.js";
 import { clientTlsOptions, type ClientTlsMaterial, type ServerTlsMaterial } from "./tls.js";
 import {
   DeliveryRejected,
+  PassFailed,
   type DestinationConnector,
   type MessageSink,
   type OutgoingMessage,
@@ -88,6 +89,13 @@ export interface HttpSourceOptions {
 }
 
 const STORE_FAILED = "the message could not be stored; send it again";
+const PASS_DEFERRED = "the message could not be passed on yet; send it again";
+const PASS_REJECTED = "the message was not accepted; sending it again will not help";
+
+/** The `Retry-After` of a 503 for a pass that may succeed later: whole seconds, at least 1. */
+function retryAfter(error: PassFailed): OutgoingHttpHeaders {
+  return { "Retry-After": String(Math.max(1, Math.ceil((error.retryAfterMs ?? 1_000) / 1_000))) };
+}
 
 /**
  * Takes messages over HTTPS: each request body to one of `paths` is one message. Once the message
@@ -97,7 +105,10 @@ const STORE_FAILED = "the message could not be stored; send it again";
  * - 400 for a path that breaks the path rule, or an empty body;
  * - 401 without the bearer token, 404 on another path, 405 for another method, with `Allow`;
  * - 413 for a body over `maxBytes`, 415 for a compressed body;
- * - 503 when the message could not be stored, so the sender sends it again.
+ * - 503 when the message could not be stored, so the sender sends it again;
+ * - on a channel that stores nothing, where a message is answered once every destination accepted
+ *   it: 503 with `Retry-After` when it could not be passed on yet, and 422 (in `ack` mode, an `AE`
+ *   ACK) when sending it again will not help.
  *
  * In `ack` mode it follows HL7 over HTTP: POST only, a `Content-Type` of `x-application/hl7-v2+er7`
  * or `application/hl7-v2` (others answer 415), and once the message is stored, 200 with the ACK
@@ -190,7 +201,12 @@ export class HttpSource implements SourceConnector {
     let id: number;
     try {
       id = await sink.receive(body, { source });
-    } catch {
+    } catch (error) {
+      if (error instanceof PassFailed) {
+        if (error.permanent) reply(response, 422, { error: PASS_REJECTED, code: error.code });
+        else reply(response, 503, { error: PASS_DEFERRED, code: error.code }, retryAfter(error));
+        return;
+      }
       reply(response, 503, { error: STORE_FAILED });
       return;
     }
@@ -216,21 +232,33 @@ export class HttpSource implements SourceConnector {
     source: Readonly<Record<string, JsonValue>>,
   ): Promise<void> {
     const { header, problem, duplicateKey } = readHeader(body);
-    let messageId: number;
+    let messageId: number | undefined;
     try {
       messageId = await sink.receive(
         body,
         problem === undefined ? { duplicateKey, source } : { failure: `inbound: ${problem}` },
       );
-    } catch {
-      replyText(response, 503, STORE_FAILED);
-      return;
+    } catch (error) {
+      if (error instanceof PassFailed && !error.permanent) {
+        replyText(response, 503, PASS_DEFERRED, retryAfter(error));
+        return;
+      }
+      if (!(error instanceof PassFailed)) {
+        replyText(response, 503, STORE_FAILED);
+        return;
+      }
+      // A channel that stores nothing could not pass it on, and sending it again will not help.
+      messageId = undefined;
     }
-    if (problem !== undefined) this.options.onUnreadable?.(messageId, problem);
+    if (problem !== undefined && messageId !== undefined) {
+      this.options.onUnreadable?.(messageId, problem);
+    }
     const request: AckRequest =
-      problem === undefined
-        ? { code: "AA", reason: "stored", problem, header, messageId }
-        : { code: "AE", reason: "unreadable", problem, header, messageId };
+      messageId === undefined
+        ? { code: "AE", reason: "rejected", problem, header, messageId }
+        : problem === undefined
+          ? { code: "AA", reason: "stored", problem, header, messageId }
+          : { code: "AE", reason: "unreadable", problem, header, messageId };
     const ack = defaultAckBuilder(request);
     response.writeHead(200, {
       "Content-Type": `${mediaType}; charset=${ackCharset(request)}`,

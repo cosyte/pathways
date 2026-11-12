@@ -81,6 +81,10 @@ export interface MessageSink {
    * losing a message. If it rejects, do not acknowledge; the sender should send again.
    *
    * `options` is optional, so a source that passes only `body` keeps working unchanged.
+   *
+   * On a channel that stores nothing (`storage.content: none`), nothing is stored: this resolves
+   * once the message was transformed and every destination accepted it, with its pass id (the
+   * time it came in, in microseconds since 1970, never given twice), and rejects with a {@link PassFailed} that says whether the sender should send again.
    */
   receive(body: Uint8Array, options?: ReceiveOptions): Promise<number>;
   /**
@@ -156,7 +160,11 @@ export interface Resend {
  * ```
  */
 export interface OutgoingMessage {
-  /** The id of the stored message this came from. */
+  /**
+   * The id of the stored message this came from; on a channel that stores nothing, the message's
+   * pass id: the time it came in, in microseconds since 1970, never given twice, so outputs named by
+   * it stay apart across restarts.
+   */
   readonly messageId: number;
   /** Which output of that message's transform this is, from 0. */
   readonly seq: number;
@@ -237,6 +245,72 @@ export class DeliveryRejected extends Error {
       typeof value === "object" &&
       value !== null &&
       (value as { readonly [REJECTED]?: unknown })[REJECTED] === true
+    );
+  }
+}
+
+/** Marks a {@link PassFailed}, shared by every copy of Pathways loaded in one process. */
+const PASS_FAILED = Symbol.for("@cosyte/pathways/PassFailed");
+
+/**
+ * Why `sink.receive` refused a message of a channel that stores nothing (`storage.content: none`),
+ * where each message is transformed and delivered before `receive` resolves. `permanent` says
+ * whether the sender should send it again:
+ *
+ * - `false`: a destination failed in a way that may pass (it was down, it timed out, the pass ran
+ *   past `passTimeout`), so the sender should send again. `retryAfterMs` is how long it might wait.
+ *   An MLLP source closes without an ACK and an HTTP source answers 503 with `Retry-After`.
+ * - `true`: sending the same message again cannot help (the transform failed, or a destination
+ *   rejected it). An MLLP source answers `AE`, an HTTP source 422, and a file source moves the file
+ *   into its `errorDir`.
+ *
+ * A source that does not know this class treats it as any failed `receive`: it does not
+ * acknowledge, and the sender sends again. `instanceof PassFailed` holds for one made by any copy
+ * of Pathways in the process.
+ *
+ * @example
+ * ```ts
+ * try {
+ *   await sink.receive(body);
+ * } catch (error) {
+ *   if (error instanceof PassFailed && error.permanent) answer("AE");
+ *   else closeWithoutAnswer();
+ * }
+ * ```
+ */
+export class PassFailed extends Error {
+  /** Whether sending the same message again cannot help. */
+  readonly permanent: boolean;
+  /** A short, stable code, such as `PASS_TIMEOUT` or `DESTINATION_REJECTED`. Never message content. */
+  readonly code: string;
+  /** For a failure that may pass: how long the sender might wait before it sends again. */
+  readonly retryAfterMs: number | undefined;
+
+  /**
+   * @param code A short, stable code. Never message content.
+   * @param permanent Whether sending the same message again cannot help.
+   * @param retryAfterMs For a failure that may pass, how long the sender might wait.
+   */
+  constructor(code: string, permanent: boolean, retryAfterMs?: number) {
+    super(
+      permanent
+        ? `the message was not accepted (${code}); sending it again will not help`
+        : `the message was not accepted (${code}); send it again`,
+    );
+    this.name = "PassFailed";
+    this.code = code;
+    this.permanent = permanent;
+    this.retryAfterMs = permanent ? undefined : retryAfterMs;
+    Object.defineProperty(this, PASS_FAILED, { value: true });
+  }
+
+  /** Whether `value` is a PassFailed from any copy of Pathways; a subclass checks as usual. */
+  static override [Symbol.hasInstance](value: unknown): boolean {
+    if (this !== PassFailed) return Function.prototype[Symbol.hasInstance].call(this, value);
+    return (
+      typeof value === "object" &&
+      value !== null &&
+      (value as { readonly [PASS_FAILED]?: unknown })[PASS_FAILED] === true
     );
   }
 }

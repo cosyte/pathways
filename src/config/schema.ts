@@ -622,11 +622,11 @@ const mllpServerTls = restate(
     })
     .meta({
       description:
-        "TLS: cert and key (PEM files) or pfx, ca to require client certificates it signed (mutual TLS), minVersion, and profile or ciphers. Required unless plaintext: true.",
+        "TLS: cert and key (PEM files) or pfx, ca to require client certificates it signed (mutual TLS), minVersion, and profile or ciphers. Required unless plaintext: true. With connect, the source is the TLS client: ca verifies the sender (Node.js's built-in roots when unset), and cert and key, or pfx, are optional and presented as a client certificate.",
     })
     .superRefine((value, ctx) => {
       mllpTlsChecks(value, ctx);
-      if (value.pfx === undefined && (value.cert === undefined || value.key === undefined)) {
+      if ((value.cert === undefined) !== (value.key === undefined)) {
         ctx.addIssue({
           code: "custom",
           path: [value.cert === undefined ? "cert" : "key"],
@@ -635,13 +635,34 @@ const mllpServerTls = restate(
       }
     }),
   (json) => {
-    json["dependencies"] = { passphrase: ["pfx"] };
-    json.allOf = [
-      ...MLLP_TLS_JSON,
-      { anyOf: [{ required: ["pfx"] }, { required: ["cert", "key"] }] },
-    ];
+    json["dependencies"] = { cert: ["key"], key: ["cert"], passphrase: ["pfx"] };
+    json.allOf = [...MLLP_TLS_JSON];
   },
 );
+
+/** A listening MLLP source's TLS must hold its certificate: `cert` and `key`, or `pfx`. */
+function mllpServerCertificate(
+  tls: { readonly pfx?: unknown; readonly cert?: unknown; readonly key?: unknown } | undefined,
+  ctx: z.RefinementCtx,
+): void {
+  if (tls === undefined || tls.pfx !== undefined) return;
+  if (tls.cert === undefined && tls.key === undefined) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["tls", "cert"],
+      message: "required: set cert and key, or pfx",
+    });
+  }
+}
+
+/** An address an MLLP source connects to itself: a sender it dials, or where its ACKs go. */
+const mllpAddress = (description: string) =>
+  z
+    .strictObject({
+      host: host.meta({ description: "The address to connect to." }),
+      port,
+    })
+    .meta({ description });
 
 /** An MLLP destination's TLS: a client's, with a pfx in place of cert and key, and the MLLP keys. */
 const mllpClientTls = restate(
@@ -674,6 +695,19 @@ const mllpClientTls = restate(
 
 /** The longest a timer may wait, in milliseconds: Node.js's own limit. */
 const MAX_TIMER_MS = 2_147_483_647;
+
+/** How long an MLLP source waits for a connection it opens itself. */
+const connectTimeout = envable(
+  durationValue
+    .refine(
+      (value) => value >= 1 && value <= MAX_TIMER_MS,
+      'a duration from 1ms to about 24 days, such as "10s"',
+    )
+    .meta({
+      description:
+        "How long a connection the source opens itself (connect, replyTo) may take to open, its TLS handshake included: a duration such as 10s, or a number of milliseconds. Default 10s.",
+    }),
+);
 
 /** How long an MLLP source waits for a message on an open connection. */
 const receiveTimeout = envable(
@@ -1209,8 +1243,15 @@ const webhook = restate(
 const mllpSource = restate(
   z
     .strictObject({
-      port,
+      port: port.optional(),
       host: listenerShape.host,
+      connect: mllpAddress(
+        "Dial out to this sender and read messages from that connection, in place of listening: { host, port }. A connection that fails or drops is dialled again, 1 second after, doubling to 5 minutes.",
+      ).optional(),
+      replyTo: mllpAddress(
+        "Send each ACK on a new connection to this address, in place of the connection the message came on: { host, port }. A reply that cannot be sent is logged by message id; the message stays stored.",
+      ).optional(),
+      connectTimeout: connectTimeout.optional(),
       tls: mllpServerTls.optional(),
       plaintext,
       maxConnections: maxConnections.optional(),
@@ -1233,11 +1274,81 @@ const mllpSource = restate(
     })
     .meta({
       description:
-        "Listen for HL7 v2 over MLLP: each framed message is stored, then acknowledged. Needs format: hl7v2.",
+        "Listen for HL7 v2 over MLLP, or dial out to a sender with connect: each framed message is stored, then acknowledged. Needs format: hl7v2.",
     })
-    .superRefine((value, ctx) => tlsOrPlaintext(value, ctx, LISTENER_TLS_REQUIRED)),
-  (json) => Object.assign(json, TLS_OR_PLAINTEXT),
+    .superRefine((value, ctx) => {
+      tlsOrPlaintext(
+        value,
+        ctx,
+        value.connect === undefined ? LISTENER_TLS_REQUIRED : MLLP_DIAL_TLS_REQUIRED,
+      );
+      mllpSourceChecks(value, ctx);
+    }),
+  (json) => {
+    const pairs = (keys: readonly string[]): JsonSchema[] =>
+      keys.map((key) => ({ required: ["connect", key] }));
+    json.allOf = [
+      TLS_OR_PLAINTEXT,
+      {
+        if: { required: ["connect"] },
+        then: { not: { anyOf: pairs(MLLP_LISTEN_ONLY) } },
+        else: {
+          required: ["port"],
+          properties: {
+            tls: { type: "object", anyOf: [{ required: ["pfx"] }, { required: ["cert", "key"] }] },
+          },
+        },
+      },
+    ];
+  },
 );
+
+const MLLP_DIAL_TLS_REQUIRED =
+  "required: set tls: {} to verify the sender against Node's built-in roots, tls: { ca } to trust your own CA, or plaintext: true to run without TLS";
+
+/** The keys of an MLLP source that listens, refused on one that dials out with `connect`. */
+const MLLP_LISTEN_ONLY = ["port", "host", "maxConnections", "keepOpen", "replyTo"] as const;
+
+/** An MLLP source listens on `port` or dials out with `connect`, never both, with the keys of each. */
+function mllpSourceChecks(
+  value: {
+    readonly port?: unknown;
+    readonly connect?: unknown;
+    readonly replyTo?: unknown;
+    readonly connectTimeout?: unknown;
+    readonly tls?:
+      { readonly pfx?: unknown; readonly cert?: unknown; readonly key?: unknown } | undefined;
+  } & Readonly<Partial<Record<(typeof MLLP_LISTEN_ONLY)[number], unknown>>>,
+  ctx: z.RefinementCtx,
+): void {
+  if (value.connect === undefined) {
+    if (value.port === undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["port"],
+        message: "required: set port to listen on, or connect to dial out to the sender",
+      });
+    }
+    mllpServerCertificate(value.tls, ctx);
+    if (value.connectTimeout !== undefined && value.replyTo === undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["connectTimeout"],
+        message: "goes with connect or replyTo, the connections the source opens itself",
+      });
+    }
+    return;
+  }
+  for (const key of MLLP_LISTEN_ONLY) {
+    if (value[key] === undefined) continue;
+    ctx.addIssue({
+      code: "custom",
+      path: [key],
+      message:
+        "cannot be set with connect: a source that dials out listens on no port, and answers on the connection it dialled",
+    });
+  }
+}
 
 const mllpDestination = restate(
   z
@@ -1838,14 +1949,39 @@ const STORAGE_BLOCK_KINDS = [...STORAGE_KINDS, "module"] as const;
 /**
  * What storage keeps of a message's content: `keep` keeps its body and outputs until retention
  * deletes the message; `dropAfterDelivery` deletes them in the transaction that records its last
- * delivery, keeping its metadata.
+ * delivery, keeping its metadata; `none`, which only a channel may set, stores nothing at all: each
+ * message is transformed and delivered while its sender waits, and answered only once every
+ * destination accepted it.
  *
  * @example
  * ```ts
- * CONTENT_POLICIES.includes("dropAfterDelivery"); // true
+ * CONTENT_POLICIES.includes("none"); // true
  * ```
  */
-export const CONTENT_POLICIES = ["keep", "dropAfterDelivery"] as const;
+export const CONTENT_POLICIES = ["keep", "dropAfterDelivery", "none"] as const;
+
+/**
+ * The {@link CONTENT_POLICIES} `pathways.yaml` may set for every channel: all but `none`, which a
+ * channel chooses for itself.
+ *
+ * @example
+ * ```ts
+ * PROJECT_CONTENT_POLICIES.includes("none"); // false
+ * ```
+ */
+export const PROJECT_CONTENT_POLICIES = ["keep", "dropAfterDelivery"] as const;
+
+/**
+ * How long a channel with `storage.content: none` lets one message's pass run (its transform and
+ * every delivery) before it answers the sender as for a failure it should retry, by default: 30
+ * seconds.
+ *
+ * @example
+ * ```ts
+ * DEFAULT_PASS_TIMEOUT_MS; // 30000
+ * ```
+ */
+export const DEFAULT_PASS_TIMEOUT_MS = 30_000;
 
 /**
  * One of {@link CONTENT_POLICIES}.
@@ -1857,11 +1993,19 @@ export const CONTENT_POLICIES = ["keep", "dropAfterDelivery"] as const;
  */
 export type ContentPolicy = (typeof CONTENT_POLICIES)[number];
 
-/** `storage.content`, in `pathways.yaml` and in a channel. */
+/** `storage.content` in `pathways.yaml`. */
 const content = envable(
+  z.enum(PROJECT_CONTENT_POLICIES).meta({
+    description:
+      "What is kept of a message's content: keep (the default) keeps its body and outputs until retention deletes the message; dropAfterDelivery deletes them once every delivery is delivered, keeping ids, times, statuses, sizes and a hash. A channel overrides it, and only a channel may set none.",
+  }),
+);
+
+/** `storage.content` in a channel, which alone may set `none`. */
+const channelContent = envable(
   z.enum(CONTENT_POLICIES).meta({
     description:
-      "What is kept of a message's content: keep (the default) keeps its body and outputs until retention deletes the message; dropAfterDelivery deletes them once every delivery is delivered, keeping ids, times, statuses, sizes and a hash. A channel overrides it.",
+      "What is kept of this channel's messages: keep keeps their bodies and outputs until retention deletes them; dropAfterDelivery deletes them once every delivery is delivered, keeping ids, times, statuses, sizes and a hash; none stores nothing, and answers each sender only once every destination accepted its message, so nothing is kept to replay. Default: pathways.yaml's, else keep.",
   }),
 );
 
@@ -3058,7 +3202,22 @@ export const channelSchema = restate(
       config: transformConfig.optional(),
       retry: settingsShape.retry,
       storage: z
-        .strictObject({ content: content.optional() })
+        .strictObject({
+          content: channelContent.optional(),
+          passTimeout: duration(
+            "With content: none, how long one message's pass (its transform and every delivery) may run before its sender is answered as for a failure to retry: 503 over HTTP, no ACK over MLLP. A duration above zero, such as 30s. Default 30s.",
+            { ms: 1, message: "must be above zero" },
+          ).optional(),
+        })
+        .superRefine((value, ctx) => {
+          if (value.passTimeout !== undefined && value.content !== "none") {
+            ctx.addIssue({
+              code: "custom",
+              path: ["passTimeout"],
+              message: "applies only with content: none",
+            });
+          }
+        })
         .meta({
           description: "What is kept of this channel's messages: overrides pathways.yaml's.",
         })
@@ -3195,9 +3354,15 @@ export interface Settings {
   readonly retry: RetryPolicy;
   /**
    * What is kept of a message's content, from `storage.content` in `pathways.yaml` or the channel:
-   * `keep`, or `dropAfterDelivery` to delete the bodies once every delivery is delivered.
+   * `keep`, `dropAfterDelivery` to delete the bodies once every delivery is delivered, or, set by a
+   * channel, `none` to store nothing and pass each message through while its sender waits.
    */
   readonly content: ContentPolicy;
+  /**
+   * With `content: none`, how long one message's pass may run before its sender is answered as for
+   * a failure to retry, in milliseconds. Undefined for {@link DEFAULT_PASS_TIMEOUT_MS}.
+   */
+  readonly passTimeoutMs?: number | undefined;
 }
 
 /**
@@ -3686,8 +3851,16 @@ export interface HttpDestination extends HttpClientConfig {
  */
 export interface MllpSource {
   readonly kind: "mllp";
+  /** The address to listen on; unused with `connect`. */
   readonly host: string;
+  /** The port to listen on; 0 with `connect`, which listens on none. */
   readonly port: number;
+  /** The sender to dial out to and read from, in place of listening. */
+  readonly connect?: { readonly host: string; readonly port: number } | undefined;
+  /** Where each ACK is sent, on a new connection, in place of the connection the message came on. */
+  readonly replyTo?: { readonly host: string; readonly port: number } | undefined;
+  /** How long a connection the source opens itself may take to open, in milliseconds; `undefined` for 10s. */
+  readonly connectTimeoutMs?: number | undefined;
   readonly tls: MllpServerTlsFiles | undefined;
   readonly plaintext: boolean;
   readonly onStoreFailure: OnStoreFailure;
