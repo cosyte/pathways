@@ -278,6 +278,231 @@ codes (such as `NO_MSH_SEGMENT`), `NO_CONTROL_ID`, `MULTIPLE_MESSAGES` or
 
 ***
 
+### ArchivedDelivery
+
+One delivery of an archived message, of any generation, as storage held it: every column of its
+row but its message's id and channel, which the record it sits in holds.
+
+#### Example
+
+```ts
+const sent = (d: ArchivedDelivery): boolean => d.status === "delivered";
+```
+
+#### Properties
+
+##### attempts
+
+> `readonly` **attempts**: `number`
+
+##### body
+
+> `readonly` **body**: `string` \| `null`
+
+The output it carried, in base64; `null` once its message's content was dropped.
+
+##### deliveredAt
+
+> `readonly` **deliveredAt**: `string` \| `null`
+
+##### destination
+
+> `readonly` **destination**: `number`
+
+##### error
+
+> `readonly` **error**: `string` \| `null`
+
+Its last error text, which can quote the message.
+
+##### generation
+
+> `readonly` **generation**: `number`
+
+##### id
+
+> `readonly` **id**: `number`
+
+##### interruptedAttempt
+
+> `readonly` **interruptedAttempt**: `number` \| `null`
+
+The latest attempt found cut off, when one was.
+
+##### nextAttemptAt
+
+> `readonly` **nextAttemptAt**: `number`
+
+Epoch milliseconds before which it was not to be tried again; 0 when due at once.
+
+##### sendingAt
+
+> `readonly` **sendingAt**: `number` \| `null`
+
+When an attempt in flight was handed to its destination, in epoch milliseconds.
+
+##### sendingAttempt
+
+> `readonly` **sendingAttempt**: `number` \| `null`
+
+The number of the attempt in flight, beside `sendingAt`.
+
+##### seq
+
+> `readonly` **seq**: `number`
+
+##### status
+
+> `readonly` **status**: [`DeliveryStatus`](#deliverystatus)
+
+***
+
+### ArchivedMessage
+
+One message in an archive: everything storage held about it when retention reached it, every
+column of its row and of each delivery row, every generation. Bodies are base64, and `null`
+(with no outputs) once its content was dropped. The index tags of its metadata are not kept:
+they are derived from `meta` under the master keys.
+
+#### Example
+
+```ts
+const body = (record: ArchivedMessage): Buffer | undefined =>
+  record.body === null ? undefined : Buffer.from(record.body, "base64");
+```
+
+#### Properties
+
+##### body
+
+> `readonly` **body**: `string` \| `null`
+
+The body as it arrived, in base64; `null` once dropped.
+
+##### channel
+
+> `readonly` **channel**: `string`
+
+##### contentDroppedAt
+
+> `readonly` **contentDroppedAt**: `string` \| `null`
+
+##### contentHash
+
+> `readonly` **contentHash**: `string` \| `null`
+
+##### dedupKey
+
+> `readonly` **dedupKey**: `string` \| `null`
+
+The hash of who sent it and its control ID, for spotting a repeat.
+
+##### deliveries
+
+> `readonly` **deliveries**: readonly [`ArchivedDelivery`](#archiveddelivery)[]
+
+Every delivery, every generation, oldest first, each with its body.
+
+##### duplicateOf
+
+> `readonly` **duplicateOf**: `number` \| `null`
+
+##### error
+
+> `readonly` **error**: `string` \| `null`
+
+Why it failed, as stored: can quote the message.
+
+##### generation
+
+> `readonly` **generation**: `number`
+
+##### id
+
+> `readonly` **id**: `number`
+
+##### idempotencyKey
+
+> `readonly` **idempotencyKey**: `string` \| `null`
+
+The hash that names it to its source, so it is stored once.
+
+##### meta
+
+> `readonly` **meta**: `Readonly`\<`Record`\<`string`, `string` \| `number` \| `boolean`\>\> \| `null`
+
+Its `ctx.meta`, which can hold identifiers; `null` when it had none or it was dropped.
+
+##### outputs
+
+> `readonly` **outputs**: readonly `string`[]
+
+The outputs of its current generation, in order, in base64: those of its first destination.
+
+##### receivedAt
+
+> `readonly` **receivedAt**: `string`
+
+##### size
+
+> `readonly` **size**: `number` \| `null`
+
+##### status
+
+> `readonly` **status**: [`MessageStatus`](#messagestatus)
+
+##### updatedAt
+
+> `readonly` **updatedAt**: `string`
+
+***
+
+### ArchiveHeader
+
+The first line of an archive: what it is, which channel's messages it holds, the master key it is
+sealed under, when it was written and which retention step wrote it. `mac` is the trailer's HMAC
+key, wrapped under that master key, in base64.
+
+#### Example
+
+```ts
+const header: ArchiveHeader = { format: "pathways-archive", version: 1, channel: "adt", keyId: "dev", created: "2026-11-11T00:00:00.000Z", step: "metadata", mac: "..." };
+```
+
+#### Properties
+
+##### channel
+
+> `readonly` **channel**: `string`
+
+##### created
+
+> `readonly` **created**: `string`
+
+ISO 8601, UTC.
+
+##### format
+
+> `readonly` **format**: `"pathways-archive"`
+
+##### keyId
+
+> `readonly` **keyId**: `string`
+
+##### mac
+
+> `readonly` **mac**: `string`
+
+##### step
+
+> `readonly` **step**: [`RetentionStep`](#retentionstep)
+
+##### version
+
+> `readonly` **version**: `1`
+
+***
+
 ### AuditEntry
 
 One entry of the audit log, as stored.
@@ -292,7 +517,7 @@ const line = (entry: AuditEntry): string => `${entry.at} ${entry.actor} ${entry.
 
 ##### action
 
-> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"`
+> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"archive"`
 
 ##### actor
 
@@ -412,7 +637,7 @@ await store.appendAudit("noah", [{ action: "content-view", channel: "adt", messa
 
 ##### action
 
-> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"`
+> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"archive"`
 
 ##### channel?
 
@@ -448,7 +673,7 @@ const views = await store.auditEntries({ action: "content-view", since: "2026-11
 
 ##### action?
 
-> `readonly` `optional` **action?**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"`
+> `readonly` `optional` **action?**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"archive"`
 
 ##### before?
 
@@ -759,7 +984,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-6)
+[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-8)
 
 ##### deliveryId
 
@@ -777,7 +1002,7 @@ The destination's place in the channel's `destinations:` list, from 0.
 
 ###### Inherited from
 
-[`DeliveryEventBase`](#deliveryeventbase).[`destination`](#destination-1)
+[`DeliveryEventBase`](#deliveryeventbase).[`destination`](#destination-2)
 
 ##### messageId
 
@@ -861,7 +1086,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-13)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-15)
 
 ##### deliveryId
 
@@ -891,7 +1116,7 @@ Absent otherwise.
 
 ##### type
 
-> `readonly` **type**: `"received"` \| `"receive-failed"` \| `"transformed"` \| `"filtered"` \| `"transform-failed"` \| `"delivered"` \| `"delivery-retry"` \| `"delivery-redirected"` \| `"delivery-rejected"` \| `"delivery-exhausted"` \| `"source-down"` \| `"source-up"` \| `"audit"`
+> `readonly` **type**: `"delivered"` \| `"received"` \| `"receive-failed"` \| `"transformed"` \| `"filtered"` \| `"transform-failed"` \| `"delivery-retry"` \| `"delivery-redirected"` \| `"delivery-rejected"` \| `"delivery-exhausted"` \| `"source-down"` \| `"source-up"` \| `"audit"`
 
 ###### Inherited from
 
@@ -946,7 +1171,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-6)
+[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-8)
 
 ##### code
 
@@ -970,7 +1195,7 @@ The destination's place in the channel's `destinations:` list, from 0.
 
 ###### Inherited from
 
-[`DeliveryEventBase`](#deliveryeventbase).[`destination`](#destination-1)
+[`DeliveryEventBase`](#deliveryeventbase).[`destination`](#destination-2)
 
 ##### messageId
 
@@ -1065,7 +1290,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-6)
+[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-8)
 
 ##### deliveryId
 
@@ -1083,7 +1308,7 @@ The destination's place in the channel's `destinations:` list, from 0.
 
 ###### Inherited from
 
-[`DeliveryEventBase`](#deliveryeventbase).[`destination`](#destination-1)
+[`DeliveryEventBase`](#deliveryeventbase).[`destination`](#destination-2)
 
 ##### locationHost
 
@@ -1188,7 +1413,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-6)
+[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-8)
 
 ##### deliveryId
 
@@ -1206,7 +1431,7 @@ The destination's place in the channel's `destinations:` list, from 0.
 
 ###### Inherited from
 
-[`DeliveryEventBase`](#deliveryeventbase).[`destination`](#destination-1)
+[`DeliveryEventBase`](#deliveryeventbase).[`destination`](#destination-2)
 
 ##### messageId
 
@@ -1295,7 +1520,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-6)
+[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-8)
 
 ##### code
 
@@ -1319,7 +1544,7 @@ The destination's place in the channel's `destinations:` list, from 0.
 
 ###### Inherited from
 
-[`DeliveryEventBase`](#deliveryeventbase).[`destination`](#destination-1)
+[`DeliveryEventBase`](#deliveryeventbase).[`destination`](#destination-2)
 
 ##### messageId
 
@@ -1769,7 +1994,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-13)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-15)
 
 ##### messageId
 
@@ -2092,7 +2317,7 @@ The channel's name.
 
 ##### type
 
-> `readonly` **type**: `"received"` \| `"receive-failed"` \| `"transformed"` \| `"filtered"` \| `"transform-failed"` \| `"delivered"` \| `"delivery-retry"` \| `"delivery-redirected"` \| `"delivery-rejected"` \| `"delivery-exhausted"` \| `"source-down"` \| `"source-up"` \| `"audit"`
+> `readonly` **type**: `"delivered"` \| `"received"` \| `"receive-failed"` \| `"transformed"` \| `"filtered"` \| `"transform-failed"` \| `"delivery-retry"` \| `"delivery-redirected"` \| `"delivery-rejected"` \| `"delivery-exhausted"` \| `"source-down"` \| `"source-up"` \| `"audit"`
 
 ***
 
@@ -2230,13 +2455,37 @@ Received at or after this time (ISO 8601, UTC).
 
 ##### state?
 
-> `readonly` `optional` **state?**: `"received"` \| `"filtered"` \| `"delivered"` \| `"failed"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
+> `readonly` `optional` **state?**: `"delivered"` \| `"received"` \| `"filtered"` \| `"failed"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
 
 ##### until?
 
 > `readonly` `optional` **until?**: `string`
 
 Received before this time (ISO 8601, UTC).
+
+***
+
+### MessageRows
+
+One message's row and every delivery row of it, oldest first: what retention archives before it
+changes or deletes them. The index tags of its metadata are left out: they are derived from
+`meta` under the master keys, and are derived again from it.
+
+#### Example
+
+```ts
+const rows: MessageRows | undefined = await store.archiveRows(12);
+```
+
+#### Properties
+
+##### deliveries
+
+> `readonly` **deliveries**: readonly [`StoredDeliveryRow`](#storeddeliveryrow)[]
+
+##### message
+
+> `readonly` **message**: [`StoredMessageRow`](#storedmessagerow)
 
 ***
 
@@ -3119,7 +3368,7 @@ The body's size in bytes, or null for a message stored before sizes were kept.
 
 ##### state
 
-> `readonly` **state**: `"received"` \| `"filtered"` \| `"delivered"` \| `"failed"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
+> `readonly` **state**: `"delivered"` \| `"received"` \| `"filtered"` \| `"failed"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
 
 The status and the current deliveries, as an operator sees them.
 
@@ -3197,7 +3446,7 @@ Received at or after this time (ISO 8601, UTC).
 
 ##### state?
 
-> `readonly` `optional` **state?**: `"received"` \| `"filtered"` \| `"delivered"` \| `"failed"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
+> `readonly` `optional` **state?**: `"delivered"` \| `"received"` \| `"filtered"` \| `"failed"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
 
 ##### until?
 
@@ -3513,7 +3762,7 @@ const due = (delivery: PendingDelivery): boolean => delivery.nextAttemptAt <= Da
 
 > `readonly` `optional` **interruptedAttempt?**: `number`
 
-The latest attempt found cut off, kept after it: see [StoredDelivery.interruptedAttempt](#interruptedattempt-2).
+The latest attempt found cut off, kept after it: see [StoredDelivery.interruptedAttempt](#interruptedattempt-3).
 
 ##### messageId
 
@@ -3601,7 +3850,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-13)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-15)
 
 ##### duplicateOf
 
@@ -3695,7 +3944,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-13)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-15)
 
 ##### code
 
@@ -3891,6 +4140,148 @@ The secret itself. Pathways never logs it, and never puts it in an error.
 > `readonly` **version**: `string`
 
 The version resolved, as the provider names it; never secret.
+
+***
+
+### RetentionQuery
+
+Which messages one retention step reaches: those of its kind whose last activity is before
+`cutoff`.
+
+#### Example
+
+```ts
+const query: RetentionQuery = { step: "metadata", cutoff: "2026-08-01T00:00:00.000Z", includeDropped: true };
+```
+
+#### Properties
+
+##### cutoff
+
+> `readonly` **cutoff**: `string`
+
+ISO 8601, UTC.
+
+##### includeDropped?
+
+> `readonly` `optional` **includeDropped?**: `boolean`
+
+For the `metadata` step: also delete a message whose content was dropped, after delivery or by
+the `content` step. Without it such a message is kept, as `retention: 30d` always has.
+
+##### step
+
+> `readonly` **step**: [`RetentionStep`](#retentionstep)
+
+***
+
+### RetentionStore
+
+What retention needs from storage to archive before it changes anything: the messages a step
+would reach, a batch at a time, every column of each, and a way to change exactly those. Each
+method is optional on [MessageStore](#messagestore); Store has all four.
+
+#### Example
+
+```ts
+const ids = await store.listExpiring("adt", query, 500);
+await store.applyExpiry("adt", ids, query);
+```
+
+#### Methods
+
+##### applyExpiry()
+
+> **applyExpiry**(`channel`, `ids`, `query`): `Promise`\<[`ExpireResult`](#expireresult)\>
+
+Applies `query`'s step to those of `ids` it still reaches, in one transaction, re-checking each,
+so a message replayed or given a new delivery meanwhile is left alone. `content` empties the
+bodies and error texts, drops `ctx.meta` and its index tags, and marks the message's content
+dropped; `metadata` and `failed` delete the rows. Returns how many messages and deliveries it
+changed.
+
+###### Parameters
+
+###### channel
+
+`string`
+
+###### ids
+
+readonly `number`[]
+
+###### query
+
+[`RetentionQuery`](#retentionquery)
+
+###### Returns
+
+`Promise`\<[`ExpireResult`](#expireresult)\>
+
+##### archiveRows()
+
+> **archiveRows**(`id`): `Promise`\<[`MessageRows`](#messagerows) \| `undefined`\>
+
+Every column of one message's row and of each of its delivery rows, every generation, bodies
+included: what an archive holds. `undefined` when the message is gone.
+
+###### Parameters
+
+###### id
+
+`number`
+
+###### Returns
+
+`Promise`\<[`MessageRows`](#messagerows) \| `undefined`\>
+
+##### countExpiring()
+
+> **countExpiring**(`channel`, `query`): `Promise`\<[`ExpireResult`](#expireresult)\>
+
+How many messages, and their deliveries, `query` reaches on `channel` now.
+
+###### Parameters
+
+###### channel
+
+`string`
+
+###### query
+
+[`RetentionQuery`](#retentionquery)
+
+###### Returns
+
+`Promise`\<[`ExpireResult`](#expireresult)\>
+
+##### listExpiring()
+
+> **listExpiring**(`channel`, `query`, `limit`, `after?`): `Promise`\<`number`[]\>
+
+Up to `limit` ids of the messages `query` reaches on `channel`, lowest first, above `after`.
+
+###### Parameters
+
+###### channel
+
+`string`
+
+###### query
+
+[`RetentionQuery`](#retentionquery)
+
+###### limit
+
+`number`
+
+###### after?
+
+`number`
+
+###### Returns
+
+`Promise`\<`number`[]\>
 
 ***
 
@@ -4212,7 +4603,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-13)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-15)
 
 ##### code
 
@@ -4280,7 +4671,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-13)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-15)
 
 ##### type
 
@@ -4387,6 +4778,76 @@ Which output of the transform this is, from 0.
 
 ***
 
+### StoredDeliveryRow
+
+Every column of one delivery's row, of any generation, as storage holds it, for an archive.
+`body` is `null` once its message's content was dropped; its message id and channel are those of
+the [StoredMessageRow](#storedmessagerow) it comes with.
+
+#### Example
+
+```ts
+const old = (row: StoredDeliveryRow, current: number): boolean => row.generation < current;
+```
+
+#### Properties
+
+##### attempts
+
+> `readonly` **attempts**: `number`
+
+##### body
+
+> `readonly` **body**: `Uint8Array`\<`ArrayBufferLike`\> \| `null`
+
+##### deliveredAt
+
+> `readonly` **deliveredAt**: `string` \| `null`
+
+##### destination
+
+> `readonly` **destination**: `number`
+
+##### error
+
+> `readonly` **error**: `string` \| `null`
+
+Its last error text, as stored: can quote the message.
+
+##### generation
+
+> `readonly` **generation**: `number`
+
+##### id
+
+> `readonly` **id**: `number`
+
+##### interruptedAttempt
+
+> `readonly` **interruptedAttempt**: `number` \| `null`
+
+##### nextAttemptAt
+
+> `readonly` **nextAttemptAt**: `number`
+
+##### sendingAt
+
+> `readonly` **sendingAt**: `number` \| `null`
+
+##### sendingAttempt
+
+> `readonly` **sendingAttempt**: `number` \| `null`
+
+##### seq
+
+> `readonly` **seq**: `number`
+
+##### status
+
+> `readonly` **status**: [`DeliveryStatus`](#deliverystatus)
+
+***
+
 ### StoredMessage
 
 What storage holds about one message, without its body.
@@ -4409,7 +4870,7 @@ const message: StoredMessage | undefined = await store.message(12);
 
 ###### Inherited from
 
-[`MessageSummary`](#messagesummary).[`channel`](#channel-15)
+[`MessageSummary`](#messagesummary).[`channel`](#channel-17)
 
 ##### contentDroppedAt?
 
@@ -4421,7 +4882,7 @@ message cannot be replayed or resent, and its content cannot be shown.
 
 ###### Inherited from
 
-[`MessageSummary`](#messagesummary).[`contentDroppedAt`](#contentdroppedat)
+[`MessageSummary`](#messagesummary).[`contentDroppedAt`](#contentdroppedat-1)
 
 ##### contentHash?
 
@@ -4431,7 +4892,7 @@ The hash of the body as received, when one was stored with it: see [StoreReceive
 
 ###### Inherited from
 
-[`MessageSummary`](#messagesummary).[`contentHash`](#contenthash)
+[`MessageSummary`](#messagesummary).[`contentHash`](#contenthash-1)
 
 ##### deliveries
 
@@ -4441,7 +4902,7 @@ The deliveries of the current generation, by status.
 
 ###### Inherited from
 
-[`MessageSummary`](#messagesummary).[`deliveries`](#deliveries-2)
+[`MessageSummary`](#messagesummary).[`deliveries`](#deliveries-4)
 
 ##### duplicateOf
 
@@ -4451,7 +4912,7 @@ The latest earlier message with the same sender and control ID, when there is on
 
 ###### Inherited from
 
-[`MessageSummary`](#messagesummary).[`duplicateOf`](#duplicateof)
+[`MessageSummary`](#messagesummary).[`duplicateOf`](#duplicateof-1)
 
 ##### error
 
@@ -4468,7 +4929,7 @@ which can quote the message: never print it.
 
 ###### Inherited from
 
-[`MessageSummary`](#messagesummary).[`generation`](#generation)
+[`MessageSummary`](#messagesummary).[`generation`](#generation-2)
 
 ##### id
 
@@ -4476,7 +4937,7 @@ which can quote the message: never print it.
 
 ###### Inherited from
 
-[`MessageSummary`](#messagesummary).[`id`](#id-1)
+[`MessageSummary`](#messagesummary).[`id`](#id-3)
 
 ##### receivedAt
 
@@ -4484,7 +4945,7 @@ which can quote the message: never print it.
 
 ###### Inherited from
 
-[`MessageSummary`](#messagesummary).[`receivedAt`](#receivedat-2)
+[`MessageSummary`](#messagesummary).[`receivedAt`](#receivedat-3)
 
 ##### size
 
@@ -4494,11 +4955,11 @@ The body's size in bytes, or null for a message stored before sizes were kept.
 
 ###### Inherited from
 
-[`MessageSummary`](#messagesummary).[`size`](#size-1)
+[`MessageSummary`](#messagesummary).[`size`](#size-2)
 
 ##### state
 
-> `readonly` **state**: `"received"` \| `"filtered"` \| `"delivered"` \| `"failed"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
+> `readonly` **state**: `"delivered"` \| `"received"` \| `"filtered"` \| `"failed"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
 
 The status and the current deliveries, as an operator sees them.
 
@@ -4512,7 +4973,7 @@ The status and the current deliveries, as an operator sees them.
 
 ###### Inherited from
 
-[`MessageSummary`](#messagesummary).[`status`](#status-1)
+[`MessageSummary`](#messagesummary).[`status`](#status-3)
 
 ##### updatedAt
 
@@ -4522,7 +4983,85 @@ When the message last changed: transformed, failed, replayed or cleared.
 
 ###### Inherited from
 
-[`MessageSummary`](#messagesummary).[`updatedAt`](#updatedat)
+[`MessageSummary`](#messagesummary).[`updatedAt`](#updatedat-1)
+
+***
+
+### StoredMessageRow
+
+Every column of one message's row, as storage holds it, for an archive: nothing a retention step
+nulls or deletes is left out. `body` is `null` once the content was dropped; `meta` is the
+metadata as stored (JSON, sealed under encryption), and a store wrapper reads it back.
+
+#### Example
+
+```ts
+const mrnHeld = (row: StoredMessageRow): boolean => row.meta !== null;
+```
+
+#### Properties
+
+##### body
+
+> `readonly` **body**: `Uint8Array`\<`ArrayBufferLike`\> \| `null`
+
+##### channel
+
+> `readonly` **channel**: `string`
+
+##### contentDroppedAt
+
+> `readonly` **contentDroppedAt**: `string` \| `null`
+
+##### contentHash
+
+> `readonly` **contentHash**: `string` \| `null`
+
+##### dedupKey
+
+> `readonly` **dedupKey**: `string` \| `null`
+
+##### duplicateOf
+
+> `readonly` **duplicateOf**: `number` \| `null`
+
+##### error
+
+> `readonly` **error**: `string` \| `null`
+
+Why it failed, as stored: can quote the message.
+
+##### generation
+
+> `readonly` **generation**: `number`
+
+##### id
+
+> `readonly` **id**: `number`
+
+##### idempotencyKey
+
+> `readonly` **idempotencyKey**: `string` \| `null`
+
+##### meta
+
+> `readonly` **meta**: `string` \| `null`
+
+##### receivedAt
+
+> `readonly` **receivedAt**: `string`
+
+##### size
+
+> `readonly` **size**: `number` \| `null`
+
+##### status
+
+> `readonly` **status**: [`MessageStatus`](#messagestatus)
+
+##### updatedAt
+
+> `readonly` **updatedAt**: `string`
 
 ***
 
@@ -4632,6 +5171,96 @@ changes the body on its way in, such as encryption, passes the original size alo
 > `readonly` `optional` **storedMeta?**: `string`
 
 The metadata as the store keeps it: JSON, encrypted under encryption. Set by a wrapper.
+
+***
+
+### TcpReply
+
+The reply a tcp destination read for one output, for its reply check to judge.
+
+#### Example
+
+```ts
+const text = (reply: TcpReply): string => Buffer.from(reply.body).toString("latin1");
+```
+
+#### Properties
+
+##### body
+
+> `readonly` **body**: `Uint8Array`
+
+The reply's bytes, without the framing. Empty for an empty frame.
+
+##### messageId
+
+> `readonly` **messageId**: `number`
+
+The id of the stored message the output came from.
+
+##### seq
+
+> `readonly` **seq**: `number`
+
+Which output of that message's transform it was, from 0.
+
+***
+
+### TcpReplyRequest
+
+What a tcp source's reply builder is given: the id of the message just stored. It runs only once
+the message is stored.
+
+#### Example
+
+```ts
+const request: TcpReplyRequest = { messageId: 42 };
+```
+
+#### Properties
+
+##### messageId
+
+> `readonly` **messageId**: `number`
+
+The stored message's id.
+
+***
+
+### TcpSourceFacts
+
+What a tcp source knows about a message: the sender's address and, over mutual TLS, the common
+name in the subject of the certificate the sender presented.
+
+#### Example
+
+```ts
+const peer = (source: TcpSourceFacts): string => source.tlsPeerSubject ?? "unknown";
+```
+
+#### Properties
+
+##### kind
+
+> `readonly` **kind**: `"tcp"`
+
+##### receivedAt
+
+> `readonly` **receivedAt**: `string`
+
+When the message was stored, as an ISO 8601 time.
+
+##### remoteAddress
+
+> `readonly` **remoteAddress**: `string` \| `undefined`
+
+The sender's IP address, when the connection had one.
+
+##### tlsPeerSubject
+
+> `readonly` **tlsPeerSubject**: `string` \| `undefined`
+
+The common name (CN) in the subject of the sender's TLS certificate, when it presented one.
 
 ***
 
@@ -4751,7 +5380,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-13)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-15)
 
 ##### messageId
 
@@ -4808,7 +5437,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-13)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-15)
 
 ##### code
 
@@ -4928,6 +5557,28 @@ if (request.reason === "unreadable") console.warn(request.problem);
 
 ***
 
+### ArchiveErrorCode
+
+> **ArchiveErrorCode** = `"ERR_PATHWAYS_ARCHIVE_FORMAT"` \| `"ERR_PATHWAYS_ARCHIVE_INTEGRITY"` \| `"ERR_PATHWAYS_ARCHIVE_TOO_LARGE"`
+
+Why an archive could not be written or read:
+
+- `ERR_PATHWAYS_ARCHIVE_FORMAT`: it is not an archive in a layout this Pathways reads;
+- `ERR_PATHWAYS_ARCHIVE_INTEGRITY`: its trailer does not match its records (count or HMAC), or a
+  record names another channel than its header;
+- `ERR_PATHWAYS_ARCHIVE_TOO_LARGE`: the file, its decompressed size or one record passes a limit
+  of ArchiveLimits.
+
+Decrypting it can also fail with an `EncryptionError`, `ERR_PATHWAYS_UNKNOWN_KEY` among them.
+
+#### Example
+
+```ts
+const code: ArchiveErrorCode = "ERR_PATHWAYS_ARCHIVE_INTEGRITY";
+```
+
+***
+
 ### AuditAction
 
 > **AuditAction** = *typeof* `AUDIT_ACTIONS`\[`number`\]
@@ -4958,15 +5609,16 @@ const detail: AuditDetail = { status: "transformed", queued: 2 };
 
 ### AuditEventAction
 
-> **AuditEventAction** = `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"`
+> **AuditEventAction** = `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"archive"`
 
 Every action the audit log records, as an [AuditEvent](#auditevent)'s `action`: `search` (messages
 listed), `view` (one message's details, without content), `content-view`, `replay`, `resend`,
 `clear`, `retention` (a run, with what it deleted), `config` (a configuration change seen when
 the engine started), `lease-release` (the engine lease freed by force), `migrate` (schema steps
 applied by `pathways migrate`), `channel-pause`, `channel-resume`, `channel-stop`,
-`channel-halt` and `channel-reload` (a `pathways channel` command), and `verify` (a stored
-message read by `pathways verify`). Kept equal to the audit log's own list by a test.
+`channel-halt` and `channel-reload` (a `pathways channel` command), `verify` (a stored
+message read by `pathways verify`), and `archive` (a sealed archive retention wrote and checked
+before changing what it holds). Kept equal to the audit log's own list by a test.
 
 #### Example
 
@@ -5567,7 +6219,7 @@ The message a channel of format `F` hands its transform.
 
 ##### F
 
-`F` *extends* [`Format`](#format-1)
+`F` *extends* [`Format`](#format-2)
 
 #### Example
 
@@ -5710,6 +6362,24 @@ if (!result.done) console.log(result.reason);
 
 ***
 
+### RetentionStep
+
+> **RetentionStep** = `"content"` \| `"metadata"` \| `"failed"`
+
+One step of retention, each with its own clock:
+
+- `content`: a done message's bodies, error texts and `ctx.meta` go, and its row stays;
+- `metadata`: a done message's row goes, with its deliveries;
+- `failed`: a failed message's row goes, with its deliveries.
+
+#### Example
+
+```ts
+const step: RetentionStep = "content";
+```
+
+***
+
 ### SecretErrorCode
 
 > **SecretErrorCode** = `"ERR_PATHWAYS_SECRET_NOT_FOUND"` \| `"ERR_PATHWAYS_SECRET_FIELD"` \| `"ERR_PATHWAYS_SECRET_VERSION"` \| `"ERR_PATHWAYS_SECRET_UNREADABLE"`
@@ -5842,7 +6512,7 @@ export default ((options, context) => ({
 
 ### SourceFacts
 
-> **SourceFacts** = [`FileSourceFacts`](#filesourcefacts) \| [`HttpSourceFacts`](#httpsourcefacts) \| [`MllpSourceFacts`](#mllpsourcefacts) \| [`ModuleSourceFacts`](#modulesourcefacts)
+> **SourceFacts** = [`FileSourceFacts`](#filesourcefacts) \| [`HttpSourceFacts`](#httpsourcefacts) \| [`MllpSourceFacts`](#mllpsourcefacts) \| [`TcpSourceFacts`](#tcpsourcefacts) \| [`ModuleSourceFacts`](#modulesourcefacts)
 
 What the source knew about a message when it took it in, by the kind of source.
 
@@ -5894,6 +6564,86 @@ export default (async (options, context) => {
   await migrate(pool);
   return new PoolStore(pool) satisfies MessageStore;
 }) satisfies StoreFactory<{ url: string }>;
+```
+
+***
+
+### TcpReplyBuilder
+
+> **TcpReplyBuilder** = (`request`) => `Uint8Array` \| `string` \| `Promise`\<`Uint8Array` \| `string`\>
+
+Builds the reply a tcp source sends once a message is stored, named in the channel's YAML as
+`source: { tcp: { ..., reply: { builder: ./reply.ts } } }` and exported as the module's default.
+It returns the reply's bytes, or a string sent as UTF-8; the source adds the framing. It runs in
+the engine's own thread, once per message, under the channel's transform time limit. If it throws,
+runs past the limit or returns something else, the source logs `tcp-reply-failed` and closes the
+connection without a reply: the message is stored, and a sender that sends it again stores it twice.
+
+#### Parameters
+
+##### request
+
+[`TcpReplyRequest`](#tcpreplyrequest)
+
+#### Returns
+
+`Uint8Array` \| `string` \| `Promise`\<`Uint8Array` \| `string`\>
+
+#### Example
+
+```ts
+// channels/orders-in/reply.ts: answers OK and the stored id, one line.
+import type { TcpReplyBuilder } from "@cosyte/pathways";
+
+export default (({ messageId }) => `OK ${messageId}`) satisfies TcpReplyBuilder;
+```
+
+***
+
+### TcpReplyCheck
+
+> **TcpReplyCheck** = (`reply`) => [`TcpReplyVerdict`](#tcpreplyverdict) \| `Promise`\<[`TcpReplyVerdict`](#tcpreplyverdict)\>
+
+Judges the reply a tcp destination with `expectReply: true` read, named in the channel's YAML as
+`replyCheck: ./check.ts` and exported as the module's default. Without one, any reply means
+delivered. If it throws, runs past the channel's transform time limit or returns anything but a
+[TcpReplyVerdict](#tcpreplyverdict), the delivery is retried with the code `REPLY_CHECK_FAILED`.
+
+#### Parameters
+
+##### reply
+
+[`TcpReply`](#tcpreply)
+
+#### Returns
+
+[`TcpReplyVerdict`](#tcpreplyverdict) \| `Promise`\<[`TcpReplyVerdict`](#tcpreplyverdict)\>
+
+#### Example
+
+```ts
+// channels/orders-out/check.ts: the receiver answers ACK or NAK.
+import type { TcpReplyCheck } from "@cosyte/pathways";
+
+export default ((reply) => {
+  const text = Buffer.from(reply.body).toString("latin1");
+  return text === "ACK" ? "delivered" : text === "NAK" ? "rejected" : "retry";
+}) satisfies TcpReplyCheck;
+```
+
+***
+
+### TcpReplyVerdict
+
+> **TcpReplyVerdict** = `"delivered"` \| `"retry"` \| `"rejected"`
+
+What a reply check decides: `delivered`, `retry` (the engine tries the same output again, holding
+later ones behind it), or `rejected` (failed for good; the destination moves on).
+
+#### Example
+
+```ts
+const verdict: TcpReplyVerdict = "retry";
 ```
 
 ***
@@ -5981,11 +6731,11 @@ second format, `To`, when the transform returns another format's model.
 
 ##### F
 
-`F` *extends* [`Format`](#format-1)
+`F` *extends* [`Format`](#format-2)
 
 ##### To
 
-`To` *extends* [`Format`](#format-1) = `F`
+`To` *extends* [`Format`](#format-2) = `F`
 
 #### Example
 

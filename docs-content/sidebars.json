@@ -18,6 +18,7 @@
         "read-and-write-amazon-s3",
         "read-and-write-azure-blob-storage",
         "send-and-receive-mllp",
+        "send-and-receive-tcp",
         "send-and-receive-http",
         "work-with-formats",
         "store-messages-in-a-database",
