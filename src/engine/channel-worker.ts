@@ -7,6 +7,7 @@ import type {
   DestinationReply,
   DestinationSetup,
   FailureSummary,
+  Hl7v2Settings,
   MessageContext,
   TransformReply,
   TransformRequest,
@@ -155,6 +156,8 @@ export interface ChannelWorkerOptions {
   readonly destinations?: readonly DestinationSetup[] | undefined;
   /** A `csv` channel's `csv:` block, as validated: how its bodies are read and written. */
   readonly csv?: CsvSettings | undefined;
+  /** An `hl7v2` channel's `hl7v2:` block, as validated: how its bodies are read and written. */
+  readonly hl7v2?: Hl7v2Settings | undefined;
   readonly workerUrl?: URL;
 }
 
@@ -239,7 +242,14 @@ export class ChannelWorker {
       ...(this.options.destinations === undefined
         ? {}
         : { destinations: this.options.destinations }),
-      ...(this.options.csv === undefined ? {} : { formatSettings: { csv: this.options.csv } }),
+      ...(this.options.csv === undefined && this.options.hl7v2 === undefined
+        ? {}
+        : {
+            formatSettings: {
+              ...(this.options.csv === undefined ? {} : { csv: this.options.csv }),
+              ...(this.options.hl7v2 === undefined ? {} : { hl7v2: this.options.hl7v2 }),
+            },
+          }),
     };
     const worker = new Worker(this.options.workerUrl ?? defaultWorkerUrl(), {
       workerData: setup,

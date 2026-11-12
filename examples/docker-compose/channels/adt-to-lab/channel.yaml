@@ -1,0 +1,33 @@
+# yaml-language-server: $schema=../../node_modules/@cosyte/pathways/schema/channel.json
+# The line above points an editor with the YAML language server at the schema of this file,
+# for completion, hover text and checks as you type. "pathways validate" checks the rest.
+
+# One channel: read HL7 v2 files from a folder, keep only admissions (ADT^A01), address them to
+# the lab and write them to another folder. Paths are relative to this file.
+
+# The name must match the channel's folder.
+name: adt-to-lab
+
+# hl7v2 messages reach the transform parsed by @cosyte/hl7. `text` passes them as a string.
+format: hl7v2
+
+# Each file dropped into this folder is one message. Once it is stored, encrypted, the file is
+# deleted, so it is never read twice and no plaintext copy is left behind.
+source:
+  file:
+    dir: ../../data/adt-to-lab/in
+    # How long a file must sit unchanged before it is read, so a file still being written is
+    # left for the next pass.
+    minAge: 1s
+    # keepProcessed: true moves each stored file into a processed/ folder inside this one instead
+    # of deleting it. Those copies are patient data in plaintext, outside the encrypted store, so it
+    # is off by default and the engine warns at start when it is on.
+
+# Filters and edits each message. `pathways test` runs it on every input in tests/ and compares
+# the output with the matching .expected file.
+transform: ./transform.ts
+
+# Each message the transform returns is written to this folder as a file of its own.
+destinations:
+  - file:
+      dir: ../../data/adt-to-lab/out

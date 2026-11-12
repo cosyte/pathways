@@ -2,6 +2,7 @@ import type { ChannelConfig, ProjectConfig } from "../config/schema.js";
 import { transformConfigFor } from "../config/transform-config.js";
 import type { Env } from "../connectors/endpoint.js";
 import { EncryptionError } from "../encryption/envelope.js";
+import { processEnv } from "../env.js";
 import { ChannelWorker, destinationSetups, TransformLoadError } from "../engine/channel-worker.js";
 import { destinationKeys } from "../engine/destination-key.js";
 import { destinationOutcomes, storedFailure } from "../engine/engine.js";
@@ -220,7 +221,8 @@ export async function replayMessages(
           : byDestination.some((o) => "outputs" in o && o.outputs.length > 0);
       if (!sends) return refuse(id, channel.name, "no-output");
     } else {
-      const worker = await workerFor(project, channel, workers, context.env ?? process.env);
+      const env = context.env ?? processEnv();
+      const worker = await workerFor(project, channel, workers, env);
       if (!(worker instanceof ChannelWorker)) {
         return refuse(id, channel.name, "transform-load", describeFailure(worker, channel));
       }
@@ -357,6 +359,7 @@ async function workerFor(
     transformFile: channel.transform,
     format: channel.format,
     csv: channel.csv,
+    hl7v2: channel.hl7v2,
     timeoutMs: channel.settings.timeoutMs,
     memoryMb: channel.settings.memoryMb,
     config: config.resolved,

@@ -19,6 +19,8 @@
 
 import { existsSync, rmSync, writeSync } from "node:fs";
 
+import { engineVariable, type EngineVariable } from "./env.js";
+
 /**
  * The points a crash test can stop the process at, each between two steps whose order keeps a
  * message safe:
@@ -67,7 +69,7 @@ export type FaultPoint = (typeof FAULT_POINTS)[number];
  * the count-th time the process reaches it (`after-send-before-record@2`). Several, each so, are
  * separated by commas (`before-claim-move,mid-move-back`). Read once, at start.
  */
-export const FAULT_POINT_ENV = "PATHWAYS_TEST_FAULT_POINT";
+export const FAULT_POINT_ENV = "PATHWAYS_TEST_FAULT_POINT" satisfies EngineVariable;
 
 /** The line a process writes to stderr as it freezes at a point, before the point's name. */
 export const FAULT_POINT_REACHED = "pathways fault point reached: ";
@@ -76,7 +78,7 @@ export const FAULT_POINT_REACHED = "pathways fault point reached: ";
  * The environment variable that names a file: with it set, a process held at a point carries on
  * once the file exists, rather than waiting to be killed. Read when the point is reached.
  */
-export const FAULT_POINT_RESUME_ENV = "PATHWAYS_TEST_FAULT_POINT_RESUME";
+export const FAULT_POINT_RESUME_ENV = "PATHWAYS_TEST_FAULT_POINT_RESUME" satisfies EngineVariable;
 
 /** The line a held process writes to stderr as it carries on, before the point's name. */
 export const FAULT_POINT_RESUMED = "pathways fault point resumed: ";
@@ -129,7 +131,7 @@ export function faultPoints(
 function freeze(point: FaultPoint): void {
   writeSync(2, `${FAULT_POINT_REACHED}${point}\n`);
   const cell = new Int32Array(new SharedArrayBuffer(4));
-  const resume = process.env[FAULT_POINT_RESUME_ENV];
+  const resume = engineVariable(FAULT_POINT_RESUME_ENV);
   if (resume !== undefined && resume !== "") {
     for (let waited = 0; waited < 60_000; waited += 25) {
       if (existsSync(resume)) {
@@ -166,5 +168,5 @@ declare const __PATHWAYS_FAULT_POINTS__: boolean | undefined;
 export const faultPoint: (point: FaultPoint) => void =
   typeof __PATHWAYS_FAULT_POINTS__ !== "undefined" && !__PATHWAYS_FAULT_POINTS__
     ? () => undefined
-    : faultPoints(process.env[FAULT_POINT_ENV], freeze);
+    : faultPoints(engineVariable(FAULT_POINT_ENV), freeze);
 /* v8 ignore stop */

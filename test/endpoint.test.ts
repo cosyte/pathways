@@ -16,6 +16,7 @@ import {
   reply,
 } from "../src/connectors/endpoint.js";
 import { loadClientTls, loadServerTls, serverTlsOptions } from "../src/connectors/tls.js";
+import { configuredName } from "../src/env.js";
 import { makeCertificates, removeCertificates, send, type Certificates } from "./net-helpers.js";
 
 // Wraps the real timingSafeEqual so a test can see that token checks go through it.
@@ -60,7 +61,7 @@ function listener(overrides: Partial<ListenerConfig> = {}): ListenerConfig {
     port: 9_999,
     tls: { cert: certs.files.serverCert, key: certs.files.serverKey, ca: undefined },
     plaintext: false,
-    auth: { kind: "bearer", env: "SYNTH_TOKEN" },
+    auth: { kind: "bearer", env: configuredName("SYNTH_TOKEN") },
     ...overrides,
   };
 }
@@ -108,11 +109,11 @@ describe("bearerMatches", () => {
 
 describe("readEnv and listenerSecurity", () => {
   it("reads a set variable and refuses an unset or empty one, naming the key and variable", () => {
-    expect(readEnv({ A: "x" }, "A", "f: k")).toBe("x");
-    expect(problemOf(() => readEnv({}, "A", "f: k"))).toBe(
+    expect(readEnv({ A: "x" }, configuredName("A"), "f: k")).toBe("x");
+    expect(problemOf(() => readEnv({}, configuredName("A"), "f: k"))).toBe(
       "f: k: the environment variable A is not set",
     );
-    expect(problemOf(() => readEnv({ A: "" }, "A", "f: k"))).toBe(
+    expect(problemOf(() => readEnv({ A: "" }, configuredName("A"), "f: k"))).toBe(
       "f: k: the environment variable A is not set",
     );
   });

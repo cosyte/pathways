@@ -13,6 +13,7 @@ import {
 import { destinationKeys } from "../engine/destination-key.js";
 import type { DestinationSetup, FailureSummary, MessageContext } from "../engine/worker-entry.js";
 import { EXIT } from "../exit.js";
+import { processEnv } from "../env.js";
 import type { MessageStore, MessageSummary } from "../storage/store.js";
 import {
   describeFailure,
@@ -108,7 +109,8 @@ export async function verifyCommand(
     channel === undefined
       ? context.project.channels
       : context.project.channels.filter((c) => c.name === channel);
-  const runner = new Runner(context.project, context.env ?? process.env);
+  const env = context.env ?? processEnv();
+  const runner = new Runner(context.project, env);
   const results = new Map<string, Gathered[]>(channels.map((c) => [c.name, []]));
   let skipped = 0;
   let missing = 0;
@@ -195,6 +197,7 @@ class Runner {
       transformFile: config.transform,
       format: config.format,
       csv: config.csv,
+      hl7v2: config.hl7v2,
       timeoutMs: config.settings.timeoutMs,
       memoryMb: config.settings.memoryMb,
       config: resolved.resolved,
