@@ -14,11 +14,11 @@ git holds, and a rollback is running the tag before.
 
 ## The Pathways image
 
-From the first release on, each release of Pathways publishes its image to
-`ghcr.io/cosyte/pathways`, tagged with the version, for `linux/amd64` and `linux/arm64`. Each one
-carries an SBOM and build provenance, and is signed with cosign keyless signing by the release
-workflow. It holds the `pathways` command and the four database drivers, nothing else; your
-project's image adds what your channels need. There is no `latest` tag.
+Each release of Pathways publishes its image to `ghcr.io/cosyte/pathways`, tagged with the version,
+for `linux/amd64` and `linux/arm64`. Each one carries an SBOM and build provenance, and is signed
+with cosign keyless signing by the release workflow. It holds the `pathways` command and the four
+database drivers, nothing else; your project's image adds what your channels need. There is no
+`latest` tag.
 
 The image is built from the same commit and the same `pnpm-lock.yaml` as the npm package of that
 version, through the repository's `Dockerfile`. It is not the npm tarball: the two are built
