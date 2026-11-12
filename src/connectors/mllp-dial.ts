@@ -1,4 +1,5 @@
 import { connect as netConnect, type Socket } from "node:net";
+import { setTimeout as sleep } from "node:timers/promises";
 import { connect as tlsConnect } from "node:tls";
 
 import { mllpDialTlsOptions, type MllpClientTlsMaterial } from "./mllp-tls.js";
@@ -114,18 +115,15 @@ export async function sendOnce(
   const socket = await dial(address, tls, timeoutMs, new AbortController().signal);
   // The peer may reset the connection once it has the frame; nothing waits on it any more.
   socket.on("error", ignore);
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    await new Promise<void>((resolve, reject) => {
-      timer = setTimeout(() => {
-        reject(new MllpDialError("SEND_TIMEOUT"));
-      }, timeoutMs);
-      socket.end(frame, resolve);
-    });
-  } finally {
-    clearTimeout(timer);
-    socket.destroy();
-  }
+  const clock = new AbortController();
+  // The clock's own rejection, once the write is out, settles to true: the frame was written.
+  const written = await Promise.race([
+    new Promise<boolean>((resolve) => socket.end(frame, () => resolve(true))),
+    sleep(timeoutMs, false, { signal: clock.signal }).catch(() => true),
+  ]);
+  clock.abort();
+  socket.destroy();
+  if (!written) throw new MllpDialError("SEND_TIMEOUT");
 }
 
 /* v8 ignore next 3: a listener for an error nothing waits on any more, so none reaches a test */
