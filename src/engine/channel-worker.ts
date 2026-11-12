@@ -1,5 +1,7 @@
 import { Worker } from "node:worker_threads";
 
+import type { Logger } from "pino";
+
 import type { ChannelConfig } from "../config/schema.js";
 import { ownsBuffer } from "../storage/ownership.js";
 import type {
@@ -9,6 +11,9 @@ import type {
   FailureSummary,
   MessageContext,
   RoutedMessage,
+  ScriptLogMessage,
+  StopReply,
+  StopRequest,
   TransformReply,
   TransformRequest,
   WorkerFormat,
@@ -158,6 +163,16 @@ export interface ChannelWorkerOptions {
   readonly destinations?: readonly DestinationSetup[] | undefined;
   /** A `csv` channel's `csv:` block, as validated: how its bodies are read and written. */
   readonly csv?: CsvSettings | undefined;
+  /**
+   * How long the module's `onStart` may run on each spawn, and its `onStop` when the worker stops,
+   * in milliseconds. Defaults to `timeoutMs`.
+   */
+  readonly scriptTimeoutMs?: number | undefined;
+  /**
+   * Where the lines `onStart`'s logger writes go, with the channel's name, and where an `onStop`
+   * that failed or ran past its limit is noted. Without it they are dropped.
+   */
+  readonly logger?: Logger | undefined;
   readonly workerUrl?: URL;
 }
 
@@ -197,6 +212,8 @@ export interface RunOptions {
 export class ChannelWorker {
   private readonly options: ChannelWorkerOptions;
   private worker: Worker | undefined;
+  /** Set while a worker is being spawned: its module loading and its `onStart` running. */
+  private starting: Promise<Worker> | undefined;
   private nextId = 1;
   private queue: Promise<unknown> = Promise.resolve();
 
@@ -205,9 +222,25 @@ export class ChannelWorker {
     this.options = options;
   }
 
-  /** Starts the worker and loads the transform. Rejects with {@link TransformLoadError}. */
+  /**
+   * Starts the worker, loads the transform and runs its `onStart`, when it has one. Rejects with
+   * {@link TransformLoadError}, also when `onStart` throws or runs past its limit. Each new worker
+   * runs `onStart` again, a replacement after a timeout or a crash among them.
+   */
   async start(): Promise<void> {
-    this.worker ??= await this.spawn();
+    if (this.worker !== undefined) return;
+    const starting = (this.starting ??= this.spawn());
+    try {
+      const worker = await starting;
+      if (this.starting === starting) this.worker = worker;
+    } finally {
+      if (this.starting === starting) this.starting = undefined;
+    }
+  }
+
+  /** How long `onStart` and `onStop` may run, in milliseconds. */
+  private get scriptTimeoutMs(): number {
+    return this.options.scriptTimeoutMs ?? this.options.timeoutMs;
   }
 
   /**
@@ -224,16 +257,55 @@ export class ChannelWorker {
     return result;
   }
 
-  /** Waits for queued messages, then stops the worker. */
+  /**
+   * Waits for queued messages and for a start under way (its `onStart` is cut at its limit), then
+   * runs the module's `onStop`, when it has one, cut at its limit too, and ends the worker.
+   */
   async stop(): Promise<void> {
     await this.queue;
-    const worker = this.worker;
+    const starting = this.starting;
+    const started = starting === undefined ? undefined : await starting.catch(() => undefined);
+    if (this.starting === starting) this.starting = undefined;
+    const worker = this.worker ?? started;
     this.worker = undefined;
-    if (worker !== undefined) await worker.terminate();
+    if (worker === undefined) return;
+    await this.runOnStop(worker);
+    await worker.terminate();
+  }
+
+  /** Asks the worker to run `onStop`, and waits for it up to the limit; notes a failure or a cut. */
+  private runOnStop(worker: Worker): Promise<void> {
+    const { channel, logger } = this.options;
+    const limitMs = this.scriptTimeoutMs;
+    return new Promise((resolve) => {
+      const finish = (): void => {
+        clearTimeout(timer);
+        worker.off("message", onReply);
+        worker.off("error", finish);
+        worker.off("exit", finish);
+        resolve();
+      };
+      const onReply = (reply: unknown): void => {
+        if (!isStopReply(reply)) return;
+        if (reply.failure !== undefined) {
+          const { name, code, where } = reply.failure;
+          logger?.warn({ event: "on-stop-failed", channel, name, code, where });
+        }
+        finish();
+      };
+      const timer = setTimeout(() => {
+        logger?.warn({ event: "on-stop-timeout", channel, limitMs });
+        finish();
+      }, limitMs);
+      worker.on("message", onReply);
+      worker.on("error", finish);
+      worker.on("exit", finish);
+      worker.postMessage({ stop: true } satisfies StopRequest);
+    });
   }
 
   private spawn(): Promise<Worker> {
-    const { channel, transformFile, format, memoryMb } = this.options;
+    const { channel, transformFile, format, memoryMb, logger } = this.options;
     const setup: WorkerSetup = {
       pathwaysWorker: true,
       transformFile,
@@ -242,6 +314,7 @@ export class ChannelWorker {
       ...(this.options.destinations === undefined
         ? {}
         : { destinations: this.options.destinations }),
+      channel,
       ...(this.options.csv === undefined ? {} : { formatSettings: { csv: this.options.csv } }),
     };
     const worker = new Worker(this.options.workerUrl ?? defaultWorkerUrl(), {
@@ -258,14 +331,41 @@ export class ChannelWorker {
     };
     worker.on("error", forget);
     worker.on("exit", forget);
+    // What onStart (or anything else in the worker) logs: a code and numbers, checked again here.
+    worker.on("message", (message: unknown) => {
+      if (!isScriptLog(message)) return;
+      const { level, code, ids } = message.scriptLog;
+      logger?.[level]({ event: "channel-script", channel, code, ids: safeIds(ids) });
+    });
 
     return new Promise((resolve, reject) => {
+      let timer: NodeJS.Timeout | undefined;
       const done = (): void => {
+        clearTimeout(timer);
         worker.off("message", onHello);
         worker.off("error", onError);
         worker.off("exit", onExit);
       };
-      const onHello = (hello: WorkerHello): void => {
+      const onHello = (hello: unknown): void => {
+        if (!isHello(hello)) return;
+        if (hello.hello === "starting") {
+          // onStart runs from here, and is cut at its limit: the worker is ended, as for a load
+          // that failed.
+          const limitMs = this.scriptTimeoutMs;
+          timer = setTimeout(() => {
+            done();
+            void worker.terminate();
+            reject(
+              new TransformLoadError(channel, {
+                kind: "timeout",
+                name: "Timeout",
+                code: "ON_START_TIMEOUT",
+                detail: `onStart ran longer than ${limitMs} ms`,
+              }),
+            );
+          }, limitMs);
+          return;
+        }
         done();
         if (hello.hello === "ready") {
           resolve(worker);
@@ -375,6 +475,46 @@ function success(reply: Extract<TransformReply, { ok: true }>): TransformOutcome
     destinations: destinations.map((result) => result ?? { ok: true, outputs }),
     ...routed,
   };
+}
+
+/** Whether a message from the worker is one of its first: starting, ready or load-failed. */
+function isHello(message: unknown): message is WorkerHello {
+  const hello = (message as { hello?: unknown } | null)?.hello;
+  return hello === "starting" || hello === "ready" || hello === "load-failed";
+}
+
+/** Whether a message from the worker is the reply to a stop request. */
+function isStopReply(message: unknown): message is StopReply {
+  return (message as { stopped?: unknown } | null)?.stopped === true;
+}
+
+/** Whether a message from the worker is a line a script logged. */
+function isScriptLog(message: unknown): message is ScriptLogMessage {
+  const line = (message as { scriptLog?: unknown } | null)?.scriptLog as
+    { level?: unknown; code?: unknown; ids?: unknown } | undefined;
+  return (
+    typeof line === "object" &&
+    line !== null &&
+    (line.level === "info" || line.level === "warn" || line.level === "error") &&
+    typeof line.code === "string" &&
+    /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(line.code) &&
+    line.code.length <= 64
+  );
+}
+
+/**
+ * A script log line's ids, checked again on this side: the transform runs in the worker and can post
+ * its own messages, so only finite numbers under plain names, at most 16, reach the log.
+ */
+function safeIds(ids: unknown): Record<string, number> {
+  const kept: Record<string, number> = {};
+  if (typeof ids !== "object" || ids === null) return kept;
+  for (const [name, value] of Object.entries(ids)) {
+    if (Object.keys(kept).length >= 16) break;
+    if (name.length > 64 || !/^[A-Za-z][A-Za-z0-9]*$/.test(name)) continue;
+    if (typeof value === "number" && Number.isFinite(value)) kept[name] = value;
+  }
+  return kept;
 }
 
 /** Whether a message from the worker is the reply to request `id`. */

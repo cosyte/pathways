@@ -1091,6 +1091,7 @@ function mergeSettings(
   override: {
     timeout?: number | undefined;
     memory?: number | undefined;
+    scriptTimeout?: number | undefined;
     pollInterval?: number | undefined;
     onStoreFailure?: OnStoreFailure | undefined;
     ackTimeout?: number | undefined;
@@ -1105,6 +1106,10 @@ function mergeSettings(
   return {
     timeoutMs: override.timeout ?? base.timeoutMs,
     memoryMb: override.memory ?? base.memoryMb,
+    // Set only when written, so settings without it resolve as they always have.
+    ...((override.scriptTimeout ?? base.scriptTimeoutMs) === undefined
+      ? {}
+      : { scriptTimeoutMs: override.scriptTimeout ?? base.scriptTimeoutMs }),
     pollIntervalMs: override.pollInterval ?? base.pollIntervalMs,
     onStoreFailure: override.onStoreFailure ?? base.onStoreFailure,
     ackTimeoutMs: override.ackTimeout ?? base.ackTimeoutMs,

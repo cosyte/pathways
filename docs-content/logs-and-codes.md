@@ -47,6 +47,15 @@ text or a source file's name. Commands whose standard output is their report (`s
 | `smtp-recipients-refused` | warn  | `channel`, `destination`, `message`, `seq`, `refused`, `outcome`                       | an SMTP server took the email for some recipients and refused `refused` of them; `outcome` is `rejected` or `delivered` (`onPartialRefusal`), and no address is logged |
 | `deliveries-held`         | warn  | `channel`, `code`, `deliveries`                                                        | at a channel's first delivery pass, pending deliveries that none of its destinations now was made for; none is sent to another                                         |
 
+A channel's `onStart` and `onStop`, which run in its worker:
+
+| Event                   | Level | Fields                                     | Meaning                                                                                                                                |
+| ----------------------- | ----- | ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `channel-script`        | any   | `channel`, `code`, `ids`                   | a line a channel's `onStart` logged: its code and numbers only                                                                         |
+| `transform-load-failed` | error | `channel`, `kind`, `name`, `code`, `where` | a replacement worker would not load (its `onStart` threw, `ON_START_FAILED`, or ran too long, `ON_START_TIMEOUT`): the channel stopped |
+| `on-stop-failed`        | warn  | `channel`, `name`, `code`, `where`         | a channel's `onStop` threw (`ON_STOP_FAILED` unless its error had a code); the worker ended                                            |
+| `on-stop-timeout`       | warn  | `channel`, `limitMs`                       | a channel's `onStop` ran past its limit and was cut off; the worker ended                                                              |
+
 A `transform-failed` line's `kind` is `load`, `parse`, `transform`, `output`, `timeout`, `memory` or
 `crash`. `where` is `file:line:column` in the transform, when it threw.
 
@@ -154,6 +163,7 @@ See [Route messages between channels](./route-between-channels.md).
 | `hook-dropped`          | a hook had 1,000 events waiting, or was stopping, and events were dropped |
 | `hook-stop-failed`      | a hook's `stop()` threw or ran out of time                                |
 | `audit-listener-failed` | a listener on the audit log failed; the entry stands                      |
+| `audit-failed`          | the `engine-stop` entry could not be written, by `code`; the stop goes on |
 
 ## Delivery codes
 

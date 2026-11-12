@@ -332,6 +332,9 @@ const settingsShape = {
     "How long one message's transform may run before it is stopped and the message is marked failed: a duration such as 5s, or a number of milliseconds. Default 5s.",
   ).optional(),
   memory: megabytes.optional(),
+  scriptTimeout: duration(
+    "How long a transform module's onStart may run on each new worker, and its onStop when the worker stops: a duration such as 5s, or a number of milliseconds. Default: the transform timeout.",
+  ).optional(),
   pollInterval: duration(
     "How often the engine looks for new work: a duration such as 1s, or a number of milliseconds. Default 1s. Engine-wide.",
   ).optional(),
@@ -3456,6 +3459,7 @@ export const channelSchema = restate(
       // engine polls, and how often it runs retention, are engine-wide.
       timeout: settingsShape.timeout,
       memory: settingsShape.memory,
+      scriptTimeout: settingsShape.scriptTimeout,
       onStoreFailure: settingsShape.onStoreFailure,
       ackTimeout: settingsShape.ackTimeout,
       retention: z
@@ -3589,6 +3593,11 @@ export interface Settings {
   readonly timeoutMs: number;
   /** The memory cap of the channel's transform worker, in megabytes. */
   readonly memoryMb: number;
+  /**
+   * How long the transform module's `onStart` may run on each new worker, and its `onStop` when the
+   * worker stops, in milliseconds. Unset, it is `timeoutMs`.
+   */
+  readonly scriptTimeoutMs?: number | undefined;
   /** How often `pathways start` looks for new work, in milliseconds. Engine-wide. */
   readonly pollIntervalMs: number;
   /** What an MLLP source does when a message cannot be stored. A source can override it. */

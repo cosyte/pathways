@@ -28,6 +28,7 @@ import type {
   Page,
   PendingDelivery,
   SendStart,
+  SettledMessage,
   PendingMessage,
   ReceivedMessage,
   DestinationKey,
@@ -225,6 +226,10 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
     channel: string,
     duplicateKey: string,
   ) => Promise<string | null | undefined>;
+  /** Ids and states only, so straight through, present only when the store underneath has both. */
+  readonly settle?: (messageId: number) => Promise<SettledMessage | undefined>;
+  readonly unsettled?: (channel: string, after: number, limit: number) => Promise<number[]>;
+  readonly requeuedUnsettled?: (channel: string, limit: number) => Promise<number[]>;
   /** The node methods, straight through, present only when the store underneath has all five. */
   readonly joinNode?: (info: NodeInfo, replace?: NodeReplace) => Promise<NodeJoin>;
   readonly nodeHeartbeat?: (self: NodeSelf, state: NodeState) => Promise<boolean>;
@@ -292,6 +297,13 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
     }
     if (inner.heldIdempotencyKey !== undefined) {
       this.heldIdempotencyKey = inner.heldIdempotencyKey.bind(inner);
+    }
+    if (inner.settle !== undefined && inner.unsettled !== undefined) {
+      this.settle = inner.settle.bind(inner);
+      this.unsettled = inner.unsettled.bind(inner);
+      if (inner.requeuedUnsettled !== undefined) {
+        this.requeuedUnsettled = inner.requeuedUnsettled.bind(inner);
+      }
     }
     const nodes = nodeStore(inner);
     if (nodes !== undefined) {

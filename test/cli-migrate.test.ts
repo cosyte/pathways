@@ -32,7 +32,7 @@ afterEach(cleanUp);
 const KEYS = "encryption:\n  keys: [{ id: test, file: ./test.key }]\n  current: test\n";
 const CHANNEL =
   "source:\n  file: { dir: ../../data/inbox, minAge: 0 }\ndestinations:\n  - file: { dir: ../../data/out }\n";
-const STEPS = 14;
+const STEPS = 15;
 
 interface Result {
   readonly code: number;
@@ -107,8 +107,9 @@ describe("pathways migrate", () => {
     expect(lines[13]).toMatch(/^ {2}12 +0012-nodes +expand$/);
     expect(lines[14]).toMatch(/^ {2}13 +0013-destination-keys +expand$/);
     expect(lines[15]).toMatch(/^ {2}14 +0014-channel-links +expand$/);
+    expect(lines[16]).toMatch(/^ {2}15 +0015-settled +expand$/);
     // An empty database has no audit log to write the dry run to, and says so.
-    expect(lines[16]).toBe("Not written to the audit log: the database has none yet.");
+    expect(lines[17]).toBe("Not written to the audit log: the database has none yet.");
     expect(dry.audit).toEqual([]);
     // The dry run applied nothing, and opening the store for it applied nothing either.
     const fresh = await cli(["migrate", "--json", "-C", root]);
@@ -243,7 +244,7 @@ describe("pathways start --no-migrate", () => {
     // Back to the schema before schema_info, as the version before left it.
     const db = new SqliteDatabase(dbFile(root));
     db.exec(
-      "drop table schema_info; drop table channel_states; drop table meta_index; drop table nodes; drop index deliveries_by_destination_key; drop index messages_by_parent; delete from kysely_migration where name in ('0007-schema-info', '0008-content-drop', '0009-channel-states', '0010-message-meta', '0011-delivery-failed-at', '0012-nodes', '0013-destination-keys', '0014-channel-links'); alter table messages drop column content_hash; alter table messages drop column content_dropped_at; alter table messages drop column meta; alter table messages drop column parent_channel; alter table messages drop column parent_message; alter table messages drop column parent_delivery; alter table messages drop column parent_generation; alter table messages drop column hops; alter table deliveries drop column failed_at; alter table deliveries drop column destination_key",
+      "drop table schema_info; drop table channel_states; drop table meta_index; drop table nodes; drop index deliveries_by_destination_key; drop index messages_by_parent; drop index messages_by_channel_settled; delete from kysely_migration where name in ('0007-schema-info', '0008-content-drop', '0009-channel-states', '0010-message-meta', '0011-delivery-failed-at', '0012-nodes', '0013-destination-keys', '0014-channel-links', '0015-settled'); alter table messages drop column content_hash; alter table messages drop column content_dropped_at; alter table messages drop column meta; alter table messages drop column parent_channel; alter table messages drop column parent_message; alter table messages drop column parent_delivery; alter table messages drop column parent_generation; alter table messages drop column hops; alter table messages drop column settled_generation; alter table deliveries drop column failed_at; alter table deliveries drop column destination_key",
     );
     db.close();
     expect((await cli(["start", "--once", "--no-migrate", "-C", root])).err).toBe(

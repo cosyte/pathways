@@ -587,6 +587,13 @@ a source took in, and absent from an archive written before channels could hand 
 
 > `readonly` **receivedAt**: `string`
 
+##### settledGeneration?
+
+> `readonly` `optional` **settledGeneration?**: `number` \| `null`
+
+The generation whose settled event was recorded, when one was and the store recorded it; null
+otherwise, and in an archive written before Pathways recorded it. Read back, it is always set.
+
 ##### size
 
 > `readonly` **size**: `number` \| `null`
@@ -661,7 +668,7 @@ const line = (entry: AuditEntry): string => `${entry.at} ${entry.actor} ${entry.
 
 ##### action
 
-> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"bulk-replay"` \| `"archive"` \| `"batch"` \| `"node-forget"`
+> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"bulk-replay"` \| `"archive"` \| `"batch"` \| `"node-forget"` \| `"engine-start"` \| `"engine-stop"` \| `"unclean-shutdown"`
 
 ##### actor
 
@@ -781,7 +788,7 @@ await store.appendAudit("noah", [{ action: "content-view", channel: "adt", messa
 
 ##### action
 
-> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"bulk-replay"` \| `"archive"` \| `"batch"` \| `"node-forget"`
+> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"bulk-replay"` \| `"archive"` \| `"batch"` \| `"node-forget"` \| `"engine-start"` \| `"engine-stop"` \| `"unclean-shutdown"`
 
 ##### channel?
 
@@ -817,7 +824,7 @@ const views = await store.auditEntries({ action: "content-view", since: "2026-11
 
 ##### action?
 
-> `readonly` `optional` **action?**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"bulk-replay"` \| `"archive"` \| `"batch"` \| `"node-forget"`
+> `readonly` `optional` **action?**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"bulk-replay"` \| `"archive"` \| `"batch"` \| `"node-forget"` \| `"engine-start"` \| `"engine-stop"` \| `"unclean-shutdown"`
 
 ##### before?
 
@@ -984,7 +991,42 @@ Where to read credentials and other settings from: `process.env` when the engine
 
 ###### Inherited from
 
-[`ExtensionContext`](#extensioncontext).[`logger`](#logger-1)
+[`ExtensionContext`](#extensioncontext).[`logger`](#logger-2)
+
+***
+
+### ChannelScriptContext
+
+What a channel's `onStart` receives: the channel's name, its configuration as each message's
+context holds it, and a logger that takes a code and numbers only. A frozen plain object.
+
+#### Example
+
+```ts
+import type { ChannelScriptContext } from "@cosyte/pathways";
+
+const channelOf = (ctx: ChannelScriptContext): string => ctx.channel;
+```
+
+#### Properties
+
+##### channel
+
+> `readonly` **channel**: `string`
+
+The channel's name.
+
+##### config
+
+> `readonly` **config**: `Readonly`\<[`TransformConfig`](#transformconfig)\>
+
+The channel's configuration, resolved when the engine (or the command) started.
+
+##### logger
+
+> `readonly` **logger**: [`ScriptLogger`](#scriptlogger)
+
+Writes a line to the engine's log: a code and numbers only.
 
 ***
 
@@ -1209,7 +1251,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-8)
+[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-9)
 
 ##### deliveryId
 
@@ -1311,7 +1353,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-16)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-17)
 
 ##### deliveryId
 
@@ -1341,7 +1383,7 @@ Absent otherwise.
 
 ##### type
 
-> `readonly` **type**: `"delivered"` \| `"received"` \| `"receive-failed"` \| `"transformed"` \| `"filtered"` \| `"transform-failed"` \| `"delivery-retry"` \| `"delivery-redirected"` \| `"delivery-rejected"` \| `"delivery-exhausted"` \| `"source-down"` \| `"source-up"` \| `"audit"`
+> `readonly` **type**: `"delivered"` \| `"received"` \| `"receive-failed"` \| `"transformed"` \| `"filtered"` \| `"transform-failed"` \| `"delivery-retry"` \| `"delivery-redirected"` \| `"delivery-rejected"` \| `"delivery-exhausted"` \| `"settled"` \| `"source-down"` \| `"source-up"` \| `"audit"`
 
 ###### Inherited from
 
@@ -1396,7 +1438,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-8)
+[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-9)
 
 ##### code
 
@@ -1515,7 +1557,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-8)
+[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-9)
 
 ##### deliveryId
 
@@ -1638,7 +1680,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-8)
+[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-9)
 
 ##### deliveryId
 
@@ -1745,7 +1787,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-8)
+[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-9)
 
 ##### code
 
@@ -2273,7 +2315,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-16)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-17)
 
 ##### messageId
 
@@ -2393,7 +2435,7 @@ Where to read credentials and other settings from: `process.env` when the engine
 
 ###### Inherited from
 
-[`ExtensionContext`](#extensioncontext).[`logger`](#logger-1)
+[`ExtensionContext`](#extensioncontext).[`logger`](#logger-2)
 
 ***
 
@@ -2637,6 +2679,7 @@ const line = (event: LifecycleEventBase): string => `${event.at} ${event.channel
 - [`FilteredEvent`](#filteredevent)
 - [`ReceivedEvent`](#receivedevent)
 - [`ReceiveFailedEvent`](#receivefailedevent)
+- [`SettledEvent`](#settledevent)
 - [`SourceDownEvent`](#sourcedownevent)
 - [`SourceUpEvent`](#sourceupevent)
 - [`TransformedEvent`](#transformedevent)
@@ -2658,7 +2701,7 @@ The channel's name.
 
 ##### type
 
-> `readonly` **type**: `"delivered"` \| `"received"` \| `"receive-failed"` \| `"transformed"` \| `"filtered"` \| `"transform-failed"` \| `"delivery-retry"` \| `"delivery-redirected"` \| `"delivery-rejected"` \| `"delivery-exhausted"` \| `"source-down"` \| `"source-up"` \| `"audit"`
+> `readonly` **type**: `"delivered"` \| `"received"` \| `"receive-failed"` \| `"transformed"` \| `"filtered"` \| `"transform-failed"` \| `"delivery-retry"` \| `"delivery-redirected"` \| `"delivery-rejected"` \| `"delivery-exhausted"` \| `"settled"` \| `"source-down"` \| `"source-up"` \| `"audit"`
 
 ***
 
@@ -3914,6 +3957,32 @@ same transaction, whichever way it goes.
 
 `Promise`\<[`RequeueResult`](#requeueresult)\>
 
+##### requeuedUnsettled()?
+
+> `optional` **requeuedUnsettled**(`channel`, `limit`): `Promise`\<`number`[]\>
+
+The ids of a channel's messages a replay or a resend left filtered or failed (no delivery
+queued) and not yet recorded as settled, lowest first, at most `limit`. A replay runs in its own
+process, so the engine reads these on every pass and settles each: such a message gets its
+settled event while the engine runs, not at its next start. `requeue` marks the new generation
+unsettled by clearing `settled_generation`, and an index on the channel, that column and the
+status serves this read, so it reads only the rows it returns. Optional, beside [settle](#settle):
+without it such a message settles at the next start.
+
+###### Parameters
+
+###### channel
+
+`string`
+
+###### limit
+
+`number`
+
+###### Returns
+
+`Promise`\<`number`[]\>
+
 ##### retryingDeliveries()
 
 > **retryingDeliveries**(`channel`): `Promise`\<`number`\>
@@ -3981,6 +4050,53 @@ Sets a channel's state; `running` removes its row. Optional, with [channelStates
 ###### Returns
 
 `Promise`\<`void`\>
+
+##### settle()?
+
+> `optional` **settle**(`messageId`): `Promise`\<[`SettledMessage`](#settledmessage) \| `undefined`\>
+
+Records that a message has settled, when it has: filtered, failed, or transformed with no
+delivery of its current generation left pending. One conditional update marks the generation
+settled, so of every caller (the engine after each outcome, a restart's sweep, a second
+engine) one gets the message's deliveries back and the rest get `undefined`; a message still
+under way, or settled already, gets `undefined` too. A replay or a resend starts a new
+generation, which settles again. Optional: without it the engine sends no settled events.
+
+###### Parameters
+
+###### messageId
+
+`number`
+
+###### Returns
+
+`Promise`\<[`SettledMessage`](#settledmessage) \| `undefined`\>
+
+##### unsettled()?
+
+> `optional` **unsettled**(`channel`, `after`, `limit`): `Promise`\<`number`[]\>
+
+The ids of a channel's messages that have ended and are not yet recorded as settled, above
+`after`, lowest first, at most `limit`: what a crash between an outcome and its settle left.
+Optional, beside [settle](#settle).
+
+###### Parameters
+
+###### channel
+
+`string`
+
+###### after
+
+`number`
+
+###### limit
+
+`number`
+
+###### Returns
+
+`Promise`\<`number`[]\>
 
 ***
 
@@ -4872,7 +4988,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-16)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-17)
 
 ##### duplicateOf
 
@@ -4989,7 +5105,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-16)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-17)
 
 ##### code
 
@@ -5388,6 +5504,81 @@ Epoch milliseconds of the next try.
 
 ***
 
+### ScriptLogger
+
+The logger a channel script receives: each line is a fixed code and numbers only, so nothing of a
+message, a patient or a secret can reach the engine's log through it. The code is lower-case
+words joined by hyphens, such as `cache-warmed` (anything else is logged as `script-log`); each
+id is a finite number under a name of a letter and then letters and digits, at most 16 of them,
+and anything else is dropped. Lines land in the engine's log as `channel-script` events, with the
+channel's name.
+
+#### Example
+
+```ts
+import type { ScriptLogger } from "@cosyte/pathways";
+
+const warmed = (logger: ScriptLogger, entries: number): void => logger.info("cache-warmed", { entries });
+```
+
+#### Methods
+
+##### error()
+
+> **error**(`code`, `ids?`): `void`
+
+###### Parameters
+
+###### code
+
+`string`
+
+###### ids?
+
+`Readonly`\<`Record`\<`string`, `number`\>\>
+
+###### Returns
+
+`void`
+
+##### info()
+
+> **info**(`code`, `ids?`): `void`
+
+###### Parameters
+
+###### code
+
+`string`
+
+###### ids?
+
+`Readonly`\<`Record`\<`string`, `number`\>\>
+
+###### Returns
+
+`void`
+
+##### warn()
+
+> **warn**(`code`, `ids?`): `void`
+
+###### Parameters
+
+###### code
+
+`string`
+
+###### ids?
+
+`Readonly`\<`Record`\<`string`, `number`\>\>
+
+###### Returns
+
+`void`
+
+***
+
 ### SecretProvider
 
 Where secrets come from: an environment variable, a file, or a secret store such as a cloud
@@ -5560,6 +5751,107 @@ The attempt found cut off, kept on the delivery so every later send of it is fla
 
 ***
 
+### SettledEvent
+
+A message has settled: its last delivery was delivered or failed for good, or it was filtered,
+or its transform failed. Sent once per message, and once more for each replay or resend, which
+settles again: the engine records it on the message's row by one conditional update, so a
+restart sends one the engine stopped before sending, and neither a restart nor a second engine
+sends one twice. It carries the message's id and where it stands with each destination, never
+content.
+
+Hooks are best effort: past 1,000 events waiting for one hook, new ones are dropped, and a hard
+stop loses those waiting. Where every settled message must be counted, read the message states
+(`pathways messages`) or the audit log rather than the events.
+
+#### Example
+
+```ts
+if (event.type === "settled" && event.destinations.some((d) => d.state === "failed")) {
+  page(`${event.channel}: message ${event.messageId} did not reach every destination`);
+}
+```
+
+#### Extends
+
+- [`LifecycleEventBase`](#lifecycleeventbase)
+
+#### Properties
+
+##### at
+
+> `readonly` **at**: `string`
+
+When it happened, as an ISO 8601 time in UTC, such as `2026-11-07T12:00:00.000Z`.
+
+###### Inherited from
+
+[`LifecycleEventBase`](#lifecycleeventbase).[`at`](#at-9)
+
+##### channel
+
+> `readonly` **channel**: `string`
+
+The channel's name.
+
+###### Inherited from
+
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-17)
+
+##### destinations
+
+> `readonly` **destinations**: readonly `object`[]
+
+Each destination in the channel's `destinations:` list, in order.
+
+##### messageId
+
+> `readonly` **messageId**: `number`
+
+##### type
+
+> `readonly` **type**: `"settled"`
+
+###### Overrides
+
+[`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-8)
+
+***
+
+### SettledMessage
+
+A message as [MessageStore.settle](#settle) found it once it settled: its status and each of its
+current generation's deliveries, by destination and status. Ids and states only.
+
+#### Example
+
+```ts
+const settled: SettledMessage = {
+  messageId: 12, channel: "adt", status: "transformed",
+  deliveries: [{ destination: 0, status: "delivered" }],
+};
+```
+
+#### Properties
+
+##### channel
+
+> `readonly` **channel**: `string`
+
+##### deliveries
+
+> `readonly` **deliveries**: readonly `object`[]
+
+##### messageId
+
+> `readonly` **messageId**: `number`
+
+##### status
+
+> `readonly` **status**: [`MessageStatus`](#messagestatus)
+
+***
+
 ### SourceConnector
 
 Brings messages in. A source that polls (a folder, an inbox) implements `poll`, which the engine
@@ -5670,7 +5962,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-16)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-17)
 
 ##### code
 
@@ -5738,7 +6030,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-16)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-17)
 
 ##### type
 
@@ -5967,7 +6259,7 @@ const message: StoredMessage | undefined = await store.message(12);
 
 ###### Inherited from
 
-[`MessageSummary`](#messagesummary).[`channel`](#channel-19)
+[`MessageSummary`](#messagesummary).[`channel`](#channel-20)
 
 ##### contentDroppedAt?
 
@@ -6189,6 +6481,13 @@ The parent link of a message another channel handed over; all null for one taken
 ##### receivedAt
 
 > `readonly` **receivedAt**: `string`
+
+##### settledGeneration?
+
+> `readonly` `optional` **settledGeneration?**: `number` \| `null`
+
+The generation whose settled event was recorded; null while none was. Unset on a store that
+does not record it.
 
 ##### size
 
@@ -6566,7 +6865,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-16)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-17)
 
 ##### messageId
 
@@ -6623,7 +6922,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-16)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-17)
 
 ##### code
 
@@ -6797,7 +7096,7 @@ const detail: AuditDetail = { status: "transformed", queued: 2 };
 
 ### AuditEventAction
 
-> **AuditEventAction** = `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"bulk-replay"` \| `"archive"` \| `"batch"` \| `"node-forget"`
+> **AuditEventAction** = `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"bulk-replay"` \| `"archive"` \| `"batch"` \| `"node-forget"` \| `"engine-start"` \| `"engine-stop"` \| `"unclean-shutdown"`
 
 Every action the audit log records, as an [AuditEvent](#auditevent)'s `action`: `search` (messages
 listed), `view` (one message's details, without content), `content-view`, `replay`, `resend`,
@@ -6807,8 +7106,11 @@ applied by `pathways migrate`), `channel-pause`, `channel-resume`, `channel-stop
 `channel-halt` and `channel-reload` (a `pathways channel` command), `verify` (a stored
 message read by `pathways verify`), `bulk-replay` (a run of `pathways replay --status failed`:
 its scope, each batch and a summary), `archive` (a sealed archive retention wrote and checked
-before changing what it holds), and `node-forget` (a stale node's row removed by
-`pathways nodes forget`). Kept equal to the audit log's own list by a test.
+before changing what it holds), `node-forget` (a stale node's row removed by
+`pathways nodes forget`), `engine-start` and `engine-stop` (`pathways start` began running or
+began to stop, with the version, the channel count and the node id), and `unclean-shutdown`
+(found at a start: the run before it left no `engine-stop`). Kept equal to the audit log's own
+list by a test.
 
 #### Example
 
@@ -7448,7 +7750,7 @@ const leases: LeaseStore | undefined = leaseStore(store);
 
 ### LifecycleEvent
 
-> **LifecycleEvent** = [`ReceivedEvent`](#receivedevent) \| [`ReceiveFailedEvent`](#receivefailedevent) \| [`TransformedEvent`](#transformedevent) \| [`FilteredEvent`](#filteredevent) \| [`TransformFailedEvent`](#transformfailedevent) \| [`DeliveredEvent`](#deliveredevent) \| [`DeliveryRetryEvent`](#deliveryretryevent) \| [`DeliveryRedirectedEvent`](#deliveryredirectedevent) \| [`DeliveryRejectedEvent`](#deliveryrejectedevent) \| [`DeliveryExhaustedEvent`](#deliveryexhaustedevent) \| [`SourceDownEvent`](#sourcedownevent) \| [`SourceUpEvent`](#sourceupevent) \| [`AuditEvent`](#auditevent)
+> **LifecycleEvent** = [`ReceivedEvent`](#receivedevent) \| [`ReceiveFailedEvent`](#receivefailedevent) \| [`TransformedEvent`](#transformedevent) \| [`FilteredEvent`](#filteredevent) \| [`TransformFailedEvent`](#transformfailedevent) \| [`DeliveredEvent`](#deliveredevent) \| [`DeliveryRetryEvent`](#deliveryretryevent) \| [`DeliveryRedirectedEvent`](#deliveryredirectedevent) \| [`DeliveryRejectedEvent`](#deliveryrejectedevent) \| [`DeliveryExhaustedEvent`](#deliveryexhaustedevent) \| [`SettledEvent`](#settledevent) \| [`SourceDownEvent`](#sourcedownevent) \| [`SourceUpEvent`](#sourceupevent) \| [`AuditEvent`](#auditevent)
 
 Any lifecycle event: switch on `type` to narrow it. Engine-wide hooks receive every channel's
 events and the audit log's; a channel's own hooks receive that channel's events.
@@ -7625,6 +7927,73 @@ const nodes: NodeStore | undefined = nodeStore(store);
 
 ***
 
+### OnStart
+
+> **OnStart** = (`ctx`) => `void` \| `Promise`\<`void`\>
+
+A channel's start script: the `onStart` its `transform.ts` may export beside the transform. It
+runs in the channel's transform worker, before the worker takes its first message, on every new
+worker: when the engine starts, on a reload, and again for the replacement worker after a
+transform runs past its timeout, runs out of memory or crashes. So it must be idempotent: safe to
+run again in a fresh worker, with nothing carried over but what it sets up anew.
+
+It may be async. A throw, or a run past its limit (the channel's `scriptTimeout`, its transform
+`timeout` unless set), is a load failure: at engine start, the start stops and says why; for a
+replacement worker, that channel stops, the health endpoint says why, and the other channels run
+on; on a reload, the reload is refused and the running transform kept.
+
+It is user code with the worker's full Node access, not a sandbox: it can read files, open
+connections and read what the worker can.
+
+#### Parameters
+
+##### ctx
+
+[`ChannelScriptContext`](#channelscriptcontext)
+
+#### Returns
+
+`void` \| `Promise`\<`void`\>
+
+#### Example
+
+```ts
+import type { OnStart } from "@cosyte/pathways";
+
+export const onStart: OnStart = async (ctx) => {
+  ctx.logger.info("lookup-loaded", { entries: 120 });
+};
+```
+
+***
+
+### OnStop
+
+> **OnStop** = () => `void` \| `Promise`\<`void`\>
+
+A channel's stop script: the `onStop` its `transform.ts` may export beside the transform. It runs
+in the transform worker once the worker's last message is done, before the worker ends: when the
+engine stops (on `SIGTERM` and `SIGINT` among the ways), for the old worker on a reload, and when
+a `pathways` command that ran the transform ends. It is cut at the channel's `scriptTimeout` (its
+transform `timeout` unless set); a throw is logged by name and code, and the worker ends either
+way. A worker ended because a transform ran past its timeout or crashed runs no `onStop`.
+
+#### Returns
+
+`void` \| `Promise`\<`void`\>
+
+#### Example
+
+```ts
+import type { OnStop } from "@cosyte/pathways";
+
+export const onStop: OnStop = async () => {
+  await Promise.resolve();
+};
+```
+
+***
+
 ### RefusalReason
 
 > **RefusalReason** = `"not-found"` \| `"changed"` \| `"pending"` \| `"not-failed"` \| `"content-dropped"`
@@ -7785,6 +8154,23 @@ export default (async (options, context) => {
     stop: () => client.close(),
   };
 }) satisfies SecretProviderFactory<{ address: string }>;
+```
+
+***
+
+### SettledDestinationState
+
+> **SettledDestinationState** = `"delivered"` \| `"failed"` \| `"filtered"` \| `"cleared"` \| `"dry-run"`
+
+Where a message stands with one destination once it has settled: `delivered` (every output it
+was given was accepted), `failed` (one failed for good, or the message's transform failed, so
+nothing was sent), `filtered` (the transform returned nothing for it), `cleared` (an operator
+cleared a failed one) or `dry-run` (recorded and never sent).
+
+#### Example
+
+```ts
+const reached = (state: SettledDestinationState): boolean => state === "delivered";
 ```
 
 ***
@@ -8193,7 +8579,7 @@ The code a message fails with when a hand-off would take it past its target's `m
 
 ### LIFECYCLE\_EVENTS
 
-> `const` **LIFECYCLE\_EVENTS**: readonly \[`"received"`, `"receive-failed"`, `"transformed"`, `"filtered"`, `"transform-failed"`, `"delivered"`, `"delivery-retry"`, `"delivery-redirected"`, `"delivery-rejected"`, `"delivery-exhausted"`, `"source-down"`, `"source-up"`, `"audit"`\]
+> `const` **LIFECYCLE\_EVENTS**: readonly \[`"received"`, `"receive-failed"`, `"transformed"`, `"filtered"`, `"transform-failed"`, `"delivered"`, `"delivery-retry"`, `"delivery-redirected"`, `"delivery-rejected"`, `"delivery-exhausted"`, `"settled"`, `"source-down"`, `"source-up"`, `"audit"`\]
 
 Every lifecycle event's `type`, in the order a message meets them. A hook entry's `events:` list in
 the YAML names some of these to receive only those.

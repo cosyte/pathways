@@ -71,7 +71,7 @@ import {
   loadTcpFunction,
 } from "../extensions/build.js";
 import { faultPoint } from "../fault-points.js";
-import type { LifecycleEvent } from "../extensions/events.js";
+import type { LifecycleEvent, SettledDestinationState } from "../extensions/events.js";
 import { HookSet } from "../extensions/hooks.js";
 import type { ChannelContext } from "../extensions/types.js";
 import { AuditLog, auditEvent } from "../operator/audit.js";
@@ -90,6 +90,7 @@ import {
   type MessageStore,
   type PendingDelivery,
   type ReceivedMessage,
+  type SettledMessage,
   type TransformOutputs,
 } from "../storage/store.js";
 import type { SourceFacts } from "../transform.js";
@@ -918,6 +919,12 @@ interface RunningChannel {
   /** The reloads, one after another. */
   reloads: Promise<unknown>;
   /**
+   * Set when a replacement worker's transform would not load (its `onStart` threw or ran past its
+   * limit, say): the channel takes no part in a pass until a reload loads it, and the health
+   * endpoint says why.
+   */
+  loadFailed: FailureSummary | undefined;
+  /**
    * What the source knew about each message it took in that waits for its transform, by message id:
    * in memory only, dropped once the message is transformed, and bounded: past the bound the oldest
    * go, and those messages are transformed with no source facts.
@@ -983,6 +990,34 @@ export interface ChannelCommandReport {
     | "state-not-stored";
   readonly changed?: readonly string[];
   readonly failure?: string;
+}
+
+/** How many unsettled messages a start, or a pass, reads at a time. */
+const SETTLE_BATCH = 500;
+
+/**
+ * Where a settled message stands with destination `index`: filtered or cleared with the message,
+ * failed when its transform failed, and otherwise by the destination's deliveries of the message's
+ * last generation: none is filtered (it was given no output), then failed, cleared, dry-run and
+ * delivered, in that order.
+ *
+ * @example
+ * ```ts
+ * settledState({ messageId: 1, channel: "adt", status: "transformed", deliveries: [] }, 0); // "filtered"
+ * ```
+ */
+export function settledState(settled: SettledMessage, index: number): SettledDestinationState {
+  if (settled.status === "filtered" || settled.status === "cleared") return settled.status;
+  if (settled.status !== "transformed") return "failed";
+  const statuses = new Set(
+    settled.deliveries.filter((d) => d.destination === index).map((d) => d.status),
+  );
+  // A destination given no output of this message was filtered for it.
+  if (statuses.size === 0) return "filtered";
+  if (statuses.has("failed")) return "failed";
+  if (statuses.has("cleared")) return "cleared";
+  if (statuses.has("dry-run")) return "dry-run";
+  return "delivered";
 }
 
 /** How long `stop` waits for a channel's work in flight, unless told otherwise. */
@@ -1128,17 +1163,9 @@ export class Engine {
       });
       this.checkContentPolicies();
       for (const config of project.channels) {
-        const worker = new ChannelWorker({
-          channel: config.name,
-          transformFile: config.transform,
-          format: config.format,
-          csv: config.csv,
-          timeoutMs: config.settings.timeoutMs,
-          memoryMb: config.settings.memoryMb,
-          // Read here, in the engine's process, so a worker never sees the environment.
-          config: resolveTransformConfig(project.config, config, env),
-          destinations: destinationSetups(config),
-        });
+        // Its configuration is read here, in the engine's process, so a worker never sees the
+        // environment.
+        const worker = this.workerFor(config, resolveTransformConfig(project.config, config, env));
         const hooks = await HookSet.open(config.hooks, {
           file: `channels/${config.name}/channel.yaml`,
           channel: config.name,
@@ -1184,6 +1211,7 @@ export class Engine {
           halt: new AbortController(),
           draining: false,
           reloads: Promise.resolve(),
+          loadFailed: undefined,
           facts: new Map(),
           receiving: new Set(),
           keys: destinationKeys(project.root, config.destinations),
@@ -1199,6 +1227,8 @@ export class Engine {
         if (channel.state === "running") await this.matchSource(channel);
         else logger.info({ event: "channel-state", channel: config.name, state: channel.state });
       }
+      // What the last run ended and did not get to settle, each settled once now.
+      for (const channel of this.channels) await this.settleLeft(channel);
     } catch (error) {
       await this.stop();
       throw error;
@@ -1317,7 +1347,7 @@ export class Engine {
     for (const channel of this.channels) {
       this.step();
       this.options.fence?.check();
-      if (channel.state === "stopped") continue;
+      if (channel.state === "stopped" || channel.loadFailed !== undefined) continue;
       const pass = this.pass(channel, polls);
       channel.busy = settled(pass);
       try {
@@ -1697,6 +1727,7 @@ export class Engine {
           messages,
           deliveries,
           ...this.connectionCounts(name),
+          ...this.transformHealth(name),
           ...this.passCounts(name),
         };
       }
@@ -1708,11 +1739,13 @@ export class Engine {
           source: source(name),
           /* v8 ignore next: as above */
           state: states[name] ?? "running",
+          ...this.transformHealth(name),
           ...this.passCounts(name),
         };
       }
     }
-    const broken = storage !== "ok" || down.size > 0;
+    const unloaded = this.channels.some((channel) => channel.loadFailed !== undefined);
+    const broken = storage !== "ok" || down.size > 0 || unloaded;
     return { status: broken ? "unavailable" : "ok", storage, channels };
   }
 
@@ -1720,6 +1753,13 @@ export class Engine {
    * How many connections a channel's MLLP or tcp source closed at accept for being over its cap, for
    * the health body; nothing for any other source. A count only, never who connected.
    */
+  private transformHealth(name: string): Pick<ChannelHealth, "transform"> {
+    const failed = this.channels.find((channel) => channel.config.name === name)?.loadFailed;
+    if (failed === undefined) return {};
+    const { kind, name: error, code } = failed;
+    return { transform: { loaded: false, kind, name: error, code } };
+  }
+
   private connectionCounts(name: string): Pick<ChannelHealth, "connections"> {
     const source = this.channels.find((channel) => channel.config.name === name)?.connectors.source;
     return source instanceof MllpSource || source instanceof TcpSource
@@ -1791,6 +1831,7 @@ export class Engine {
     }
     await this.transformAll(channel);
     await this.deliverAll(channel);
+    await this.settleRequeued(channel);
   }
 
   /**
@@ -2073,16 +2114,7 @@ export class Engine {
       if (!(error instanceof ConfigError)) throw error;
       return { channel: name, refused: "invalid-config" };
     }
-    const worker = new ChannelWorker({
-      channel: name,
-      transformFile: next.transform,
-      format: next.format,
-      csv: next.csv,
-      timeoutMs: next.settings.timeoutMs,
-      memoryMb: next.settings.memoryMb,
-      config,
-      destinations: destinationSetups(next),
-    });
+    const worker = this.workerFor(next, config);
     try {
       // A fresh worker, so the transform's module and every module it imports are read anew.
       await worker.start();
@@ -2102,9 +2134,30 @@ export class Engine {
     const old = channel.worker;
     channel.worker = worker;
     channel.config = next;
+    // A transform that would not load in a replacement worker loads again now: the channel runs.
+    channel.loadFailed = undefined;
     await old.stop();
     this.options.logger.info({ event: "channel-reloaded", channel: name });
     return { channel: name, state: channel.state };
+  }
+
+  /** A channel's transform worker, with the engine's logger for what its scripts log. */
+  private workerFor(
+    config: ChannelConfig,
+    transformConfig: Record<string, unknown>,
+  ): ChannelWorker {
+    return new ChannelWorker({
+      channel: config.name,
+      transformFile: config.transform,
+      format: config.format,
+      csv: config.csv,
+      timeoutMs: config.settings.timeoutMs,
+      scriptTimeoutMs: config.settings.scriptTimeoutMs,
+      memoryMb: config.settings.memoryMb,
+      config: transformConfig,
+      destinations: destinationSetups(config),
+      logger: this.options.logger,
+    });
   }
 
   private async startSource(channel: RunningChannel): Promise<void> {
@@ -2655,12 +2708,23 @@ export class Engine {
         await Promise.all(channel.receiving);
       }
       const source = channel.facts.get(next.id);
+      let outcome: TransformOutcome;
+      try {
+        outcome = await worker.run(next.body, {
+          // A worker that will not start is never handed the body: it stays with the message.
+          transfer: owned,
+          // Every message the engine transforms is on its first run: a replay runs elsewhere.
+          context: { messageId: next.id, attempt: 1, source, meta: {} },
+        });
+      } catch (error) {
+        /* v8 ignore next: run rejects only with TransformLoadError */
+        if (!(error instanceof TransformLoadError)) throw error;
+        // A replacement worker would not start: its transform, or its onStart, failed to load. The
+        // message keeps its facts, and waits for a reload.
+        this.markLoadFailed(channel, error.failure);
+        return;
+      }
       channel.facts.delete(next.id);
-      const outcome: TransformOutcome = await worker.run(next.body, {
-        transfer: owned,
-        // Every message the engine transforms is on its first run: a replay runs elsewhere.
-        context: { messageId: next.id, attempt: 1, source, meta: {} },
-      });
       if (outcome.ok) {
         faultPoint("after-transform-before-complete");
         const byDestination = destinationOutcomes(outcome);
@@ -2678,7 +2742,11 @@ export class Engine {
           const routed = await this.handRoutes(channel, next, transformed, routes);
           // Full: the message stays received, and is run again on a later pass, in its turn.
           if (routed === "full") return;
-          if (routed === "failed") continue;
+          if (routed === "failed") {
+            // The transform's outcome is the failure handRoutes recorded: the message ended.
+            await this.settle(channel, next.id);
+            continue;
+          }
         }
         if (owned) releaseOutputs(outcome);
         if (outcome.destinations !== undefined && byDestination !== undefined) {
@@ -2702,6 +2770,7 @@ export class Engine {
             ? { type: "filtered", ...base }
             : { type: "transformed", ...base, outputs };
         });
+        if (outputs === 0) await this.settle(channel, messageId);
       } else {
         await store.failTransform(next.id, storedFailure(outcome.failure), ...this.epoch());
         const { kind, name, code, where } = outcome.failure;
@@ -2724,6 +2793,7 @@ export class Engine {
           code,
           where,
         }));
+        await this.settle(channel, next.id);
       }
     }
   }
@@ -3051,6 +3121,78 @@ export class Engine {
   }
 
   /**
+   * Records a message as settled when it has, and sends its settled event: the store's conditional
+   * update lets one caller through, so the event goes out once. Emitting only queues, so a hook's
+   * full queue never holds this up: the event is dropped and logged, and the record stands.
+   */
+  private async settle(channel: RunningChannel, messageId: number): Promise<void> {
+    const { store } = this.options;
+    if (store.settle === undefined) return;
+    const settled = await store.settle(messageId);
+    if (settled === undefined) return;
+    const { config } = channel;
+    this.emit(channel, () => ({
+      type: "settled",
+      at: this.at(),
+      channel: config.name,
+      messageId,
+      destinations: config.destinations.map((destination, index) => ({
+        index,
+        name: destination.kind,
+        state: settledState(settled, index),
+      })),
+    }));
+  }
+
+  /**
+   * Settles what a crash or a hard stop left between a message's last outcome and its settle, for
+   * one channel, a batch at a time: each gets its settled event now, once.
+   */
+  private async settleLeft(channel: RunningChannel): Promise<void> {
+    const { store } = this.options;
+    if (store.unsettled === undefined) return;
+    const name = channel.config.name;
+    for (
+      let ids = await store.unsettled(name, 0, SETTLE_BATCH);
+      ids.length > 0;
+      ids = await store.unsettled(name, Math.max(...ids), SETTLE_BATCH)
+    ) {
+      for (const id of ids) await this.settle(channel, id);
+    }
+  }
+
+  /**
+   * Settles what a replay or a resend, run in another process, left filtered or failed: it queued
+   * no delivery, so neither the transform nor the delivery pass ends it here. One batch a pass, read
+   * through an index; the rest at the passes after.
+   */
+  private async settleRequeued(channel: RunningChannel): Promise<void> {
+    const { store } = this.options;
+    if (store.requeuedUnsettled === undefined) return;
+    for (const id of await store.requeuedUnsettled(channel.config.name, SETTLE_BATCH)) {
+      await this.settle(channel, id);
+    }
+  }
+
+  /**
+   * Stops a channel whose replacement worker would not load: the message it held stays to be
+   * transformed, nothing more of the channel runs until a reload loads it, and the other channels
+   * run on. Logged, and shown on the health endpoint, by kind, name and code.
+   */
+  private markLoadFailed(channel: RunningChannel, failure: FailureSummary): void {
+    channel.loadFailed = failure;
+    const { kind, name, code, where } = failure;
+    this.options.logger.error({
+      event: "transform-load-failed",
+      channel: channel.config.name,
+      kind,
+      name,
+      code,
+      where,
+    });
+  }
+
+  /**
    * How long ago a message's current deliveries were queued (its transform, replay or resend), when
    * `policy` has a `maxAge` and the store says; otherwise `undefined`. Read only after a failure.
    */
@@ -3104,11 +3246,14 @@ export class Engine {
    */
   private async deliverAll(channel: RunningChannel): Promise<void> {
     const deadline = new DeadlineTimer(() => this.now(), this.wait);
+    // The messages whose deliveries ended this pass, each settled once the pass is through.
+    const settling = new Set<number>();
     try {
-      await this.deliverEach(channel, deadline);
+      await this.deliverEach(channel, deadline, settling);
     } finally {
       deadline.close();
     }
+    for (const messageId of settling) await this.settle(channel, messageId);
   }
 
   /** A message's metadata, read back from the store: empty when it has none or the store keeps none. */
@@ -3118,7 +3263,11 @@ export class Engine {
     return text === undefined ? {} : (JSON.parse(text) as MessageMeta);
   }
 
-  private async deliverEach(channel: RunningChannel, deadline: DeadlineTimer): Promise<void> {
+  private async deliverEach(
+    channel: RunningChannel,
+    deadline: DeadlineTimer,
+    settling: Set<number>,
+  ): Promise<void> {
     const { config, connectors } = channel;
     const { store, logger } = this.options;
     if (!channel.held) await this.holdDeliveries(channel);
@@ -3144,6 +3293,7 @@ export class Engine {
           // the destination moves on. Nothing is handed to a connector, so nothing is opened.
           this.options.fence?.check();
           await this.markDryRun(delivery.id);
+          settling.add(delivery.messageId);
           logger.info({
             event: "dry-run",
             channel: config.name,
@@ -3157,6 +3307,8 @@ export class Engine {
           // No connector: the output is stored for the target channel with this delivery's record.
           this.options.fence?.check();
           if ((await this.handDelivery(channel, index, handTo, delivery, policy)) === "wait") break;
+          // Delivered, or failed for good: either way this delivery ended.
+          settling.add(delivery.messageId);
           continue;
         }
         // Still marked: an attempt was handed over and its outcome never recorded, so it counts.
@@ -3258,6 +3410,7 @@ export class Engine {
           const error = expired ? new DeliveryTimeout(limitMs) : thrown;
           if (error instanceof DeliveryRejected) {
             await store.failDelivery(delivery.id, `rejected: ${error.reason}`, ...this.epoch());
+            settling.add(delivery.messageId);
             logger.warn({
               event: "delivery-rejected",
               channel: config.name,
@@ -3296,6 +3449,7 @@ export class Engine {
               `exhausted (${exhausted}, ${String(attempts)} attempts): ${failure}`,
               ...this.epoch(),
             );
+            settling.add(delivery.messageId);
             logger.warn({
               event: "delivery-exhausted",
               channel: config.name,
@@ -3386,6 +3540,7 @@ export class Engine {
         } else {
           await store.markDelivered(delivery.id, ...this.epoch());
         }
+        settling.add(delivery.messageId);
         logger.info({
           event: "delivered",
           channel: config.name,

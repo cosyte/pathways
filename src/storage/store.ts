@@ -210,6 +210,11 @@ interface MessagesTable {
   parent_generation: number | null;
   /** How many hand-offs in a row brought it here; null for one a source took in. Since 0014. */
   hops: number | null;
+  /**
+   * The generation whose settled event was recorded: set by one conditional update once the
+   * message's last delivery of that generation ended, so the event is sent once. Since 0015.
+   */
+  settled_generation: number | null;
 }
 
 /**
@@ -1123,6 +1128,11 @@ export interface StoredMessageRow {
   readonly parentDelivery?: number | null | undefined;
   readonly parentGeneration?: number | null | undefined;
   readonly hops?: number | null | undefined;
+  /**
+   * The generation whose settled event was recorded; null while none was. Unset on a store that
+   * does not record it.
+   */
+  readonly settledGeneration?: number | null | undefined;
 }
 
 /**
@@ -1259,6 +1269,11 @@ export function retentionStore(store: MessageStore): RetentionStore | undefined 
  * - `batch`: a source read a file or request body as a batch: how many pieces it stored, failed
  *   and found stored already, and, for a batch failed whole, why. Counts and codes, never a name.
  * - `node-forget`: `pathways nodes forget` removed a stale node's row, or was refused.
+ * - `engine-start`: `pathways start` began running, once its channels started, with the version,
+ *   the channel count and the node id.
+ * - `engine-stop`: it began to stop, cleanly, as its sources close, with the same particulars.
+ * - `unclean-shutdown`: found at a start: the run before it (`detail.since`, its `engine-start`
+ *   entry's id) left no `engine-stop` of its own node after it, so it was killed or lost its host.
  *
  * @example
  * ```ts
@@ -1286,6 +1301,9 @@ export const AUDIT_ACTIONS = [
   "archive",
   "batch",
   "node-forget",
+  "engine-start",
+  "engine-stop",
+  "unclean-shutdown",
 ] as const;
 
 /**
@@ -1354,6 +1372,28 @@ export interface AuditEntry {
   readonly channel: string | null;
   readonly messageId: number | null;
   readonly detail: AuditDetail;
+}
+
+/**
+ * A message as {@link MessageStore.settle} found it once it settled: its status and each of its
+ * current generation's deliveries, by destination and status. Ids and states only.
+ *
+ * @example
+ * ```ts
+ * const settled: SettledMessage = {
+ *   messageId: 12, channel: "adt", status: "transformed",
+ *   deliveries: [{ destination: 0, status: "delivered" }],
+ * };
+ * ```
+ */
+export interface SettledMessage {
+  readonly messageId: number;
+  readonly channel: string;
+  readonly status: MessageStatus;
+  readonly deliveries: readonly {
+    readonly destination: number;
+    readonly status: DeliveryStatus;
+  }[];
 }
 
 /**
@@ -1511,6 +1551,31 @@ export interface MessageStore {
   ): Promise<void>;
   /** Fenced by `epoch` when it is given. */
   failDelivery(deliveryId: number, error: string, epoch?: number): Promise<void>;
+  /**
+   * Records that a message has settled, when it has: filtered, failed, or transformed with no
+   * delivery of its current generation left pending. One conditional update marks the generation
+   * settled, so of every caller (the engine after each outcome, a restart's sweep, a second
+   * engine) one gets the message's deliveries back and the rest get `undefined`; a message still
+   * under way, or settled already, gets `undefined` too. A replay or a resend starts a new
+   * generation, which settles again. Optional: without it the engine sends no settled events.
+   */
+  settle?(messageId: number): Promise<SettledMessage | undefined>;
+  /**
+   * The ids of a channel's messages that have ended and are not yet recorded as settled, above
+   * `after`, lowest first, at most `limit`: what a crash between an outcome and its settle left.
+   * Optional, beside {@link settle}.
+   */
+  unsettled?(channel: string, after: number, limit: number): Promise<number[]>;
+  /**
+   * The ids of a channel's messages a replay or a resend left filtered or failed (no delivery
+   * queued) and not yet recorded as settled, lowest first, at most `limit`. A replay runs in its own
+   * process, so the engine reads these on every pass and settles each: such a message gets its
+   * settled event while the engine runs, not at its next start. `requeue` marks the new generation
+   * unsettled by clearing `settled_generation`, and an index on the channel, that column and the
+   * status serves this read, so it reads only the rows it returns. Optional, beside {@link settle}:
+   * without it such a message settles at the next start.
+   */
+  requeuedUnsettled?(channel: string, limit: number): Promise<number[]>;
   /**
    * Takes the lease `name` for `ttlMs` when it is free or has lapsed by the database's clock,
    * raising its epoch by one, in one statement; else answers with its holder. Optional.
@@ -2212,7 +2277,50 @@ export function migrations(kind: StorageKind): Record<string, SchemaStep> {
           .execute();
       },
     },
+    "0015-settled": {
+      // Expand only: a column that may be null, which an older Pathways never reads or writes. Each
+      // message that had ended already is marked settled as it stands, so no settled event is sent
+      // for a message that ended before this step; a message an older Pathways ends afterwards
+      // gets its event at the next start of this one. To roll it back, stop every engine and drop
+      // the column.
+      tag: "expand",
+      async up(db: Kysely<unknown>): Promise<void> {
+        await db.schema.alterTable("messages").addColumn("settled_generation", "integer").execute();
+        // What the engine reads on every pass: the messages a replay left filtered or failed and
+        // not yet settled, by channel, unsettled (null) and status, so it reads only those rows.
+        await db.schema
+          .createIndex("messages_by_channel_settled")
+          .on("messages")
+          .columns(["channel", "settled_generation", "status"])
+          .execute();
+        const tables = db as unknown as Kysely<Tables>;
+        await tables
+          .updateTable("messages")
+          .set((eb) => ({ settled_generation: eb.ref("generation") }))
+          .where((eb) => ended(eb))
+          .execute();
+      },
+    },
   };
+}
+
+/**
+ * Whether a message has ended for its current generation: filtered, failed or cleared, or
+ * transformed with no delivery of that generation still pending.
+ */
+function ended(eb: MessagesBuilder): Expression<SqlBool> {
+  return eb.or([
+    eb("messages.status", "in", ["filtered", "failed", "cleared"]),
+    eb.and([eb("messages.status", "=", "transformed"), eb.not(hasCurrent(eb, ["pending"]))]),
+  ]);
+}
+
+/** Whether a message's settled event is still to be recorded for its current generation. */
+function unsettled(eb: MessagesBuilder): Expression<SqlBool> {
+  return eb.or([
+    eb("messages.settled_generation", "is", null),
+    eb("messages.settled_generation", "<>", eb.ref("messages.generation")),
+  ]);
 }
 
 /**
@@ -3414,6 +3522,69 @@ export class Store implements MessageStore, ContentStore, MetaStore {
     fenced(epoch, updated);
   }
 
+  /** Marks the message's generation settled, once: see {@link MessageStore.settle}. */
+  async settle(messageId: number): Promise<SettledMessage | undefined> {
+    // One transaction, the update first: it holds the message's row (on SQLite the write lock), so
+    // a replay cannot land between it and the reads, which see the generation it settled.
+    return await this.db.transaction().execute(async (tx) => {
+      const updated = await tx
+        .updateTable("messages")
+        .set((eb) => ({ settled_generation: eb.ref("messages.generation") }))
+        .where("id", "=", messageId)
+        .where((eb) => eb.and([ended(eb), unsettled(eb)]))
+        .executeTakeFirst();
+      if (updated.numUpdatedRows === 0n) return undefined;
+      const message = await tx
+        .selectFrom("messages")
+        .select(["channel", "status", "generation"])
+        .where("id", "=", messageId)
+        .executeTakeFirst();
+      /* v8 ignore next: the row was just updated in this transaction */
+      if (message === undefined) return undefined;
+      const deliveries = await tx
+        .selectFrom("deliveries")
+        .select(["destination", "status"])
+        .where("message_id", "=", messageId)
+        .where("generation", "=", message.generation)
+        .orderBy("id")
+        .execute();
+      return {
+        messageId,
+        channel: message.channel,
+        status: readStatus(message.status),
+        deliveries: deliveries.map((row) => ({ destination: row.destination, status: row.status })),
+      };
+    });
+  }
+
+  /** The ended messages of a channel not yet settled: see {@link MessageStore.unsettled}. */
+  async unsettled(channel: string, after: number, limit: number): Promise<number[]> {
+    const rows = await this.db
+      .selectFrom("messages")
+      .select("id")
+      .where("channel", "=", channel)
+      .where("id", ">", after)
+      .where((eb) => eb.and([ended(eb), unsettled(eb)]))
+      .orderBy("id")
+      .$call((query) => this.take(query, limit))
+      .execute();
+    return rows.map((row) => Number(row.id));
+  }
+
+  /** What a replay left filtered or failed and unsettled: see {@link MessageStore.requeuedUnsettled}. */
+  async requeuedUnsettled(channel: string, limit: number): Promise<number[]> {
+    const rows = await this.db
+      .selectFrom("messages")
+      .select("id")
+      .where("channel", "=", channel)
+      .where("settled_generation", "is", null)
+      .where("status", "in", ["filtered", "failed"])
+      .orderBy("id")
+      .$call((query) => this.take(query, limit))
+      .execute();
+    return rows.map((row) => Number(row.id));
+  }
+
   /**
    * Holds the channel's pending deliveries that no destination it has now was made for: see
    * {@link MessageStore.holdDeliveries}. Fenced by `epoch`: an engine that lost the lease fails
@@ -3837,6 +4008,9 @@ export class Store implements MessageStore, ContentStore, MetaStore {
             error: failure ?? null,
             updated_at: at,
             generation: eb("generation", "+", 1),
+            // The new generation is unsettled: null, which the engine's per-pass read finds by
+            // its index when this leaves the message filtered or failed.
+            settled_generation: null,
           }))
           .where("id", "=", messageId)
           .where("status", "=", expected)
@@ -4098,6 +4272,7 @@ export class Store implements MessageStore, ContentStore, MetaStore {
         parentDelivery: int64OrNull(row.parent_delivery),
         parentGeneration: row.parent_generation,
         hops: row.hops,
+        settledGeneration: row.settled_generation,
       },
       deliveries: deliveries.map((delivery) => ({
         id: Number(delivery.id),

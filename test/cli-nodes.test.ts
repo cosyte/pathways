@@ -147,7 +147,7 @@ describe("pathways start's node, on SQLite", () => {
         host: hostname(),
         pid: process.pid,
         version: VERSION,
-        schemaGeneration: 14,
+        schemaGeneration: 15,
         role: "active",
         draining: false,
         staleAfterMs: 3_000,
@@ -341,7 +341,7 @@ describe("pathways nodes forget", () => {
     expect((await cli(["migrate", "-C", root])).code).toBe(EXIT.ok);
     const older = new SqliteDatabase(db(root));
     older.exec(
-      "drop index deliveries_by_destination_key; alter table deliveries drop column destination_key; drop index messages_by_parent; alter table messages drop column parent_channel; alter table messages drop column parent_message; alter table messages drop column parent_delivery; alter table messages drop column parent_generation; alter table messages drop column hops; drop table nodes; delete from kysely_migration where name in ('0012-nodes', '0013-destination-keys', '0014-channel-links'); delete from schema_info where step in ('0012-nodes', '0013-destination-keys', '0014-channel-links')",
+      "drop index deliveries_by_destination_key; alter table deliveries drop column destination_key; drop index messages_by_parent; alter table messages drop column parent_channel; alter table messages drop column parent_message; alter table messages drop column parent_delivery; alter table messages drop column parent_generation; alter table messages drop column hops; drop index messages_by_channel_settled; alter table messages drop column settled_generation; drop table nodes; delete from kysely_migration where name in ('0012-nodes', '0013-destination-keys', '0014-channel-links', '0015-settled'); delete from schema_info where step in ('0012-nodes', '0013-destination-keys', '0014-channel-links', '0015-settled')",
     );
     older.close();
     expect(await bad()).toMatchObject({ code: EXIT.usage, out: "", err: rule });
