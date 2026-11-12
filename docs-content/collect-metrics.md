@@ -34,8 +34,9 @@ curl --cacert certs/ca.pem -H "Authorization: Bearer $PATHWAYS_HEALTH_TOKEN" htt
 The answer's `Content-Type` is `application/openmetrics-text; version=1.0.0; charset=utf-8`, and the
 text ends with `# EOF`.
 
-A health endpoint with `plaintext: true` and `auth: none` can be read by anyone who can reach its
-port, so it answers `/metrics` with 403, and `pathways start` logs `metrics-refused`. Give it a token,
+A health endpoint with `auth: none` and no `tls.ca` can be read by anyone who can reach its port,
+over plaintext or TLS alike, so it answers `/metrics` with 403, and `pathways start` logs
+`metrics-refused`. Give it a token,
 or, on a network only your collector can reach, say so in the file:
 
 ```yaml title="pathways.yaml"
@@ -66,8 +67,9 @@ scrape_configs:
       - targets: ["pathways-1.internal.example:9090", "pathways-2.internal.example:9090"]
 ```
 
-Each scrape makes four counting reads of the database per channel for the store gauges, and
-`pathways_store_latency_seconds` reports how long they took.
+One set of store gauges costs four counting reads of the database per channel, and
+`pathways_store_latency_seconds` reports how long they took. A set serves every scrape of the next 5
+seconds, so several collectors, or one that retries, read the database once.
 
 ## Read them right
 
@@ -77,8 +79,8 @@ Each scrape makes four counting reads of the database per channel for the store 
   which handle the reset a restart makes.
 - **Store gauges are the database's.** `pathways_queue_depth`,
   `pathways_oldest_pending_age_seconds`, `pathways_deliveries_retrying`,
-  `pathways_deliveries_failed` and `pathways_messages_failed` are read from the database at each
-  scrape, so they survive a restart, and every node on the same database reports the same values.
+  `pathways_deliveries_failed` and `pathways_messages_failed` are read from the database (at most
+  once every 5 seconds), so they survive a restart, and every node on the same database reports the same values.
   Take `max` over nodes, never `sum`.
 - **A standby serves no gauges.** Until it takes the engine lease, a standby
   (`pathways start --standby`) serves its counters, all 0, and nothing else.

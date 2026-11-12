@@ -73,6 +73,7 @@ import {
   channelStateStore,
   type AuditAction,
   type ChannelRunState,
+  type DestinationQueue,
   type MessageStore,
   type ReceivedMessage,
 } from "../storage/store.js";
@@ -80,7 +81,13 @@ import type { SourceFacts } from "../transform.js";
 import { ChannelWorker, TransformLoadError, type TransformOutcome } from "./channel-worker.js";
 import type { EngineFence } from "./lease.js";
 import { channelStatus, type ChannelHealth, type EngineHealth, type PassCounts } from "./health.js";
-import type { ChannelGauges, DeliveryOutcome, EngineMetrics, MetricsSnapshot } from "./metrics.js";
+import {
+  METRICS_STORE_CACHE_MS,
+  type ChannelGauges,
+  type DeliveryOutcome,
+  type EngineMetrics,
+  type MetricsSnapshot,
+} from "./metrics.js";
 import { formatTable, type FailureSummary } from "./worker-entry.js";
 import { DeadlineTimer } from "./deadline.js";
 import { nextPollAt, pollOf } from "./schedule.js";
@@ -789,6 +796,21 @@ export interface EngineOptions {
   readonly metrics?: EngineMetrics;
 }
 
+/**
+ * One set of the store reads behind `/metrics`: each channel's failed messages and its
+ * destinations' queues, in the project's channel order, or undefined when a read failed; and how
+ * long the reads took, in seconds.
+ */
+interface StoreGauges {
+  readonly channels:
+    | readonly {
+        readonly messagesFailed: number;
+        readonly queues?: readonly DestinationQueue[] | undefined;
+      }[]
+    | undefined;
+  readonly latencySeconds: number;
+}
+
 interface RunningChannel {
   /** Replaced by a reload, between messages. */
   config: ChannelConfig;
@@ -972,6 +994,8 @@ export class Engine {
   private steppedAt: number | undefined;
   /** The last storage check for readiness: when it started and what it found. */
   private storageCheck: { readonly at: number; readonly reachable: Promise<boolean> } | undefined;
+  /** The last set of store reads for `/metrics`: when it started and what it found. */
+  private metricsRead: { readonly at: number; readonly reading: Promise<StoreGauges> } | undefined;
   /** The engine-wide hooks, from `pathways.yaml`, once started. */
   private hooks: HookSet | undefined;
   /** The environment the engine started with: a reload reads the transform's configuration from it. */
@@ -1626,10 +1650,12 @@ export class Engine {
    * The gauges a scrape of `/metrics` reads: whether each channel's source is up, the connections
    * an MLLP or tcp source holds, and from the store, each channel's failed messages and each
    * destination's queue. How long the store took is measured over all its reads; when one fails,
-   * the store reads as down and its gauges are left out. Counts and times, never content.
+   * the store reads as down and its gauges are left out. The store is read at most once every
+   * {@link METRICS_STORE_CACHE_MS}, however often or however many at once this is asked; the
+   * sources and the age of each queue are read at each call. Counts and times, never content.
    */
   async metricsSnapshot(): Promise<MetricsSnapshot> {
-    const { project, store } = this.options;
+    const { project } = this.options;
     const down = new Set(this.channels.filter(isDown).map((c) => c.config.name));
     const live = (name: string): Omit<ChannelGauges, "messagesFailed" | "destinations"> => {
       const source = this.channels.find((c) => c.config.name === name)?.connectors.source;
@@ -1641,49 +1667,66 @@ export class Engine {
           : {}),
       };
     };
+    const at = this.monotonic();
+    if (this.metricsRead === undefined || at - this.metricsRead.at >= METRICS_STORE_CACHE_MS) {
+      this.metricsRead = { at, reading: this.readStoreGauges() };
+    }
+    const read = await this.metricsRead.reading;
+    const store = { up: read.channels !== undefined, latencySeconds: read.latencySeconds };
+    if (read.channels === undefined) {
+      return { store, channels: project.channels.map(({ name }) => live(name)) };
+    }
+    const now = this.now();
+    const channels = project.channels.map(({ name, destinations }, index): ChannelGauges => {
+      const { messagesFailed, queues } = read.channels?.[index] ?? { messagesFailed: 0 };
+      return {
+        ...live(name),
+        messagesFailed,
+        ...(queues === undefined
+          ? {}
+          : {
+              destinations: destinations.map((_, destination) => {
+                const queue = queues.find((q) => q.destination === destination);
+                const since =
+                  queue?.oldestPendingSince === undefined
+                    ? Number.NaN
+                    : Date.parse(queue.oldestPendingSince);
+                return {
+                  destination,
+                  queueDepth: queue?.pending ?? 0,
+                  oldestPendingAgeSeconds: Number.isNaN(since)
+                    ? 0
+                    : Math.max(0, now - since) / 1000,
+                  retrying: queue?.retrying ?? 0,
+                  failed: queue?.failed ?? 0,
+                };
+              }),
+            }),
+      };
+    });
+    return { store, channels };
+  }
+
+  /**
+   * One set of the store reads behind {@link metricsSnapshot}, in the project's channel order, and
+   * how long they took. Never rejects: a failed read leaves `channels` undefined.
+   */
+  private async readStoreGauges(): Promise<StoreGauges> {
+    const { project, store } = this.options;
     const began = this.monotonic();
     try {
       const channels = await Promise.all(
-        project.channels.map(async ({ name, destinations }): Promise<ChannelGauges> => {
+        project.channels.map(async ({ name }) => {
           const [messages, queues] = await Promise.all([
             store.messageCounts(name),
             store.destinationQueues?.(name),
           ]);
-          const now = this.now();
-          return {
-            ...live(name),
-            messagesFailed: messages.failed,
-            ...(queues === undefined
-              ? {}
-              : {
-                  destinations: destinations.map((_, destination) => {
-                    const queue = queues.find((q) => q.destination === destination);
-                    const since =
-                      queue?.oldestPendingSince === undefined
-                        ? Number.NaN
-                        : Date.parse(queue.oldestPendingSince);
-                    return {
-                      destination,
-                      queueDepth: queue?.pending ?? 0,
-                      oldestPendingAgeSeconds: Number.isNaN(since)
-                        ? 0
-                        : Math.max(0, now - since) / 1000,
-                      retrying: queue?.retrying ?? 0,
-                      failed: queue?.failed ?? 0,
-                    };
-                  }),
-                }),
-          };
+          return { messagesFailed: messages.failed, queues };
         }),
       );
-      const latencySeconds = Math.max(0, this.monotonic() - began) / 1000;
-      return { store: { up: true, latencySeconds }, channels };
+      return { channels, latencySeconds: Math.max(0, this.monotonic() - began) / 1000 };
     } catch {
-      const latencySeconds = Math.max(0, this.monotonic() - began) / 1000;
-      return {
-        store: { up: false, latencySeconds },
-        channels: project.channels.map(({ name }) => live(name)),
-      };
+      return { channels: undefined, latencySeconds: Math.max(0, this.monotonic() - began) / 1000 };
     }
   }
 

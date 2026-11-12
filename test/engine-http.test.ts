@@ -573,4 +573,47 @@ describe("health", () => {
     expect((await send(port, { method: "GET", ca: certs.ca })).status).toBe(401);
     expect(events.at(-1)).toMatchObject({ event: "http-refused", endpoint: "health", status: 401 });
   });
+
+  it("answers /metrics 403 on a TLS listener with auth: none and no client CA, unless it opts in", async () => {
+    const { logger, events } = captureLogger();
+    const report = (): Promise<HealthReport> =>
+      Promise.resolve({ ...IDENTITY, status: "ok", storage: "ok", channels: {} });
+    const scrape = (): Promise<string> => Promise.resolve("# EOF\n");
+    const listener = (allowUnauthenticated: boolean) =>
+      healthEndpointFor(
+        {
+          host: "127.0.0.1",
+          port: 0,
+          tls: { cert: certs.files.serverCert, key: certs.files.serverKey, ca: undefined },
+          plaintext: false,
+          auth: { kind: "none" },
+          metrics: { enabled: true, allowUnauthenticated },
+        },
+        report,
+        {},
+        logger,
+        undefined,
+        scrape,
+      );
+    const refusing = listener(false);
+    await refusing.start();
+    closers.push(() => refusing.stop());
+    expect(events).toContainEqual(
+      expect.objectContaining({ level: 40, event: "metrics-refused", endpoint: "health" }),
+    );
+    const refused = await send(refusing.port ?? 0, {
+      method: "GET",
+      path: "/metrics",
+      ca: certs.ca,
+    });
+    expect(refused.status).toBe(403);
+    expect(refused.body).toContain("health.metrics.allowUnauthenticated");
+
+    const opted = listener(true);
+    await opted.start();
+    closers.push(() => opted.stop());
+    const served = await send(opted.port ?? 0, { method: "GET", path: "/metrics", ca: certs.ca });
+    expect(served.status).toBe(200);
+    expect(served.body).toBe("# EOF\n");
+  });
 });

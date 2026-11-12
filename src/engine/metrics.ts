@@ -20,6 +20,18 @@ export const OPENMETRICS_CONTENT_TYPE =
   "application/openmetrics-text; version=1.0.0; charset=utf-8";
 
 /**
+ * How long one set of the store reads behind the gauges serves the scrapes that follow it: 5
+ * seconds. Concurrent or rapid scrapes cost one set of reads; a scrape every 15 seconds or more,
+ * as collectors are usually set, reads the store each time.
+ *
+ * @example
+ * ```ts
+ * const fresh = now - readAt < METRICS_STORE_CACHE_MS;
+ * ```
+ */
+export const METRICS_STORE_CACHE_MS = 5_000;
+
+/**
  * The type of one metric family, as OpenMetrics names it.
  *
  * @example
@@ -196,14 +208,14 @@ export const METRIC_FAMILIES: readonly MetricFamily[] = [
     name: "pathways_store_up",
     type: "gauge",
     unit: undefined,
-    help: "1 when the store answered this scrape's reads, 0 when it did not.",
+    help: "1 when the store answered its latest reads, 0 when it did not.",
     labels: [],
   },
   {
     name: "pathways_store_latency_seconds",
     type: "gauge",
     unit: "seconds",
-    help: "How long the store took to answer this scrape's reads.",
+    help: "How long the store took to answer its latest reads.",
     labels: [],
   },
 ];

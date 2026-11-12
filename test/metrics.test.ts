@@ -21,6 +21,7 @@ import {
   EngineMetrics,
   escapeLabel,
   METRIC_FAMILIES,
+  METRICS_STORE_CACHE_MS,
   OPENMETRICS_CONTENT_TYPE,
   type MetricsSnapshot,
 } from "../src/engine/metrics.js";
@@ -400,7 +401,7 @@ describe("metricsMode and healthEndpointFor", () => {
   });
   const on = { enabled: true, allowUnauthenticated: false };
 
-  it("serves behind a token, refuses a plaintext listener without one unless it opts in", () => {
+  it("serves behind a token, refuses a listener without one unless it opts in", () => {
     expect(metricsMode(listener({ metrics: on }))).toBe("serve");
     expect(metricsMode(listener({ metrics: on, auth: { kind: "none" } }))).toBe("refuse");
     expect(
@@ -420,10 +421,25 @@ describe("metricsMode and healthEndpointFor", () => {
           tls: { cert: "c.pem", key: "k.pem", ca: undefined },
         }),
       ),
-    ).toBe("serve");
+    ).toBe("refuse");
     expect(metricsMode(listener({ metrics: { enabled: false, allowUnauthenticated: true } }))).toBe(
       "off",
     );
+  });
+
+  it("refuses a TLS listener with auth: none and no client CA, as a plaintext one, unless it opts in", () => {
+    const tls = { cert: "c.pem", key: "k.pem", ca: undefined };
+    const open = { plaintext: false, auth: { kind: "none" } as const, tls };
+    expect(metricsMode(listener({ metrics: on, ...open }))).toBe("refuse");
+    expect(
+      metricsMode(listener({ metrics: { enabled: true, allowUnauthenticated: true }, ...open })),
+    ).toBe("serve");
+    // Mutual TLS checks who connects, so it serves without a token.
+    expect(metricsMode(listener({ metrics: on, ...open, tls: { ...tls, ca: "ca.pem" } }))).toBe(
+      "serve",
+    );
+    // A token on TLS serves.
+    expect(metricsMode(listener({ metrics: on, plaintext: false, tls }))).toBe("serve");
   });
 
   it("answers /metrics with the health body when metrics are off", async () => {
@@ -542,6 +558,7 @@ for (const database of TEST_DATABASES) {
         store,
         logger,
         now: () => clock.now,
+        monotonic: () => clock.now,
         metrics,
         connectors: async (channel: ChannelConfig): Promise<ChannelConnectors> => {
           const built = await connectorsFor(channel, { now: () => clock.now, logger, env: {} });
@@ -624,6 +641,7 @@ for (const database of TEST_DATABASES) {
 
       await store.close();
       stores.splice(0);
+      clock.now += METRICS_STORE_CACHE_MS;
       const down = await engine.metricsSnapshot();
       expect(down.store?.up).toBe(false);
       expect(down.channels).toEqual([{ channel: "adt", sourceUp: true }]);
@@ -677,5 +695,93 @@ describe("the engine's metrics on a store without destinationQueues", () => {
       { channel: "orders", sourceUp: true, openConnections: 0, messagesFailed: 0 },
       { channel: "results", sourceUp: false, messagesFailed: 0 },
     ]);
+  });
+});
+
+describe("the engine's metrics store reads", () => {
+  it("serve concurrent and rapid scrapes from one set of reads, for a short fixed time", async () => {
+    const root = await makeProject({
+      "channels/adt/channel.yaml": CHANNEL,
+      "channels/adt/transform.ts": LAB_TRANSFORM,
+      "channels/orders/channel.yaml": CHANNEL,
+      "channels/orders/transform.ts": LAB_TRANSFORM,
+    });
+    const project = await loadProject(root);
+    const { logger } = captureLogger();
+    const store = new MemoryStore();
+    let reads = 0;
+    const clock = { now: Date.UTC(2026, 10, 10, 12, 0, 0), monotonic: 1_000 };
+    const mllp = new MllpSource({ host: "127.0.0.1", port: 0, tls: undefined });
+    const engine = new Engine({
+      project,
+      store,
+      logger,
+      now: () => clock.now,
+      monotonic: () => clock.monotonic,
+      metrics: new EngineMetrics(),
+      connectors: (channel: ChannelConfig): ChannelConnectors => ({
+        source:
+          channel.name === "adt"
+            ? mllp
+            : { start: () => Promise.reject(new Error("synthetic: cannot listen")) },
+        destinations: [failing, failing],
+      }),
+    });
+    engines.push(engine);
+    await engine.start();
+    const counts = store.messageCounts.bind(store);
+    store.messageCounts = (channel: string) => {
+      reads += 1;
+      return counts(channel);
+    };
+
+    // Two channels: one set of reads is two.
+    const [first, second] = await Promise.all([engine.metricsSnapshot(), engine.metricsSnapshot()]);
+    expect(reads).toBe(2);
+    expect(second).toEqual(first);
+    clock.monotonic += METRICS_STORE_CACHE_MS - 1;
+    const rapid = await engine.metricsSnapshot();
+    expect(reads).toBe(2);
+    // The gauges that cost no read are still read at each scrape.
+    expect(rapid.channels.map((c) => c.sourceUp)).toEqual([true, false]);
+
+    clock.monotonic += 1;
+    await engine.metricsSnapshot();
+    expect(reads).toBe(4);
+  });
+
+  it("keeps the store reading down for the same time, so a down store is not read on every scrape", async () => {
+    const root = await makeProject({
+      "channels/adt/channel.yaml": CHANNEL,
+      "channels/adt/transform.ts": LAB_TRANSFORM,
+    });
+    const project = await loadProject(root);
+    const { logger } = captureLogger();
+    const store = new MemoryStore();
+    let reads = 0;
+    const clock = { monotonic: 1_000 };
+    const engine = new Engine({
+      project,
+      store,
+      logger,
+      monotonic: () => clock.monotonic,
+      metrics: new EngineMetrics(),
+      connectors: (): ChannelConnectors => ({
+        source: { start: () => Promise.resolve() },
+        destinations: [failing, failing],
+      }),
+    });
+    engines.push(engine);
+    await engine.start();
+    store.messageCounts = () => {
+      reads += 1;
+      return Promise.reject(new Error("synthetic: store down"));
+    };
+    expect((await engine.metricsSnapshot()).store?.up).toBe(false);
+    expect((await engine.metricsSnapshot()).store?.up).toBe(false);
+    expect(reads).toBe(1);
+    clock.monotonic += METRICS_STORE_CACHE_MS;
+    await engine.metricsSnapshot();
+    expect(reads).toBe(2);
   });
 });

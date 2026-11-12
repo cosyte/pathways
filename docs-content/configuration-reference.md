@@ -236,9 +236,9 @@ is not set. See [Check status and health](./check-status-and-health.md).
 | `metrics.allowUnauthenticated` | boolean | `false` |
 
 `GET /metrics` serves the [metrics](#metrics) in the OpenMetrics text format, behind the endpoint's
-token or mutual TLS. On a listener with `plaintext: true` and `auth: none`, where anyone who can
-reach the port could read it, `/metrics` answers 403 and `metrics-refused` is logged at start,
-unless `metrics.allowUnauthenticated` is `true`. With `metrics.enabled: false`, `/metrics` answers
+token or mutual TLS. On a listener with `auth: none` and no `tls.ca`, plaintext or TLS alike, where
+anyone who can reach the port could read it, `/metrics` answers 403 and `metrics-refused` is logged
+at start, unless `metrics.allowUnauthenticated` is `true`. With `metrics.enabled: false`, `/metrics` answers
 with the health body, as any other path does. See [Collect metrics](./collect-metrics.md).
 
 #### Metrics
@@ -248,7 +248,9 @@ contract: alarms and dashboards read them, so a name is never renamed or reused,
 labels are only `channel` (the channel's name), `destination` (its index in `destinations:`) and
 `outcome` (one of the values listed), never a message id, a metadata key, an error's text or a host.
 A counter starts at 0 when the engine starts, with its `_created` time; a gauge marked _store_ is
-read from the database at each scrape, so it holds across a restart and is the same on every node.
+read from the database, so it holds across a restart and is the same on every node. One set of the
+database reads serves the scrapes of the next 5 seconds, so concurrent or rapid scrapes cost one set
+of reads; the other gauges, and the age of the oldest pending delivery, are read at each scrape.
 
 | Name                                  | Type      | Labels                        | What it is                                                                                                                                         |
 | ------------------------------------- | --------- | ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -263,12 +265,12 @@ read from the database at each scrape, so it holds across a restart and is the s
 | `pathways_messages_failed`            | gauge     | channel                       | _store_: messages that failed and are not cleared                                                                                                  |
 | `pathways_source_up`                  | gauge     | channel                       | 1 while the source listens or polls, 0 while it cannot                                                                                             |
 | `pathways_open_connections`           | gauge     | channel                       | connections an MLLP or tcp source holds open; absent for any other source                                                                          |
-| `pathways_store_up`                   | gauge     | none                          | 1 when the database answered this scrape's reads, 0 when it did not                                                                                |
-| `pathways_store_latency_seconds`      | gauge     | none                          | how long the database took to answer this scrape's reads                                                                                           |
+| `pathways_store_up`                   | gauge     | none                          | 1 when the database answered its latest reads, 0 when it did not                                                                                   |
+| `pathways_store_latency_seconds`      | gauge     | none                          | how long the database took to answer its latest reads                                                                                              |
 
 The histogram's samples are `_bucket` (with `le`), `_count`, `_sum` and `_created`, and each
 counter's are `_total` and `_created`. When the database cannot be read, `pathways_store_up` is 0
-and the _store_ gauges are left out of that scrape. A standby serves its counters, all 0, and no
+and the _store_ gauges are left out until a read 5 seconds later answers. A standby serves its counters, all 0, and no
 gauges until it takes the engine lease. The _store_ gauges for a destination come from the built-in
 stores; a custom store serves them when it has `destinationQueues`.
 

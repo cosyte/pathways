@@ -155,9 +155,9 @@ export interface HealthEndpointOptions {
   readonly metrics?: (() => Promise<string>) | "refused";
 }
 
-/** Why `/metrics` is refused on a plaintext listener without authentication. */
+/** Why `/metrics` is refused on a listener that checks no one. */
 const METRICS_REFUSED =
-  "metrics need authentication on a plaintext listener: set health.auth, or health.metrics.allowUnauthenticated: true";
+  "metrics need authentication: set health.auth or health.tls.ca, or health.metrics.allowUnauthenticated: true";
 
 /**
  * The health endpoint: `GET` (or `HEAD`) on any path answers 200 with a {@link HealthReport}, or
@@ -228,9 +228,9 @@ export class HealthEndpoint {
 }
 
 /**
- * What `/metrics` on the health endpoint `config` describes does: `serve`, `refuse` (a plaintext
- * listener without authentication that did not opt in with `metrics.allowUnauthenticated`), or
- * `off` (`metrics.enabled: false`).
+ * What `/metrics` on the health endpoint `config` describes does: `serve`, `refuse` (a listener
+ * that checks no one, `auth: none` with no client CA, plaintext or TLS alike, that did not opt in
+ * with `metrics.allowUnauthenticated`), or `off` (`metrics.enabled: false`).
  *
  * @example
  * ```ts
@@ -239,7 +239,8 @@ export class HealthEndpoint {
  */
 export function metricsMode(config: HealthConfig): "serve" | "refuse" | "off" {
   if (!config.metrics.enabled) return "off";
-  const open = config.plaintext && config.auth.kind === "none" && config.tls?.ca === undefined;
+  // TLS without a client CA encrypts but lets anyone who reaches the port read, as plaintext does.
+  const open = config.auth.kind === "none" && config.tls?.ca === undefined;
   return open && !config.metrics.allowUnauthenticated ? "refuse" : "serve";
 }
 

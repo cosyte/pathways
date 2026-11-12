@@ -2109,13 +2109,13 @@ const healthMetrics = z
       .boolean()
       .meta({
         description:
-          "Serve /metrics on a listener with plaintext: true and auth: none, where anyone who can reach the port reads it. Default false: such a listener answers /metrics with 403. Not read from the environment.",
+          "Serve /metrics on a listener with auth: none and no tls.ca, plaintext or TLS, where anyone who can reach the port reads it. Default false: such a listener answers /metrics with 403. Not read from the environment.",
       })
       .optional(),
   })
   .meta({
     description:
-      "GET /metrics: on by default, behind the endpoint's token or mutual TLS. Refused on a plaintext listener without authentication unless allowUnauthenticated is true.",
+      "GET /metrics: on by default, behind the endpoint's token or mutual TLS. Refused on a listener that checks no one (auth: none and no tls.ca) unless allowUnauthenticated is true.",
   });
 
 /** The health endpoint: a listener, with its metrics. */
