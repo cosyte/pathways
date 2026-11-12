@@ -23,18 +23,22 @@ export const STARTER_KEY_FILE = ".pathways/dev.key";
 /**
  * Template files whose name in the package differs from the name they are written under. npm never
  * packs a file named `.gitignore`, so the template carries it without the dot, and `.dockerignore`
- * the same way, so the package's own tooling never reads either as its own.
+ * and `.env.example` the same way, so the package's own tooling never reads one as its own.
  */
 const RENAMES: Readonly<Record<string, string>> = {
   gitignore: ".gitignore",
   dockerignore: ".dockerignore",
+  "env.example": ".env.example",
 };
 
-/** Replaced with this package's version: in `package.json`, and in the `Dockerfile`'s image tag. */
+/**
+ * Replaced with this package's version: in `package.json`, in the `Dockerfile`'s image tag, and in
+ * `.env.example`'s `PATHWAYS_VERSION`, the image tag `compose.yaml` runs.
+ */
 const VERSION_PLACEHOLDER = "{{pathwaysVersion}}";
 
 /** The starter files that carry {@link VERSION_PLACEHOLDER}. */
-const VERSIONED: ReadonlySet<string> = new Set(["package.json", "Dockerfile"]);
+const VERSIONED: ReadonlySet<string> = new Set(["package.json", "Dockerfile", ".env.example"]);
 
 /** Why `pathways init` stopped: the target is not empty, is not a folder, or could not be used. */
 export type InitFailure = "not-empty" | "not-a-folder" | "io";
@@ -91,7 +95,8 @@ export interface InitOptions {
 /**
  * Writes the starter project into `target`: `pathways.yaml`, the `adt-to-lab` channel with its
  * transform and synthetic test messages, a `.gitignore`, a `package.json`, a `Dockerfile` and
- * `.dockerignore` that build the project's own image on this version's image, and a freshly generated
+ * `.dockerignore` that build the project's own image on this version's image, a `compose.yaml` and
+ * `.env.example` that run this version's image beside PostgreSQL, and a freshly generated
  * development master key at {@link STARTER_KEY_FILE}, so stored messages are encrypted from the
  * first run. On Linux and macOS the key and its folder are readable by their owner only (modes 0600
  * and 0700); on Windows a mode sets only the read-only attribute, and the project folder's access

@@ -36,6 +36,7 @@
         "set-message-retention",
         "upgrade-pathways",
         "run-in-docker",
+        "run-with-docker-compose",
         "deploy-the-image"
       ]
     },

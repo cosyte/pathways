@@ -115,6 +115,7 @@ there.
 - `src/`: the engine, its connectors, storage, encryption and the `pathways` command.
 - `test/`: the test suites.
 - `templates/starter/`: the starter project `pathways init` writes.
+- `examples/docker-compose/`: the engine under Docker Compose, beside PostgreSQL.
 - `docs-content/`: the documentation pages.
 - `bench/`: the benchmark suites.
 - `scripts/`: the repository's own scripts.
@@ -135,6 +136,10 @@ The pages live in this repository's
   before you run Pathways for real.
 - [The security model](https://github.com/cosyte/pathways/blob/main/docs-content/security-model.md):
   what Pathways does to protect the data it moves and stores, and what stays with you.
+- [Run Pathways with Docker Compose](https://github.com/cosyte/pathways/blob/main/docs-content/run-with-docker-compose.md):
+  the engine beside PostgreSQL, from
+  [`examples/docker-compose/`](https://github.com/cosyte/pathways/tree/main/examples/docker-compose),
+  with a synthetic message sent through.
 - [Testing and quality](https://github.com/cosyte/pathways/blob/main/docs-content/testing-and-quality.md)
   and [Performance](https://github.com/cosyte/pathways/blob/main/docs-content/performance.md).
 

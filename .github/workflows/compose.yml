@@ -1,0 +1,98 @@
+name: Compose
+
+# The Docker Compose example in examples/docker-compose/, run as docs-content/run-with-docker-compose.md
+# walks through it: the image built from the Dockerfile and tagged as the published image of this
+# version, .env filled in from .env.example with throwaway secrets made for the run, the example
+# started and waited on until both services are healthy, the channel's synthetic A01 copied into the
+# folder its source reads, and then the checks that the engine stored it as delivered and wrote the
+# output the channel's test expects. Nothing is pushed to a registry and nothing is published to the
+# host.
+#
+# Its own workflow, beside ci.yml rather than inside it, so it never changes the contexts the shared
+# `ci` job reports. No ruleset requires it yet; its context is `compose`.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  compose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: examples/docker-compose
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Built locally and loaded into the runner's Docker only, under the name compose.yaml pulls,
+      # so Compose finds it and pulls nothing.
+      - name: Build the image as the published image of this version
+        working-directory: .
+        run: |
+          version="$(jq -r .version package.json)"
+          echo "PATHWAYS_VERSION=$version" >> "$GITHUB_ENV"
+          docker build --tag "ghcr.io/cosyte/pathways:$version" .
+
+      # Throwaway secrets, made for this run and gone with the runner. Each is masked in the log.
+      - name: Fill in .env from .env.example
+        run: |
+          password="$(openssl rand -hex 24)"
+          key="$(openssl rand -base64 32)"
+          echo "::add-mask::$password"
+          echo "::add-mask::$key"
+          cp .env.example .env
+          sed -i \
+            -e "s|^PATHWAYS_VERSION=$|PATHWAYS_VERSION=$PATHWAYS_VERSION|" \
+            -e "s|^POSTGRES_PASSWORD=$|POSTGRES_PASSWORD=$password|" \
+            -e "s|^PATHWAYS_KEY=$|PATHWAYS_KEY=$key|" \
+            .env
+          grep -c -E '^(PATHWAYS_VERSION|POSTGRES_PASSWORD|PATHWAYS_KEY)=.+$' .env | grep -qx 3
+
+      - name: Start the example and wait until both services are healthy
+        run: docker compose up --detach --wait --wait-timeout 180 --pull never
+
+      - name: Send the synthetic A01 through the channel
+        run: docker compose cp channels/adt-to-lab/tests/a01.hl7 pathways:/project/data/adt-to-lab/in/
+
+      - name: The engine stored it as delivered, and wrote what the channel's test expects
+        run: |
+          delivered=""
+          for _ in $(seq 1 60); do
+            delivered="$(docker compose exec -T pathways /nodejs/bin/node /app/dist/bin/pathways.mjs \
+              messages --channel adt-to-lab --status delivered --json)"
+            if [ "$(jq '.messages | length' <<< "$delivered")" = 1 ]; then break; fi
+            sleep 1
+          done
+          echo "delivered: $(jq -c '[.messages[] | {id, channel, state}]' <<< "$delivered")"
+          test "$(jq -r '.messages[0].state' <<< "$delivered")" = delivered
+          test "$(jq '.messages | length' <<< "$delivered")" = 1
+          docker compose cp pathways:/project/data/adt-to-lab/out "$RUNNER_TEMP/out"
+          ls "$RUNNER_TEMP/out"
+          cmp "$RUNNER_TEMP/out/1-1.hl7" channels/adt-to-lab/tests/a01.expected.hl7
+          # Stored, the inbox keeps no plaintext copy.
+          docker compose cp pathways:/project/data/adt-to-lab/in "$RUNNER_TEMP/in"
+          test -z "$(find "$RUNNER_TEMP/in" -type f)"
+
+      # The engine logs ids, counts and events, never message content.
+      - name: Show the services' state and logs
+        if: always()
+        run: |
+          docker compose ps --all
+          docker compose logs --no-color
+
+      - name: Stop the example and delete its volumes
+        if: always()
+        run: docker compose down --volumes
