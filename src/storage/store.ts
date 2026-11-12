@@ -223,6 +223,11 @@ interface DeliveriesTable {
   sending_attempt: number | null;
   /** The latest attempt found cut off: set means every later send is a possible duplicate. Since 0005. */
   interrupted_attempt: number | null;
+  /**
+   * The key of the destination it was made for (see {@link MessageStore.completeTransform}): null
+   * for one queued before destinations were recorded, or by a caller that gave no keys. Since 0011.
+   */
+  destination_key: string | null;
 }
 
 /** The audit log. Rows are only ever inserted: nothing here updates or deletes one. Since 0003. */
@@ -420,7 +425,14 @@ export interface StoredMessage extends MessageSummary {
  */
 export interface StoredDelivery {
   readonly id: number;
+  /** The destination's place in the channel's list when the delivery was made, from 0. */
   readonly destination: number;
+  /**
+   * The key of the destination it was made for, which a destination keeps when others are added,
+   * removed or moved; undefined for one queued before destinations were recorded, or by a caller
+   * that gave no keys. See {@link MessageStore.completeTransform}.
+   */
+  readonly destinationKey?: string | undefined;
   /**
    * Which output of the transform this is, from 0; -1 for a delivery with no output, which its
    * destination's own transform filtered (`filtered`) or failed (`failed`, then `cleared`).
@@ -545,6 +557,12 @@ export interface NextDeliveryOptions {
    * with `retry.rotate: true`. A store that ignores it keeps that destination in order.
    */
   readonly dueBy?: number | undefined;
+  /**
+   * Only a delivery made for the destination with this key, wherever it stands in the list now
+   * (see {@link MessageStore.completeTransform}); `destination` is then not read. The engine always
+   * gives it. A store that ignores it finds deliveries by place, as before keys.
+   */
+  readonly key?: string | undefined;
 }
 
 /**
@@ -752,6 +770,33 @@ export function notStoredOf(byDestination: readonly DestinationOutcome[] | undef
 }
 
 /**
+ * A destination named by its key rather than its place, for {@link MessageStore.outputs}.
+ *
+ * @example
+ * ```ts
+ * const theirs = await store.outputs(12, { key: keys[1] });
+ * ```
+ */
+export interface DestinationKey {
+  readonly key: string;
+}
+
+/**
+ * What {@link MessageStore.holdDeliveries} held: `unknown`, pending deliveries queued before
+ * destinations were recorded, now failed; `gone`, pending deliveries made for a destination the
+ * channel no longer has, still pending.
+ *
+ * @example
+ * ```ts
+ * const held: HeldDeliveries = { unknown: 0, gone: 2 };
+ * ```
+ */
+export interface HeldDeliveries {
+  readonly unknown: number;
+  readonly gone: number;
+}
+
+/**
  * What a replay or a resend asks storage to record. Storage checks the message still stands where
  * the caller found it, and changes nothing otherwise.
  *
@@ -780,6 +825,11 @@ export interface RequeueRequest {
    * `notStored` gets no delivery; how many were is `notStored` in the result and its audit entry.
    */
   readonly byDestination?: readonly DestinationOutcome[] | undefined;
+  /**
+   * Each destination's key, in the channel's order now, recorded on its deliveries: see
+   * {@link MessageStore.completeTransform}. Needed with `byDestination`.
+   */
+  readonly keys?: readonly string[] | undefined;
 }
 
 /**
@@ -949,6 +999,8 @@ export interface StoredDeliveryRow {
   readonly sendingAt: number | null;
   readonly sendingAttempt: number | null;
   readonly interruptedAttempt: number | null;
+  /** The key of the destination it was made for; null when it records none. */
+  readonly destinationKey: string | null;
 }
 
 /**
@@ -1228,12 +1280,19 @@ export interface MessageStore {
    * destination with none as one `filtered` delivery and one that failed as one `failed` delivery
    * with its error, and the message `filtered` only when every destination filtered it. Fenced by
    * `epoch` when it is given: see the lease methods above.
+   *
+   * `keys` names each destination, in the channel's order, by a key it keeps when others are added,
+   * removed or moved (its `name:`, or its kind and target); each delivery records its destination's
+   * key, so it is sent to, and resent or verified against, that destination only. The engine always
+   * gives them, and storage needs them with `{ byDestination }`. A store that ignores them finds
+   * deliveries by place, as before keys.
    */
   completeTransform(
     messageId: number,
     outputs: TransformOutputs,
     destinations: number,
     epoch?: number,
+    keys?: readonly string[],
   ): Promise<void>;
   /** Fenced by `epoch` when it is given. */
   failTransform(messageId: number, error: string, epoch?: number): Promise<void>;
@@ -1268,6 +1327,21 @@ export interface MessageStore {
    * with a destination that runs dry refuses to start on a store without it.
    */
   markDryRun?(deliveryId: number, epoch?: number): Promise<void>;
+  /**
+   * Holds the channel's pending deliveries that no destination it has now was made for, so none is
+   * sent to another: fails each one queued before destinations were recorded (no key, so which
+   * destination it was made for cannot be told), with `error`, so an operator can replay its
+   * message; and counts those made for a destination that is not among `keys` (removed, or its
+   * `name:` or target changed), which stay pending and go out if it comes back. Fenced by `epoch`
+   * when it is given. The engine calls it once per channel at its first delivery pass; a store
+   * without it holds nothing.
+   */
+  holdDeliveries?(
+    channel: string,
+    keys: readonly string[],
+    error: string,
+    epoch?: number,
+  ): Promise<HeldDeliveries>;
   /** Fenced by `epoch` when it is given. */
   scheduleRetry(
     deliveryId: number,
@@ -1321,10 +1395,11 @@ export interface MessageStore {
   deliveries(messageId: number): Promise<StoredDelivery[]>;
   /**
    * The outputs of a message's current generation, in order; none when it has none or they were
-   * dropped. Those of `destination` when it is given, else those of the first destination that has
+   * dropped. Those of `destination` when it is given, by its place or, as `{ key }`, by the key its
+   * deliveries record (see {@link completeTransform}), else those of the first destination that has
    * any.
    */
-  outputs(messageId: number, destination?: number): Promise<Uint8Array[]>;
+  outputs(messageId: number, destination?: number | DestinationKey): Promise<Uint8Array[]>;
   /** A page of messages, newest first, without bodies or errors. */
   listMessages(query: MessageQuery): Promise<Page<MessageSummary>>;
   /**
@@ -1817,6 +1892,21 @@ export function migrations(kind: StorageKind): Record<string, SchemaStep> {
           .createIndex("meta_index_by_message")
           .on("meta_index")
           .columns(["message_id"])
+          .execute();
+      },
+    },
+    "0011-destination-keys": {
+      // Expand only: a column that may be null and an index, which an older Pathways never reads;
+      // it goes on finding deliveries by place. A delivery queued before it has no key, and the
+      // engine holds it rather than guess its destination. To roll it back, stop every engine and
+      // drop the index and the column; deliveries are then found by place again.
+      tag: "expand",
+      async up(db: Kysely<unknown>): Promise<void> {
+        await db.schema.alterTable("deliveries").addColumn("destination_key", t.name).execute();
+        await db.schema
+          .createIndex("deliveries_by_destination_key")
+          .on("deliveries")
+          .columns(["channel", "destination_key", "status", "id"])
           .execute();
       },
     },
@@ -2383,6 +2473,7 @@ export class Store implements MessageStore, ContentStore, MetaStore {
         "delivered_at",
         "last_error",
         "interrupted_attempt",
+        "destination_key",
       ])
       .where("message_id", "=", messageId)
       .orderBy("id")
@@ -2390,6 +2481,7 @@ export class Store implements MessageStore, ContentStore, MetaStore {
     return rows.map((row) => ({
       id: Number(row.id),
       destination: row.destination,
+      ...(row.destination_key === null ? {} : { destinationKey: row.destination_key }),
       seq: row.seq,
       generation: row.generation,
       status: row.status,
@@ -2403,10 +2495,10 @@ export class Store implements MessageStore, ContentStore, MetaStore {
 
   /**
    * The outputs of a message's current generation, in order, or none once they were dropped: those
-   * of `destination`, or else of the first destination with any. Without destination transforms,
+   * of `destination`, by place or by key, or else of the first destination with any. Without destination transforms,
    * each destination was queued the same outputs. A delivery with no output (`seq` -1) is none.
    */
-  async outputs(messageId: number, destination?: number): Promise<Uint8Array[]> {
+  async outputs(messageId: number, destination?: number | DestinationKey): Promise<Uint8Array[]> {
     const rows = await this.db
       .selectFrom("deliveries")
       .innerJoin("messages", "messages.id", "deliveries.message_id")
@@ -2415,8 +2507,11 @@ export class Store implements MessageStore, ContentStore, MetaStore {
       .whereRef("deliveries.generation", "=", "messages.generation")
       .where("messages.content_dropped_at", "is", null)
       .where("deliveries.seq", ">=", 0)
-      .$if(destination !== undefined, (q) =>
+      .$if(typeof destination === "number", (q) =>
         q.where("deliveries.destination", "=", destination as number),
+      )
+      .$if(typeof destination === "object", (q) =>
+        q.where("deliveries.destination_key", "=", (destination as DestinationKey).key),
       )
       .orderBy("deliveries.destination")
       .orderBy("deliveries.seq")
@@ -2594,6 +2689,7 @@ export class Store implements MessageStore, ContentStore, MetaStore {
     outputs: TransformOutputs,
     destinations: number,
     epoch?: number,
+    keys?: readonly string[],
   ): Promise<void> {
     const at = this.now();
     await this.db.transaction().execute(async (tx) => {
@@ -2614,7 +2710,7 @@ export class Store implements MessageStore, ContentStore, MetaStore {
         .select(["channel", "generation"])
         .where("id", "=", messageId)
         .executeTakeFirstOrThrow();
-      await this.queue(tx, messageId, message, outputs, destinations);
+      await this.queue(tx, messageId, message, outputs, destinations, keys);
     });
   }
 
@@ -2639,7 +2735,7 @@ export class Store implements MessageStore, ContentStore, MetaStore {
     destination: number,
     options: NextDeliveryOptions = {},
   ): Promise<PendingDelivery | undefined> {
-    const { dueBy } = options;
+    const { dueBy, key } = options;
     const row = await this.db
       .selectFrom("deliveries")
       .select([
@@ -2654,7 +2750,9 @@ export class Store implements MessageStore, ContentStore, MetaStore {
         "interrupted_attempt",
       ])
       .where("channel", "=", channel)
-      .where("destination", "=", destination)
+      // By key when given: the destination it was made for, wherever it stands in the list now.
+      .$if(key === undefined, (q) => q.where("destination", "=", destination))
+      .$if(key !== undefined, (q) => q.where("destination_key", "=", key as string))
       .where("status", "=", "pending")
       .$if(dueBy !== undefined, (q) => q.where("next_attempt_at", "<=", dueBy as number))
       .orderBy("id")
@@ -2811,6 +2909,37 @@ export class Store implements MessageStore, ContentStore, MetaStore {
       .$if(epoch !== undefined, (q) => q.where(this.fence("pending", epoch)))
       .executeTakeFirst();
     fenced(epoch, updated);
+  }
+
+  /**
+   * Holds the channel's pending deliveries that no destination it has now was made for: see
+   * {@link MessageStore.holdDeliveries}. Fenced by `epoch`: an engine that lost the lease fails
+   * nothing.
+   */
+  async holdDeliveries(
+    channel: string,
+    keys: readonly string[],
+    error: string,
+    epoch?: number,
+  ): Promise<HeldDeliveries> {
+    const failed = await this.db
+      .updateTable("deliveries")
+      .set({ status: "failed", last_error: error, sending_at: null, sending_attempt: null })
+      .where("channel", "=", channel)
+      .where("status", "=", "pending")
+      .where("destination_key", "is", null)
+      .$if(epoch !== undefined, (q) => q.where(this.fence("pending", epoch)))
+      .executeTakeFirst();
+    const gone = await this.db
+      .selectFrom("deliveries")
+      .select((eb) => eb.fn.countAll<number | string>().as("count"))
+      .where("channel", "=", channel)
+      .where("status", "=", "pending")
+      .where("destination_key", "is not", null)
+      // A channel has at least one destination; the guard keeps an empty list out of the SQL.
+      .$if(keys.length > 0, (q) => q.where("destination_key", "not in", keys))
+      .executeTakeFirstOrThrow();
+    return { unknown: Number(failed.numUpdatedRows), gone: Number(gone.count) };
   }
 
   /**
@@ -3104,7 +3233,7 @@ export class Store implements MessageStore, ContentStore, MetaStore {
           .executeTakeFirst();
         const queued =
           failure === undefined
-            ? await this.queue(tx, messageId, message, outputs, destinations)
+            ? await this.queue(tx, messageId, message, outputs, destinations, request.keys)
             : 0;
         const done = {
           status,
@@ -3343,6 +3472,7 @@ export class Store implements MessageStore, ContentStore, MetaStore {
         sendingAt: int64OrNull(delivery.sending_at),
         sendingAttempt: delivery.sending_attempt,
         interruptedAttempt: delivery.interrupted_attempt,
+        destinationKey: delivery.destination_key,
       })),
     };
   }
@@ -3501,14 +3631,21 @@ export class Store implements MessageStore, ContentStore, MetaStore {
     message: { readonly channel: string; readonly generation: number },
     given: TransformOutputs,
     destinations: number,
+    keys: readonly string[] | undefined,
   ): Promise<number> {
     // The same outputs for every destination, and none: the message was filtered, with no rows.
     if (!isByDestination(given) && given.length === 0) return 0;
     const outcomes: readonly DestinationOutcome[] = isByDestination(given)
       ? given.byDestination
       : Array.from({ length: destinations }, () => ({ outputs: given }));
+    // Rows with no key are only ever the same outputs for every destination, so a reader can tell a
+    // row's destination by its key, or know that every destination was queued the same.
+    if (keys === undefined ? isByDestination(given) : keys.length !== outcomes.length) {
+      throw new RangeError("each destination's outputs need each destination's key, in order");
+    }
     let queued = 0;
     for (const [destination, outcome] of outcomes.entries()) {
+      const destinationKey = keys?.[destination] ?? null;
       // Nothing stored for it to send again: no row at all, so it is neither filtered nor failed.
       if ("notStored" in outcome) continue;
       if ("failure" in outcome || outcome.outputs.length === 0) {
@@ -3532,6 +3669,7 @@ export class Store implements MessageStore, ContentStore, MetaStore {
             last_error: "failure" in outcome ? outcome.failure : null,
             delivered_at: null,
             generation: message.generation,
+            destination_key: destinationKey,
           })
           .execute();
         continue;
@@ -3552,6 +3690,7 @@ export class Store implements MessageStore, ContentStore, MetaStore {
             last_error: null,
             delivered_at: null,
             generation: message.generation,
+            destination_key: destinationKey,
           })
           .execute();
         queued += 1;

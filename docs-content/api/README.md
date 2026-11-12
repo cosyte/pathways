@@ -309,6 +309,13 @@ The output it carried, in base64; `null` once its message's content was dropped.
 
 > `readonly` **destination**: `number`
 
+##### destinationKey?
+
+> `readonly` `optional` **destinationKey?**: `string` \| `null`
+
+The key of the destination it was made for; null when it records none. Absent from an archive
+written before deliveries recorded one.
+
 ##### error
 
 > `readonly` **error**: `string` \| `null`
@@ -1674,6 +1681,24 @@ export default ((msg, ctx) => (ctx?.destination?.name === "billing" ? msg : null
 
 ***
 
+### DestinationKey
+
+A destination named by its key rather than its place, for [MessageStore.outputs](#outputs-1).
+
+#### Example
+
+```ts
+const theirs = await store.outputs(12, { key: keys[1] });
+```
+
+#### Properties
+
+##### key
+
+> `readonly` **key**: `string`
+
+***
+
 ### ExpireResult
 
 What retention deleted, or would delete, from one channel.
@@ -2037,6 +2062,30 @@ The channel's name.
 ###### Overrides
 
 [`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-8)
+
+***
+
+### HeldDeliveries
+
+What [MessageStore.holdDeliveries](#holddeliveries) held: `unknown`, pending deliveries queued before
+destinations were recorded, now failed; `gone`, pending deliveries made for a destination the
+channel no longer has, still pending.
+
+#### Example
+
+```ts
+const held: HeldDeliveries = { unknown: 0, gone: 2 };
+```
+
+#### Properties
+
+##### gone
+
+> `readonly` **gone**: `number`
+
+##### unknown
+
+> `readonly` **unknown**: `number`
 
 ***
 
@@ -2757,7 +2806,7 @@ is nothing failed. The audit entry is written in the same transaction.
 
 ##### completeTransform()
 
-> **completeTransform**(`messageId`, `outputs`, `destinations`, `epoch?`): `Promise`\<`void`\>
+> **completeTransform**(`messageId`, `outputs`, `destinations`, `epoch?`, `keys?`): `Promise`\<`void`\>
 
 Records a transform's outputs and the message's new status, all or nothing: given a list, one
 pending delivery per output per destination, and the message `filtered` when the list is
@@ -2765,6 +2814,12 @@ empty; given `{ byDestination }`, each destination's own outputs as pending deli
 destination with none as one `filtered` delivery and one that failed as one `failed` delivery
 with its error, and the message `filtered` only when every destination filtered it. Fenced by
 `epoch` when it is given: see the lease methods above.
+
+`keys` names each destination, in the channel's order, by a key it keeps when others are added,
+removed or moved (its `name:`, or its kind and target); each delivery records its destination's
+key, so it is sent to, and resent or verified against, that destination only. The engine always
+gives them, and storage needs them with `{ byDestination }`. A store that ignores them finds
+deliveries by place, as before keys.
 
 ###### Parameters
 
@@ -2783,6 +2838,10 @@ with its error, and the message `filtered` only when every destination filtered 
 ###### epoch?
 
 `number`
+
+###### keys?
+
+readonly `string`[]
 
 ###### Returns
 
@@ -2893,6 +2952,40 @@ Fenced by `epoch` when it is given.
 ###### Returns
 
 `Promise`\<`void`\>
+
+##### holdDeliveries()?
+
+> `optional` **holdDeliveries**(`channel`, `keys`, `error`, `epoch?`): `Promise`\<[`HeldDeliveries`](#helddeliveries)\>
+
+Holds the channel's pending deliveries that no destination it has now was made for, so none is
+sent to another: fails each one queued before destinations were recorded (no key, so which
+destination it was made for cannot be told), with `error`, so an operator can replay its
+message; and counts those made for a destination that is not among `keys` (removed, or its
+`name:` or target changed), which stay pending and go out if it comes back. Fenced by `epoch`
+when it is given. The engine calls it once per channel at its first delivery pass; a store
+without it holds nothing.
+
+###### Parameters
+
+###### channel
+
+`string`
+
+###### keys
+
+readonly `string`[]
+
+###### error
+
+`string`
+
+###### epoch?
+
+`number`
+
+###### Returns
+
+`Promise`\<[`HeldDeliveries`](#helddeliveries)\>
 
 ##### leaseHolder()?
 
@@ -3149,7 +3242,8 @@ searched by metadata.
 > **outputs**(`messageId`, `destination?`): `Promise`\<`Uint8Array`\<`ArrayBufferLike`\>[]\>
 
 The outputs of a message's current generation, in order; none when it has none or they were
-dropped. Those of `destination` when it is given, else those of the first destination that has
+dropped. Those of `destination` when it is given, by its place or, as `{ key }`, by the key its
+deliveries record (see [completeTransform](#completetransform)), else those of the first destination that has
 any.
 
 ###### Parameters
@@ -3160,7 +3254,7 @@ any.
 
 ###### destination?
 
-`number`
+`number` \| [`DestinationKey`](#destinationkey-1)
 
 ###### Returns
 
@@ -3697,6 +3791,14 @@ Only a delivery due by this time, in epoch milliseconds: the oldest whose `nextA
 or before it, passing over any still waiting for a retry. The engine asks this for a destination
 with `retry.rotate: true`. A store that ignores it keeps that destination in order.
 
+##### key?
+
+> `readonly` `optional` **key?**: `string`
+
+Only a delivery made for the destination with this key, wherever it stands in the list now
+(see [MessageStore.completeTransform](#completetransform)); `destination` is then not read. The engine always
+gives it. A store that ignores it finds deliveries by place, as before keys.
+
 ***
 
 ### OutgoingMessage
@@ -4113,6 +4215,13 @@ The status the caller read before transforming.
 > `readonly` `optional` **failure?**: `string`
 
 What the replayed transform failed with, as stored; the message is marked failed.
+
+##### keys?
+
+> `readonly` `optional` **keys?**: readonly `string`[]
+
+Each destination's key, in the channel's order now, recorded on its deliveries: see
+[MessageStore.completeTransform](#completetransform). Needed with `byDestination`.
 
 ##### mode
 
@@ -4787,6 +4896,16 @@ const waiting = (await store.deliveries(12)).filter((d: StoredDelivery) => d.sta
 
 > `readonly` **destination**: `number`
 
+The destination's place in the channel's list when the delivery was made, from 0.
+
+##### destinationKey?
+
+> `readonly` `optional` **destinationKey?**: `string`
+
+The key of the destination it was made for, which a destination keeps when others are added,
+removed or moved; undefined for one queued before destinations were recorded, or by a caller
+that gave no keys. See [MessageStore.completeTransform](#completetransform).
+
 ##### error
 
 > `readonly` **error**: `string` \| `null`
@@ -4857,6 +4976,12 @@ const old = (row: StoredDeliveryRow, current: number): boolean => row.generation
 ##### destination
 
 > `readonly` **destination**: `number`
+
+##### destinationKey
+
+> `readonly` **destinationKey**: `string` \| `null`
+
+The key of the destination it was made for; null when it records none.
 
 ##### error
 

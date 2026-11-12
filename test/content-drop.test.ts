@@ -10,6 +10,7 @@ import { configJsonSchemas, DEFAULT_SETTINGS } from "../src/config/schema.js";
 import { EncryptedStore, UnencryptedStore } from "../src/encryption/encrypted-store.js";
 import { generateKey, KEY_BYTES, LocalKeyProvider } from "../src/encryption/keys.js";
 import { rekey } from "../src/encryption/rekey.js";
+import { destinationKeys } from "../src/engine/destination-key.js";
 import { Engine } from "../src/engine/engine.js";
 import { AuditLog } from "../src/operator/audit.js";
 import { replayMessages } from "../src/operator/actions.js";
@@ -514,10 +515,16 @@ describe("the operator commands on a message whose content was dropped", () => {
   });
 
   it("refuses a replay in storage too, when the drop comes after the check", async () => {
-    const raw = await Store.open(join(await makeProject({}), "pathways.db"));
+    const root = await makeProject({
+      "channels/adt/channel.yaml": channelYaml("adt"),
+      "channels/adt/transform.ts": LAB_TRANSFORM,
+    });
+    const project = await loadProject(root);
+    const raw = await Store.open(join(root, "pathways.db"));
     closables.push(raw);
     const { id } = await raw.receive("adt", bytes("MSH|SYNTH"));
-    await raw.completeTransform(id, [bytes("out")], 1);
+    const keys = destinationKeys(root, project.channels[0]?.destinations ?? []);
+    await raw.completeTransform(id, [bytes("out")], 1, undefined, keys);
     const [delivery] = await raw.deliveries(id);
     // A store that drops the content just after the replay read the message, as the engine can.
     const racing: MessageStore = Object.assign(Object.create(raw) as Store, {
@@ -533,11 +540,6 @@ describe("the operator commands on a message whose content was dropped", () => {
           : { ...message, deliveries: { ...message.deliveries, pending: 0 } };
       },
     });
-    const root = await makeProject({
-      "channels/adt/channel.yaml": channelYaml("adt"),
-      "channels/adt/transform.ts": LAB_TRANSFORM,
-    });
-    const project = await loadProject(root);
     const audit = new AuditLog(racing, { actor: "tester" });
     const results = await replayMessages([id], { project, store: racing, audit, resend: true });
     expect(results).toEqual([{ id, outcome: "refused", reason: "content-dropped" }]);

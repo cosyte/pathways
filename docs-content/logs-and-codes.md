@@ -34,9 +34,16 @@ text or a source file's name. Commands whose standard output is their report (`s
 | `delivery-rejected`   | warn  | `channel`, `destination`, `delivery`, `reason`                                         | the destination rejected it for good                                                                                            |
 | `delivery-exhausted`  | warn  | `channel`, `destination`, `delivery`, `attempt`, `reason`, `code`                      | out of retries (`reason` `limit` or `maxAge`): marked failed, its body kept for a resend                                        |
 | `delivery-halted`     | warn  | `channel`, `destination`, `delivery`, `attempt`                                        | `pathways channel halt` cut the send off; it stays pending and is sent again, flagged, after a resume                           |
+| `deliveries-held`     | warn  | `channel`, `code`, `deliveries`                                                        | at a channel's first delivery pass, pending deliveries that none of its destinations now was made for; none is sent to another  |
 
 A `transform-failed` line's `kind` is `load`, `parse`, `transform`, `output`, `timeout`, `memory` or
 `crash`. `where` is `file:line:column` in the transform, when it threw.
+
+A `deliveries-held` line's `code` is `destination-gone` for deliveries made for a destination the
+channel no longer has (removed, renamed, or, without a name, given another target), which stay
+pending and are sent if it comes back; or `destination-unknown` for deliveries queued by a Pathways
+before deliveries recorded their destination, which cannot be matched to one, so each is marked
+failed with the error `delivery: destination-unknown` and its message can be replayed.
 
 ### Sources and endpoints
 

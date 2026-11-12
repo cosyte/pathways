@@ -80,6 +80,7 @@ import type { EngineFence } from "./lease.js";
 import { channelStatus, type ChannelHealth, type EngineHealth } from "./health.js";
 import { formatTable, type FailureSummary } from "./worker-entry.js";
 import { DeadlineTimer } from "./deadline.js";
+import { destinationKeys } from "./destination-key.js";
 import { nextPollAt, pollOf } from "./schedule.js";
 import { copyFacts, keepFacts, sourceFacts } from "./source-facts.js";
 
@@ -700,6 +701,13 @@ export interface EngineOptions {
 interface RunningChannel {
   /** Replaced by a reload, between messages. */
   config: ChannelConfig;
+  /**
+   * Each destination's key, in order, which its deliveries record: a reload keeps the destinations,
+   * so it keeps these.
+   */
+  readonly keys: readonly string[];
+  /** Whether the deliveries no destination was made for were held, at the first delivery pass. */
+  held: boolean;
   /** Replaced by a reload, between messages. */
   worker: ChannelWorker;
   readonly connectors: ChannelConnectors;
@@ -993,6 +1001,8 @@ export class Engine {
           reloads: Promise.resolve(),
           facts: new Map(),
           receiving: new Set(),
+          keys: destinationKeys(project.root, config.destinations),
+          held: false,
         };
         this.channels.push(channel);
         this.warnInsecure(config);
@@ -2044,7 +2054,8 @@ export class Engine {
           next.id,
           byDestination === undefined ? outcome.outputs : { byDestination },
           config.destinations.length,
-          ...this.epoch(),
+          this.options.fence?.epoch,
+          channel.keys,
         );
         if (owned) releaseOutputs(outcome);
         if (outcome.destinations !== undefined && byDestination !== undefined) {
@@ -2131,6 +2142,43 @@ export class Engine {
   }
 
   /**
+   * Holds, once per start, the channel's pending deliveries that none of its destinations now was
+   * made for, so none goes to another destination: one queued before destinations were recorded is
+   * failed with the code `destination-unknown`, its message then replayed by an operator; one made
+   * for a destination the channel no longer has (`destination-gone`) waits for it to come back.
+   * Each kind is logged with a count, never content.
+   */
+  private async holdDeliveries(channel: RunningChannel): Promise<void> {
+    const { store, logger } = this.options;
+    channel.held = true;
+    if (store.holdDeliveries === undefined) return;
+    this.options.fence?.check();
+    const held = await store.holdDeliveries(
+      channel.config.name,
+      channel.keys,
+      "delivery: destination-unknown",
+      ...this.epoch(),
+    );
+    const name = channel.config.name;
+    if (held.unknown > 0) {
+      logger.warn({
+        event: "deliveries-held",
+        channel: name,
+        code: "destination-unknown",
+        deliveries: held.unknown,
+      });
+    }
+    if (held.gone > 0) {
+      logger.warn({
+        event: "deliveries-held",
+        channel: name,
+        code: "destination-gone",
+        deliveries: held.gone,
+      });
+    }
+  }
+
+  /**
    * Delivers what the channel has due, one attempt at a time, each cut off at its destination's
    * deadline by one timer between them all.
    */
@@ -2146,7 +2194,9 @@ export class Engine {
   private async deliverEach(channel: RunningChannel, deadline: DeadlineTimer): Promise<void> {
     const { config, connectors } = channel;
     const { store, logger } = this.options;
+    if (!channel.held) await this.holdDeliveries(channel);
     for (const [index, destination] of connectors.destinations.entries()) {
+      const key = channel.keys[index];
       const dry = runsDry(config, index, this.options.dryRun === true);
       const policy = config.destinations[index]?.retry ?? config.settings.retry;
       // With rotate, a delivery waiting for a retry steps aside for the due ones behind it; each is
@@ -2155,9 +2205,10 @@ export class Engine {
       for (;;) {
         if (channel.state === "stopped") return;
         this.step();
+        // By key: the deliveries made for this destination, wherever it stood in the list then.
         const delivery = await (policy.rotate
-          ? store.nextDelivery(config.name, index, { dueBy: this.now() })
-          : store.nextDelivery(config.name, index));
+          ? store.nextDelivery(config.name, index, { dueBy: this.now(), key })
+          : store.nextDelivery(config.name, index, { key }));
         if (delivery === undefined || delivery.nextAttemptAt > this.now()) break;
         if (tried.has(delivery.id)) break;
         tried.add(delivery.id);

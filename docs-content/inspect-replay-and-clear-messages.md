@@ -91,13 +91,18 @@ npx pathways replay 17 --resend
 `--resend` queues the outputs stored from the last transform, without running the transform again:
 for a destination that lost what it was sent, or one that rejected a message and has since been fixed.
 
-On a channel with destination transforms, a resend queues each destination the outputs stored for
-it, even when its transform has changed since; a destination its transform filtered stays
-`filtered`, and one whose transform failed keeps its failure, even when that failed delivery was
-cleared since. A resend never sends one destination the outputs stored for another: a destination
-added to the channel after the message's last transform has nothing stored, so it is sent nothing
-and gets no delivery. The command counts those destinations, with the code `not-stored`, and the
-`resend` audit entry carries the count as `notStored`:
+A resend queues each destination the outputs stored for it, even when its transform has changed
+since; a destination its transform filtered stays `filtered`, and one whose transform failed keeps
+its failure, even when that failed delivery was cleared since. Each delivery records the destination
+it was made for by its identity: its `name:`, or, without one, its kind and target (a folder, a URL,
+a host and port, a module). A resend finds each destination's stored outputs by that identity, never
+by its place in `channel.yaml`'s list, so adding a destination anywhere in the list, removing one or
+reordering them never sends one destination the outputs stored for another.
+
+A destination with nothing stored under its identity for the message's last transform (added to the
+channel since, renamed, or, without a name, given another target) is sent nothing and gets no
+delivery. The command counts those destinations, with the code `not-stored`, and the `resend` audit
+entry carries the count as `notStored`:
 
 ```text
 message 17: resent: 1 delivery queued; 1 destination with nothing stored for this message was sent nothing (not-stored)
@@ -105,6 +110,10 @@ message 17: resent: 1 delivery queued; 1 destination with nothing stored for thi
 
 To send such a destination the message, replay it instead. A replay runs the channel's transform
 and every destination's transform as they are on disk now.
+
+A message whose outputs were stored by a Pathways before deliveries recorded their destination has
+no identity to match, so a resend of it is refused with the code `destination-unknown` and sends
+nothing; replay it instead.
 
 ## Clear a failed message
 

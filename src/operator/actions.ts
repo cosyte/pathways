@@ -3,6 +3,7 @@ import { transformConfigFor } from "../config/transform-config.js";
 import type { Env } from "../connectors/endpoint.js";
 import { EncryptionError } from "../encryption/envelope.js";
 import { ChannelWorker, destinationSetups, TransformLoadError } from "../engine/channel-worker.js";
+import { destinationKeys } from "../engine/destination-key.js";
 import { destinationOutcomes, storedFailure } from "../engine/engine.js";
 import type { FailureSummary } from "../engine/worker-entry.js";
 import type {
@@ -26,7 +27,9 @@ import type { AuditLog } from "./audit.js";
  * - `unreadable`: what is stored of it could not be decrypted;
  * - `not-failed`: a clear, but nothing about it had failed;
  * - `content-dropped`: its content was dropped after delivery (`storage.content:
- *   dropAfterDelivery`), so there is nothing to replay or resend.
+ *   dropAfterDelivery`), so there is nothing to replay or resend;
+ * - `destination-unknown`: a resend, but its outputs were stored before deliveries recorded their
+ *   destination, so which destination each was for cannot be told; a replay runs it again.
  *
  * @example
  * ```ts
@@ -42,7 +45,8 @@ export type ActionRefusal =
   | "changed"
   | "unreadable"
   | "not-failed"
-  | "content-dropped";
+  | "content-dropped"
+  | "destination-unknown";
 
 /**
  * What a replay or a resend did to one message. Ids, counts, states and codes only.
@@ -64,7 +68,7 @@ export type ReplayResult =
       readonly superseded: number;
       /**
        * A resend: destinations with nothing stored for the message's last transform (added to the
-       * channel since), which were sent nothing. Absent when there were none.
+       * channel since, or renamed), which were sent nothing. Absent when there were none.
        */
       readonly notStored?: number;
       /** When the replayed transform failed: what happened, without the error's own text. */
@@ -170,17 +174,15 @@ export async function replayMessages(
     if (message.contentDroppedAt !== undefined) return refuse(id, channel.name, "content-dropped");
     if (message.deliveries.pending > 0) return refuse(id, channel.name, "pending");
 
+    const keys = destinationKeys(project.root, channel.destinations);
     let outputs: readonly Uint8Array[] = [];
     let byDestination: DestinationOutcome[] | undefined;
     let failure: FailureSummary | undefined;
     if (resend) {
       if (message.status === "transformed") {
-        byDestination = await storedByDestination(
-          store,
-          id,
-          message.generation,
-          channel.destinations.length,
-        );
+        const stored = await storedByDestination(store, id, message.generation, keys);
+        if (stored === undefined) return refuse(id, channel.name, "destination-unknown");
+        byDestination = stored;
         const same = sameForEvery(byDestination);
         if (same !== undefined) {
           // Every destination has the same outputs: queued as one list, as a store always took them.
@@ -221,6 +223,7 @@ export async function replayMessages(
         outputs,
         failure: failure === undefined ? undefined : storedFailure(failure),
         destinations: channel.destinations.length,
+        keys,
         ...(byDestination === undefined ? {} : { byDestination }),
       },
       audit.actor,
@@ -339,26 +342,31 @@ async function workerFor(
  * What a resend sends to each destination: the outputs stored for it in the message's current
  * generation, so a destination transform changed since is not run again. A destination whose
  * transform filtered the message stays filtered, and one whose transform failed keeps its failure.
- * A destination with no delivery of that generation (added to the channel since) is `notStored`
- * and gets nothing: a destination is never sent another destination's outputs.
+ *
+ * Each destination is matched to what was stored for it by its key (see {@link destinationKeys}),
+ * never by its place in the list, so adding, removing or moving a destination since gives none of
+ * them another's outputs. A destination with no delivery of that generation under its key (added
+ * since, or renamed) is `notStored` and gets nothing. A generation stored before deliveries
+ * recorded their destination cannot be matched at all: `undefined`, and the resend is refused.
  */
 async function storedByDestination(
   store: MessageStore,
   id: number,
   generation: number,
-  destinations: number,
-): Promise<DestinationOutcome[]> {
+  keys: readonly string[],
+): Promise<DestinationOutcome[] | undefined> {
   const current = (await store.deliveries(id)).filter((d) => d.generation === generation);
+  if (current.some((d) => d.destinationKey === undefined)) return undefined;
   const outcomes: DestinationOutcome[] = [];
-  for (let destination = 0; destination < destinations; destination += 1) {
-    const rows = current.filter((d) => d.destination === destination);
+  for (const key of keys) {
+    const rows = current.filter((d) => d.destinationKey === key);
     if (rows.length === 0) {
       outcomes.push({ notStored: true });
       continue;
     }
     const none = rows.find((d) => d.seq < 0);
     if (none === undefined) {
-      outcomes.push({ outputs: await store.outputs(id, destination) });
+      outcomes.push({ outputs: await store.outputs(id, { key }) });
     } else if (none.status === "filtered") {
       outcomes.push({ outputs: [] });
     } else {

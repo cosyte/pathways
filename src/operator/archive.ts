@@ -79,6 +79,8 @@ export interface ArchivedDelivery {
   readonly sendingAttempt: number | null;
   /** The latest attempt found cut off, when one was. */
   readonly interruptedAttempt: number | null;
+  /** The key of the destination it was made for; null when it records none. */
+  readonly destinationKey: string | null;
 }
 
 /**
@@ -423,6 +425,7 @@ function asMessage(value: unknown): ArchivedMessage {
     check(isWhole(d["nextAttemptAt"]) && isTextOrNull(d["body"]));
     check(isWholeOrNull(d["sendingAt"]) && isWholeOrNull(d["sendingAttempt"]));
     check(isWholeOrNull(d["interruptedAttempt"]));
+    check(isTextOrNull(d["destinationKey"]));
   }
   return fields as unknown as ArchivedMessage;
 }
@@ -487,6 +490,7 @@ export async function archivedMessage(
       sendingAt: delivery.sendingAt,
       sendingAttempt: delivery.sendingAttempt,
       interruptedAttempt: delivery.interruptedAttempt,
+      destinationKey: delivery.destinationKey,
     })),
   };
 }

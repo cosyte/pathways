@@ -10,6 +10,7 @@ import {
   TransformLoadError,
   type TransformOutcome,
 } from "../engine/channel-worker.js";
+import { destinationKeys } from "../engine/destination-key.js";
 import type { DestinationSetup, FailureSummary, MessageContext } from "../engine/worker-entry.js";
 import { EXIT } from "../exit.js";
 import type { MessageStore, MessageSummary } from "../storage/store.js";
@@ -111,6 +112,7 @@ export async function verifyCommand(
   const results = new Map<string, Gathered[]>(channels.map((c) => [c.name, []]));
   let skipped = 0;
   let missing = 0;
+  const notStored = { count: 0 };
   try {
     if (selection.kind === "samples") {
       for (const config of channels) {
@@ -122,7 +124,14 @@ export async function verifyCommand(
       if (store === undefined || audit === undefined) {
         throw new Error("verifying stored messages needs the store and its audit log");
       }
-      const stored = { store, audit, runner, results };
+      const stored = {
+        store,
+        audit,
+        runner,
+        results,
+        root: context.project.root,
+        notStored,
+      };
       if (selection.kind === "ids") {
         const counted = await verifyIds(stored, selection.ids, channel);
         skipped = counted.skipped;
@@ -136,7 +145,11 @@ export async function verifyCommand(
   } finally {
     await runner.stop();
   }
-  return report(context, channels, selection, results, { skipped, missing });
+  return report(context, channels, selection, results, {
+    skipped,
+    missing,
+    notStored: notStored.count,
+  });
 }
 
 /** The channels' workers, each started on first use and stopped at the end. */
@@ -211,6 +224,10 @@ interface Stored {
   readonly audit: AuditLog;
   readonly runner: Runner;
   readonly results: Map<string, Gathered[]>;
+  /** The project's root, which unnamed destinations' keys are read from. */
+  readonly root: string;
+  /** Destinations of a stored message with nothing stored under their key, so not compared. */
+  readonly notStored: { count: number };
 }
 
 /** The outcome of one transform's outputs against the recorded ones, compared in `format`. */
@@ -244,7 +261,7 @@ function destinationOutcome(outcome: TransformOutcome, setup: DestinationSetup):
  * have fails without being read.
  */
 async function verifyBatch(stored: Stored, batch: readonly MessageSummary[]): Promise<void> {
-  const { store, audit, runner, results } = stored;
+  const { store, audit, runner, results, root } = stored;
   const known = batch.filter((m) => runner.config(m.channel) !== undefined);
   for (const message of batch) {
     if (runner.config(message.channel) !== undefined) continue;
@@ -277,29 +294,47 @@ async function verifyBatch(stored: Stored, batch: readonly MessageSummary[]): Pr
       source: undefined,
       meta: {},
     });
-    if (setups === undefined) {
-      // No destination transform: every destination was queued the same outputs.
-      list.push({
-        message: message.id,
-        ...outcomeOf(config, outcome, await store.outputs(message.id)),
-      });
+    const current = (await store.deliveries(message.id)).filter(
+      (d) => d.generation === message.generation,
+    );
+    if (current.some((d) => d.destinationKey === undefined)) {
+      // Stored before deliveries recorded their destination, so with the same outputs for every
+      // destination. Without destination transforms, those are what the channel's transform gives
+      // and are compared once for all; with them, which destination each was for cannot be told.
+      list.push(
+        setups === undefined
+          ? { message: message.id, ...outcomeOf(config, outcome, await store.outputs(message.id)) }
+          : { message: message.id, outcome: "failed", reason: UNKNOWN_DESTINATION },
+      );
       continue;
     }
-    // Each destination against its own stored outputs, never another destination's.
-    for (const setup of setups) {
+    // Each destination against its own stored outputs, found by its key, never another
+    // destination's by its place in the list. With no deliveries at all, the channel's transform
+    // filtered the message, so every destination was stored nothing.
+    const keys = destinationKeys(root, config.destinations);
+    for (const [index, key] of keys.entries()) {
+      if (current.length > 0 && !current.some((d) => d.destinationKey === key)) {
+        stored.notStored.count += 1;
+        continue;
+      }
+      const setup = setups?.[index];
       list.push({
         message: message.id,
-        destination: setup.index,
+        destination: index,
         ...outcomeOf(
           config,
-          destinationOutcome(outcome, setup),
-          await store.outputs(message.id, setup.index),
-          setup.format,
+          setup === undefined ? outcome : destinationOutcome(outcome, setup),
+          current.length === 0 ? [] : await store.outputs(message.id, { key }),
+          setup?.format,
         ),
       });
     }
   }
 }
+
+/** Why a stored message cannot be compared destination by destination. */
+const UNKNOWN_DESTINATION =
+  "destination-unknown: its outputs were stored before deliveries recorded their destination; replay it to compare";
 
 /** Verifies a channel's messages stored since `since`, a page at a time. Returns how many skipped. */
 async function verifySince(stored: Stored, channel: string, since: string): Promise<number> {
@@ -431,7 +466,7 @@ function report(
   channels: readonly ChannelConfig[],
   selection: VerifySelection,
   results: Map<string, Gathered[]>,
-  counts: { readonly skipped: number; readonly missing: number },
+  counts: { readonly skipped: number; readonly missing: number; readonly notStored: number },
 ): number {
   const rows: {
     channel: string;
@@ -442,10 +477,10 @@ function report(
     results: Result[];
   }[] = [];
   const lines: string[] = [];
-  // Each input once: a channel with destination transforms holds one result per destination.
+  // Each input once: a channel holds one result per destination compared.
   const total = [...results.values()].reduce(
     (sum, list) =>
-      sum + list.filter((r) => r.destination === undefined || r.destination === 0).length,
+      sum + new Set(list.map((r) => ("message" in r ? `m${r.message}` : `s${r.sample}`))).size,
     0,
   );
   lines.push(`Verified ${total} ${noun(selection, total)} ${scope(selection)}.`);
@@ -489,6 +524,11 @@ function report(
       `Skipped ${counts.skipped} with no recorded outputs (received, failed or cleared), or of another channel.`,
     );
   }
+  if (counts.notStored > 0) {
+    lines.push(
+      `Not compared: ${counts.notStored} ${counts.notStored === 1 ? "destination" : "destinations"} of a stored message with nothing stored for ${counts.notStored === 1 ? "it" : "them"} (added or renamed since), not-stored.`,
+    );
+  }
   const differs = rows.some((row) => row.different > 0 || row.failed > 0);
   if (context.json) {
     context.out(
@@ -496,6 +536,7 @@ function report(
         channels: rows.filter((row) => row.destination >= 0),
         unknown: rows.filter((row) => row.destination < 0).flatMap((row) => row.results),
         skipped: counts.skipped,
+        ...(counts.notStored === 0 ? {} : { notStored: counts.notStored }),
       })}\n`,
     );
   } else {

@@ -21,6 +21,8 @@ import type {
   SendStart,
   PendingMessage,
   ReceivedMessage,
+  DestinationKey,
+  HeldDeliveries,
   RequeueRequest,
   RequeueResult,
   RetryingDelivery,
@@ -209,6 +211,16 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
   /** Straight through, present only when the store underneath has it. */
   readonly markDryRun?: (deliveryId: number, epoch?: number) => Promise<void>;
   /**
+   * Holds the deliveries no destination was made for, its error passed through the codec; present
+   * only when the store underneath has it.
+   */
+  readonly holdDeliveries?: (
+    channel: string,
+    keys: readonly string[],
+    error: string,
+    epoch?: number,
+  ) => Promise<HeldDeliveries>;
+  /**
    * The retention steps: ids and counts, and rows changed whole or emptied, so straight through,
    * present only when the store underneath has all four; the rows an archive holds come back
    * through the codec.
@@ -240,6 +252,11 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
       this.setChannelState = states.setChannelState;
     }
     if (inner.markDryRun !== undefined) this.markDryRun = inner.markDryRun.bind(inner);
+    if (inner.holdDeliveries !== undefined) {
+      const hold = inner.holdDeliveries.bind(inner);
+      this.holdDeliveries = async (channel, keys, error, epoch) =>
+        hold(channel, keys, await codec.storeText(error), epoch);
+    }
     const steps = retentionStore(inner);
     if (steps !== undefined) {
       this.countExpiring = (channel, query) => steps.countExpiring(channel, query);
@@ -409,15 +426,16 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
     outputs: TransformOutputs,
     destinations: number,
     epoch?: number,
+    keys?: readonly string[],
   ): Promise<void> {
     if (isByDestination(outputs)) {
       await this.#storedByDestination(outputs.byDestination, (byDestination) =>
-        this.#inner.completeTransform(messageId, { byDestination }, destinations, epoch),
+        this.#inner.completeTransform(messageId, { byDestination }, destinations, epoch, keys),
       );
       return;
     }
     await this.#stored(outputs, (stored) =>
-      this.#inner.completeTransform(messageId, stored, destinations, epoch),
+      this.#inner.completeTransform(messageId, stored, destinations, epoch, keys),
     );
   }
 
@@ -554,7 +572,7 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
   }
 
   /** The outputs of a message's current generation, of one destination or the first, each read back. */
-  async outputs(messageId: number, destination?: number): Promise<Uint8Array[]> {
+  async outputs(messageId: number, destination?: number | DestinationKey): Promise<Uint8Array[]> {
     const read: Uint8Array[] = [];
     const stored =
       destination === undefined

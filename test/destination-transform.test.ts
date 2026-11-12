@@ -16,6 +16,7 @@ import {
   TransformLoadError,
   type ChannelWorkerOptions,
 } from "../src/engine/channel-worker.js";
+import { destinationKeys } from "../src/engine/destination-key.js";
 import { Engine } from "../src/engine/engine.js";
 import {
   buildContext,
@@ -36,6 +37,7 @@ import {
   statusCommand,
   type OperatorContext,
 } from "../src/operator/commands.js";
+import type { ProjectConfig } from "../src/config/schema.js";
 import type { Store } from "../src/storage/store.js";
 import { destinationExpectedName, runChannelTests } from "../src/testing/run-tests.js";
 import {
@@ -63,6 +65,9 @@ afterEach(async () => {
 afterAll(closeAdmins);
 
 const bytes = (text: string): Uint8Array => new TextEncoder().encode(text);
+/** The first channel's destination keys, or its first `count`, as the engine records them. */
+const keysOf = (project: ProjectConfig, count?: number): string[] =>
+  destinationKeys(project.root, project.channels[0]?.destinations ?? []).slice(0, count);
 const text = (body: Uint8Array | undefined): string => new TextDecoder().decode(body);
 const texts = (bodies: readonly Uint8Array[]): string[] => bodies.map(text);
 
@@ -591,6 +596,8 @@ destinations:
           ],
         },
         4,
+        undefined,
+        keysOf(project),
       );
       for (const destination of [0, 2]) {
         const next = await store.nextDelivery("adt", destination);
@@ -640,6 +647,8 @@ destinations:
         id,
         { byDestination: [{ outputs: [] }, { outputs: [bytes("ALPHA")] }] },
         2,
+        undefined,
+        keysOf(project, 2),
       );
       const next = await store.nextDelivery("adt", 1);
       await store.markDelivered(next?.id ?? -1);
@@ -662,13 +671,15 @@ destinations:
     });
 
     it("drops a message's content once its last delivery is delivered and the rest were filtered", async () => {
-      const root = await makeProject(FILES);
-      const store = await storeOn(database, (await loadProject(root)).databaseFile);
+      const project = await loadProject(await makeProject(FILES));
+      const store = await storeOn(database, project.databaseFile);
       const { id } = await store.receive("adt", bytes("alpha"));
       await store.completeTransform(
         id,
         { byDestination: [{ outputs: [bytes("ALPHA")] }, { outputs: [] }] },
         2,
+        undefined,
+        keysOf(project, 2),
       );
       const next = await store.nextDelivery("adt", 0);
       expect(await store.markDeliveredAndDropContent(next?.id ?? -1)).toBe(true);
@@ -676,11 +687,17 @@ destinations:
     });
 
     it("writes the empty body of a row with no output as each database takes one, without encryption", async () => {
-      const root = await makeProject(FILES);
-      const raw = await storeOn(database, (await loadProject(root)).databaseFile);
+      const project = await loadProject(await makeProject(FILES));
+      const raw = await storeOn(database, project.databaseFile);
       const store = new UnencryptedStore(raw);
       const { id } = await store.receive("adt", bytes("alpha"));
-      await store.completeTransform(id, { byDestination: [{ outputs: [] }, { failure: "x" }] }, 2);
+      await store.completeTransform(
+        id,
+        { byDestination: [{ outputs: [] }, { failure: "x" }] },
+        2,
+        undefined,
+        keysOf(project, 2),
+      );
       expect((await store.deliveries(id)).map((d) => d.status)).toEqual(["filtered", "failed"]);
     });
 
@@ -701,6 +718,8 @@ destinations:
           ],
         },
         3,
+        undefined,
+        keysOf(project, 3),
       );
       const rows = await raw.storedContent("deliveries", 0, 10);
       expect(rows).toHaveLength(3);
@@ -825,7 +844,7 @@ destinations:
     const store = new MemoryStore();
     const audit = new AuditLog(store, { actor: "tester" });
     const { id } = await store.receive("adt", bytes("alpha"));
-    await store.completeTransform(id, outcomes, stored);
+    await store.completeTransform(id, outcomes, stored, undefined, keysOf(project, stored));
     for (const row of store.deliveryRows) if (row.status === "pending") row.status = "delivered";
     const results = await replayMessages([id], { project, store, audit, resend: true });
     return { store, results };
@@ -912,6 +931,8 @@ destinations:
       id,
       { byDestination: [{ outputs: [] }, { outputs: [bytes("B")] }] },
       2,
+      undefined,
+      keysOf(project, 2),
     );
     for (const row of store.deliveryRows) if (row.status === "pending") row.status = "delivered";
     let printed = "";
@@ -1007,6 +1028,8 @@ destinations:
         ],
       },
       3,
+      undefined,
+      keysOf(project),
     );
     const beta = await store.receive("adt", bytes("beta"));
     await store.completeTransform(
@@ -1019,6 +1042,8 @@ destinations:
         ],
       },
       3,
+      undefined,
+      keysOf(project),
     );
     let printed = "";
     const code = await verifyCommand(
@@ -1060,6 +1085,8 @@ destinations:
       id,
       { byDestination: [{ outputs: [bytes("ALPHA")] }, { outputs: [bytes("alpha")] }] },
       2,
+      undefined,
+      keysOf(project),
     );
     let printed = "";
     const code = await verifyCommand(

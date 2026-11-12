@@ -2,6 +2,7 @@ import { parseDuration, type ProjectConfig } from "../config/schema.js";
 import type { Env } from "../connectors/endpoint.js";
 import { channelStatus } from "../engine/health.js";
 import { describeHolder } from "../engine/lease.js";
+import { destinationKeys } from "../engine/destination-key.js";
 import { EXIT } from "../exit.js";
 import {
   AUDIT_ACTIONS,
@@ -473,13 +474,21 @@ export async function showCommand(
   }
 
   const { error, ...summary } = message;
-  // The destinations' names, from the channel as configured now, when it still is.
-  const names =
-    context.project.channels
-      .find((channel) => channel.name === message.channel)
-      ?.destinations.map((destination) => destination.name) ?? [];
-  const shownDeliveries = deliveries.map((delivery) => {
-    const name = names[delivery.destination];
+  // The destinations' names, from the channel as configured now, when it still is: each delivery's
+  // by the key it recorded, never by its place, which may have moved since.
+  const configured = context.project.channels.find((channel) => channel.name === message.channel);
+  const nameByKey = new Map<string, string | undefined>();
+  if (configured !== undefined) {
+    const keys = destinationKeys(context.project.root, configured.destinations);
+    for (const [index, destination] of configured.destinations.entries()) {
+      nameByKey.set(keys[index] as string, destination.name);
+    }
+  }
+  const names = deliveries.map((delivery) =>
+    delivery.destinationKey === undefined ? undefined : nameByKey.get(delivery.destinationKey),
+  );
+  const shownDeliveries = deliveries.map((delivery, index) => {
+    const name = names[index];
     return {
       ...delivery,
       ...(name === undefined ? {} : { destinationName: name }),
@@ -920,6 +929,8 @@ const REFUSALS: Readonly<Record<ActionRefusal, string>> = {
   "not-failed": "nothing about it has failed",
   "content-dropped":
     "its content was dropped after delivery (storage.content: dropAfterDelivery), so there is nothing to send again",
+  "destination-unknown":
+    "its outputs were stored before deliveries recorded their destination, so which destination each was for cannot be told; replay it without --resend",
 };
 
 function describeReplay(result: ReplayResult): string {
@@ -1000,12 +1011,12 @@ function deliveryTable(
 ): string[] {
   return table([
     ["ID", "GENERATION", "DESTINATION", "OUTPUT", "STATUS", "ATTEMPTS", "WHEN", "ERROR", "RESENT"],
-    ...deliveries.map((d) => [
+    ...deliveries.map((d, index) => [
       String(d.id),
       String(d.generation),
-      names[d.destination] === undefined
+      names[index] === undefined
         ? String(d.destination)
-        : `${d.destination} (${String(names[d.destination])})`,
+        : `${d.destination} (${String(names[index])})`,
       // A filtered delivery, or one whose destination transform failed, has no output.
       d.seq < 0 ? "-" : String(d.seq + 1),
       d.status,

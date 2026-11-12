@@ -103,6 +103,18 @@ The destination's three keys:
 | `name`      | lowercase letters, digits and hyphens, unique in the channel. `pathways messages show` prints it beside the destination, and `pathways test` puts it in the expected file's name. Without one, its place in the list is used. |
 | `format`    | the format the destination sends: what its transform's return is written in, the extension a `file` destination writes and the `Content-Type` an `http` destination sends. The channel's `format` by default.                 |
 
+Each delivery records the destination it was made for: by its `name`, or, without one, by its kind
+and target (a `file` destination's folder, an `http` destination's URL, an `mllp` or `tcp`
+destination's host and port, a `module` destination's module). Adding a destination anywhere in the
+list, removing one or reordering them is safe: after a restart, each queued delivery goes to the
+destination it was made for, and a resend or `pathways verify` reads each destination's own stored
+outputs. A delivery queued for a destination the channel no longer has waits, and is logged at
+start as `deliveries-held` with the code `destination-gone`; it is sent if that destination comes
+back. Renaming a destination, setting a `name` on one that had none, or changing the target of one
+without a name makes it a new destination, so what was queued for it waits in the same way: give
+each destination a `name` when you add it, and it stays the same destination when its URL, host or
+folder changes.
+
 Its context is the channel transform's, with `ctx.destination` beside it: the destination's `index`
 (from 0), its `name` and its `kind` (`file`, `http`, `mllp` or `module`).
 

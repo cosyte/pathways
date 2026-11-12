@@ -9,8 +9,10 @@ import type {
   DeliveryCounts,
   DeliveryStatus,
   DeliveryTally,
+  DestinationKey,
   DestinationOutcome,
   ExpireResult,
+  HeldDeliveries,
   MessageQuery,
   MessageState,
   MessageStatus,
@@ -71,6 +73,7 @@ interface DeliveryRow {
   deliveredAt: string | null;
   sending: SendingMarker | undefined;
   interruptedAttempt: number | undefined;
+  readonly destinationKey: string | undefined;
 }
 
 const now = (): string => new Date().toISOString();
@@ -121,9 +124,11 @@ export class MemoryStore implements MessageStore {
     messageId: number,
     outputs: TransformOutputs,
     destinations: number,
+    _epoch?: number,
+    keys?: readonly string[],
   ): Promise<void> {
     const message = this.row(messageId);
-    this.queue(message, outputs, destinations);
+    this.queue(message, outputs, destinations, keys);
     message.status = statusOf(outputs);
     message.updatedAt = now();
     return Promise.resolve();
@@ -142,11 +147,11 @@ export class MemoryStore implements MessageStore {
     destination: number,
     options: NextDeliveryOptions = {},
   ): Promise<PendingDelivery | undefined> {
-    const { dueBy = Number.POSITIVE_INFINITY } = options;
+    const { dueBy = Number.POSITIVE_INFINITY, key } = options;
     const row = this.deliveryRows.find(
       (d) =>
         d.channel === channel &&
-        d.destination === destination &&
+        (key === undefined ? d.destination === destination : d.destinationKey === key) &&
         d.status === "pending" &&
         d.nextAttemptAt <= dueBy,
     );
@@ -203,6 +208,21 @@ export class MemoryStore implements MessageStore {
   failDelivery(deliveryId: number, error: string): Promise<void> {
     Object.assign(this.delivery(deliveryId), { status: "failed", error, sending: undefined });
     return Promise.resolve();
+  }
+
+  holdDeliveries(channel: string, keys: readonly string[], error: string): Promise<HeldDeliveries> {
+    let unknown = 0;
+    let gone = 0;
+    for (const d of this.deliveryRows) {
+      if (d.channel !== channel || d.status !== "pending") continue;
+      if (d.destinationKey === undefined) {
+        Object.assign(d, { status: "failed", error, sending: undefined });
+        unknown += 1;
+      } else if (!keys.includes(d.destinationKey)) {
+        gone += 1;
+      }
+    }
+    return Promise.resolve({ unknown, gone });
   }
 
   messageCounts(channel: string): Promise<Record<MessageStatus, number>> {
@@ -268,15 +288,24 @@ export class MemoryStore implements MessageStore {
           deliveredAt: d.deliveredAt,
           error: d.error,
           interruptedAttempt: d.interruptedAttempt,
+          ...(d.destinationKey === undefined ? {} : { destinationKey: d.destinationKey }),
         })),
     );
   }
 
-  outputs(messageId: number, destination?: number): Promise<Uint8Array[]> {
+  outputs(messageId: number, destination?: number | DestinationKey): Promise<Uint8Array[]> {
     const message = this.messageRows.find((m) => m.id === messageId);
     const current = this.deliveryRows.filter(
       (d) => d.messageId === messageId && d.generation === message?.generation && d.seq >= 0,
     );
+    if (typeof destination === "object") {
+      return Promise.resolve(
+        current
+          .filter((d) => d.destinationKey === destination.key)
+          .sort((a, b) => a.seq - b.seq)
+          .map((d) => d.body),
+      );
+    }
     const first = destination ?? Math.min(...current.map((d) => d.destination));
     return Promise.resolve(
       current
@@ -346,7 +375,8 @@ export class MemoryStore implements MessageStore {
     message.error = failure ?? null;
     message.updatedAt = now();
     message.generation += 1;
-    const queued = failure === undefined ? this.queue(message, outputs, destinations) : 0;
+    const queued =
+      failure === undefined ? this.queue(message, outputs, destinations, request.keys) : 0;
     const notStored = (byDestination ?? []).filter((o) => "notStored" in o).length;
     const done = {
       status: message.status,
@@ -460,7 +490,12 @@ export class MemoryStore implements MessageStore {
     return row;
   }
 
-  private queue(message: MessageRow, given: TransformOutputs, destinations: number): number {
+  private queue(
+    message: MessageRow,
+    given: TransformOutputs,
+    destinations: number,
+    keys: readonly string[] | undefined,
+  ): number {
     if (Array.isArray(given) && given.length === 0) return 0;
     let queued = 0;
     for (let destination = 0; destination < destinations; destination += 1) {
@@ -486,6 +521,7 @@ export class MemoryStore implements MessageStore {
           deliveredAt: null,
           sending: undefined,
           interruptedAttempt: undefined,
+          destinationKey: keys?.[destination],
         });
         continue;
       }
@@ -505,6 +541,7 @@ export class MemoryStore implements MessageStore {
           deliveredAt: null,
           sending: undefined,
           interruptedAttempt: undefined,
+          destinationKey: keys?.[destination],
         });
         queued += 1;
       }

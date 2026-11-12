@@ -118,11 +118,16 @@ only, and each one is written to the audit log (`verify`) before its content is 
 written to the message or delivery tables. A message with no recorded outputs (received, failed or
 cleared) is skipped. Two outputs are the same only when they are the same bytes.
 
-On a channel with destination transforms, each destination is compared on its own: the outputs its
-transform gives now, in its own `format`, with the outputs stored for that destination, so a changed
-destination transform shows as different on its destination only. A destination its transform
-filtered was recorded with no output, as was one whose transform failed or one added to the channel
-since. A sample is compared per destination with
+Each destination is compared on its own: the outputs it is given now (its transform's, in its own
+`format`, on a channel with destination transforms) with the outputs stored for that destination,
+found by the identity its deliveries recorded (its `name`, or its kind and target), never by its
+place in the list. A changed destination transform shows as different on its destination only. A
+destination its transform filtered was recorded with no output, as was one whose transform failed. A
+destination with nothing stored under its identity (added to the channel since, or renamed) is not
+compared, and is counted on a line of its own with the code `not-stored`. A message stored by a
+Pathways before deliveries recorded their destination is compared once for every destination on a
+channel without destination transforms, which sent each the same outputs; on a channel with them,
+it fails with the code `destination-unknown`. A sample is compared per destination with
 `<sample without its extension>.expected.<destination name, or its place from 1>.<extension>`, named
 as [`pathways test`](./test-a-channel.md) names it, and a missing file expects that destination to
 filter the sample out.
