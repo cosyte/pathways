@@ -34,10 +34,23 @@ text or a source file's name. Commands whose standard output is their report (`s
 | `delivery-rejected`       | warn  | `channel`, `destination`, `delivery`, `reason`                                         | the destination rejected it for good                                                                                                                                   |
 | `delivery-exhausted`      | warn  | `channel`, `destination`, `delivery`, `attempt`, `reason`, `code`                      | out of retries (`reason` `limit` or `maxAge`): marked failed, its body kept for a resend                                                                               |
 | `delivery-halted`         | warn  | `channel`, `destination`, `delivery`, `attempt`                                        | `pathways channel halt` cut the send off; it stays pending and is sent again, flagged, after a resume                                                                  |
+| `handed-over`             | info  | `channel`, `message`, `target`, `handedTo`                                             | `ctx.route` handed a message to channel `target`, stored there as message `handedTo`                                                                                   |
+| `hand-off-waiting`        | info  | `channel`, `message` or `destination` and `delivery`, `target`, `retryInMs`, `code`    | the target holds `maxPending` messages: the hand-off is tried again later (`code` `ERR_PATHWAYS_TARGET_FULL`)                                                          |
+| `hand-off-refused`        | warn  | `channel`, `destination`, `delivery`, `code`                                           | a channel destination's delivery failed: past the target's `maxHops`, or no such target                                                                                |
 | `smtp-recipients-refused` | warn  | `channel`, `destination`, `message`, `seq`, `refused`, `outcome`                       | an SMTP server took the email for some recipients and refused `refused` of them; `outcome` is `rejected` or `delivered` (`onPartialRefusal`), and no address is logged |
 
 A `transform-failed` line's `kind` is `load`, `parse`, `transform`, `output`, `timeout`, `memory` or
 `crash`. `where` is `file:line:column` in the transform, when it threw.
+
+A channel destination's `delivered` line also carries `handedTo`, the new message's id in its target.
+
+| Code                         | Meaning                                                                                                         |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `ERR_PATHWAYS_UNKNOWN_ROUTE` | `ctx.route` named no channel whose source is `channel:`; the message fails and nothing is handed over           |
+| `ERR_PATHWAYS_HOP_LIMIT`     | a hand-off would take the message past its target's `maxHops`; the message, or the delivery, fails              |
+| `ERR_PATHWAYS_TARGET_FULL`   | the target holds `maxPending` messages waiting for its transform; the hand-off is tried again later, not failed |
+
+See [Route messages between channels](./route-between-channels.md).
 
 ### Sources and endpoints
 

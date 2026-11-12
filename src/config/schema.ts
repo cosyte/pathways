@@ -1739,8 +1739,87 @@ const restateKinds =
     json["dependencies"] = { options: ["module"] };
   };
 
-const SOURCE_KINDS = ["file", "http", "mllp", "tcp", "module"] as const;
-const DESTINATION_KINDS = ["file", "http", "mllp", "tcp", "smtp", "module"] as const;
+const SOURCE_KINDS = ["file", "http", "mllp", "tcp", "channel", "module"] as const;
+const DESTINATION_KINDS = ["file", "http", "mllp", "tcp", "smtp", "channel", "module"] as const;
+
+/** A channel's name, as a `channel:` block names another: the rule its folder name follows. */
+const CHANNEL_NAME = /^[a-z0-9][a-z0-9-]*$/;
+
+/**
+ * How many hand-offs in a row a message may come through before the next is refused, by default:
+ * a message taken in by a source has made none, and each `channel:` destination or `ctx.route` adds
+ * one. Past it, the message that would hand over fails with {@link HOP_LIMIT_CODE}, which stops a
+ * loop made through `ctx.route` that the check at start cannot see.
+ */
+export const DEFAULT_MAX_HOPS = 8;
+
+/**
+ * How many messages a channel fed by others may hold waiting for its transform, by default, before
+ * a hand-off into it waits: a channel destination tries again later, and a transform that routes
+ * into it is run again on the next pass. It keeps a stopped or slow channel from growing the store
+ * without bound.
+ */
+export const DEFAULT_MAX_PENDING = 10_000;
+
+/** The code a message fails with when a hand-off would take it past its target's `maxHops`. */
+export const HOP_LIMIT_CODE = "ERR_PATHWAYS_HOP_LIMIT";
+
+/** The code a transform fails with when `ctx.route` names no channel with a `channel:` source. */
+export const UNKNOWN_ROUTE_CODE = "ERR_PATHWAYS_UNKNOWN_ROUTE";
+
+/** The code a channel destination's retry carries while its target holds `maxPending` messages. */
+export const TARGET_FULL_CODE = "ERR_PATHWAYS_TARGET_FULL";
+
+/** A channel source's `channel:` block: messages come from other channels, never from outside. */
+const channelSource = z
+  .strictObject({
+    routed: envable(
+      z.boolean().meta({
+        description:
+          "true when only ctx.route in another channel's transform feeds this channel, so start does not look for a channel destination that names it. Default false.",
+      }),
+    ).optional(),
+    maxPending: envable(
+      z.number().int().positive().meta({
+        description:
+          "How many messages this channel may hold waiting for its transform before a hand-off into it waits and is tried again. Default 10000.",
+      }),
+    ).optional(),
+    maxHops: envable(
+      z.number().int().positive().meta({
+        description:
+          "How many hand-offs in a row a message may have come through to reach this channel; past it the message that would hand over fails with ERR_PATHWAYS_HOP_LIMIT. Default 8.",
+      }),
+    ).optional(),
+  })
+  .meta({
+    description:
+      "Take messages handed over by other channels: a channel destination that names this one, or ctx.route in a transform.",
+  });
+
+/** A channel destination's `channel:` block: each output becomes a new message of another channel. */
+const channelDestination = z
+  .strictObject({
+    name: z
+      .string()
+      .regex(CHANNEL_NAME, "a channel's name: lowercase letters, digits and hyphens")
+      .meta({ description: "The channel each output is handed to: its source is channel: {}." }),
+    carryMeta: z
+      .array(
+        z
+          .string()
+          .regex(
+            /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/,
+            "a ctx.meta key: a letter, then letters, digits, _, . or -, at most 64",
+          ),
+      )
+      .meta({
+        description:
+          "The ctx.meta keys of the message copied to each new message, by name. Default: none; never all of them.",
+      })
+      .optional(),
+  })
+  .meta({ description: "Hand each output to another channel of this project, as a new message." });
 const HOOK_KINDS = ["module", "webhook"] as const;
 
 /**
@@ -2644,12 +2723,14 @@ const source = restate(
       http: httpSource.optional(),
       mllp: mllpSource.optional(),
       tcp: tcpSource.optional(),
+      channel: channelSource.optional(),
       module: modulePath.optional(),
       options: moduleOptions.optional(),
       poll: pollBlock.optional(),
     })
     .meta({
-      description: "Where messages come from: exactly one of file, http, mllp, tcp or module.",
+      description:
+        "Where messages come from: exactly one of file, http, mllp, tcp, channel or module.",
     })
     .superRefine(oneKind(SOURCE_KINDS))
     .superRefine(optionsWithModule)
@@ -2660,7 +2741,8 @@ const source = restate(
       ctx.addIssue({
         code: "custom",
         path: ["poll"],
-        message: "goes with file or module: http, mllp and tcp listen rather than poll",
+        message:
+          "goes with file or module: http, mllp and tcp listen, and channel is handed messages",
       });
     }),
   restateKinds(SOURCE_KINDS),
@@ -2687,6 +2769,7 @@ const destination = restate(
       mllp: mllpDestination.optional(),
       tcp: tcpDestination.optional(),
       smtp: smtpDestination.optional(),
+      channel: channelDestination.optional(),
       module: modulePath.optional(),
       options: moduleOptions.optional(),
       retry: settingsShape.retry,
@@ -2703,7 +2786,7 @@ const destination = restate(
     })
     .meta({
       description:
-        "One destination: exactly one of file, http, mllp, tcp, smtp or module, its own retry settings, and dryRun.",
+        "One destination: exactly one of file, http, mllp, tcp, smtp, channel or module, its own retry settings, and dryRun.",
     })
     .superRefine(oneKind(DESTINATION_KINDS))
     .superRefine(optionsWithModule)
@@ -2719,6 +2802,15 @@ const destination = restate(
             message: `longer than the delivery's timeout (${String(total)}ms), which cuts it off first`,
           });
         }
+      }
+    })
+    .superRefine((value, ctx) => {
+      if (value.timeout !== undefined && value.channel !== undefined) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["timeout"],
+          message: "goes with file, smtp or module: a channel destination hands over in the store",
+        });
       }
     })
     .superRefine((value, ctx) => {
@@ -3313,6 +3405,42 @@ export interface ModuleConnector {
   readonly options: ModuleOptions;
 }
 
+/**
+ * A channel source: the channel takes in only what other channels hand it, through a channel
+ * destination that names it or `ctx.route` in a transform. Nothing listens or polls.
+ *
+ * @example
+ * ```ts
+ * const source: ChannelSourceConfig = { kind: "channel", routed: false, maxPending: 10_000, maxHops: 8 };
+ * ```
+ */
+export interface ChannelSourceConfig {
+  readonly kind: "channel";
+  /** True when only `ctx.route` feeds the channel, so start looks for no destination naming it. */
+  readonly routed: boolean;
+  /** How many messages may wait for the transform before a hand-off into the channel waits. */
+  readonly maxPending: number;
+  /** How many hand-offs in a row a message may have come through to reach the channel. */
+  readonly maxHops: number;
+}
+
+/**
+ * A channel destination: each output is handed to channel `name` as a new message of its own, in
+ * the same transaction as this delivery's record, carrying the `ctx.meta` keys `carryMeta` lists.
+ *
+ * @example
+ * ```ts
+ * const destination: ChannelDestinationConfig = { kind: "channel", name: "lab-results", carryMeta: ["mrn"] };
+ * ```
+ */
+export interface ChannelDestinationConfig {
+  readonly kind: "channel";
+  /** The channel the outputs are handed to. */
+  readonly name: string;
+  /** The `ctx.meta` keys copied to each new message; none by default, never all of them. */
+  readonly carryMeta: readonly string[];
+}
+
 /** A file source, with its folder resolved to an absolute path. */
 export interface FileSource {
   readonly kind: "file";
@@ -3822,6 +3950,7 @@ export type DestinationConfig = (
   | MllpDestination
   | TcpDestination
   | SmtpDestination
+  | ChannelDestinationConfig
   | ModuleConnector
 ) & {
   readonly retry?: RetryPolicy;
@@ -3893,7 +4022,8 @@ export interface ChannelConfig {
   readonly format: Format;
   /** A `csv` channel's `csv:` block, as written; unset for another format or no block. */
   readonly csv?: CsvSettings | undefined;
-  readonly source: FileSource | HttpSource | MllpSource | TcpSource | ModuleConnector;
+  readonly source:
+    FileSource | HttpSource | MllpSource | TcpSource | ChannelSourceConfig | ModuleConnector;
   /** The transform module, or `undefined` to pass each message through unchanged. */
   readonly transform: string | undefined;
   readonly destinations: readonly DestinationConfig[];

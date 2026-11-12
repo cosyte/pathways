@@ -9,8 +9,13 @@ import { ConfigError } from "../config/load.js";
 import {
   DEFAULT_DELIVERY_TIMEOUT_MS,
   DEFAULT_RETRY,
+  HOP_LIMIT_CODE,
+  TARGET_FULL_CODE,
+  UNKNOWN_ROUTE_CODE,
   type AzblobConfig,
   type ChannelConfig,
+  type ChannelDestinationConfig,
+  type ChannelSourceConfig,
   type DestinationConfig,
   type Format,
   type ProjectConfig,
@@ -70,14 +75,18 @@ import {
   channelStateStore,
   type AuditAction,
   type ChannelRunState,
+  type HandOff,
+  type HandOffFrom,
+  type HandOffResult,
   type MessageStore,
+  type PendingDelivery,
   type ReceivedMessage,
 } from "../storage/store.js";
 import type { SourceFacts } from "../transform.js";
 import { ChannelWorker, TransformLoadError, type TransformOutcome } from "./channel-worker.js";
 import type { EngineFence } from "./lease.js";
 import { channelStatus, type ChannelHealth, type EngineHealth } from "./health.js";
-import { formatTable, type FailureSummary } from "./worker-entry.js";
+import { formatTable, type FailureSummary, type RoutedMessage } from "./worker-entry.js";
 import { DeadlineTimer } from "./deadline.js";
 import { nextPollAt, pollOf } from "./schedule.js";
 import { copyFacts, keepFacts, sourceFacts } from "./source-facts.js";
@@ -348,6 +357,20 @@ const DRY_RUN_CONNECTOR: DestinationConnector = {
 };
 
 /**
+ * The source of a channel that other channels feed: nothing listens or polls, since what it takes
+ * in is stored for it by the channel that hands it over.
+ */
+const CHANNEL_SOURCE: SourceConnector = { start: () => Promise.resolve() };
+
+/**
+ * The connector a channel destination gets: the engine hands over through the store and never calls
+ * it, so a send that reached it would be a defect, and it rejects rather than drop one quietly.
+ */
+const CHANNEL_DESTINATION: DestinationConnector = {
+  deliver: () => Promise.reject(new Error("a channel destination was handed a message to send")),
+};
+
+/**
  * Whether destination `index` of `channel` runs dry: its block sets `dryRun: true`, or the engine
  * runs every destination dry.
  *
@@ -528,6 +551,9 @@ export async function connectorsFor(
       });
       break;
     }
+    case "channel":
+      sourceConnector = CHANNEL_SOURCE;
+      break;
     case "module":
       sourceConnector = await customSource(
         source,
@@ -695,6 +721,9 @@ export async function connectorsFor(
         );
         break;
       }
+      case "channel":
+        destinations.push(CHANNEL_DESTINATION);
+        break;
       case "module":
         destinations.push(
           await customDestination(
@@ -2190,12 +2219,20 @@ export class Engine {
       });
       if (outcome.ok) {
         faultPoint("after-transform-before-complete");
-        await store.completeTransform(
-          next.id,
-          outcome.outputs,
-          config.destinations.length,
-          ...this.epoch(),
-        );
+        const routes = outcome.routes ?? [];
+        if (routes.length === 0) {
+          await store.completeTransform(
+            next.id,
+            outcome.outputs,
+            config.destinations.length,
+            ...this.epoch(),
+          );
+        } else {
+          const routed = await this.handRoutes(channel, next, outcome.outputs, routes);
+          // Full: the message stays received, and is run again on a later pass, in its turn.
+          if (routed === "full") return;
+          if (routed === "failed") continue;
+        }
         if (owned) for (const output of outcome.outputs) release(output);
         const outputs = outcome.outputs.length;
         logger.info({
@@ -2235,6 +2272,283 @@ export class Engine {
         }));
       }
     }
+  }
+
+  /**
+   * The settings of channel `name` as a target of hand-offs: its `channel:` source, or `undefined`
+   * when no channel of the project by that name takes them.
+   */
+  private handOffTarget(name: string): ChannelSourceConfig | undefined {
+    const target = this.options.project.channels.find((channel) => channel.name === name);
+    return target?.source.kind === "channel" ? target.source : undefined;
+  }
+
+  /**
+   * Records hand-offs with what they come from, in one transaction through the store's `handOff`.
+   * A store without it gets each new message through `receive`, under the idempotency key the
+   * hand-off carries, looked up as a source that resumes looks one up, and then the source's record:
+   * a crash between the two hands each one over once when the work is done again. Either way, a
+   * target that already holds its `maxPending` messages waiting takes nothing.
+   */
+  private async commitHandOffs(
+    from: HandOffFrom,
+    handOffs: readonly HandOff[],
+    dropContent: boolean,
+  ): Promise<HandOffResult> {
+    const { store } = this.options;
+    this.options.fence?.check();
+    if (typeof store.handOff === "function" && !dropContent) {
+      return store.handOff(from, handOffs, ...this.epoch());
+    }
+    for (const handOff of handOffs) {
+      const { received } = await store.messageCounts(handOff.channel);
+      if (received >= handOff.maxPending) return { ok: false, full: handOff.channel };
+    }
+    const ids: number[] = [];
+    for (const handOff of handOffs) {
+      ids.push((await store.receive(handOff.channel, handOff.body, handOff.options)).id);
+    }
+    if (from.kind === "transform") {
+      await store.completeTransform(
+        from.messageId,
+        from.outputs,
+        from.destinations,
+        ...this.epoch(),
+      );
+    } else if (dropContent) {
+      // start() refused a store without the method for such a channel.
+      const dropping = store as Required<Pick<MessageStore, "markDeliveredAndDropContent">>;
+      await dropping.markDeliveredAndDropContent(from.deliveryId, ...this.epoch());
+    } else {
+      await store.markDelivered(from.deliveryId, ...this.epoch());
+    }
+    return { ok: true, ids };
+  }
+
+  /**
+   * Hands what a transform routed with `ctx.route` to its targets, with the transform's outcome,
+   * in one transaction. A route to a channel that takes no hand-offs, or past a target's
+   * `maxHops`, fails the message with a stable code and hands nothing over; a full target leaves
+   * the message received, to run again on a later pass.
+   */
+  private async handRoutes(
+    channel: RunningChannel,
+    message: { readonly id: number; readonly hops?: number | undefined },
+    outputs: readonly Uint8Array[],
+    routes: readonly RoutedMessage[],
+  ): Promise<"done" | "failed" | "full"> {
+    const { config } = channel;
+    const { store, logger } = this.options;
+    const hops = (message.hops ?? 0) + 1;
+    const generation = (await store.message(message.id))?.generation ?? 0;
+    const handOffs: HandOff[] = [];
+    for (const [index, route] of routes.entries()) {
+      const target = this.handOffTarget(route.channel);
+      const code =
+        target === undefined
+          ? UNKNOWN_ROUTE_CODE
+          : hops > target.maxHops
+            ? HOP_LIMIT_CODE
+            : undefined;
+      if (target === undefined || code !== undefined) {
+        const failure: FailureSummary = {
+          kind: "output",
+          name: "RouteError",
+          code: code ?? UNKNOWN_ROUTE_CODE,
+          detail:
+            code === HOP_LIMIT_CODE
+              ? `the message has come through ${String(hops - 1)} hand-offs, the most its target takes`
+              : "ctx.route named no channel whose source is channel:",
+        };
+        await store.failTransform(message.id, storedFailure(failure), ...this.epoch());
+        logger.warn({
+          event: "transform-failed",
+          channel: config.name,
+          message: message.id,
+          kind: failure.kind,
+          name: failure.name,
+          code: failure.code,
+          route: index,
+        });
+        this.emit(channel, () => ({
+          type: "transform-failed",
+          at: this.at(),
+          channel: config.name,
+          messageId: message.id,
+          kind: failure.kind,
+          name: failure.name,
+          code: failure.code,
+          where: undefined,
+        }));
+        return "failed";
+      }
+      handOffs.push({
+        channel: route.channel,
+        body: route.body,
+        maxPending: target.maxPending,
+        options: {
+          parent: {
+            channel: config.name,
+            messageId: message.id,
+            deliveryId: undefined,
+            generation,
+          },
+          hops,
+          idempotencyKey: hashed(
+            `route:${config.name}:${String(message.id)}:${String(generation)}:${String(index)}`,
+          ),
+          resumed: true,
+          size: route.body.byteLength,
+        },
+      });
+    }
+    const result = await this.commitHandOffs(
+      {
+        kind: "transform",
+        messageId: message.id,
+        outputs,
+        destinations: config.destinations.length,
+      },
+      handOffs,
+      false,
+    );
+    if (!result.ok) {
+      logger.info({
+        event: "hand-off-waiting",
+        channel: config.name,
+        message: message.id,
+        target: result.full,
+        code: TARGET_FULL_CODE,
+      });
+      return "full";
+    }
+    for (const [index, id] of result.ids.entries()) {
+      logger.info({
+        event: "handed-over",
+        channel: config.name,
+        message: message.id,
+        target: handOffs[index]?.channel,
+        handedTo: id,
+      });
+    }
+    return "done";
+  }
+
+  /**
+   * Hands one delivery of a channel destination to its target channel as a new message, in the
+   * same transaction as the delivery's record, carrying the `ctx.meta` keys `carryMeta` names.
+   * Returns `wait` when the target is full: the delivery is tried again later, and in order the
+   * deliveries behind it wait.
+   */
+  private async handDelivery(
+    channel: RunningChannel,
+    index: number,
+    destination: ChannelDestinationConfig,
+    delivery: PendingDelivery,
+    policy: RetryPolicy,
+  ): Promise<"next" | "wait"> {
+    const { config } = channel;
+    const { store, logger } = this.options;
+    const message = await store.message(delivery.messageId);
+    const generation = message?.generation ?? 0;
+    const hops = (message?.hops ?? 0) + 1;
+    const target = this.handOffTarget(destination.name);
+    const about = {
+      channel: config.name,
+      messageId: delivery.messageId,
+      destination: index,
+      deliveryId: delivery.id,
+      attempt: delivery.attempts + 1,
+    };
+    if (target === undefined || hops > target.maxHops) {
+      // Checked at start for a target; a hop count past the limit is a loop through ctx.route.
+      const code = target === undefined ? UNKNOWN_ROUTE_CODE : HOP_LIMIT_CODE;
+      this.options.fence?.check();
+      await store.failDelivery(delivery.id, `hand-off: ${code}`, ...this.epoch());
+      logger.warn({
+        event: "hand-off-refused",
+        channel: config.name,
+        destination: index,
+        delivery: delivery.id,
+        code,
+      });
+      this.emit(channel, () => ({
+        type: "delivery-rejected",
+        at: this.at(),
+        ...about,
+        reason: code,
+      }));
+      return "next";
+    }
+    const carried =
+      destination.carryMeta.length === 0 || typeof store.messageMeta !== "function"
+        ? undefined
+        : await store.messageMeta(delivery.messageId);
+    const meta =
+      carried === undefined
+        ? undefined
+        : Object.fromEntries(
+            destination.carryMeta.flatMap((key) =>
+              Object.hasOwn(carried, key) ? [[key, carried[key] as string | number | boolean]] : [],
+            ),
+          );
+    const result = await this.commitHandOffs(
+      { kind: "delivery", deliveryId: delivery.id },
+      [
+        {
+          channel: destination.name,
+          body: delivery.body,
+          maxPending: target.maxPending,
+          options: {
+            parent: {
+              channel: config.name,
+              messageId: delivery.messageId,
+              deliveryId: delivery.id,
+              generation,
+            },
+            hops,
+            // The source channel, the delivery and the generation: a crash re-send of the same
+            // delivery finds the message stored, and a replay's new delivery hands over anew.
+            idempotencyKey: hashed(
+              `channel:${config.name}:${String(delivery.id)}:${String(generation)}`,
+            ),
+            resumed: true,
+            size: delivery.body.byteLength,
+            ...(meta === undefined || Object.keys(meta).length === 0 ? {} : { meta }),
+          },
+        },
+      ],
+      config.settings.content === "dropAfterDelivery",
+    );
+    if (!result.ok) {
+      const wait = policy.firstMs;
+      await store.scheduleRetry(
+        delivery.id,
+        delivery.attempts,
+        this.now() + wait,
+        `hand-off: ${TARGET_FULL_CODE}`,
+        ...this.epoch(),
+      );
+      logger.info({
+        event: "hand-off-waiting",
+        channel: config.name,
+        destination: index,
+        delivery: delivery.id,
+        target: result.full,
+        retryInMs: wait,
+        code: TARGET_FULL_CODE,
+      });
+      return "wait";
+    }
+    logger.info({
+      event: "delivered",
+      channel: config.name,
+      destination: index,
+      delivery: delivery.id,
+      handedTo: result.ids[0],
+    });
+    this.emit(channel, () => ({ type: "delivered", at: this.at(), ...about }));
+    return "next";
   }
 
   /**
@@ -2290,6 +2604,13 @@ export class Engine {
             destination: index,
             delivery: delivery.id,
           });
+          continue;
+        }
+        const handTo = config.destinations[index];
+        if (handTo?.kind === "channel") {
+          // No connector: the output is stored for the target channel with this delivery's record.
+          this.options.fence?.check();
+          if ((await this.handDelivery(channel, index, handTo, delivery, policy)) === "wait") break;
           continue;
         }
         // Still marked: an attempt was handed over and its outcome never recorded, so it counts.

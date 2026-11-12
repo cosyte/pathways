@@ -6,6 +6,7 @@ import type { z } from "zod";
 
 import { normalisePath } from "../connectors/http-path.js";
 import { secretSourceOf, secretUses, type SecretSourceYaml } from "../secrets/sources.js";
+import { channelGraphProblems } from "./channel-graph.js";
 import { referencesIn, resolvingEnv, variableAt, type EnvReference } from "./env-ref.js";
 import { DEFAULT_INDEX_BITS, isLowEntropyKey } from "./meta-index.js";
 import {
@@ -23,6 +24,8 @@ import {
   DEFAULT_LEASE_TTL_MS,
   DEFAULT_DELIVERY_TIMEOUT_MS,
   DEFAULT_MAX_BYTES,
+  DEFAULT_MAX_HOPS,
+  DEFAULT_MAX_PENDING,
   DEFAULT_MIN_AGE_MS,
   DEFAULT_POLL_DEADLINE_MS,
   DEFAULT_READ_TRIES,
@@ -382,6 +385,20 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
     });
   }
 
+  if (problems.length === 0) {
+    problems.push(
+      ...channelGraphProblems(
+        channels.map((channel) => ({
+          name: channel.name,
+          takesHandOffs: channel.source.kind === "channel",
+          routed: channel.source.kind === "channel" && channel.source.routed,
+          targets: channel.destinations.flatMap((destination, index) =>
+            destination.kind === "channel" ? [{ index, name: destination.name }] : [],
+          ),
+        })),
+      ),
+    );
+  }
   if (problems.length === 0 && channels.length === 0) {
     problems.push(
       `${show(channelsDir)}: no channels; each channel lives in channels/<name>/channel.yaml`,
@@ -558,9 +575,17 @@ function resolveSource(
   dir: string,
   settings: Settings,
 ): ChannelConfig["source"] {
-  const { http, mllp, tcp } = source;
+  const { http, mllp, tcp, channel } = source;
   const module = resolveModule(source, dir);
   if (module !== undefined) return module;
+  if (channel !== undefined) {
+    return {
+      kind: "channel",
+      routed: channel.routed === true,
+      maxPending: channel.maxPending ?? DEFAULT_MAX_PENDING,
+      maxHops: channel.maxHops ?? DEFAULT_MAX_HOPS,
+    };
+  }
   if (tcp !== undefined) {
     const { reply } = tcp;
     return {
@@ -789,9 +814,12 @@ function resolveConnector(
   dir: string,
   settings: Settings,
 ): ChannelConfig["destinations"][number] {
-  const { http, mllp, smtp, tcp } = destination;
+  const { http, mllp, smtp, tcp, channel } = destination;
   const module = resolveModule(destination, dir);
   if (module !== undefined) return module;
+  if (channel !== undefined) {
+    return { kind: "channel", name: channel.name, carryMeta: channel.carryMeta ?? [] };
+  }
   if (smtp !== undefined) {
     return resolveSmtp(smtp, dir, destination.timeout ?? DEFAULT_DELIVERY_TIMEOUT_MS);
   }

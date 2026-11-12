@@ -13,6 +13,7 @@ import {
   type AuditDetail,
   type AuditEntry,
   type DeliveryTally,
+  type MessageParent,
   type MessageState,
   type MessageStore,
   type MessageSummary,
@@ -264,6 +265,7 @@ export async function statusCommand(
       since: message.updatedAt,
     }));
     const more = { retrying: retrying.length > STATUS_LIST, failed: failed.next !== undefined };
+    const links = channelLinks(project, name);
     channels[name] = {
       status,
       configured: configured.has(name),
@@ -272,9 +274,13 @@ export async function statusCommand(
       retrying: shown,
       failed: failures,
       more,
+      // Set only for a channel that hands over or is handed to, so others read as they always have.
+      ...(links.feeds.length === 0 && links.fedBy.length === 0 ? {} : { links }),
     };
 
     lines.push(`${name}: ${status}${configured.has(name) ? "" : " (not configured)"}`);
+    if (links.fedBy.length > 0) lines.push(`  fed by: ${links.fedBy.join(", ")}`);
+    if (links.feeds.length > 0) lines.push(`  feeds: ${links.feeds.join(", ")}`);
     lines.push(`  messages: ${tally(messages)}`);
     lines.push(
       `  deliveries: ${counts.pending} pending (${retryingCount} retrying), ${counts.delivered} delivered, ${counts.failed} failed, ${counts.cleared} cleared` +
@@ -297,6 +303,30 @@ export async function statusCommand(
   print(context, { channels }, lines);
   return EXIT.ok;
 }
+
+/**
+ * The channels `name` hands over to through its channel destinations, and those that hand over to
+ * it, by name, each once and sorted. `ctx.route` links are made at run time and are not among them.
+ */
+function channelLinks(
+  project: ProjectConfig,
+  name: string,
+): { readonly feeds: string[]; readonly fedBy: string[] } {
+  const targets = (channel: ProjectConfig["channels"][number]): string[] =>
+    channel.destinations.flatMap((destination) =>
+      destination.kind === "channel" ? [destination.name] : [],
+    );
+  const own = project.channels.find((channel) => channel.name === name);
+  const feeds = [...new Set(own === undefined ? [] : targets(own))].sort();
+  const fedBy = project.channels
+    .filter((channel) => targets(channel).includes(name))
+    .map((channel) => channel.name)
+    .sort();
+  return { feeds, fedBy };
+}
+
+/** The most messages handed over from one that `pathways messages show` lists. */
+const CHILDREN_SHOWN = 20;
 
 /**
  * `pathways messages`: a page of stored messages, newest first, with ids, states, times, sizes and
@@ -461,6 +491,8 @@ export async function showCommand(
     return EXIT.notFound;
   }
   const deliveries = await store.deliveries(id);
+  const children =
+    typeof store.children === "function" ? await store.children(id, CHILDREN_SHOWN + 1) : [];
   let received: Uint8Array | undefined;
   let outputs: Uint8Array[] = [];
   if (content) {
@@ -496,13 +528,41 @@ export async function showCommand(
       ...(message.contentHash === undefined
         ? []
         : [["  content hash", message.contentHash] as [string, string]]),
+      ...(message.parent === undefined
+        ? []
+        : [
+            ["  handed over from", describeParent(message.parent)] as [string, string],
+            ["  hops", String(message.hops ?? 1)] as [string, string],
+          ]),
     ]),
     deliveries.length === 0 ? "No deliveries." : "Deliveries:",
     ...(deliveries.length === 0 ? [] : indent(deliveryTable(deliveries))),
+    ...(children.length === 0
+      ? []
+      : [
+          "Handed over to:",
+          ...children
+            .slice(0, CHILDREN_SHOWN)
+            .map(
+              (child) =>
+                `  message ${String(child.id)} of ${child.channel}, ${child.state}${child.parent?.deliveryId === undefined ? " (ctx.route)" : ` (delivery ${String(child.parent.deliveryId)})`}`,
+            ),
+          ...(children.length > CHILDREN_SHOWN ? ["  more than shown"] : []),
+        ]),
   ];
   let json: Record<string, unknown> = {
     message: { ...summary, error: safeError(error) },
     deliveries: shownDeliveries,
+    ...(children.length === 0
+      ? {}
+      : {
+          children: children.slice(0, CHILDREN_SHOWN).map((child) => ({
+            id: child.id,
+            channel: child.channel,
+            state: child.state,
+            deliveryId: child.parent?.deliveryId,
+          })),
+        }),
   };
   if (message.contentDroppedAt !== undefined) {
     lines.push(
@@ -913,9 +973,19 @@ const REFUSALS: Readonly<Record<ActionRefusal, string>> = {
   changed: "it changed while the replay ran, so nothing was recorded; try again",
   unreadable: "what is stored of it could not be decrypted",
   "not-failed": "nothing about it has failed",
+  routes:
+    "its transform hands messages to other channels with ctx.route, which a replay does not do yet; resend it with --resend",
   "content-dropped":
     "its content was dropped after delivery (storage.content: dropAfterDelivery), so there is nothing to send again",
 };
+
+/** A parent link as `messages show` prints it: channel, message, delivery and any replay. */
+function describeParent(parent: MessageParent): string {
+  const via =
+    parent.deliveryId === undefined ? "ctx.route" : `delivery ${String(parent.deliveryId)}`;
+  const replay = parent.generation > 0 ? `, from replay ${String(parent.generation)}` : "";
+  return `message ${String(parent.messageId)} of ${parent.channel} (${via}${replay})`;
+}
 
 function describeReplay(result: ReplayResult): string {
   switch (result.outcome) {

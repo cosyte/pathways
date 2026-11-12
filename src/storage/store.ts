@@ -174,6 +174,16 @@ interface MessagesTable {
    * has none. Since 0010.
    */
   meta: string | null;
+  /** The channel that handed this message over; null for one a source took in. Since 0012. */
+  parent_channel: string | null;
+  /** The message of `parent_channel` it was handed over from. Since 0012. */
+  parent_message: ColumnType<number | string | null, number | null, number | null>;
+  /** The channel destination's delivery that handed it over; null for `ctx.route`. Since 0012. */
+  parent_delivery: ColumnType<number | string | null, number | null, number | null>;
+  /** The parent's generation at the hand-off: above 0 for a replay or a resend. Since 0012. */
+  parent_generation: number | null;
+  /** How many hand-offs in a row brought it here; null for one a source took in. Since 0012. */
+  hops: number | null;
 }
 
 /**
@@ -332,7 +342,79 @@ export interface StoreReceiveOptions {
   readonly storedMeta?: string | undefined;
   /** The metadata's index tags, stored with the message in the same transaction. Set by a wrapper. */
   readonly metaTags?: readonly MetaTag[] | undefined;
+  /** The message of another channel this one was handed over from, kept with it. */
+  readonly parent?: MessageParent | undefined;
+  /** How many hand-offs in a row brought the message here: 1 for the first hand-off. */
+  readonly hops?: number | undefined;
 }
+
+/**
+ * Where a message handed over from another channel came from: that channel, its message, the
+ * channel destination's delivery (none for `ctx.route`), and the parent's generation at the time,
+ * which is above 0 when the hand-off came from a replay or a resend.
+ *
+ * @example
+ * ```ts
+ * const parent: MessageParent = { channel: "adt-in", messageId: 12, deliveryId: 40, generation: 0 };
+ * ```
+ */
+export interface MessageParent {
+  readonly channel: string;
+  readonly messageId: number;
+  /** The channel destination's delivery that handed it over; `undefined` for `ctx.route`. */
+  readonly deliveryId: number | undefined;
+  /** The parent's generation when it handed over: 0 the first time, more for a replay or resend. */
+  readonly generation: number;
+}
+
+/**
+ * One message to hand to another channel: its target, body and what is stored with it (the
+ * parent link, hop count, idempotency key and metadata), and the most messages the target may
+ * hold waiting for its transform, counting this one.
+ *
+ * @example
+ * ```ts
+ * const handOff: HandOff = { channel: "lab-results", body, options: { parent, hops: 1 }, maxPending: 10_000 };
+ * ```
+ */
+export interface HandOff {
+  readonly channel: string;
+  readonly body: Uint8Array;
+  readonly options: StoreReceiveOptions;
+  readonly maxPending: number;
+}
+
+/**
+ * What a hand-off is recorded with, in the same transaction: a channel destination's delivery
+ * marked delivered, or a transform's outcome (its outputs queued for the destinations) when the
+ * transform routed with `ctx.route`.
+ *
+ * @example
+ * ```ts
+ * const from: HandOffFrom = { kind: "delivery", deliveryId: 40 };
+ * ```
+ */
+export type HandOffFrom =
+  | { readonly kind: "delivery"; readonly deliveryId: number }
+  | {
+      readonly kind: "transform";
+      readonly messageId: number;
+      readonly outputs: readonly Uint8Array[];
+      readonly destinations: number;
+    };
+
+/**
+ * What a hand-off came to: the new messages' ids, in order, or, when a target already held its
+ * `maxPending` messages, nothing changed and the full target's name.
+ *
+ * @example
+ * ```ts
+ * if (!result.ok) console.log(`${result.full} is full`);
+ * ```
+ */
+export type HandOffResult =
+  | { readonly ok: true; readonly ids: readonly number[] }
+  | { readonly ok: false; readonly full: string };
 
 /**
  * An incoming message, stored.
@@ -387,6 +469,10 @@ export interface MessageSummary {
    * message cannot be replayed or resent, and its content cannot be shown.
    */
   readonly contentDroppedAt?: string | undefined;
+  /** Where the message was handed over from, when another channel handed it over. */
+  readonly parent?: MessageParent | undefined;
+  /** How many hand-offs in a row brought it here, when another channel handed it over. */
+  readonly hops?: number | undefined;
 }
 
 /**
@@ -498,6 +584,8 @@ export interface RetryingDelivery {
 export interface PendingMessage {
   readonly id: number;
   readonly body: Uint8Array;
+  /** How many hand-offs in a row brought it here; unset for a message a source took in. */
+  readonly hops?: number | undefined;
 }
 
 /**
@@ -835,6 +923,12 @@ export interface StoredMessageRow {
   readonly contentHash: string | null;
   readonly contentDroppedAt: string | null;
   readonly meta: string | null;
+  /** The parent link of a message another channel handed over; all null for one taken in. */
+  readonly parentChannel?: string | null | undefined;
+  readonly parentMessage?: number | null | undefined;
+  readonly parentDelivery?: number | null | undefined;
+  readonly parentGeneration?: number | null | undefined;
+  readonly hops?: number | null | undefined;
 }
 
 /**
@@ -1240,6 +1334,28 @@ export interface MessageStore {
   metaCandidates?(query: MetaCandidateQuery): Promise<MetaCandidate[]>;
   /** A channel's retrying deliveries, oldest first, at most `limit`. */
   listRetrying(channel: string, limit: number): Promise<RetryingDelivery[]>;
+  /**
+   * Hands messages to other channels in one transaction with what they come from: `from` a
+   * channel destination's delivery, marked delivered, or a transform's outcome, recorded as
+   * {@link completeTransform} records it. Each new message is stored as `received` in its target
+   * channel with its parent link and hop count, as {@link receive} stores one. When a target then
+   * holds more than its hand-off's `maxPending` messages waiting for the transform, nothing is
+   * kept and the result names it. Fenced by `epoch` when it is given. Optional: without it the
+   * engine stores each hand-off with {@link receive} under an idempotency key built from the source
+   * channel, the delivery or message, and the generation, then records the source, so a crash
+   * between the two hands over once.
+   */
+  handOff?(from: HandOffFrom, handOffs: readonly HandOff[], epoch?: number): Promise<HandOffResult>;
+  /**
+   * The messages handed over from message `messageId`, oldest first, at most `limit`. Optional: a
+   * store without it shows no children.
+   */
+  children?(messageId: number, limit: number): Promise<MessageSummary[]>;
+  /**
+   * A message's `ctx.meta`, read back, or `undefined` when it has none or it was dropped. Optional:
+   * a channel destination with `carryMeta` carries nothing on a store without it.
+   */
+  messageMeta?(messageId: number): Promise<MessageMeta | undefined>;
   /**
    * Records a replay or a resend: the message's new status, a new generation, and fresh deliveries
    * at the back of each destination's queue. Refuses, changing nothing, when the message has moved
@@ -1734,6 +1850,26 @@ export function migrations(kind: StorageKind): Record<string, SchemaStep> {
         await db.schema.alterTable("deliveries").addColumn("failed_at", t.time).execute();
       },
     },
+    "0012-channel-links": {
+      // Expand only: five columns that may be null and an index, which an older Pathways never
+      // reads or writes. A message stored before reads as one a source took in. To roll it back,
+      // stop every engine, drop the index and the five columns; a message handed over then reads
+      // as one taken in.
+      tag: "expand",
+      async up(db: Kysely<unknown>): Promise<void> {
+        // One column per statement: SQLite adds only one column per ALTER TABLE.
+        await db.schema.alterTable("messages").addColumn("parent_channel", t.name).execute();
+        await db.schema.alterTable("messages").addColumn("parent_message", t.int64).execute();
+        await db.schema.alterTable("messages").addColumn("parent_delivery", t.int64).execute();
+        await db.schema.alterTable("messages").addColumn("parent_generation", "integer").execute();
+        await db.schema.alterTable("messages").addColumn("hops", "integer").execute();
+        await db.schema
+          .createIndex("messages_by_parent")
+          .on("messages")
+          .columns(["parent_message", "id"])
+          .execute();
+      },
+    },
   };
 }
 
@@ -1932,6 +2068,14 @@ function countOne(tally: Tallying, status: DeliveryStatus): void {
 }
 
 /** Thrown inside a transaction to roll it back and say why. */
+/** Thrown inside a hand-off's transaction when a target is full, so nothing of it is kept. */
+class TargetFull extends Error {
+  constructor(readonly channel: string) {
+    super("target full");
+    this.name = "TargetFull";
+  }
+}
+
 class Refusal extends Error {
   constructor(readonly reason: RefusalReason) {
     super(reason);
@@ -1951,6 +2095,11 @@ type MessageRow = Pick<
   | "generation"
   | "content_hash"
   | "content_dropped_at"
+  | "parent_channel"
+  | "parent_message"
+  | "parent_delivery"
+  | "parent_generation"
+  | "hops"
 >;
 
 /** The columns a message's summary is read from. */
@@ -1965,7 +2114,49 @@ const SUMMARY_COLUMNS = [
   "generation",
   "content_hash",
   "content_dropped_at",
+  "parent_channel",
+  "parent_message",
+  "parent_delivery",
+  "parent_generation",
+  "hops",
 ] as const;
+
+/** A message's parent link and hop count, as a summary carries them: nothing for one taken in. */
+function parentOf(
+  row: Pick<
+    MessageRow,
+    "parent_channel" | "parent_message" | "parent_delivery" | "parent_generation" | "hops"
+  >,
+): { parent?: MessageParent; hops?: number } {
+  if (row.parent_channel === null || row.parent_message === null) return {};
+  return {
+    parent: {
+      channel: row.parent_channel,
+      messageId: Number(row.parent_message),
+      deliveryId: int64OrNull(row.parent_delivery) ?? undefined,
+      generation: row.parent_generation ?? 0,
+    },
+    hops: row.hops ?? 1,
+  };
+}
+
+/** The columns a hand-off's parent link and hop count are stored in, from receive's options. */
+function parentColumns(
+  options: StoreReceiveOptions,
+): Pick<
+  Insertable<MessagesTable>,
+  "parent_channel" | "parent_message" | "parent_delivery" | "parent_generation" | "hops"
+> {
+  const { parent, hops } = options;
+  if (parent === undefined) return {};
+  return {
+    parent_channel: parent.channel,
+    parent_message: parent.messageId,
+    parent_delivery: parent.deliveryId ?? null,
+    parent_generation: parent.generation,
+    hops: hops ?? 1,
+  };
+}
 
 /** A nullable 64-bit column, read as a number. */
 function int64OrNull(value: number | string | null): number | null {
@@ -2199,6 +2390,7 @@ export class Store implements MessageStore, ContentStore, MetaStore {
         content_hash: contentHash ?? null,
         content_dropped_at: null,
         meta,
+        ...parentColumns(options),
       });
     // The tags go in with the message, in the same transaction.
     const insert = async (db: Kysely<Tables>): Promise<number> => {
@@ -2486,13 +2678,18 @@ export class Store implements MessageStore, ContentStore, MetaStore {
   async nextToTransform(channel: string): Promise<PendingMessage | undefined> {
     const row = await this.db
       .selectFrom("messages")
-      .select(["id", "body"])
+      .select(["id", "body", "hops"])
       .where("channel", "=", channel)
       .where("status", "=", "received")
       .orderBy("id")
       .$call((query) => this.first(query))
       .executeTakeFirst();
-    return row === undefined ? undefined : { id: Number(row.id), body: row.body };
+    if (row === undefined) return undefined;
+    return {
+      id: Number(row.id),
+      body: row.body,
+      ...(row.hops === null ? {} : { hops: row.hops }),
+    };
   }
 
   /**
@@ -2505,27 +2702,137 @@ export class Store implements MessageStore, ContentStore, MetaStore {
     destinations: number,
     epoch?: number,
   ): Promise<void> {
-    const at = this.now();
     await this.db.transaction().execute(async (tx) => {
-      // The update first: see receive() for why every transaction here writes before it reads.
-      const updated = await tx
-        .updateTable("messages")
-        .set({
-          status: outputs.length === 0 ? "filtered" : "transformed",
-          updated_at: at.toISOString(),
-        })
-        .where("id", "=", messageId)
-        .$if(epoch !== undefined, (q) => q.where(this.fence("received", epoch)))
-        .executeTakeFirst();
-      // Thrown inside the transaction, so nothing of it is kept.
-      if (epoch !== undefined && updated.numUpdatedRows === 0n) throw new LeaseLostError();
-      const message = await tx
-        .selectFrom("messages")
-        .select(["channel", "generation"])
-        .where("id", "=", messageId)
-        .executeTakeFirstOrThrow();
-      await this.queue(tx, messageId, message, outputs, destinations);
+      await this.recordTransform(tx, messageId, outputs, destinations, epoch);
     });
+  }
+
+  /** {@link completeTransform}'s writes, inside the transaction `tx`. */
+  private async recordTransform(
+    tx: Transaction<Tables>,
+    messageId: number,
+    outputs: readonly Uint8Array[],
+    destinations: number,
+    epoch: number | undefined,
+  ): Promise<void> {
+    // The update first: see receive() for why every transaction here writes before it reads.
+    const updated = await tx
+      .updateTable("messages")
+      .set({
+        status: outputs.length === 0 ? "filtered" : "transformed",
+        updated_at: this.now().toISOString(),
+      })
+      .where("id", "=", messageId)
+      .$if(epoch !== undefined, (q) => q.where(this.fence("received", epoch)))
+      .executeTakeFirst();
+    // Thrown inside the transaction, so nothing of it is kept.
+    if (epoch !== undefined && updated.numUpdatedRows === 0n) throw new LeaseLostError();
+    const message = await tx
+      .selectFrom("messages")
+      .select(["channel", "generation"])
+      .where("id", "=", messageId)
+      .executeTakeFirstOrThrow();
+    await this.queue(tx, messageId, message, outputs, destinations);
+  }
+
+  /**
+   * Hands messages to other channels in one transaction with what they come from: see
+   * {@link MessageStore.handOff}. The source's record is written first, then each new message, and
+   * only then is its target's backlog counted, so the transaction writes before it reads.
+   */
+  async handOff(
+    from: HandOffFrom,
+    handOffs: readonly HandOff[],
+    epoch?: number,
+  ): Promise<HandOffResult> {
+    try {
+      return await this.db.transaction().execute(async (tx) => {
+        if (from.kind === "delivery") {
+          const updated = await tx
+            .updateTable("deliveries")
+            .set({
+              status: "delivered",
+              delivered_at: this.now().toISOString(),
+              sending_at: null,
+              sending_attempt: null,
+            })
+            .where("id", "=", from.deliveryId)
+            .$if(epoch !== undefined, (q) => q.where(this.fence("pending", epoch)))
+            .executeTakeFirst();
+          fenced(epoch, updated);
+        } else {
+          await this.recordTransform(tx, from.messageId, from.outputs, from.destinations, epoch);
+        }
+        const ids: number[] = [];
+        for (const handOff of handOffs) {
+          const { channel, body, options, maxPending } = handOff;
+          const at = this.now().toISOString();
+          const id = await this.insertMessage(tx, {
+            channel,
+            received_at: at,
+            body: blob(body),
+            status: "received",
+            error: null,
+            updated_at: at,
+            dedup_key: null,
+            duplicate_of: null,
+            size: options.size ?? body.byteLength,
+            idempotency_key: options.idempotencyKey ?? null,
+            content_hash: options.contentHash ?? null,
+            content_dropped_at: null,
+            meta:
+              options.storedMeta ??
+              (options.meta === undefined ? null : JSON.stringify(options.meta)),
+            ...parentColumns(options),
+          });
+          await this.insertTags(tx, id, channel, options.metaTags ?? []);
+          const waiting = await tx
+            .selectFrom("messages")
+            .select((eb) => eb.fn.countAll<number | string>().as("count"))
+            .where("channel", "=", channel)
+            .where("status", "=", "received")
+            .executeTakeFirstOrThrow();
+          if (Number(waiting.count) > maxPending) throw new TargetFull(channel);
+          ids.push(id);
+        }
+        return { ok: true as const, ids };
+      });
+    } catch (error) {
+      if (error instanceof TargetFull) return { ok: false, full: error.channel };
+      throw error;
+    }
+  }
+
+  /** The messages handed over from message `messageId`, oldest first, at most `limit`. */
+  async children(messageId: number, limit: number): Promise<MessageSummary[]> {
+    const rows = await this.db
+      .selectFrom("messages")
+      .select(SUMMARY_COLUMNS)
+      .where("parent_message", "=", messageId)
+      .orderBy("id")
+      .$call((query) => this.take(query, limit))
+      .execute();
+    return this.summarize(rows);
+  }
+
+  /** A message's metadata as stored (JSON, encrypted under encryption), or `undefined`. */
+  async storedMetaOf(messageId: number): Promise<string | undefined> {
+    const row = await this.db
+      .selectFrom("messages")
+      .select("meta")
+      .where("id", "=", messageId)
+      .where("content_dropped_at", "is", null)
+      .executeTakeFirst();
+    return row?.meta ?? undefined;
+  }
+
+  /**
+   * A message's metadata, read as plain JSON: right for a store with no codec over it. The
+   * encryption wrappers read {@link storedMetaOf} through their codec instead.
+   */
+  async messageMeta(messageId: number): Promise<MessageMeta | undefined> {
+    const stored = await this.storedMetaOf(messageId);
+    return stored === undefined ? undefined : (JSON.parse(stored) as MessageMeta);
   }
 
   /** Marks a message `failed`, with its error, so the channel moves on to the next. */
@@ -3246,6 +3553,11 @@ export class Store implements MessageStore, ContentStore, MetaStore {
         contentHash: row.content_hash,
         contentDroppedAt: row.content_dropped_at,
         meta: row.meta,
+        parentChannel: row.parent_channel,
+        parentMessage: int64OrNull(row.parent_message),
+        parentDelivery: int64OrNull(row.parent_delivery),
+        parentGeneration: row.parent_generation,
+        hops: row.hops,
       },
       deliveries: deliveries.map((delivery) => ({
         id: Number(delivery.id),
@@ -3558,6 +3870,7 @@ export class Store implements MessageStore, ContentStore, MetaStore {
         deliveries,
         ...(row.content_hash === null ? {} : { contentHash: row.content_hash }),
         ...(row.content_dropped_at === null ? {} : { contentDroppedAt: row.content_dropped_at }),
+        ...parentOf(row),
       };
     });
   }

@@ -1,0 +1,16 @@
+---
+"@cosyte/pathways": patch
+---
+
+One channel can hand a message to another channel of the same project, through the store, with a channel destination or `ctx.route` in a transform.
+
+- New channel destination, `channel: { name, carryMeta }`: each output becomes a new message of channel `name`, stored in the same transaction as the delivery's record. `carryMeta` lists the `ctx.meta` keys copied to the new message, by name; none by default, and never all of them.
+- New channel source, `channel: {}`, with `routed` (only `ctx.route` feeds it), `maxPending` (10000 by default) and `maxHops` (8 by default). Nothing listens or polls; a paused or stopped channel still takes hand-offs as stored messages.
+- New `ctx.route(name, message)` in a transform: returns nothing, and the hand-off is stored in the same transaction as the transform's outcome, so it is kept only when the transform succeeds. A name that is no channel with a `channel:` source fails the message with `ERR_PATHWAYS_UNKNOWN_ROUTE`.
+- Start refuses a channel destination naming no such channel, a `channel:` source nothing names (unless it sets `routed: true`), and a loop of channel destinations, naming it (`a -> b -> a`).
+- Each handed-over message counts its hops; a hand-off past the target's `maxHops` fails with `ERR_PATHWAYS_HOP_LIMIT`, which catches a loop made through `ctx.route`. A target holding `maxPending` messages makes the hand-off wait and try again (`ERR_PATHWAYS_TARGET_FULL`), without counting an attempt.
+- Each handed-over message names its parent: the source channel, message, delivery (none for `ctx.route`) and the parent's generation, above 0 for a replay or resend. `pathways messages show` prints the parent and the messages handed over; `pathways status` prints `feeds:` and `fed by:`; the retention archive keeps the link.
+- New optional store methods `handOff`, `children` and `messageMeta`, and the types `HandOff`, `HandOffFrom`, `HandOffResult` and `MessageParent`. A custom store without `handOff` still works: the engine stores each hand-off with `receive` under an idempotency key built from the source channel, the delivery or message, and the generation, then records the source, so a crash between the two hands over once.
+- New expand schema step `0012-channel-links`: five nullable columns on `messages` and an index, applied at start.
+- `pathways replay` refuses, changing nothing, a message whose transform calls `ctx.route` (reason `routes`); `pathways replay --resend` works.
+- What a caller must change: a custom store whose `listMessages` or `message` results are compared whole may now see `parent` and `hops` on a handed-over message; a test that compares a transform's `ctx` whole now sees `route`. Nothing else.

@@ -68,10 +68,34 @@ export interface TransformRequest extends MessageContext {
   readonly body: Uint8Array;
 }
 
+/** One message a transform handed to another channel with `ctx.route`, serialized. */
+export interface RoutedMessage {
+  /** The channel it goes to, as the transform named it. */
+  readonly channel: string;
+  readonly body: Uint8Array;
+}
+
+/** What one message's run came to: its outputs, and what it handed to other channels. */
+export interface TransformResult {
+  readonly outputs: Uint8Array[];
+  readonly routes: RoutedMessage[];
+}
+
 /** The worker's reply to one request. */
 export type TransformReply =
-  | { readonly id: number; readonly ok: true; readonly outputs: readonly Uint8Array[] }
+  | {
+      readonly id: number;
+      readonly ok: true;
+      readonly outputs: readonly Uint8Array[];
+      readonly routes?: readonly RoutedMessage[];
+    }
   | { readonly id: number; readonly ok: false; readonly failure: FailureSummary };
+
+/** What `ctx.route` does with one call: given a channel's name and a message. */
+export type RouteFunction = (channel: string, message: unknown) => void;
+
+/** A `ctx.route` that keeps nothing: the context of a run whose hand-offs go nowhere. */
+const DISCARD_ROUTE: RouteFunction = () => undefined;
 
 /** The worker's first message: ready, or the transform could not be loaded. */
 export type WorkerHello =
@@ -1314,14 +1338,81 @@ export function freezeDeep<T>(value: T): T {
 export function buildContext(
   message: MessageContext,
   config: Readonly<Record<string, unknown>>,
-): Readonly<MessageContext & { readonly config: Readonly<Record<string, unknown>> }> {
+  route: RouteFunction = DISCARD_ROUTE,
+): Readonly<
+  MessageContext & {
+    readonly config: Readonly<Record<string, unknown>>;
+    readonly route: RouteFunction;
+  }
+> {
   return freezeDeep({
     messageId: message.messageId,
     attempt: message.attempt,
     source: message.source,
     meta: message.meta,
     config: freezeDeep(config),
+    route,
   });
+}
+
+/**
+ * Runs one message through `transform` as {@link runTransform} does, with a `ctx.route` that keeps
+ * each message handed to another channel, and serializes those as it does the outputs, in the order
+ * they were routed. `ctx.route` takes a channel's name and a message (anything a transform may
+ * return but `null` and `undefined`), returns nothing, and throws a `TypeError` for anything else,
+ * or once the transform has settled.
+ *
+ * @example
+ * ```ts
+ * const { outputs, routes } = await transformMessage((msg, ctx) => {
+ *   ctx.route("audit-copy", msg);
+ *   return msg;
+ * }, "text", body, UNSTORED, {});
+ * ```
+ */
+export async function transformMessage(
+  transform: TransformFunction,
+  format: WorkerFormat,
+  body: Uint8Array,
+  message: MessageContext,
+  config: Readonly<Record<string, unknown>>,
+  settings: FormatSettings = {},
+): Promise<TransformResult> {
+  const routed: { readonly channel: string; readonly output: unknown }[] = [];
+  let settled = false;
+  const route: RouteFunction = (channel, output) => {
+    if (settled) throw new TypeError("ctx.route was called after the transform settled");
+    if (typeof channel !== "string" || channel === "") {
+      throw new TypeError("ctx.route takes a channel's name first");
+    }
+    if (output === null || output === undefined) {
+      throw new TypeError("ctx.route takes a message to hand over second");
+    }
+    routed.push({ channel, output });
+  };
+  let outputs: Uint8Array[];
+  try {
+    outputs = await runTransform(
+      transform,
+      format,
+      body,
+      buildContext(message, config, route),
+      settings,
+    );
+  } finally {
+    settled = true;
+  }
+  try {
+    const routes = await Promise.all(
+      routed.map(async ({ channel, output }) => ({
+        channel,
+        body: await encode(format, output, settings),
+      })),
+    );
+    return { outputs, routes };
+  } catch (error) {
+    throw new StageError("output", error);
+  }
 }
 
 /**
@@ -1496,17 +1587,18 @@ if (!isMainThread && parentPort !== null && isWorkerSetup(workerData)) {
   Promise.all([loadTransform(setup.transformFile), parser]).then(
     ([transform]) => {
       port.on("message", (request: TransformRequest) => {
-        runTransform(
+        transformMessage(
           transform,
           setup.format,
           request.body,
-          buildContext(request, config),
+          request,
+          config,
           formatSettings,
         ).then(
-          (outputs) =>
+          ({ outputs, routes }) =>
             port.postMessage(
-              { id: request.id, ok: true, outputs } satisfies TransformReply,
-              transferable(outputs),
+              { id: request.id, ok: true, outputs, routes } satisfies TransformReply,
+              transferable([...outputs, ...routes.map((routed) => routed.body)]),
             ),
           (error: unknown) =>
             port.postMessage({

@@ -311,8 +311,8 @@ HL7 ACK, so HL7 v2 with ACKs goes over MLLP.
 
 ### Sources
 
-Exactly one of `file`, `http`, `mllp`, `tcp` or `module`. A `file` or `module` source may add `poll` beside
-it.
+Exactly one of `file`, `http`, `mllp`, `tcp`, `channel` or `module`. A `file` or `module` source may add `poll`
+beside it.
 
 #### Poll schedule
 
@@ -481,14 +481,26 @@ Either is framed as messages are. See [Send and receive over TCP](./send-and-rec
 
 Hex goes in quotes, two digits a byte, such as `"0d0a"`: unquoted, YAML reads `10` as a number.
 
+#### Channel source
+
+`channel: {}`: the channel takes in only what other channels hand it, through a
+[channel destination](#channel-destination) or `ctx.route`. See
+[Route messages between channels](./route-between-channels.md).
+
+| Key          | Type                   | Default | Meaning                                                                                                    |
+| ------------ | ---------------------- | ------- | ---------------------------------------------------------------------------------------------------------- |
+| `routed`     | boolean                | `false` | only `ctx.route` feeds this channel, so start looks for no channel destination naming it                   |
+| `maxPending` | a whole number above 0 | `10000` | how many messages may wait for the transform before a hand-off into the channel waits and is tried again   |
+| `maxHops`    | a whole number above 0 | `8`     | how many hand-offs in a row a message may have come through to reach it; past it, `ERR_PATHWAYS_HOP_LIMIT` |
+
 #### Module source
 
 `module: path`, with `options:` any mapping handed to its factory.
 
 ### Destinations
 
-Each entry is exactly one of `file`, `http`, `mllp`, `tcp`, `smtp` or `module`, and may add a [`retry`](#retry)
-block of its own and `dryRun`, beside that key:
+Each entry is exactly one of `file`, `http`, `mllp`, `tcp`, `smtp`, `channel` or `module`, and may add a
+[`retry`](#retry) block of its own and `dryRun`, beside that key:
 
 ```yaml title="channels/results-out/channel.yaml"
 source:
@@ -684,6 +696,19 @@ An address is plain, such as `lab@example.test`, with no display name. A templat
 are `{{ messageId }}`, `{{ seq }}`, `{{ channel }}` and `{{ meta.<key> }}`. The server's certificate is
 always verified, with TLS 1.2 or later. [Send email over SMTP](./send-email-over-smtp.md) says what
 each answer means.
+
+#### Channel destination
+
+`channel: { name, carryMeta }` hands each output to channel `name` as a new message of its own, in
+the same transaction as the delivery's record. That channel's source is [`channel:`](#channel-source).
+
+| Key         | Type                      | Default  | Meaning                                                                      |
+| ----------- | ------------------------- | -------- | ---------------------------------------------------------------------------- |
+| `name`      | a channel's name          | required | the channel the outputs are handed to                                        |
+| `carryMeta` | a list of `ctx.meta` keys | none     | the keys copied from the message to each new one, by name; never all of them |
+
+Start refuses a `name` that is no channel with a `channel:` source, and channel destinations that
+make a loop. See [Route messages between channels](./route-between-channels.md).
 
 #### Module destination
 

@@ -5,6 +5,7 @@ import type {
   CsvSettings,
   FailureSummary,
   MessageContext,
+  RoutedMessage,
   TransformReply,
   TransformRequest,
   WorkerFormat,
@@ -14,7 +15,12 @@ import type {
 
 /** The result of one message's transform. */
 export type TransformOutcome =
-  | { readonly ok: true; readonly outputs: readonly Uint8Array[] }
+  | {
+      readonly ok: true;
+      readonly outputs: readonly Uint8Array[];
+      /** What the transform handed to other channels with `ctx.route`, in order; none when unset. */
+      readonly routes?: readonly RoutedMessage[];
+    }
   | { readonly ok: false; readonly failure: FailureSummary };
 
 /**
@@ -231,7 +237,15 @@ export class ChannelWorker {
         // a reply that carries this message's id settles it; anything else is ignored.
         if (!isReplyTo(reply, id)) return;
         finish(
-          reply.ok ? { ok: true, outputs: reply.outputs } : { ok: false, failure: reply.failure },
+          reply.ok
+            ? {
+                ok: true,
+                outputs: reply.outputs,
+                ...(reply.routes === undefined || reply.routes.length === 0
+                  ? {}
+                  : { routes: reply.routes }),
+              }
+            : { ok: false, failure: reply.failure },
           false,
         );
       };
