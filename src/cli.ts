@@ -49,6 +49,7 @@ import {
   type ProbeEndpoint,
 } from "./engine/probes.js";
 import { EXIT } from "./exit.js";
+import { faultPoint } from "./fault-points.js";
 import { HookSet } from "./extensions/hooks.js";
 import { ExtensionLoadError } from "./extensions/load.js";
 import { AuditLog, auditEvent, operatingSystemUser, type AuditListener } from "./operator/audit.js";
@@ -706,9 +707,10 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
   if (leases === undefined) logger.warn({ event: "lease-unsupported" });
   // Said once at start, so a log reader knows why nothing goes out.
   if (mode.dryRun) logger.warn({ event: "dry-run", destinations: "all" });
-  // Aborted by the caller's signal, or at once when the lease is lost.
+  // Aborted once the engine is to stop taking in: `drain.notReadyDelay` after the caller's signal,
+  // or at once when the lease is lost.
   const stopping = new AbortController();
-  const signal = AbortSignal.any([io.signal ?? new AbortController().signal, stopping.signal]);
+  const { signal } = stopping;
   // Where this engine stands, for readiness and the health body. Told to stop, it drains: its
   // sources close while the probes still answer, 503 draining.
   let state: EngineState = standby ? "standby" : "starting";
@@ -727,6 +729,23 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
   signal.addEventListener("abort", () => {
     if (state !== "fenced") state = "draining";
   });
+  // Told to stop, a running engine reports draining at once and keeps taking in for
+  // `drain.notReadyDelay`, so a load balancer that reads its readiness stops sending it new
+  // connections before its listeners close. One not yet running, or a standby, stops at once.
+  const { drain } = project;
+  let notReady: NodeJS.Timeout | undefined;
+  const told = (): void => {
+    /* v8 ignore next: the lease was lost first, and the run is ending already */
+    if (signal.aborted) return;
+    const running = state === "running";
+    state = "draining";
+    logger.info({ event: "draining", ...drain });
+    faultPoint("drain-not-ready");
+    if (!running || drain.notReadyDelayMs === 0) stopping.abort();
+    else notReady = setTimeout(() => stopping.abort(), drain.notReadyDelayMs);
+  };
+  if (io.signal?.aborted === true) told();
+  else io.signal?.addEventListener("abort", told, { once: true });
   const node = lease?.claimant.node ?? nodeId();
   const identity = (): EngineIdentity => ({
     version: VERSION,
@@ -812,9 +831,12 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
       },
     });
   } finally {
+    clearTimeout(notReady);
+    io.signal?.removeEventListener("abort", told);
     // The engine has stopped, its sources closed, before the probes stop answering.
     await probeListener?.stop();
     await health?.stop();
+    faultPoint("drain-before-release");
     await lease?.release().catch((error: unknown) => {
       logger.warn({ event: "lease-release-failed", code: errorCode(error) });
     });

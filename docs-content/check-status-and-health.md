@@ -148,8 +148,9 @@ done. Run `pathways retention` by hand first in that case. Point a restart polic
 
 **Readiness** is 503 until the engine is running, and while it runs when storage cannot be read
 (read at most once a second, and counted unreachable after 5 seconds without an answer) or a source
-is down. On SIGTERM or SIGINT it turns 503 `draining` at once, while the sources are still
-closing, and the listener closes last. Point a load balancer or a readiness probe at `/readyz`.
+is down. On SIGTERM or SIGINT it turns 503 `draining` at once, and the sources keep taking
+messages in for `drain.notReadyDelay` before they close; the listener closes last. See
+[Stop and upgrade a node](./stop-and-upgrade-a-node.md). Point a load balancer or a readiness probe at `/readyz`.
 
 ```bash
 curl http://127.0.0.1:9091/readyz
