@@ -37,14 +37,21 @@ text or a source file's name. Commands whose standard output is their report (`s
 | `passed`                  | info  | `channel`, `pass`, `outputs`                                                           | `storage.content: none`: every destination accepted the message, and its sender is answered so; `pass` is the message's pass id                                        |
 | `pass-filtered`           | info  | `channel`, `pass`                                                                      | `storage.content: none`: the transform returned no output, and the sender is answered as for one accepted                                                              |
 | `pass-unreadable`         | warn  | `channel`, `pass`                                                                      | `storage.content: none`: the source could not read the message, and answers as it does on any channel                                                                  |
-| `pass-transform-failed`   | warn  | `channel`, `pass`, `kind`, `name`, `code`, `where`                                     | `storage.content: none`: the transform failed; the sender is told not to send it again                                                                                 |
+| `pass-transform-failed`   | warn  | `channel`, `pass`, `destination`, `kind`, `name`, `code`, `where`                      | `storage.content: none`: the transform failed (`destination` is set when it was that destination's own); the sender is told not to send it again                       |
 | `pass-rejected`           | warn  | `channel`, `pass`, `destination`, `reason`                                             | `storage.content: none`: a destination rejected the message for good; the others are still sent it                                                                     |
 | `pass-deferred`           | warn  | `channel`, `pass`, `destination`, `code`                                               | `storage.content: none`: a destination failed or timed out; the later ones are not sent it, and the sender is told to send it again                                    |
 | `pass-failed`             | warn  | `channel`, `pass`, `code`, `permanent`, `retryAfterMs`                                 | `storage.content: none`: the sender is not answered as accepted; `permanent` says whether it is told not to send again, `code` why (such as `PASS_TIMEOUT`)            |
 | `smtp-recipients-refused` | warn  | `channel`, `destination`, `message`, `seq`, `refused`, `outcome`                       | an SMTP server took the email for some recipients and refused `refused` of them; `outcome` is `rejected` or `delivered` (`onPartialRefusal`), and no address is logged |
+| `deliveries-held`         | warn  | `channel`, `code`, `deliveries`                                                        | at a channel's first delivery pass, pending deliveries that none of its destinations now was made for; none is sent to another                                         |
 
 A `transform-failed` line's `kind` is `load`, `parse`, `transform`, `output`, `timeout`, `memory` or
 `crash`. `where` is `file:line:column` in the transform, when it threw.
+
+A `deliveries-held` line's `code` is `destination-gone` for deliveries made for a destination the
+channel no longer has (removed, renamed, or, without a name, given another target), which stay
+pending and are sent if it comes back; or `destination-unknown` for deliveries queued by a Pathways
+before deliveries recorded their destination, which cannot be matched to one, so each is marked
+failed with the error `delivery: destination-unknown` and its message can be replayed.
 
 ### Sources and endpoints
 

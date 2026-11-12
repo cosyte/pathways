@@ -20,6 +20,7 @@ export type {
   CsvRecord,
   CsvSettings,
   CsvTable,
+  DestinationFacts,
   FhirResource,
   FileSourceFacts,
   Hl7Message,
@@ -131,7 +132,10 @@ export type {
   DeliveryCounts,
   DeliveryStatus,
   DeliveryTally,
+  DestinationKey,
+  DestinationOutcome,
   ExpireResult,
+  HeldDeliveries,
   LeaseStore,
   MessageQuery,
   MessageRows,
@@ -164,6 +168,7 @@ export type {
   StoredMessageRow,
   StoredMeta,
   StoreReceiveOptions,
+  TransformOutputs,
 } from "./storage/store.js";
 export {
   ENGINE_LEASE,

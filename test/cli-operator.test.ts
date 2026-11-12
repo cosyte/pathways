@@ -408,9 +408,18 @@ describe("pathways replay and clear", () => {
     });
     const resend = await runCli(["replay", "--resend", "1", "2", "--json", "-C", root]);
     expect(resend.code).toBe(EXIT.failed);
+    // Destination 1's folder changed since message 1 was sent: without a name, a destination is
+    // known by its kind and target, so the one there now is another destination, sent nothing.
     expect(JSON.parse(resend.out)).toEqual({
       results: [
-        { id: 1, outcome: "resent", status: "transformed", queued: 2, superseded: 0 },
+        {
+          id: 1,
+          outcome: "resent",
+          status: "transformed",
+          queued: 1,
+          superseded: 0,
+          notStored: 1,
+        },
         { id: 2, outcome: "refused", reason: "no-output" },
       ],
     });

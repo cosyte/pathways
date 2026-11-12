@@ -27,11 +27,10 @@ so a restart loses nothing.
   several messages, or `null` to filter it out. Node.js runs it as it is, with no build step, in a
   worker thread of the channel's own.
 - **Formats.** HL7 v2, FHIR R4 JSON, X12, and C-CDA arrive parsed, through our open-source
-  `@cosyte/*` libraries. JSON arrives as a value and anything else as text. CSV and fixed-width text
-  land in the next release.
-- **Connectors.** MLLP, HTTP, and files in a folder or on an SFTP server, in and out, over TLS by
-  default. TCP with your own framing, SMTP, and files on Amazon S3 and Azure Blob Storage land in
-  the next release.
+  `@cosyte/*` libraries. CSV and fixed-width text arrive as a table. JSON arrives as a value and
+  anything else as text.
+- **Connectors.** MLLP, HTTP, TCP with your own framing, and files in a folder, on an SFTP server,
+  or on Amazon S3 and Azure Blob Storage, in and out, and an SMTP destination, over TLS by default.
 - **Storage.** SQLite with no setup, or PostgreSQL, MySQL or MariaDB, and SQL Server, with every
   stored message encrypted at rest.
 - **Operations from the command line.** `pathways status`, `messages`, `replay`, `clear`,
