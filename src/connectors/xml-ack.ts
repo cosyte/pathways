@@ -22,6 +22,23 @@ const LIMITS = {
   maxEntityExpansions: 0,
 } as const;
 
+/**
+ * Caps on the message sent, sized to it: it is our own outbound body, so a cap must never hide its
+ * control ID. An element takes at least four bytes and a text node one, so neither bound can be met
+ * by a message of `bytes` bytes. Entities stay refused.
+ */
+function sentLimits(bytes: number): Record<keyof typeof LIMITS, number> {
+  const bound = Math.max(bytes, 1) + 1;
+  return { maxInputBytes: bound, maxDepth: bound, maxNodeCount: bound, maxEntityExpansions: 0 };
+}
+
+/**
+ * What {@link xmlControlId} gives for a message sent that is XML but cannot be read: not
+ * well-formed, not UTF-8, or with a document type declaration. Its acknowledgement cannot be matched
+ * to it, so the delivery is retried, never settled unchecked.
+ */
+export const UNREADABLE = Symbol("unreadable");
+
 let library: Promise<typeof Ccda> | undefined;
 
 /** The XML reader, loaded on the first acknowledgement so start does not wait for it. */
@@ -44,10 +61,15 @@ interface Node {
   readonly textContent: string | null;
 }
 
+/** The child elements of `parent` whose local name is `name`, in any namespace. */
+function all(library: typeof Ccda, parent: unknown, name: string): readonly Node[] {
+  const elements = library.childElements(parent as Parameters<typeof Ccda.childElements>[0]);
+  return (elements as readonly Node[]).filter((element) => element.localName === name);
+}
+
 /** The first child element of `parent` whose local name is `name`, in any namespace. */
 function first(library: typeof Ccda, parent: unknown, name: string): Node | undefined {
-  const elements = library.childElements(parent as Parameters<typeof Ccda.childElements>[0]);
-  return (elements as readonly Node[]).find((element) => element.localName === name);
+  return all(library, parent, name)[0];
 }
 
 /** The trimmed text of `node`, or undefined when it has none. */
@@ -57,16 +79,18 @@ function textOf(node: Node | undefined): string | undefined {
 }
 
 /**
- * Reads `<segment>` and its `<segment.field>` children under the root of an HL7 v2 XML message, by
- * local name, so the HL7 namespace (`urn:hl7-org:v2xml`) and no namespace read the same. Undefined
- * when the bytes are not well-formed XML, break a limit, or are not UTF-8.
+ * Reads the one `<segment>` and its `<segment.field>` children under the root of an HL7 v2 XML
+ * message, by local name, so the HL7 namespace (`urn:hl7-org:v2xml`) and no namespace read the same.
+ * Undefined when the bytes are not well-formed XML, break a limit, are not UTF-8, or hold more than
+ * one `<segment>` under the root, which cannot be read as one answer.
  */
 async function fields(
   body: Uint8Array,
   segment: string,
   wanted: readonly string[],
+  limits: Record<keyof typeof LIMITS, number>,
 ): Promise<(string | undefined)[] | undefined> {
-  if (body.byteLength > MAX_XML_ACK_BYTES) return undefined;
+  if (body.byteLength > limits.maxInputBytes) return undefined;
   let text: string;
   try {
     // The reader strips a byte order mark itself, and says so through `ignore`.
@@ -77,21 +101,23 @@ async function fields(
   const reader = await ccda();
   let root: unknown;
   try {
-    const document = reader.parseSecureXml(text, reader.resolveLimits(LIMITS), ignore, ignore);
+    const document = reader.parseSecureXml(text, reader.resolveLimits(limits), ignore, ignore);
     root = document.documentElement;
   } catch {
     return undefined;
   }
   /* v8 ignore next: a well-formed document always has a root element */
   if (root === null || root === undefined) return undefined;
-  const found = first(reader, root, segment);
-  if (found === undefined) return wanted.map(() => undefined);
-  return wanted.map((field) => textOf(first(reader, found, `${segment}.${field}`)));
+  const found = all(reader, root, segment);
+  if (found.length > 1) return undefined;
+  const [only] = found;
+  if (only === undefined) return wanted.map(() => undefined);
+  return wanted.map((field) => textOf(first(reader, only, `${segment}.${field}`)));
 }
 
 /**
  * Reads an HL7 v2 XML acknowledgement: its `MSA.1` code and its `MSA.2` control ID. Undefined when
- * the answer cannot be read as XML at all.
+ * the answer cannot be read as XML at all, or holds more than one `MSA` under its root.
  *
  * @example
  * ```ts
@@ -100,42 +126,67 @@ async function fields(
  * ```
  */
 export async function readXmlAck(body: Uint8Array): Promise<XmlAck | undefined> {
-  const read = await fields(body, "MSA", ["1", "2"]);
+  const read = await fields(body, "MSA", ["1", "2"], LIMITS);
   if (read === undefined) return undefined;
   const [code, controlId] = read;
   return { code, controlId };
 }
 
 /**
- * The control ID (`MSH.10`) of an HL7 v2 XML message, or undefined when the body is not v2 XML or
- * carries none, so its acknowledgement can be matched to it.
+ * Whether `body` is meant as XML: after any whitespace or UTF-8 byte order mark, it opens with `<`,
+ * or it opens with a UTF-16 byte order mark.
+ */
+function looksLikeXml(body: Uint8Array): boolean {
+  if ((body[0] === 0xfe && body[1] === 0xff) || (body[0] === 0xff && body[1] === 0xfe)) return true;
+  let at = body[0] === 0xef && body[1] === 0xbb && body[2] === 0xbf ? 3 : 0;
+  while (at < body.byteLength && [0x20, 0x09, 0x0a, 0x0d].includes(body[at] as number)) at += 1;
+  return body[at] === 0x3c;
+}
+
+/**
+ * The control ID (`MSH.10`) of an HL7 v2 XML message, so its acknowledgement can be matched to it:
+ * undefined when the body is not XML or is XML with no `MSH.10`, and {@link UNREADABLE} when it is
+ * XML that cannot be read. The message is read under caps sized to it, never the acknowledgement's,
+ * so a large result is checked like a small one.
  *
  * @example
  * ```ts
  * await xmlControlId(Buffer.from("<ORU_R01><MSH><MSH.10>SYN-1</MSH.10></MSH></ORU_R01>")); // "SYN-1"
  * ```
  */
-export async function xmlControlId(body: Uint8Array): Promise<string | undefined> {
-  return (await fields(body, "MSH", ["10"]))?.[0];
+export async function xmlControlId(
+  body: Uint8Array,
+): Promise<string | typeof UNREADABLE | undefined> {
+  if (!looksLikeXml(body)) return undefined;
+  const read = await fields(body, "MSH", ["10"], sentLimits(body.byteLength));
+  return read === undefined ? UNREADABLE : read[0];
 }
 
 /**
- * Settles a delivery by its XML acknowledgement, the way an MLLP destination settles one by its ACK:
+ * Settles a delivery by its XML acknowledgement, following the public guide of the network this
+ * mode was written for, which differs from an MLLP destination:
  *
  * - `AA` or `CA`: delivered (returns);
- * - `AE` or `CE`: a {@link DeliveryRejected} naming the code, so the delivery is marked failed;
- * - `AR` or `CR`: a retryable error coded `ACK_AR` or `ACK_CR`;
- * - an answer that is not an acknowledgement, has no code we know, or answers another control ID
- *   than `sent`: a retryable error coded `ACK_UNREADABLE` or `ACK_CONTROL_ID_MISMATCH`.
+ * - `AE` or `CE`: a retryable error coded `ACK_AE` or `ACK_CE`, bounded by the destination's retry
+ *   settings;
+ * - `AR` or `CR`: a {@link DeliveryRejected} naming the code, so the delivery is marked failed;
+ * - an answer that is not one acknowledgement or has no code we know: a retryable error coded
+ *   `ACK_UNREADABLE`;
+ * - an acknowledgement that answers another control ID than `sent`, or a `sent` of
+ *   {@link UNREADABLE}: a retryable error coded `ACK_CONTROL_ID_MISMATCH`.
  *
- * `sent` is the control ID of the message sent, or undefined when it has none to match.
+ * `sent` is what {@link xmlControlId} read of the message sent: undefined when it has no control ID
+ * to match, the only case the check is skipped.
  *
  * @example
  * ```ts
- * settleXmlAck({ code: "AE", controlId: "SYN-1" }, "SYN-1"); // throws DeliveryRejected("AE")
+ * settleXmlAck({ code: "AR", controlId: "SYN-1" }, "SYN-1"); // throws DeliveryRejected("AR")
  * ```
  */
-export function settleXmlAck(ack: XmlAck | undefined, sent: string | undefined): void {
+export function settleXmlAck(
+  ack: XmlAck | undefined,
+  sent: string | typeof UNREADABLE | undefined,
+): void {
   const code = ack?.code;
   if (sent !== undefined && code !== undefined && ack?.controlId !== sent) {
     throw transientError("ACK_CONTROL_ID_MISMATCH");
@@ -146,10 +197,10 @@ export function settleXmlAck(ack: XmlAck | undefined, sent: string | undefined):
       return;
     case "AE":
     case "CE":
-      throw new DeliveryRejected(code);
+      throw transientError(`ACK_${code}`);
     case "AR":
     case "CR":
-      throw transientError(`ACK_${code}`);
+      throw new DeliveryRejected(code);
     case undefined:
     default:
       throw transientError("ACK_UNREADABLE");

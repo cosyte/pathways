@@ -353,10 +353,11 @@ export interface HttpDestinationOptions {
  *
  * With `ack: "xml"`, a 2xx answer's body is read, up to 1 MiB and within the same time limit, as an
  * HL7 v2 XML acknowledgement, the way a web service that takes v2 XML answers on the same connection:
- * `AA` or `CA` is delivered; `AE` or `CE` a `DeliveryRejected`; `AR` or `CR`, an answer that is not
- * an acknowledgement, a larger one, or one that answers another `MSH.10` than the message sent, a
- * `RetryableError` coded `ACK_AR`, `ACK_CR`, `ACK_UNREADABLE` or `ACK_CONTROL_ID_MISMATCH`. Only the
- * code and the control ID are read; the rest is dropped, never logged.
+ * `AA` or `CA` is delivered; `AR` or `CR` a `DeliveryRejected`; `AE` or `CE`, an answer that is not
+ * one acknowledgement, a larger one, one that answers another `MSH.10` than the message sent, or a
+ * message sent that is XML but cannot be read, a `RetryableError` coded `ACK_AE`, `ACK_CE`,
+ * `ACK_UNREADABLE` or `ACK_CONTROL_ID_MISMATCH`. Only the code and the control ID are read; the rest
+ * is dropped, never logged.
  *
  * @example
  * ```ts

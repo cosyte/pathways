@@ -666,9 +666,10 @@ by default); a 3xx is held, never followed, and retried every `retry.max`; a 101
 fails the delivery for good. The destination's [`retry`](#retry) block sets the waits and any limit. Any other 1xx is an interim answer: the attempt waits for the final
 answer after it, and is retried when none comes within `timeout` or the connection closes. See [Send and receive over HTTP](./send-and-receive-http.md).
 
-With `ack: xml`, a 2xx answer is read as an HL7 v2 XML acknowledgement and settles the delivery as
-an MLLP ACK does: `AA` or `CA` delivered, `AE` or `CE` failed, and `AR` or `CR`, an answer that
-cannot be read or one that answers another `MSH.10`, retried. See
+With `ack: xml`, a 2xx answer is read as an HL7 v2 XML acknowledgement and settles the delivery:
+`AA` or `CA` delivered, `AR` or `CR` failed, and `AE` or `CE`, an answer that cannot be read or one
+that answers another `MSH.10`, retried. `AE` and `AR` settle the other way round from an MLLP
+destination. See
 [Settle by an HL7 v2 XML acknowledgement](./send-and-receive-http.md#settle-by-an-hl7-v2-xml-acknowledgement).
 
 #### MLLP destination

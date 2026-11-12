@@ -234,8 +234,9 @@ destination's `url` and the queue moves on. The response body is read and droppe
 
 Some web services take HL7 v2 in the XML encoding and answer each POST, on the same connection, with
 an XML acknowledgement: an `ACK` whose `MSA.1` says whether the message was taken. With `ack: xml`,
-the destination reads that answer and settles the delivery by its code, as an
-[MLLP destination](./send-and-receive-mllp.md) settles one by its ACK.
+the destination reads that answer and settles the delivery by its code, much as an
+[MLLP destination](./send-and-receive-mllp.md) settles one by its ACK, with `AE` and `AR` the
+other way round (see below).
 
 ```yaml title="channels/results-to-lab-network/channel.yaml"
 source:
@@ -251,13 +252,13 @@ destinations:
       ack: xml
 ```
 
-| A 2xx answer whose body is                                                   | The delivery                              |
-| ---------------------------------------------------------------------------- | ----------------------------------------- |
-| an acknowledgement with `AA` or `CA`                                         | delivered                                 |
-| an acknowledgement with `AE` or `CE`                                         | failed for good; the destination moves on |
-| an acknowledgement with `AR` or `CR`                                         | retried, coded `ACK_AR` or `ACK_CR`       |
-| an acknowledgement whose `MSA.2` is not the `MSH.10` sent                    | retried, coded `ACK_CONTROL_ID_MISMATCH`  |
-| not XML, not an acknowledgement, a code not listed, over 1 MiB, or cut short | retried, coded `ACK_UNREADABLE`           |
+| A 2xx answer whose body is                                                                    | The delivery                              |
+| --------------------------------------------------------------------------------------------- | ----------------------------------------- |
+| an acknowledgement with `AA` or `CA`                                                          | delivered                                 |
+| an acknowledgement with `AE` or `CE`                                                          | retried, coded `ACK_AE` or `ACK_CE`       |
+| an acknowledgement with `AR` or `CR`                                                          | failed for good; the destination moves on |
+| an acknowledgement whose `MSA.2` is not the `MSH.10` sent, or sent as XML that cannot be read | retried, coded `ACK_CONTROL_ID_MISMATCH`  |
+| not XML, not one acknowledgement, a code not listed, over 1 MiB, or cut short                 | retried, coded `ACK_UNREADABLE`           |
 
 - **Any other status** is read by the status table above, whatever its body says.
 - **The answer is read within `timeout`**, from connecting to its last byte.
@@ -265,9 +266,16 @@ destinations:
   document deeper than 32 elements or one with more than 20,000 nodes. Elements are matched by their
   local name, so an answer in the HL7 namespace (`urn:hl7-org:v2xml`) and one in no namespace read
   the same.
-- **Only `MSA.1` and `MSA.2` are read**, and `MSH.10` of the message sent, to match them. When the
-  message sent has no `MSH.10` in v2 XML, the control ID is not checked. The rest of the answer is
-  dropped, never logged.
+- **One acknowledgement per answer.** The `MSA` must be a child of the answer's root element, and
+  there must be one: an answer with two `MSA` elements is unreadable and retried, never settled by
+  the first. An answer wrapped in a SOAP envelope, where the `MSA` sits deeper, is unreadable and
+  retried too.
+- **Only `MSA.1` and `MSA.2` are read**, and `MSH.10` of the message sent, to match them. The
+  message sent is read whatever its size, so a result with a large embedded report is checked like a
+  small one. When the message sent is not XML, or is XML with no `MSH.10`, the control ID is not
+  checked. When it is XML that cannot be read (not well-formed, not UTF-8, or with a document type
+  declaration), the delivery is retried as `ACK_CONTROL_ID_MISMATCH`, never settled unchecked. The
+  rest of the answer is dropped, never logged.
 - **The body is sent as the transform returned it.** Writing the message in the v2 XML encoding is
   the transform's work; `ack: xml` reads the answer only.
 
@@ -282,10 +290,14 @@ until each comes back `AA`, as the network's onboarding asks.
 
 Where the network's public documents and this setting differ, or say nothing:
 
-- The network's results guide says a sender retries after `AE` as well as `AR`. Here `AE` fails the
-  delivery, as it does over MLLP, because sending the same message again will not fix an error in
-  its structure or content: fix the message or the transform, then
-  [replay it](./inspect-replay-and-clear-messages.md#replay-a-failed-message).
+- `AE` and `CE` are retried and `AR` and `CR` fail the delivery, following the network's public
+  description of the exchange. This is the other way round from the
+  [MLLP destination](./send-and-receive-mllp.md), where `AE` fails and `AR` is retried. A failed
+  delivery waits for someone to replay it, so a lost result is the larger harm; the retries after an
+  `AE` stop where the destination's [`retry`](./configuration-reference.md#retry) settings say,
+  and an exhausted delivery can be
+  [replayed](./inspect-replay-and-clear-messages.md#replay-a-failed-message) once the message or
+  the transform is fixed.
 - The destination always POSTs. A public walkthrough of one lab system shows it sending with PUT and
   an account's credentials in headers; the network's quick guide asks only for an HTTPS web-service
   call. Send credentials with `headers`, read from a secret (see [Read secrets](./read-secrets.md)),

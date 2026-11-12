@@ -99,26 +99,69 @@ describe("HttpDestination with ack: xml", () => {
     expect(await deliver(destination({ url: r.url }))).toBe("delivered");
   });
 
-  it.each(["AE", "CE"])(
-    "fails the delivery on %s, which sending again will not fix",
-    async (code) => {
-      const r = await serve(answer(ack(code)));
-      const outcome = await deliver(destination({ url: r.url }));
-      expect(outcome).toBeInstanceOf(DeliveryRejected);
-      expect(outcome).toMatchObject({ reason: code });
-    },
-  );
-
-  it.each(["AR", "CR"])("retries %s", async (code) => {
+  it.each(["AE", "CE"])("retries %s, as the network's guide asks", async (code) => {
     const r = await serve(answer(ack(code)));
     const outcome = await deliver(destination({ url: r.url }));
     expect(outcome).toBeInstanceOf(RetryableError);
     expect(outcome).toMatchObject({ code: `ACK_${code}` });
   });
 
+  it.each(["AR", "CR"])("fails the delivery on %s, a rejection", async (code) => {
+    const r = await serve(answer(ack(code)));
+    const outcome = await deliver(destination({ url: r.url }));
+    expect(outcome).toBeInstanceOf(DeliveryRejected);
+    expect(outcome).toMatchObject({ reason: code });
+  });
+
   it("reads the acknowledgement in the HL7 namespace and in none alike", async () => {
-    const r = await serve(answer(ack("AE", CONTROL_ID, V2XML)));
-    expect(await deliver(destination({ url: r.url }))).toMatchObject({ reason: "AE" });
+    const r = await serve(answer(ack("AR", CONTROL_ID, V2XML)));
+    expect(await deliver(destination({ url: r.url }))).toMatchObject({ reason: "AR" });
+  });
+
+  it("checks the control ID of a message sent over 1 MiB", async () => {
+    // A synthetic result with a large embedded report in OBX.5, as lab results often carry.
+    const large = Buffer.from(
+      `<ORU_R01 xmlns="${V2XML}"><MSH><MSH.10>${CONTROL_ID}</MSH.10></MSH>` +
+        `<OBX><OBX.5>${"QUJD".repeat(300_000)}</OBX.5></OBX></ORU_R01>`,
+    );
+    expect(large.byteLength).toBeGreaterThan(MAX_XML_ACK_BYTES);
+    const other = await serve(answer(ack("AA", "SYN-CTL-9999")));
+    expect(await deliver(destination({ url: other.url }), large)).toMatchObject({
+      code: "ACK_CONTROL_ID_MISMATCH",
+    });
+    const same = await serve(answer(ack("AA")));
+    expect(await deliver(destination({ url: same.url }), large)).toBe("delivered");
+  });
+
+  it("checks the control ID of a message sent with more nodes than an acknowledgement may hold", async () => {
+    const many = Buffer.from(
+      `<ORU_R01><MSH><MSH.10>${CONTROL_ID}</MSH.10></MSH>${"<NTE><NTE.3>x</NTE.3></NTE>".repeat(25_000)}</ORU_R01>`,
+    );
+    const r = await serve(answer(ack("AA", "SYN-CTL-9999")));
+    expect(await deliver(destination({ url: r.url }), many)).toMatchObject({
+      code: "ACK_CONTROL_ID_MISMATCH",
+    });
+  });
+
+  it.each([
+    ["XML that is not well-formed", Buffer.from(`<ORU_R01><MSH><MSH.10>${CONTROL_ID}</MSH.10>`)],
+    ["XML that is not UTF-8", Buffer.from([0x3c, 0x41, 0xff, 0x3e])],
+  ])(
+    "retries when the message sent is %s, so its control ID cannot be checked",
+    async (_n, body) => {
+      const r = await serve(answer(ack("AA")));
+      const outcome = await deliver(destination({ url: r.url }), body);
+      expect(outcome).toBeInstanceOf(RetryableError);
+      expect(outcome).toMatchObject({ code: "ACK_CONTROL_ID_MISMATCH" });
+    },
+  );
+
+  it("retries an answer with more than one MSA as unreadable", async () => {
+    const two =
+      `<ACK><MSA><MSA.1>AA</MSA.1><MSA.2>${CONTROL_ID}</MSA.2></MSA>` +
+      `<MSA><MSA.1>AE</MSA.1><MSA.2>${CONTROL_ID}</MSA.2></MSA></ACK>`;
+    const r = await serve(answer(two));
+    expect(await deliver(destination({ url: r.url }))).toMatchObject({ code: "ACK_UNREADABLE" });
   });
 
   it("retries an acknowledgement that answers another message", async () => {
@@ -134,6 +177,10 @@ describe("HttpDestination with ack: xml", () => {
     ["XML with no MSA", "<ACK><MSH/></ACK>"],
     ["an unknown code", ack("ZZ")],
     ["a document type declaration", `<!DOCTYPE ACK [<!ENTITY a "AA">]>${ack("&a;")}`],
+    [
+      "a SOAP envelope around the acknowledgement",
+      `<Envelope><Body>${ack("AA").replace(/^<\?xml[^>]*\?>/, "")}</Body></Envelope>`,
+    ],
   ])("retries %s as unreadable", async (_name, body) => {
     const r = await serve(answer(body));
     const outcome = await deliver(destination({ url: r.url }));
@@ -209,7 +256,7 @@ describe("an http destination's ack setting", () => {
   });
 
   it("is read from the channel, and the destination it builds settles by the acknowledgement", async () => {
-    const r = await serve(answer(ack("AE")));
+    const r = await serve(answer(ack("AR")));
     const root = await makeProject(channel(`http: { url: "${r.url}", plaintext: true, ack: xml }`));
     const [config] = (await loadProject(root)).channels;
     expect(config?.destinations[0]).toMatchObject({ kind: "http", ack: "xml" });
@@ -218,7 +265,7 @@ describe("an http destination's ack setting", () => {
     const [target] = built.destinations;
     expect(target).toBeInstanceOf(HttpDestination);
     destinations.push(target as HttpDestination);
-    expect(await deliver(target as HttpDestination)).toMatchObject({ reason: "AE" });
+    expect(await deliver(target as HttpDestination)).toMatchObject({ reason: "AR" });
   });
 
   it("is unset by default", async () => {

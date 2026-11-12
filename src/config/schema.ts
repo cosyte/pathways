@@ -1145,7 +1145,7 @@ const httpDestination = restate(
       ack: envable(
         z.enum(["xml"]).meta({
           description:
-            "xml: read each 2xx answer as an HL7 v2 XML acknowledgement and settle by its MSA.1, as an MLLP ACK settles: AA or CA delivered, AE or CE failed, AR or CR (or an answer that is not an acknowledgement or answers another MSH.10) retried. Default: the status alone decides.",
+            "xml: read each 2xx answer as an HL7 v2 XML acknowledgement and settle by its MSA.1: AA or CA delivered, AR or CR failed, AE or CE (or an answer that is not one acknowledgement or answers another MSH.10) retried. Default: the status alone decides.",
         }),
       ).optional(),
     })
