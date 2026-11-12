@@ -1037,6 +1037,11 @@ export async function loadPreprocess(
 /**
  * Checks, as a worker starts, that it can read its channel's bodies as the channel says: a
  * windows-1252 `hl7v2` channel needs an `@cosyte/hl7` that decodes windows-1252.
+ *
+ * @example
+ * ```ts
+ * await checkInbound("hl7v2", { encoding: "latin1" }); // resolves: hl7 reads 8859/1
+ * ```
  */
 export async function checkInbound(
   format: WorkerFormat,

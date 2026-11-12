@@ -16,27 +16,36 @@ text or a source file's name. Commands whose standard output is their report (`s
 
 ### Messages
 
-| Event                 | Level | Fields                                                                                 | Meaning                                                                                                                         |
-| --------------------- | ----- | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `received`            | info  | `channel`, `message`, `bytes`, `failed`                                                | a message is stored; `failed` when the source stored it as failed                                                               |
-| `already-stored`      | info  | `channel`, `message`                                                                   | a source handed in again a message it had stored before a stop                                                                  |
-| `possible-duplicate`  | warn  | `channel`, `message`, `duplicateOf`                                                    | same sender and control ID as an earlier message                                                                                |
-| `possible-duplicate`  | warn  | `channel`, `message`, `delivery`, `destination`, `reason`, `interruptedAttempt`        | a delivery was found cut off after its send (`reason` `send-interrupted`), and is sent again, flagged                           |
-| `receive-failed`      | error | `channel`, `code`                                                                      | a message could not be stored, and was not acknowledged                                                                         |
-| `transformed`         | info  | `channel`, `message`, `outputs`                                                        | the transform returned outputs                                                                                                  |
-| `filtered`            | info  | `channel`, `message`, `outputs`                                                        | the transform returned none                                                                                                     |
-| `transform-failed`    | warn  | `channel`, `message`, `kind`, `name`, `code`, `where`                                  | the message is marked failed; `kind` is the stage                                                                               |
-| `delivered`           | info  | `channel`, `destination`, `delivery`, `resend`                                         | a destination accepted an output; `resend` only on a flagged resend                                                             |
-| `content-dropped`     | info  | `channel`, `message`, `delivery`                                                       | the last delivery was delivered, and the message's content dropped (`storage.content: dropAfterDelivery`)                       |
-| `dry-run`             | info  | `channel`, `destination`, `delivery`                                                   | a destination that runs dry recorded an output and sent nothing                                                                 |
-| `delivery-retry`      | warn  | `channel`, `destination`, `delivery`, `attempt`, `retryInMs`, `code`                   | it is tried again after `retryInMs`                                                                                             |
-| `delivery-redirected` | warn  | `channel`, `destination`, `delivery`, `attempt`, `retryInMs`, `status`, `locationHost` | an HTTP destination answered a 3xx; held, never followed, and tried again after `retryInMs` (`retry.max`, 5 minutes by default) |
-| `delivery-rejected`   | warn  | `channel`, `destination`, `delivery`, `reason`                                         | the destination rejected it for good                                                                                            |
-| `delivery-exhausted`  | warn  | `channel`, `destination`, `delivery`, `attempt`, `reason`, `code`                      | out of retries (`reason` `limit` or `maxAge`): marked failed, its body kept for a resend                                        |
-| `delivery-halted`     | warn  | `channel`, `destination`, `delivery`, `attempt`                                        | `pathways channel halt` cut the send off; it stays pending and is sent again, flagged, after a resume                           |
+| Event                 | Level | Fields                                                                                 | Meaning                                                                                                                                            |
+| --------------------- | ----- | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `received`            | info  | `channel`, `message`, `bytes`, `failed`                                                | a message is stored; `failed` when the source stored it as failed                                                                                  |
+| `already-stored`      | info  | `channel`, `message`                                                                   | a source handed in again a message it had stored before a stop                                                                                     |
+| `possible-duplicate`  | warn  | `channel`, `message`, `duplicateOf`                                                    | same sender and control ID as an earlier message                                                                                                   |
+| `possible-duplicate`  | warn  | `channel`, `message`, `delivery`, `destination`, `reason`, `interruptedAttempt`        | a delivery was found cut off after its send (`reason` `send-interrupted`), and is sent again, flagged                                              |
+| `receive-failed`      | error | `channel`, `code`                                                                      | a message could not be stored, and was not acknowledged                                                                                            |
+| `transformed`         | info  | `channel`, `message`, `outputs`                                                        | the transform returned outputs                                                                                                                     |
+| `filtered`            | info  | `channel`, `message`, `outputs`                                                        | the transform returned none                                                                                                                        |
+| `inbound-warning`     | warn  | `channel`, `message`, `codes`                                                          | the parse raised a warning about the body's character set, such as `ENCODING_MISMATCH`; stored with the message and counted on the health endpoint |
+| `transform-failed`    | warn  | `channel`, `message`, `kind`, `name`, `code`, `where`                                  | the message is marked failed; `kind` is the stage                                                                                                  |
+| `delivered`           | info  | `channel`, `destination`, `delivery`, `resend`                                         | a destination accepted an output; `resend` only on a flagged resend                                                                                |
+| `content-dropped`     | info  | `channel`, `message`, `delivery`                                                       | the last delivery was delivered, and the message's content dropped (`storage.content: dropAfterDelivery`)                                          |
+| `dry-run`             | info  | `channel`, `destination`, `delivery`                                                   | a destination that runs dry recorded an output and sent nothing                                                                                    |
+| `delivery-retry`      | warn  | `channel`, `destination`, `delivery`, `attempt`, `retryInMs`, `code`                   | it is tried again after `retryInMs`                                                                                                                |
+| `delivery-redirected` | warn  | `channel`, `destination`, `delivery`, `attempt`, `retryInMs`, `status`, `locationHost` | an HTTP destination answered a 3xx; held, never followed, and tried again after `retryInMs` (`retry.max`, 5 minutes by default)                    |
+| `delivery-rejected`   | warn  | `channel`, `destination`, `delivery`, `reason`                                         | the destination rejected it for good                                                                                                               |
+| `delivery-exhausted`  | warn  | `channel`, `destination`, `delivery`, `attempt`, `reason`, `code`                      | out of retries (`reason` `limit` or `maxAge`): marked failed, its body kept for a resend                                                           |
+| `delivery-halted`     | warn  | `channel`, `destination`, `delivery`, `attempt`                                        | `pathways channel halt` cut the send off; it stays pending and is sent again, flagged, after a resume                                              |
 
-A `transform-failed` line's `kind` is `load`, `parse`, `transform`, `output`, `timeout`, `memory` or
-`crash`. `where` is `file:line:column` in the transform, when it threw.
+A `transform-failed` line's `kind` is `load`, `preprocess`, `parse`, `transform`, `output`,
+`timeout`, `memory` or `crash`. `where` is `file:line:column` in the transform, or in the
+preprocessor for `preprocess`, when it threw. A `preprocess` failure always has a `code`: the error's
+own, `PREPROCESS_FAILED` when it has none, `PREPROCESS_EMPTY` for an empty result, or
+`PREPROCESS_INVALID` for a result that is neither bytes nor a string. A `load` failure with the code
+`ENCODING_UNSUPPORTED` is an `hl7v2` channel with `encoding: windows-1252` on an `@cosyte/hl7` that
+cannot decode it. An `inbound-warning` line's `codes` are comma-separated: `ENCODING_MISMATCH` (MSH-18
+names another character set than the channel's `encoding`), `UNKNOWN_CHARSET` (MSH-18 names a set the
+parser does not know) or `UNSUPPORTED_CHARSET` (a set it knows and does not decode, or bytes that are
+not valid in the one it was told), each read as Latin-1 would.
 
 ### Sources and endpoints
 

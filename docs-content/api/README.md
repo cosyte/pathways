@@ -526,7 +526,7 @@ Where to read credentials and other settings from: `process.env` when the engine
 
 ##### format
 
-> `readonly` **format**: `"hl7v2"` \| `"json"` \| `"fhir"` \| `"x12"` \| `"ccda"` \| `"text"`
+> `readonly` **format**: `"hl7v2"` \| `"json"` \| `"fhir"` \| `"x12"` \| `"ccda"` \| `"text"` \| `"raw"`
 
 ##### logger
 
@@ -2800,6 +2800,33 @@ message twice.
 
 `Promise`\<[`ReceivedMessage`](#receivedmessage)\>
 
+##### recordWarnings()?
+
+> `optional` **recordWarnings**(`messageId`, `codes`, `epoch?`): `Promise`\<`void`\>
+
+Stores the inbound warning codes a message's parse raised (`ENCODING_MISMATCH` and the like),
+before its transform is recorded: codes only, never content, replacing any stored before.
+Fenced by `epoch` when it is given. Optional: on a store without it the engine still counts and
+logs each warning, and stores none.
+
+###### Parameters
+
+###### messageId
+
+`number`
+
+###### codes
+
+readonly `string`[]
+
+###### epoch?
+
+`number`
+
+###### Returns
+
+`Promise`\<`void`\>
+
 ##### releaseLease()?
 
 > `optional` **releaseLease**(`name`, `epoch?`): `Promise`\<`boolean`\>
@@ -3026,6 +3053,14 @@ The status and the current deliveries, as an operator sees them.
 > `readonly` **updatedAt**: `string`
 
 When the message last changed: transformed, failed, replayed or cleared.
+
+##### warnings?
+
+> `readonly` `optional` **warnings?**: readonly `string`[]
+
+The inbound warning codes the message's parse raised, such as `ENCODING_MISMATCH` when MSH-18
+disagrees with the channel's `encoding:`: codes only. Undefined when it raised none, or when
+the store does not keep them.
 
 ***
 
@@ -3452,6 +3487,27 @@ const next: PendingMessage | undefined = await store.nextToTransform("adt");
 ##### id
 
 > `readonly` **id**: `number`
+
+***
+
+### PreprocessInfo
+
+What a preprocessor is told about the body it is handed: the message's stored id (0 for one that
+is not stored), the channel's format, and its `encoding:` when it sets one.
+
+#### Properties
+
+##### encoding
+
+> `readonly` **encoding**: `"utf-8"` \| `"latin1"` \| `"windows-1252"` \| `undefined`
+
+##### format
+
+> `readonly` **format**: `"hl7v2"` \| `"json"` \| `"fhir"` \| `"x12"` \| `"ccda"` \| `"text"` \| `"raw"`
+
+##### messageId
+
+> `readonly` **messageId**: `number`
 
 ***
 
@@ -4418,6 +4474,18 @@ When the message last changed: transformed, failed, replayed or cleared.
 
 [`MessageSummary`](#messagesummary).[`updatedAt`](#updatedat)
 
+##### warnings?
+
+> `readonly` `optional` **warnings?**: readonly `string`[]
+
+The inbound warning codes the message's parse raised, such as `ENCODING_MISMATCH` when MSH-18
+disagrees with the channel's `encoding:`: codes only. Undefined when it raised none, or when
+the store does not keep them.
+
+###### Inherited from
+
+[`MessageSummary`](#messagesummary).[`warnings`](#warnings)
+
 ***
 
 ### StoredMeta
@@ -5272,6 +5340,14 @@ export default ((_options, context) => ({
 
 ***
 
+### InboundEncoding
+
+> **InboundEncoding** = *typeof* `ENCODINGS`\[`number`\]
+
+A character encoding a channel may read its bodies in: one of ENCODINGS.
+
+***
+
 ### JsonValue
 
 > **JsonValue** = `string` \| `number` \| `boolean` \| `null` \| [`JsonValue`](#jsonvalue)[] \| \{\[`key`: `string`\]: [`JsonValue`](#jsonvalue); \}
@@ -5427,7 +5503,7 @@ The message a channel of format `F` hands its transform.
 
 ##### F
 
-`F` *extends* [`Format`](#format-1)
+`F` *extends* [`Format`](#format-2)
 
 #### Example
 
@@ -5489,12 +5565,52 @@ const done = (status: MessageStatus): boolean => status === "transformed" || sta
 The message each format hands a transform, by the `format` a channel declares, read from the
 format registry: `hl7v2` an [Hl7Message](#hl7message), `fhir` a [FhirResource](#fhirresource), `x12` an
 [X12Interchange](#x12interchange), `ccda` a [CcdaDocument](#ccdadocument), `json` a [JsonValue](#jsonvalue) (a string a
-`json` transform returns is sent as it is, not JSON-quoted), and `text` the body as a string.
+`json` transform returns is sent as it is, not JSON-quoted), `text` the body as a string, and
+`raw` a copy of the body's bytes as a `Uint8Array`.
 
 #### Example
 
 ```ts
 type Claim = MessageTypes["x12"]; // X12Interchange
+```
+
+***
+
+### Preprocess
+
+> **Preprocess** = (`bytes`, `info`) => `Uint8Array` \| `string` \| `Promise`\<`Uint8Array` \| `string`\>
+
+A channel's preprocessor: the default export of the module its `preprocess:` names. It takes each
+body's bytes as they were received, before they are decoded, and returns the bytes to decode (in
+the channel's encoding) or the text to decode (as it is). It runs in the transform worker, under
+the transform's time and memory limits. The stored body stays the bytes as received.
+
+A throw fails the message at the `preprocess` stage with the error's code, or
+`PREPROCESS_FAILED`; an empty result fails it with `PREPROCESS_EMPTY`.
+
+#### Parameters
+
+##### bytes
+
+`Uint8Array`
+
+##### info
+
+[`PreprocessInfo`](#preprocessinfo)
+
+#### Returns
+
+`Uint8Array` \| `string` \| `Promise`\<`Uint8Array` \| `string`\>
+
+#### Example
+
+```ts
+import type { Preprocess } from "@cosyte/pathways";
+
+// Drops a byte order mark a sender writes before MSH.
+export default ((bytes) =>
+  bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf ? bytes.subarray(3) : bytes
+) satisfies Preprocess;
 ```
 
 ***
@@ -5814,7 +5930,7 @@ export default ((msg) => {
 
 ### TransformFailureKind
 
-> **TransformFailureKind** = `"load"` \| `"parse"` \| `"transform"` \| `"output"` \| `"timeout"` \| `"memory"` \| `"crash"`
+> **TransformFailureKind** = `"load"` \| `"preprocess"` \| `"parse"` \| `"transform"` \| `"output"` \| `"timeout"` \| `"memory"` \| `"crash"`
 
 The stage a message's transform failed in: `load` (the transform would not load), `parse` (the
 message could not be read in the channel's format), `transform` (the transform threw), `output`
@@ -5840,11 +5956,11 @@ second format, `To`, when the transform returns another format's model.
 
 ##### F
 
-`F` *extends* [`Format`](#format-1)
+`F` *extends* [`Format`](#format-2)
 
 ##### To
 
-`To` *extends* [`Format`](#format-1) = `F`
+`To` *extends* [`Format`](#format-2) = `F`
 
 #### Example
 

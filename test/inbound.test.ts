@@ -3,7 +3,7 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 
-import { Hl7Message, resolveCharset } from "@cosyte/hl7";
+import { resolveCharset, type Hl7Message } from "@cosyte/hl7";
 import { generateAdt, generateOru } from "@cosyte/synth/hl7";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 
@@ -244,7 +244,7 @@ describe("a channel's preprocessor", () => {
     oru[at] = fields.join("|");
     const body = ascii(oru.join("\r") + "\r");
 
-    const unrepaired = (await decode("hl7v2", body)) as Hl7Message;
+    const unrepaired: Hl7Message = await decode("hl7v2", body);
     expect(unrepaired.get("OBX.5")).toBe("first line");
 
     // An LF that does not start a segment becomes HL7's line break escape.
@@ -252,7 +252,7 @@ describe("a channel's preprocessor", () => {
       Buffer.from(bytes)
         .toString("latin1")
         .replace(/\n(?![A-Z][A-Z0-9]{2}\|)/g, "\\.br\\");
-    const repaired = (await decode("hl7v2", await preprocessBody(repair, body))) as Hl7Message;
+    const repaired: Hl7Message = await decode("hl7v2", await preprocessBody(repair, body));
     expect(repaired.get("OBX.5")).toBe("first line\nsecond line");
   });
 
@@ -312,9 +312,7 @@ describe("a channel's preprocessor", () => {
     expect(
       await failureOf(
         run("text", body, {
-          preprocess: async () => {
-            throw coded;
-          },
+          preprocess: () => Promise.reject(coded),
         }),
       ),
     ).toMatchObject({ kind: "preprocess", code: "SENDER_GARBLED" });
