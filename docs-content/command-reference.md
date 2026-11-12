@@ -45,10 +45,13 @@ Runs every channel, and the health endpoint and the probe listener if `pathways.
 them, until it receives SIGINT or SIGTERM. Retention runs after the first pass and then every `retentionInterval`. Needs
 `encryption` in `pathways.yaml`.
 
-On either signal it stops cleanly and exits 0: `/readyz` answers 503 `draining` at once, sources stop
-taking messages, what is being stored is
-answered, and each [lifecycle hook](./add-lifecycle-hooks.md) gets up to its time limit to finish the
-events queued for it. Windows has no SIGTERM. There Ctrl+C in the engine's console is SIGINT and
+On either signal it drains and exits 0: `/readyz` answers 503 `draining` at once, it keeps taking
+messages in for `drain.notReadyDelay` (0 by default) so a load balancer stops sending it new ones,
+then its listeners close and polling stops, each MLLP connection finishes the message it is handling
+and its ACK, the transforms and sends under way finish within `drain.timeout` (30 seconds by
+default), it releases its lease, and each [lifecycle hook](./add-lifecycle-hooks.md) gets up to its
+time limit to finish the events queued for it. A second signal stops it at once. See
+[Stop and upgrade a node](./stop-and-upgrade-a-node.md). Windows has no SIGTERM. There Ctrl+C in the engine's console is SIGINT and
 stops it the same way, while ending the process (Task Manager, `taskkill /F`, or a service manager
 that gives up waiting) stops it at once, with no stop at all. A hard stop loses no message: each one
 was stored before its source acknowledged it, and a file the engine had claimed is stored on the

@@ -97,6 +97,7 @@ health:
 | `health`     | see [Health endpoint](#health-endpoint)                 | no health endpoint              |
 | `probes`     | see [Probe listener](#probe-listener)                   | no probe listener               |
 | `lease`      | see [Engine lease](#engine-lease)                       | a 15s lease, no standby         |
+| `drain`      | see [Drain](#drain)                                     | no delay, a 30s timeout         |
 | `migrations` | see [Migrations](#migrations)                           | no rollback window              |
 | `config`     | see [Transform configuration](#transform-configuration) | none                            |
 
@@ -253,6 +254,20 @@ The lease one engine per database holds, so a second is refused or waits as a st
 | `ttl`     | duration, at least `1s` | `15s`   | how long the lease lasts unless renewed; the holder renews it every third of this                           |
 | `standby` | boolean                 | `false` | start as a standby, as `pathways start --standby` does; needs a database server, and is refused with SQLite |
 
+### Drain
+
+How `pathways start` stops on SIGTERM or SIGINT. See
+[Stop and upgrade a node](./stop-and-upgrade-a-node.md).
+
+| Key             | Type     | Default | Meaning                                                                                                                                           |
+| --------------- | -------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `notReadyDelay` | duration | `0`     | how long the engine keeps taking messages in after it reports draining (readiness 503), so a load balancer stops sending it new connections first |
+| `timeout`       | duration | `30s`   | how long it then lets the work in flight finish: each MLLP connection's current message and its ACK, the transforms and the sends under way       |
+
+Each is at most about 24 days. Past `timeout`, a message not yet stored gets no ACK, so its sender
+sends it again, and a send under way is cut off and stays pending, sent again at the next start and
+flagged as a possible duplicate. A second signal stops the engine at once.
+
 ### Migrations
 
 How `pathways migrate --contract` treats contract steps. See
@@ -408,24 +423,27 @@ an API key header included.
 
 #### MLLP source
 
-| Key              | Type                  | Default                         |
-| ---------------- | --------------------- | ------------------------------- |
-| `port`           | 1 to 65,535           | required unless `connect`       |
-| `host`           | an address            | `127.0.0.1`                     |
-| `connect`        | `{ host, port }`      | none: the source listens        |
-| `replyTo`        | `{ host, port }`      | none: ACKs go on the connection |
-| `connectTimeout` | duration              | `10s`                           |
-| `tls`            | [MLLP TLS](#tls)      | required unless `plaintext`     |
-| `plaintext`      | boolean               | `false`                         |
-| `onStoreFailure` | `close`, `AE` or `AR` | the channel's                   |
-| `ackBuilder`     | path to a module      | the default ACK                 |
-| `maxConnections` | 1 to 100,000          | `100`                           |
-| `receiveTimeout` | duration              | no limit                        |
-| `maxMessageSize` | size                  | `4MB`                           |
-| `keepOpen`       | boolean               | `true`                          |
+| Key                | Type                  | Default                         |
+| ------------------ | --------------------- | ------------------------------- |
+| `port`             | 1 to 65,535           | required unless `connect`       |
+| `host`             | an address            | `127.0.0.1`                     |
+| `connect`          | `{ host, port }`      | none: the source listens        |
+| `replyTo`          | `{ host, port }`      | none: ACKs go on the connection |
+| `connectTimeout`   | duration              | `10s`                           |
+| `tls`              | [MLLP TLS](#tls)      | required unless `plaintext`     |
+| `plaintext`        | boolean               | `false`                         |
+| `onStoreFailure`   | `close`, `AE` or `AR` | the channel's                   |
+| `ackBuilder`       | path to a module      | the default ACK                 |
+| `maxConnections`   | 1 to 100,000          | `100`                           |
+| `receiveTimeout`   | duration              | no limit                        |
+| `maxConnectionAge` | duration              | no limit                        |
+| `maxMessageSize`   | size                  | `4MB`                           |
+| `keepOpen`         | boolean               | `true`                          |
 
 A connection over `maxConnections` is closed at accept. `receiveTimeout` closes a connection that goes
-that long without a whole message, a part-sent one included. A message over `maxMessageSize` closes
+that long without a whole message, a part-sent one included. `maxConnectionAge` closes a connection
+older than it after the message it brings and that message's ACK, so the sender connects again,
+through a load balancer to any node behind it. A message over `maxMessageSize` closes
 the connection and is not stored. `keepOpen: false` closes each connection once its messages are
 answered. See [Bound connections and messages](./send-and-receive-mllp.md#bound-connections-and-messages).
 

@@ -19,7 +19,7 @@ import {
   type MllpServer,
 } from "@cosyte/mllp";
 
-import type { OnStoreFailure } from "../config/schema.js";
+import { DEFAULT_DRAIN_TIMEOUT_MS, type OnStoreFailure } from "../config/schema.js";
 import { defaultAckBuilder, type AckBuilder, type AckRequest } from "./ack.js";
 import {
   DEFAULT_MLLP_CONNECT_TIMEOUT_MS,
@@ -177,7 +177,8 @@ export interface MllpSourceOptions {
   readonly replyTo?: MllpAddress | undefined;
   /**
    * How long a connection the source opens itself (`connect`, `replyTo`) may take to open, its TLS
-   * handshake included, in milliseconds. Defaults to {@link DEFAULT_MLLP_CONNECT_TIMEOUT_MS}.
+   * handshake included, in milliseconds; a `replyTo` connection then has as long again to write its
+   * ACK. Defaults to {@link DEFAULT_MLLP_CONNECT_TIMEOUT_MS}.
    */
   readonly connectTimeoutMs?: number | undefined;
   /**
@@ -191,6 +192,18 @@ export interface MllpSourceOptions {
    * idle connection, and one that stalls partway through a frame. Undefined for no limit.
    */
   readonly receiveTimeoutMs?: number | undefined;
+  /**
+   * How old a connection may grow, in milliseconds: once it is older, it is closed after the
+   * message it brings has been stored and answered, so the sender connects again (through a load
+   * balancer, to any node behind it). Undefined for no limit.
+   */
+  readonly maxConnectionAgeMs?: number | undefined;
+  /**
+   * How long {@link MllpSource.stop} lets each connection finish the message it is handling and
+   * send its ACK, in milliseconds, before it cuts off what is left. Defaults to
+   * {@link DEFAULT_DRAIN_TIMEOUT_MS}.
+   */
+  readonly drainTimeoutMs?: number | undefined;
   /**
    * The largest message taken, in bytes. A frame that grows past it closes the connection, and
    * nothing of it is stored. Defaults to {@link DEFAULT_MLLP_MAX_MESSAGE_SIZE}.
@@ -342,18 +355,31 @@ export class MllpSource implements SourceConnector {
   }
 
   /**
-   * Stops taking messages, lets those being stored finish and be answered, then closes every
-   * connection. A message that arrives meanwhile is neither stored nor answered, so its sender
-   * sends it again.
+   * Stops listening at once, then closes each connection: an idle one at once, and a busy one once
+   * the message it is handling has been stored and answered. A message that arrives meanwhile is
+   * neither stored nor answered, so its sender sends it again. A connection still busy at
+   * `drainTimeoutMs` is cut off: a message not yet answered then gets no ACK, and its sender sends
+   * it again.
    */
   async stop(): Promise<void> {
     this.stopping = true;
     this.peers.clear();
-    this.dialling?.abort();
-    await Promise.all(this.pending);
+    const timeoutMs = this.options.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS;
     const server = this.server;
     this.server = undefined;
-    await server?.close({ drainTimeoutMs: 1_000 });
+    // A dialled connection closes the same way: its close waits for its own work, cut off at the
+    // timeout (the abort handler in `read`).
+    this.dialling?.abort();
+    // Each connection's close waits for its own work (`beforeClose`, set when it brings its first
+    // message), and the server cuts off whatever is still open at the timeout.
+    await server?.close({ drainTimeoutMs: timeoutMs });
+    // A store cut off at the timeout may still be under way: it is waited for no longer than that.
+    const waited = new AbortController();
+    await Promise.race([
+      Promise.all(this.pending),
+      sleep(timeoutMs, undefined, { signal: waited.signal }).catch(() => undefined),
+    ]);
+    waited.abort();
     await this.dialLoop;
     this.dialLoop = undefined;
   }
@@ -432,10 +458,13 @@ export class MllpSource implements SourceConnector {
         resolve(code);
       });
     });
-    // A stop closes the connection, its ACKs written out first. One that came as the stop began is
+    // A stop closes the connection once the message it is handling has been stored and answered
+    // (`beforeClose`), and cuts it off at `drainTimeoutMs`. One that came as the stop began is
     // closed at once.
     const onAbort = (): void => {
-      void conn.close({ drainTimeoutMs: 1_000 });
+      void conn.close({
+        drainTimeoutMs: this.options.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS,
+      });
     };
     /* v8 ignore next: a stop that lands between the connection opening and this line */
     if (signal.aborted) onAbort();
@@ -465,6 +494,10 @@ export class MllpSource implements SourceConnector {
         },
       };
       this.states.set(conn, state);
+      // A close (the source stopping) waits for the message this connection is handling to be
+      // stored and answered; the connection's own drain timeout cuts that wait off.
+      const waitFor = state;
+      conn.beforeClose = () => waitFor.tail;
     }
     const current = state;
     current.queued += 1;
@@ -473,10 +506,26 @@ export class MllpSource implements SourceConnector {
       .then(() => {
         current.queued -= 1;
         if (this.options.keepOpen === false && current.queued === 0) finish(conn, current);
+        else if (this.aged(conn)) {
+          this.report("info", "mllp-connection-aged", {
+            maxConnectionAgeMs: this.options.maxConnectionAgeMs,
+          });
+          finish(conn, current);
+        }
       });
     current.tail = task;
     this.pending.add(task);
     void task.then(() => this.pending.delete(task));
+  }
+
+  /** Whether `conn` is older than `maxConnectionAgeMs`, when one is set. */
+  private aged(conn: Connection): boolean {
+    const { maxConnectionAgeMs } = this.options;
+    if (maxConnectionAgeMs === undefined) return false;
+    const connectedAt = conn.getStats().connectedAt;
+    /* v8 ignore next: a connection that brought a message has connected */
+    if (connectedAt === null) return false;
+    return Date.now() - connectedAt.getTime() >= maxConnectionAgeMs;
   }
 
   /** Stores one message and answers it. Never rejects: whatever goes wrong is reported. */
