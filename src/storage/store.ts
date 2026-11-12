@@ -1224,6 +1224,11 @@ export interface StoredDeliveryRow {
   readonly destinationKey: string | null;
   /** When it failed for good; unset on a store that does not record it. */
   readonly failedAt?: string | null | undefined;
+  /**
+   * When it was queued; null for one queued before schema step `0017-delivery-queued-at`, unset on
+   * a store that does not record it.
+   */
+  readonly queuedAt?: string | null | undefined;
 }
 
 /**
@@ -4542,6 +4547,7 @@ export class Store implements MessageStore, ContentStore, MetaStore {
         interruptedAttempt: delivery.interrupted_attempt,
         destinationKey: delivery.destination_key,
         failedAt: delivery.failed_at,
+        queuedAt: delivery.queued_at,
       })),
     };
   }

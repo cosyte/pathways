@@ -86,6 +86,11 @@ export interface ArchivedDelivery {
   readonly destinationKey: string | null;
   /** When it failed for good, when it did and the store recorded it. */
   readonly failedAt: string | null;
+  /**
+   * When it was queued, when the store recorded it: null for a delivery queued before schema step
+   * `0017-delivery-queued-at`, and absent from an archive written before it.
+   */
+  readonly queuedAt?: string | null;
 }
 
 /**
@@ -458,6 +463,7 @@ function asMessage(value: unknown): ArchivedMessage {
     check(isWholeOrNull(d["interruptedAttempt"]));
     check(d["destinationKey"] === undefined || isTextOrNull(d["destinationKey"]));
     check(d["failedAt"] === undefined || isTextOrNull(d["failedAt"]));
+    check(d["queuedAt"] === undefined || isTextOrNull(d["queuedAt"]));
   }
   return { settledGeneration: null, ...fields } as unknown as ArchivedMessage;
 }
@@ -531,6 +537,7 @@ export async function archivedMessage(
       interruptedAttempt: delivery.interruptedAttempt,
       destinationKey: delivery.destinationKey,
       failedAt: delivery.failedAt ?? null,
+      queuedAt: delivery.queuedAt ?? null,
     })),
   };
 }
