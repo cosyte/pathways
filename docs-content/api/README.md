@@ -7658,7 +7658,7 @@ NODE_ROLES.includes("standby"); // true
 
 ### VERSION
 
-> `const` **VERSION**: `"0.0.2"` = `"0.0.2"`
+> `const` **VERSION**: `"0.0.3"` = `"0.0.3"`
 
 The version of `@cosyte/pathways`, kept equal to `package.json#version` (a test fails when they
 differ).
