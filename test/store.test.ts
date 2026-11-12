@@ -350,6 +350,68 @@ for (const database of TEST_DATABASES) {
       await store.close();
     });
 
+    it("stores a delivery whose output is empty, beside one that is not", async () => {
+      const { store } = await openStore(database);
+      const { id } = await store.receive("a", bytes("SYNTHETIC-IN"));
+      await store.completeTransform(id, [new Uint8Array(), bytes("SYNTHETIC-OUT")], 1);
+      const first = await store.nextDelivery("a", 0);
+      expect(first?.seq).toBe(0);
+      expect(first?.body.byteLength).toBe(0);
+      await store.markDelivered(first?.id ?? -1);
+      const second = await store.nextDelivery("a", 0);
+      expect(text(second?.body ?? new Uint8Array())).toBe("SYNTHETIC-OUT");
+      await store.close();
+    });
+
+    it("stores a hand-off between channels whose body is empty, beside one that is not", async () => {
+      const { store } = await openStore(database);
+      const { id } = await store.receive("a", bytes("SYNTHETIC-IN"));
+      await store.completeTransform(id, [bytes("SYNTHETIC-OUT")], 1);
+      const [delivery] = await store.deliveries(id);
+      const parent = { channel: "a", messageId: id, deliveryId: delivery?.id, generation: 0 };
+      const handOff = (body: Uint8Array) => ({
+        channel: "b",
+        body,
+        maxPending: 10,
+        options: { parent, hops: 1 },
+      });
+      const done = await store.handOff({ kind: "delivery", deliveryId: delivery?.id ?? -1 }, [
+        handOff(new Uint8Array()),
+        handOff(bytes("SYNTHETIC-NEXT")),
+      ]);
+      expect(done).toMatchObject({ ok: true, ids: [expect.any(Number), expect.any(Number)] });
+      const empty = await store.nextToTransform("b");
+      expect(empty?.body.byteLength).toBe(0);
+      await store.completeTransform(empty?.id ?? -1, [], 1);
+      expect(text((await store.nextToTransform("b"))?.body ?? new Uint8Array())).toBe(
+        "SYNTHETIC-NEXT",
+      );
+      expect((await store.deliveries(id))[0]?.status).toBe("delivered");
+      await store.close();
+    });
+
+    it("replaces an empty body, and replaces a body with an empty one", async () => {
+      const { store } = await openStore(database);
+      await store.receive("a", new Uint8Array());
+      const [empty] = await store.storedContent("messages", 0, 1);
+      expect(
+        await store.replaceContent(empty as StoredContent, { body: bytes("x"), error: null }),
+      ).toBe(true);
+      const [full] = await store.storedContent("messages", 0, 1);
+      expect(text(full?.body ?? new Uint8Array())).toBe("x");
+      expect(
+        await store.replaceContent(full as StoredContent, { body: new Uint8Array(), error: "e" }),
+      ).toBe(true);
+      const [now] = await store.storedContent("messages", 0, 1);
+      expect(now?.body.byteLength).toBe(0);
+      expect(now?.error).toBe("e");
+      // Still compared byte for byte: an empty body is not the one read before it.
+      expect(
+        await store.replaceContent(full as StoredContent, { body: bytes("y"), error: null }),
+      ).toBe(false);
+      await store.close();
+    });
+
     it("keeps a long failure reason whole", async () => {
       const { store } = await openStore(database);
       const { id } = await store.receive("a", bytes("x"));
