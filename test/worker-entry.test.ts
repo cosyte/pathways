@@ -68,6 +68,17 @@ function latin1Adt(): Uint8Array {
   return new Uint8Array(Buffer.from(message.toString(), "latin1"));
 }
 
+/**
+ * A synthetic ADT from @cosyte/synth with MSH-18 blank and a name holding an A-ring as one Latin-1
+ * byte (0xc5): a sender that sends Latin-1 and does not declare it.
+ */
+function undeclaredLatin1Adt(): Uint8Array {
+  const message = generateAdt({ seed: 23, trigger: "A01" });
+  message.setField("MSH.18", "");
+  message.setField("PID.5.2", "ÅLPHA");
+  return new Uint8Array(Buffer.from(message.toString(), "latin1"));
+}
+
 async function roundTrip(format: WorkerFormat, body: string): Promise<string> {
   return text(await encode(format, await decode(format, bytes(body))));
 }
@@ -296,6 +307,69 @@ describe("decode and encode", () => {
       code: "UNENCODABLE_CHARACTER",
     });
     expect(failure.detail).not.toMatch(/EURO|NAME|€|TESTPAT/);
+  });
+
+  describe("a message with MSH-18 blank and non-ASCII bytes", () => {
+    const setPid3: TransformFunction = (message) => {
+      (message as Hl7Message).setField("PID.3.1", "TEST2");
+      return message;
+    };
+    const assumeLatin1 = { hl7v2: { assumeCharset: "8859/1" } } as const;
+    /** The segment of `body` that starts with `name`, as bytes. */
+    const segmentOf = (body: Uint8Array, name: string): Buffer => {
+      const all = Buffer.from(body);
+      const start = all.indexOf(`\r${name}|`) + 1;
+      const end = all.indexOf(0x0d, start);
+      return all.subarray(start, end === -1 ? all.length : end);
+    };
+
+    it("fails an edit to a segment holding such a byte without the setting, naming it", async () => {
+      const failure = await failureOf(runTransform(setPid3, "hl7v2", undeclaredLatin1Adt()));
+      expect(failure).toMatchObject({ kind: "output", code: "UNENCODABLE_CHARACTER" });
+      expect(failure.detail).toContain("MSH-18 is blank");
+      expect(failure.detail).toContain("hl7v2.assumeCharset");
+      expect(failure.detail).not.toMatch(/LPHA|TESTPAT|TEST2/);
+    });
+
+    it("with hl7v2.assumeCharset 8859/1, writes the edit in Latin-1 and keeps the rest", async () => {
+      const body = undeclaredLatin1Adt();
+      expect(body.includes(0xc5)).toBe(true);
+      const [same] = await runTransform(identity, "hl7v2", body, undefined, assumeLatin1);
+      expect(Buffer.from(same ?? []).equals(Buffer.from(body))).toBe(true);
+      const [edited] = await runTransform(setPid3, "hl7v2", body, undefined, assumeLatin1);
+      const out = Buffer.from(edited ?? []);
+      expect(out.toString("latin1")).toContain("|TEST2^");
+      expect(segmentOf(out, "PID").includes(0xc5)).toBe(true);
+      expect(out.includes(0xc3)).toBe(false);
+      // Segments the transform did not touch go out byte for byte.
+      expect(out.subarray(0, out.indexOf(0x0d)).equals(body.subarray(0, body.indexOf(0x0d)))).toBe(
+        true,
+      );
+      expect(segmentOf(out, "PV1").equals(segmentOf(body, "PV1"))).toBe(true);
+    });
+
+    it("with hl7v2.assumeCharset 8859/1, still refuses a character Latin-1 has no byte for", async () => {
+      const euro: TransformFunction = (message) => {
+        (message as Hl7Message).setField("PID.5.2", "EURO€NAME");
+        return message;
+      };
+      const failure = await failureOf(
+        runTransform(euro, "hl7v2", undeclaredLatin1Adt(), undefined, assumeLatin1),
+      );
+      expect(failure).toMatchObject({ kind: "output", code: "UNENCODABLE_CHARACTER" });
+      expect(failure.detail).toContain('"8859/1"');
+      expect(failure.detail).not.toMatch(/EURO|NAME|€|LPHA|assumeCharset/);
+    });
+
+    it("with the setting, still reads and writes a declared MSH-18 in its own set", async () => {
+      const message = generateAdt({ seed: 22, trigger: "A01" });
+      message.setField("MSH.18", "UNICODE UTF-8");
+      message.setField("PID.5.1", "TESTPATIENTÉ");
+      const body = bytes(message.toString());
+      const [edited] = await runTransform(setPid3, "hl7v2", body, undefined, assumeLatin1);
+      // E-acute stays two UTF-8 bytes: the assumed set applies to a blank MSH-18 only.
+      expect(Buffer.from(edited ?? []).includes(Buffer.from([0xc3, 0x89]))).toBe(true);
+    });
   });
 
   it("keeps a serializer's own refusal code", async () => {

@@ -10,6 +10,16 @@ description: "Set a channel's format, see what its transform receives, read deli
 A channel's `format` says how its transform receives each message. The message is stored as it
 arrived; it is parsed in the channel's worker, right before the transform runs.
 
+**Upgrading from Pathways 0.0.3 or earlier with HL7 v2 senders that leave MSH-18 blank:** an HL7 v2
+message is now written in the character set its MSH-18 declares, and a blank MSH-18 means ASCII. A
+message that arrives with non-ASCII bytes and a blank MSH-18 (Latin-1 from a sender that does not
+declare it, say) still leaves byte for byte when nothing changes it. But when the transform edits
+any field in a segment that holds such a byte, even with ASCII text, the output now fails with
+`UNENCODABLE_CHARACTER`, where 0.0.3 sent it re-encoded as UTF-8. Such a channel fails every such
+message until the sender declares MSH-18, or the channel names the set to assume with
+[`hl7v2: { assumeCharset }`](#character-sets-in-hl7-v2). Setting MSH-18 inside the transform does not
+help: a message read this way holds the bytes as they arrived and cannot be moved to another set.
+
 | `format`          | The transform receives                               | Type                    |
 | ----------------- | ---------------------------------------------------- | ----------------------- |
 | `hl7v2` (default) | an `Hl7Message` from `@cosyte/hl7`                   | `TransformFor<"hl7v2">` |
@@ -28,14 +38,58 @@ rather than being rounded; use `text` to pass it through untouched.
 A message that does not parse is marked failed with the parser's stable code, such as
 `NO_MSH_SEGMENT` or `X12_NO_ISA_HEADER`, and the transform never sees it.
 
-An HL7 v2 body is read in the character set its MSH-18 declares, and written back in that same set.
-A message that holds a character the set has no byte for (a euro sign in a message that declares
-`8859/1`, say) is never sent with a substitute: its output fails with `UNENCODABLE_CHARACTER`, and
-the error names the segment, the field and the set, never the field's text. Pathways 0.0.3 and
-earlier wrote every `Hl7Message` as UTF-8, whatever MSH-18 said. A transform that wants UTF-8 out
-sets MSH-18 to `UNICODE UTF-8`, or returns `message.toString()`, a string, which is sent as UTF-8.
+An HL7 v2 body is read in the character set its MSH-18 declares, and written back in that same
+set; [Character sets in HL7 v2](#character-sets-in-hl7-v2) has the detail.
 
 MLLP carries HL7 v2 only, so a channel with an MLLP source or destination keeps `format: hl7v2`.
+
+## Character sets in HL7 v2
+
+An HL7 v2 body is read in the character set its MSH-18 declares, and an `Hl7Message` the transform
+returns is written back in that same set, so a message that nothing changed goes out byte for byte
+as it arrived. Pathways never guesses a set from the bytes. Pathways 0.0.3 and earlier wrote every
+`Hl7Message` as UTF-8, whatever MSH-18 said.
+
+A character the set has no byte for is never sent with a substitute: the output fails with
+`UNENCODABLE_CHARACTER`, and the error names the segment, the field and the set, never the field's
+text. That happens in two cases:
+
+- the transform writes a character the declared set cannot hold, such as a euro sign in a message
+  that declares `8859/1`;
+- the reader kept the message's bytes as they arrived, without knowing their set, and the transform
+  edits any field in a segment that holds a byte above ASCII. The reader does that when MSH-18 is
+  blank and the bytes are not UTF-8, or when MSH-18 names a set it does not decode or does not
+  know. A segment it kept is written back as those bytes; a segment the transform changed must be
+  ASCII, even when the edit itself is ASCII and the byte is in another field. The error for a blank
+  MSH-18 also names the setting below.
+
+For the second case, a channel can:
+
+- have the sender declare its set in MSH-18 (`8859/1` for Latin-1);
+- name the set to assume when MSH-18 is blank, with the channel's `hl7v2:` block:
+
+  ```yaml title="channels/adt-in/channel.yaml"
+  format: hl7v2
+  hl7v2:
+    assumeCharset: "8859/1"
+  source:
+    mllp: { port: 2575, plaintext: true }
+  transform: ./transform.ts
+  destinations:
+    - file: { dir: ../../data/adt-in/out }
+  ```
+
+  A message with MSH-18 blank is then read and written in that set, an edit included; a message
+  that declares MSH-18 keeps its own. `assumeCharset` takes `8859/1` to `8859/8`, `8859/10`,
+  `8859/13` to `8859/16` and `WINDOWS-1252`;
+
+- have the transform return bytes it wrote itself, which are sent as they are.
+
+Setting MSH-18 inside the transform does not help in the second case: the message holds the bytes as
+they arrived, and they cannot be moved to another set. A transform that wants UTF-8 out of a
+message that declares a set the reader decodes, such as `8859/1`, sets MSH-18 to `UNICODE UTF-8`.
+Returning `message.toString()`, a string, sends UTF-8 as 0.0.3 did, reading each kept byte as the
+Latin-1 character of the same value.
 
 ## Read a FHIR resource
 
@@ -163,8 +217,8 @@ What a transform returns is written back like this, whatever the channel's forma
   character set, such as Latin-1, or a binary one keeps its bytes;
 - a model from `@cosyte/hl7`, `@cosyte/fhir`, `@cosyte/x12` or `@cosyte/ccda` is written by its own
   library. An `Hl7Message` is written with `toBytes()`, in the character set its MSH-18 declares
-  (UTF-8 when MSH-18 is blank), so a Latin-1 message that nothing changed goes out byte for byte as
-  it arrived;
+  or the channel's `hl7v2.assumeCharset`, as [Character sets in HL7 v2](#character-sets-in-hl7-v2)
+  says, so a Latin-1 message that nothing changed goes out byte for byte as it arrived;
 - on a `json` channel, a plain object, an array, a number or a boolean is written with
   `JSON.stringify`;
 - on a `csv` channel, a `CsvTable` is written with the channel's `csv:` settings.

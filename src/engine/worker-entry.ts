@@ -292,8 +292,52 @@ export const CSV_DEFAULTS = Object.freeze({
 } as const);
 
 /**
- * The settings a format reads a channel's bodies with, beside its name: for now, a `csv` channel's
- * `csv:` block. Plain data, sent to the worker as it starts.
+ * How an `hl7v2` channel reads and writes its bodies, from the channel's `hl7v2:` block.
+ *
+ * @example
+ * ```ts
+ * const settings: Hl7v2Settings = { assumeCharset: "8859/1" };
+ * ```
+ */
+export interface Hl7v2Settings {
+  /**
+   * The character set to read and write a message in when its MSH-18 is blank or absent, one of
+   * {@link ASSUMABLE_CHARSETS}. A message that declares MSH-18 is read and written in the set it
+   * declares. Unset, a blank MSH-18 means ASCII, read as its UTF-8 superset: bytes that are not
+   * UTF-8 are kept as they arrived, and a segment a transform edits must then be ASCII.
+   */
+  readonly assumeCharset?: string | undefined;
+}
+
+/**
+ * The character sets `hl7v2.assumeCharset` takes: the single-byte sets `@cosyte/hl7` reads into
+ * text and writes back, by the labels MSH-18 uses for them.
+ *
+ * @example
+ * ```ts
+ * ASSUMABLE_CHARSETS.includes("8859/1"); // true
+ * ```
+ */
+export const ASSUMABLE_CHARSETS = Object.freeze([
+  "8859/1",
+  "8859/2",
+  "8859/3",
+  "8859/4",
+  "8859/5",
+  "8859/6",
+  "8859/7",
+  "8859/8",
+  "8859/10",
+  "8859/13",
+  "8859/14",
+  "8859/15",
+  "8859/16",
+  "WINDOWS-1252",
+] as const);
+
+/**
+ * The settings a format reads a channel's bodies with, beside its name: a `csv` channel's `csv:`
+ * block, or an `hl7v2` channel's `hl7v2:` block. Plain data, sent to the worker as it starts.
  *
  * @example
  * ```ts
@@ -302,6 +346,7 @@ export const CSV_DEFAULTS = Object.freeze({
  */
 export interface FormatSettings {
   readonly csv?: CsvSettings | undefined;
+  readonly hl7v2?: Hl7v2Settings | undefined;
 }
 
 /**
@@ -337,8 +382,11 @@ export interface ModelWriter {
    * is not plain JSON, the channel's own format first.
    */
   readonly byShape: boolean;
-  /** The model as the library writes it, or `undefined` when `value` is not one. */
-  readonly write: (value: object) => Promise<Written | undefined>;
+  /**
+   * The model as the library writes it, or `undefined` when `value` is not one. `settings` are the
+   * channel's.
+   */
+  readonly write: (value: object, settings: FormatSettings) => Promise<Written | undefined>;
 }
 
 /**
@@ -395,16 +443,26 @@ export const FORMAT_REGISTRY = Object.freeze({
     extension: "hl7",
     contentType: "application/hl7-v2",
     load: libraries.hl7,
-    // The library reads the bytes itself, in the charset the message declares.
-    decode: async (body) =>
-      (await libraries.hl7()).parseHL7(Buffer.from(body.buffer, body.byteOffset, body.byteLength)),
+    // The library reads the bytes itself, in the charset the message declares, or the channel's
+    // assumed one when MSH-18 is blank.
+    decode: async (body, settings) =>
+      readHl7(
+        await libraries.hl7(),
+        Buffer.from(body.buffer, body.byteOffset, body.byteLength),
+        settings.hl7v2?.assumeCharset,
+      ),
     model: {
       byShape: false,
-      // Written in the charset MSH-18 declares, so a message nothing changed leaves as the bytes it
-      // arrived as. A character that set cannot hold is refused (`UNENCODABLE_CHARACTER`, naming
-      // the segment and field, never their text), never replaced.
-      write: async (value) =>
-        value instanceof (await libraries.hl7()).Hl7Message ? value.toBytes() : undefined,
+      // Written in the charset MSH-18 declares, or the channel's assumed one when it is blank, so a
+      // message nothing changed leaves as the bytes it arrived as. A character that set cannot hold
+      // is refused (`UNENCODABLE_CHARACTER`, naming the segment and field, never their text), never
+      // replaced.
+      write: async (value, settings) => {
+        const library = await libraries.hl7();
+        return value instanceof library.Hl7Message
+          ? writeHl7(library, value, settings.hl7v2?.assumeCharset)
+          : undefined;
+      },
     },
   }),
   fhir: defineFormat<Fhir.FhirComplex>({
@@ -462,6 +520,54 @@ export const FORMAT_REGISTRY = Object.freeze({
       isCsvTable(output) ? writeCsv(output, settings.csv ?? {}) : undefined,
   }),
 });
+
+/** Whether a message's MSH-18 is blank or absent, so the ASCII default or an assumed set applies. */
+function msh18Blank(message: Hl7.Hl7Message): boolean {
+  return (message.get("MSH.18") ?? "").trim() === "";
+}
+
+/**
+ * An `hl7v2` body read in the set its MSH-18 declares; with MSH-18 blank and `assumeCharset` set,
+ * read again in that set. Never a set guessed from the bytes.
+ */
+function readHl7(
+  library: typeof Hl7,
+  body: Buffer,
+  assumeCharset: string | undefined,
+): Hl7.Hl7Message {
+  const message = library.parseHL7(body);
+  if (assumeCharset === undefined || !msh18Blank(message)) return message;
+  return library.parseHL7(body, { charset: assumeCharset });
+}
+
+/**
+ * An `Hl7Message` written with `toBytes`: in the set MSH-18 declares, or in `assumeCharset` when
+ * MSH-18 is blank. A refusal on a blank MSH-18 with no assumed set adds what a channel can do to the
+ * library's text, which names a segment, a field and a set, never content; its code stays.
+ */
+function writeHl7(
+  library: typeof Hl7,
+  message: Hl7.Hl7Message,
+  assumeCharset: string | undefined,
+): Buffer {
+  const blank = msh18Blank(message);
+  try {
+    return blank && assumeCharset !== undefined
+      ? message.toBytes({ charset: assumeCharset })
+      : message.toBytes();
+  } catch (error) {
+    if (
+      blank &&
+      assumeCharset === undefined &&
+      error instanceof library.Hl7EncodeError &&
+      error.code === "UNENCODABLE_CHARACTER"
+    ) {
+      error.message +=
+        " MSH-18 is blank, so a segment the transform changed is written as ASCII: have the sender declare MSH-18, or set the channel's hl7v2.assumeCharset.";
+    }
+    throw error;
+  }
+}
 
 /**
  * A message format a channel can declare, and so a worker can parse: a key of
@@ -1262,9 +1368,13 @@ for (const format of FORMATS) {
  * `value` is not one. A model is written whatever the channel's format, so a transform can turn one
  * format into another.
  */
-async function writeModel(format: WorkerFormat, value: object): Promise<Written | undefined> {
+async function writeModel(
+  format: WorkerFormat,
+  value: object,
+  settings: FormatSettings,
+): Promise<Written | undefined> {
   for (const writer of shapeWriters) {
-    const written = await writer.write(value);
+    const written = await writer.write(value, settings);
     if (written !== undefined) return written;
   }
   // A JSON object is never a message or a document; only a class instance can be one, and checking
@@ -1272,7 +1382,7 @@ async function writeModel(format: WorkerFormat, value: object): Promise<Written 
   if (isPlain(value)) return undefined;
   const own = classWriters.filter(([owner]) => owner === format);
   for (const [, writer] of [...own, ...classWriters.filter(([owner]) => owner !== format)]) {
-    const written = await writer.write(value);
+    const written = await writer.write(value, settings);
     if (written !== undefined) return written;
   }
   return undefined;
@@ -1321,7 +1431,7 @@ export async function encode(
 ): Promise<Uint8Array> {
   if (typeof output === "string" || output instanceof Uint8Array) return bytesOf(output);
   if (typeof output === "object" && output !== null) {
-    const written = await writeModel(format, output);
+    const written = await writeModel(format, output, settings);
     if (written !== undefined) return bytesOf(written);
   }
   const entry: FormatEntry<unknown> = FORMAT_REGISTRY[format];
