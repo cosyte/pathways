@@ -287,6 +287,40 @@ describe("pathways test on a channel that reads batches", () => {
     ]);
   });
 
+  it("compares each destination's outputs from every piece together, and a destination by the first piece it failed on", async () => {
+    const root = await makeProject({
+      "channels/notes/channel.yaml": `
+format: text
+source:
+  file:
+    dir: ../../data/inbox
+    minAge: 0
+    batch: { split: lines }
+destinations:
+  - name: upper
+    file: { dir: ../../data/out-0 }
+    transform: ./upper.ts
+  - file: { dir: ../../data/out-1 }
+    transform: ./picky.ts
+`,
+      "channels/notes/upper.ts": "export default (text: string): string => text.toUpperCase();\n",
+      "channels/notes/picky.ts":
+        "export default (text: string): string => { if (text !== 'one') throw new TypeError('synthetic'); return text; };\n",
+      "channels/notes/tests/batch.txt": "one\ntwo\nthree\n",
+      "channels/notes/tests/batch.expected.upper.txt": "ONE\nTWO\nTHREE",
+    });
+    const out: string[] = [];
+    const summary = await runChannelTests((await loadProject(root)).channels, {
+      update: false,
+      out: (line) => out.push(line),
+    });
+    expect(out).toEqual([
+      "PASS notes/tests/batch.txt -> upper",
+      expect.stringMatching(/^FAIL notes\/tests\/batch\.txt -> 2: the transform threw TypeError/),
+    ]);
+    expect(summary).toEqual({ passed: 1, failed: 1, updated: 0 });
+  });
+
   it("names a piece an HL7 batch cannot read, by its place", async () => {
     const root = await makeProject({
       "channels/adt/channel.yaml": channel("{ split: hl7 }", "hl7v2"),
