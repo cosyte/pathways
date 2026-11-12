@@ -10,6 +10,7 @@ import { afterAll, describe, expect, it } from "vitest";
 // in an HTML comment, `<!-- changesets: tcp-connector -->`. The release pull request consumes those
 // changesets into CHANGELOG.md, so this test fails on it until the bullet moves up. With no
 // changeset pending, the section may be empty or gone; while one is, it lists at least one bullet.
+// npm shows the README, so each version it names as the one on npm is package.json's.
 
 const ROOT = join(import.meta.dirname, "..");
 
@@ -62,6 +63,22 @@ function nextReleaseBullets(readme: string): string[] {
     .split(/^- /m)
     .slice(1)
     .map((b) => b.split(/\n\n/)[0] ?? b);
+}
+
+/** A version the README names as the one on npm: "0.0.3, the version on npm", "0.0.3 is on npm". */
+const ON_NPM =
+  /\b\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?=,\s+the\s+version\s+on\s+npm\b|\s+is\s+on\s+npm\b)/g;
+
+/**
+ * Why the README is wrong about the version on npm, or nothing. npm shows the README of the version
+ * it serves, so each version the README names as the one on npm is package.json's, and it names one.
+ */
+function wrongNpmVersion(readme: string, version: string): string[] {
+  const named = [...readme.matchAll(ON_NPM)].map((m) => m[0]);
+  if (named.length === 0) return ["the README names no version as the one on npm"];
+  return named
+    .filter((v) => v !== version)
+    .map((v) => `the README says ${v} is on npm, but package.json holds ${version}`);
 }
 
 /** The first line of a pending changeset's summary, or undefined once it is consumed. */
@@ -124,6 +141,10 @@ describe("release status", () => {
 
   it("package.json's description does not say the package is unreleased", () => {
     expect(unreleasedClaims(pkg.description)).toEqual([]);
+  });
+
+  it("the README names package.json's version as the one on npm", () => {
+    expect(wrongNpmVersion(read("README.md"), pkg.version)).toEqual([]);
   });
 
   it("the README lists something in the next release while a changeset is pending", () => {
@@ -192,6 +213,27 @@ describe("release status", () => {
       expect(missingNextRelease(readme(["Nothing is pending."]), empty)).toEqual([]);
       expect(missingNextRelease("\n## Status\n", empty)).toEqual([]);
       expect(staleNextRelease(readme([]), "", empty)).toEqual([]);
+    });
+
+    it("passes a README whose every on-npm line names the version", () => {
+      const text = "What follows is in 0.0.4, the version on npm:\n\nReleased: 0.0.4\nis on npm.\n";
+      expect(wrongNpmVersion(text, "0.0.4")).toEqual([]);
+    });
+
+    it("fails a README that names another version as the one on npm", () => {
+      const text = "What follows is in 0.0.3, the version on npm:\n\nReleased: 0.0.4 is on npm.\n";
+      expect(wrongNpmVersion(text, "0.0.4")).toEqual([
+        "the README says 0.0.3 is on npm, but package.json holds 0.0.4",
+      ]);
+      expect(wrongNpmVersion("Released: 0.0.4-rc.1 is on npm.", "0.0.4")).toEqual([
+        "the README says 0.0.4-rc.1 is on npm, but package.json holds 0.0.4",
+      ]);
+    });
+
+    it("fails a README that names no version as the one on npm", () => {
+      expect(wrongNpmVersion("Pathways is on npm.", "0.0.4")).toEqual([
+        "the README names no version as the one on npm",
+      ]);
     });
 
     it("still fails a leftover bullet once a release consumed every changeset", () => {

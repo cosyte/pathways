@@ -53,37 +53,81 @@ const SECTION = [
   "",
 ].join("\n");
 
-const README = `# Synthetic\n\n${CONTENTS}\n---\n\n${SECTION}## Status\n\nEarly.\n`;
+const LATEST = [
+  "## What the latest release ships",
+  "",
+  "What follows is in 0.0.3, the version on npm:",
+  "",
+  "- **Old.** A synthetic thing an earlier release shipped.",
+  "",
+  "---",
+  "",
+].join("\n");
+
+const STATUS = "## Status\n\nEarly, and released: 0.0.3 is on npm.\n";
+
+/** A version named as the one on npm, as the release-status test reads it. */
+const ON_NPM = /\b\d+\.\d+\.\d+(?=,\s+the\s+version\s+on\s+npm\b|\s+is\s+on\s+npm\b)/g;
+
+const README = `# Synthetic\n\n${CONTENTS}\n---\n\n${LATEST}${SECTION}${STATUS}`;
+
+/** The README with the latest-release list holding `moved` and every on-npm line naming 0.0.4. */
+function released(text: string, moved: readonly string[]): string {
+  return text
+    .replace(
+      "- **Old.** A synthetic thing an earlier release shipped.\n",
+      ["- **Old.** A synthetic thing an earlier release shipped.", ...moved, ""].join("\n"),
+    )
+    .replace("in 0.0.3, the version on npm", "in 0.0.4, the version on npm")
+    .replace("0.0.3 is on npm", "0.0.4 is on npm");
+}
 
 describe("rewriteNextRelease", () => {
-  it("drops a bullet whose changesets are all consumed and names the new version", () => {
+  it("moves a released bullet up, without its comment, and names the new version", () => {
     const result = rewriteNextRelease(README, ["pending-thing"], "0.0.4");
     expect(result).toEqual({
       ok: true,
       changed: true,
-      dropped: 1,
+      moved: 1,
       kept: 1,
-      text: README.replace(
-        "- A synthetic shipped thing.\n  <!-- changesets: shipped-thing -->\n",
-        "",
-      ).replace("not in 0.0.3:", "not in 0.0.4:"),
+      narrowed: 1,
+      text: released(README, ["- A synthetic shipped thing."])
+        .replace("- A synthetic shipped thing.\n  <!-- changesets: shipped-thing -->\n", "")
+        .replace("not in 0.0.3:", "not in 0.0.4:")
+        .replace("shipped-other, pending-thing", "pending-thing"),
     });
   });
 
-  it("removes the section and its Contents line once every bullet is released", () => {
+  it("moves every bullet up and removes the section and its Contents line", () => {
     const result = rewriteNextRelease(README, [], "0.0.4");
     expect(result).toEqual({
       ok: true,
       changed: true,
-      dropped: 2,
+      moved: 2,
       kept: 0,
-      text: `# Synthetic\n\n${CONTENTS.replace("- [In the next release](#in-the-next-release)\n", "")}\n---\n\n## Status\n\nEarly.\n`,
+      narrowed: 0,
+      text: `# Synthetic\n\n${CONTENTS.replace("- [In the next release](#in-the-next-release)\n", "")}\n---\n\n${released(
+        LATEST,
+        ["- A synthetic shipped thing.", "- A synthetic pending thing, over", "  two lines."],
+      )}${released(STATUS, [])}`,
     });
   });
 
   it("leaves a current section as it is", () => {
-    const result = rewriteNextRelease(README, ["shipped-thing", "pending-thing"], "0.0.3");
-    expect(result).toEqual({ ok: true, changed: false, dropped: 0, kept: 2, text: README });
+    const text = README.replace("shipped-other, pending-thing", "pending-thing");
+    const result = rewriteNextRelease(text, ["shipped-thing", "pending-thing"], "0.0.3");
+    expect(result).toEqual({ ok: true, changed: false, moved: 0, kept: 2, narrowed: 0, text });
+  });
+
+  // release-status fails a next-release bullet that names any consumed changeset, so a bullet with
+  // one consumed and one pending stays, naming only the pending one: part of it is not out yet.
+  it("keeps a bullet naming a consumed and a pending changeset, naming only the pending one", () => {
+    const result = rewriteNextRelease(README, ["shipped-thing", "pending-thing"], "0.0.4");
+    expect(result.ok && result.narrowed).toBe(1);
+    expect(result.ok && result.text).toContain(
+      "- A synthetic pending thing, over\n  two lines.\n  <!-- changesets: pending-thing -->\n",
+    );
+    expect(result.ok && result.text).not.toContain("shipped-other");
   });
 
   it("keeps a bullet that names no changeset, for the release-status test to report", () => {
@@ -93,13 +137,69 @@ describe("rewriteNextRelease", () => {
     expect(result.ok && result.text).toContain("- A synthetic shipped thing.\n\nThe changelog");
   });
 
-  it("leaves a README with no such section untouched", () => {
+  it("keeps a pending bullet in a list whose bullets are separated by blank lines", () => {
+    const text = README.replace(
+      "  <!-- changesets: shipped-thing -->\n- A synthetic pending",
+      "  <!-- changesets: shipped-thing -->\n\n- A synthetic pending",
+    );
+    const result = rewriteNextRelease(text, ["pending-thing"], "0.0.4");
+    expect(result.ok && result.moved).toBe(1);
+    expect(result.ok && result.kept).toBe(1);
+    expect(result.ok && result.text).toContain(
+      "not in 0.0.4:\n\n- A synthetic pending thing, over\n  two lines.\n  <!-- changesets: pending-thing -->\n\nThe changelog",
+    );
+  });
+
+  it("keeps the blank lines between the bullets it keeps in such a list", () => {
+    const text = [
+      "## What the latest release ships\n\nIn 0.0.3, the version on npm:\n\n- **Old.** Shipped.\n",
+      "## In the next release\n\n- Gone. <!-- changesets: a -->\n\n- One. <!-- changesets: b -->",
+      "  More of one.\n\n  A second paragraph of one.\n\n- Two. <!-- changesets: c -->\n\nEnd.\n",
+    ].join("\n");
+    const result = rewriteNextRelease(text, ["b", "c"], "0.0.4");
+    expect(result.ok && result.text).toContain(
+      "\n- One. <!-- changesets: b -->\n  More of one.\n\n  A second paragraph of one.\n\n- Two. <!-- changesets: c -->\n\nEnd.\n",
+    );
+    expect(result.ok && result.text).toContain("- **Old.** Shipped.\n- Gone.\n");
+  });
+
+  it("removes a comment on a bullet's own line and its trailing space when moving it", () => {
+    const text = README.replace(
+      "  <!-- changesets: shipped-thing -->\n",
+      "  in two lines. <!-- changesets: shipped-thing -->  \n",
+    );
+    const result = rewriteNextRelease(text, ["pending-thing"], "0.0.4");
+    expect(result.ok && result.text).toContain(
+      "- **Old.** A synthetic thing an earlier release shipped.\n- A synthetic shipped thing.\n  in two lines.\n\n---",
+    );
+  });
+
+  it("rewrites the version lines when the README has no next-release section", () => {
+    const text = `# Synthetic\n\n${LATEST}${STATUS}`;
+    expect(rewriteNextRelease(text, [], "0.0.4")).toEqual({
+      ok: true,
+      changed: true,
+      moved: 0,
+      kept: 0,
+      narrowed: 0,
+      text: released(text, []),
+    });
+  });
+
+  it("rewrites a version line wrapped over two lines", () => {
+    const text = "# Synthetic\n\nEarly, and released:\n0.0.3\nis on npm.\n";
+    const result = rewriteNextRelease(text, [], "0.0.4");
+    expect(result.ok && result.text).toBe("# Synthetic\n\nEarly, and released:\n0.0.4\nis on npm.\n");
+  });
+
+  it("leaves a README with no such sections untouched", () => {
     const text = "# Synthetic\n\n## Status\n\nEarly.\n";
     expect(rewriteNextRelease(text, [], "0.0.4")).toEqual({
       ok: true,
       changed: false,
-      dropped: 0,
+      moved: 0,
       kept: 0,
+      narrowed: 0,
       text,
     });
   });
@@ -111,10 +211,11 @@ describe("rewriteNextRelease", () => {
   });
 
   it("removes a last section and the rule before it", () => {
-    const text =
-      "# Synthetic\n\nIntro.\n\n---\n\n## In the next release\n\n- Gone. <!-- changesets: a -->\n";
+    const text = `# Synthetic\n\n${LATEST}## In the next release\n\n- Gone. <!-- changesets: a -->\n`;
     const result = rewriteNextRelease(text, [], "0.0.4");
-    expect(result.ok && result.text).toBe("# Synthetic\n\nIntro.\n");
+    expect(result.ok && result.text).toBe(
+      `# Synthetic\n\n${released(LATEST, ["- Gone."])}`.replace(/\n+---\n+$/, "\n"),
+    );
   });
 
   it("keeps a last section that ends on its bullet", () => {
@@ -122,6 +223,30 @@ describe("rewriteNextRelease", () => {
       "## Contents\n\n## In the next release\n\nNot in 0.0.3:\n\n- Kept. <!-- changesets: a -->";
     const result = rewriteNextRelease(text, ["a"], "0.0.4");
     expect(result.ok && result.text).toBe(text.replace("0.0.3", "0.0.4"));
+  });
+
+  it("refuses to move a released bullet when there is no latest-release list to hold it", () => {
+    const noLatest = README.replace(LATEST, "");
+    expect(rewriteNextRelease(noLatest, ["pending-thing"], "0.0.4")).toEqual({
+      ok: false,
+      reason: "1 released bullet(s) have no What the latest release ships list to move into",
+    });
+    const noList = README.replace("- **Old.** A synthetic thing an earlier release shipped.\n", "");
+    expect(rewriteNextRelease(noList, ["pending-thing"], "0.0.4").ok).toBe(false);
+  });
+
+  it("writes a CRLF README back with CRLF line endings", () => {
+    const result = rewriteNextRelease(README.replace(/\n/g, "\r\n"), ["pending-thing"], "0.0.4");
+    const lf = rewriteNextRelease(README, ["pending-thing"], "0.0.4");
+    expect(result.ok && lf.ok && result.text).toBe(lf.ok && lf.text.replace(/\n/g, "\r\n"));
+  });
+
+  it("refuses a README that mixes line endings", () => {
+    expect(rewriteNextRelease(README.replace("\n", "\r\n"), [], "0.0.4")).toEqual({
+      ok: false,
+      reason: "it mixes CRLF and LF line endings",
+    });
+    expect(rewriteNextRelease(README.replace("\n", "\r"), [], "0.0.4").ok).toBe(false);
   });
 
   it("refuses a version a replacement could read as a pattern", () => {
@@ -167,6 +292,23 @@ describe("syncNextRelease and the script", () => {
       .map((b) => /<!--\s*changesets:\s*([\w\s,-]+?)\s*-->/.exec(b)?.[1]?.split(/[\s,]+/) ?? []);
   }
 
+  /** A section of `readme` from its heading to the next one. */
+  function sectionOf(readme: string, heading: string): string {
+    const start = readme.indexOf(`\n${heading}\n`);
+    if (start === -1) return "";
+    const rest = readme.slice(start + 1);
+    const end = rest.indexOf("\n## ", 1);
+    return end === -1 ? rest : rest.slice(0, end);
+  }
+
+  /** Each next-release bullet of `readme`, as it reads once moved: its comment line gone. */
+  function nextReleaseTexts(readme: string): string[] {
+    return sectionOf(readme, "## In the next release")
+      .split(/^(?=- )/m)
+      .slice(1)
+      .map((b) => (b.split(/\n\n/)[0] ?? b).replace(/\n\s*<!--[^>]*-->/, "").trimEnd());
+  }
+
   function run(): { code: number; stdout: string; stderr: string } {
     const result = spawnSync(process.execPath, [TSX, SCRIPT], {
       cwd: dir,
@@ -201,25 +343,55 @@ describe("syncNextRelease and the script", () => {
     expect(after).not.toContain("(#in-the-next-release)");
   });
 
-  it("writes and says what it dropped", () => {
+  // What npm shows for the release: every bullet it shipped is under What the latest release ships,
+  // without its comment, and the README names the new version as the one on npm.
+  it("moves the repository's released bullets up and names the new version on npm", () => {
+    const bullets = nextReleaseTexts(repoReadme);
+    expect(bullets.length).toBeGreaterThan(0);
+    layout({ version: "9.9.9" }, repoReadme, []);
+    expect(syncNextRelease(dir).code).toBe(0);
+    const after = readFileSync(join(dir, "README.md"), "utf8");
+    const latest = sectionOf(after, "## What the latest release ships");
+    for (const bullet of bullets) expect(latest).toContain(bullet);
+    expect(latest).not.toContain("<!--");
+    expect([...after.matchAll(ON_NPM)].map((m) => m[0])).toEqual(
+      [...repoReadme.matchAll(ON_NPM)].map(() => "9.9.9"),
+    );
+    expect([...after.matchAll(ON_NPM)].length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("keeps the repository's pending bullets where they are", () => {
+    const ids = bulletIds(repoReadme).flat();
+    const last = ids.at(-1) ?? "";
+    layout({ version: "9.9.9" }, repoReadme, [last]);
+    expect(syncNextRelease(dir).code).toBe(0);
+    const after = readFileSync(join(dir, "README.md"), "utf8");
+    expect(bulletIds(after)).toEqual([[last]]);
+  });
+
+  it("writes and says what it moved", () => {
     layout({ version: "0.0.4" }, README, ["pending-thing"]);
     expect(syncNextRelease(dir)).toEqual({
       code: 0,
       message:
-        "sync-next-release: README.md dropped 1 released bullet(s); 1 left, the lead names 0.0.4",
+        "sync-next-release: README.md moved 1 released bullet(s) up; 1 left, 1 naming only pending changesets; the version lines name 0.0.4",
     });
   });
 
-  it("says when the section is gone", () => {
+  it("says when nothing is left", () => {
     layout({ version: "0.0.4" }, README, []);
     expect(syncNextRelease(dir)).toEqual({
       code: 0,
-      message: "sync-next-release: README.md dropped 2 released bullet(s); the section is gone",
+      message:
+        "sync-next-release: README.md moved 2 released bullet(s) up; 0 left; the version lines name 0.0.4",
     });
   });
 
   it("leaves a current README untouched", () => {
-    layout({ version: "0.0.3" }, README, ["shipped-thing", "pending-thing"]);
+    layout({ version: "0.0.3" }, README.replace("shipped-other, ", ""), [
+      "shipped-thing",
+      "pending-thing",
+    ]);
     const before = statSync(join(dir, "README.md")).mtimeMs;
     expect(syncNextRelease(dir)).toEqual({
       code: 0,
@@ -275,7 +447,8 @@ describe("syncNextRelease and the script", () => {
     expect(run()).toEqual({
       code: 0,
       stdout: "",
-      stderr: "sync-next-release: README.md dropped 2 released bullet(s); the section is gone\n",
+      stderr:
+        "sync-next-release: README.md moved 2 released bullet(s) up; 0 left; the version lines name 0.0.4\n",
     });
     expect(readFileSync(join(dir, "README.md"), "utf8")).not.toContain("## In the next release");
   });
@@ -290,7 +463,7 @@ describe("syncNextRelease and the script", () => {
       await import("../../scripts/sync-next-release.js");
       expect(process.exitCode).toBe(0);
       expect(stderr).toHaveBeenCalledWith(
-        "sync-next-release: README.md dropped 0 released bullet(s); 2 left, the lead names 0.0.4\n",
+        "sync-next-release: README.md moved 0 released bullet(s) up; 2 left, 1 naming only pending changesets; the version lines name 0.0.4\n",
       );
     } finally {
       process.exitCode = exitCode;
