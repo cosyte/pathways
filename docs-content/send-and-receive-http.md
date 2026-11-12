@@ -2,7 +2,7 @@
 id: send-and-receive-http
 title: Send and receive messages over HTTP
 sidebar_label: HTTP
-description: "Take each POST or PUT as one message over HTTPS with a bearer token or mutual TLS, on one path or several, answered with the message id, an HL7 ACK or a fixed response, and POST each output to a URL."
+description: "Take each POST or PUT over HTTPS as one message, with a bearer token or mutual TLS, answered as you choose, and POST each output to a URL."
 ---
 
 # Send and receive messages over HTTP
@@ -63,6 +63,12 @@ The source answers once it knows what became of the message, and never echoes th
 | 413    | the body is larger than `maxBytes`                                |
 | 415    | the body is compressed (`Content-Encoding` other than `identity`) |
 | 503    | the message could not be stored; the sender should send it again  |
+
+On a channel that stores nothing (`storage.content: none`), 202 means every destination accepted the
+message, and its `id` is the message's pass id, which no command can look up. A destination that failed in a way that may pass
+gets 503 with `Retry-After`, and a transform that failed or a destination that rejected the message
+for good gets 422 (with `response: ack`, 200 and an `AE` ACK). See [Pass messages through without
+storing them](./pass-messages-through-without-storing.md).
 
 ### How a request's path is matched
 

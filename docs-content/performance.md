@@ -2,7 +2,7 @@
 id: performance
 title: Performance
 sidebar_label: Performance
-description: "What we measure on Pathways (end-to-end throughput, open-loop latency and capacity, memory, import time and scaling) and how, and how to run the benchmarks yourself."
+description: "What we measure on Pathways (throughput, open-loop latency and capacity, memory, import time and scaling), how, and how to run the benchmarks yourself."
 ---
 
 # Performance

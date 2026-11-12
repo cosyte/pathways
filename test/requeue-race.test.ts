@@ -352,7 +352,8 @@ async function raceTwo(
 /**
  * Waits until `count` statements on this database are blocked behind the locked message row, as
  * the server's own view of running statements shows them: the process list on MySQL and MariaDB
- * (a blocked update stays there with its text), and the lock views on PostgreSQL and SQL Server.
+ * (a blocked update stays there with its text, as `Execute`, since the store's statements with
+ * values run as prepared statements), and the lock views on PostgreSQL and SQL Server.
  * Polls for up to 20 seconds, then fails saying the race's precondition was not observed, with the
  * last count the server showed.
  */
@@ -370,7 +371,7 @@ async function waiting(database: TestDatabase, db: Kysely<unknown>, count: numbe
       case "mysql":
         query = sql<{ n: number | string }>`
           select count(*) as n from information_schema.processlist
-          where db = database() and id <> connection_id() and command = 'Query'
+          where db = database() and id <> connection_id() and command in ('Query', 'Execute')
             and lower(info) like 'update%messages%'`;
         break;
       case "sqlite":

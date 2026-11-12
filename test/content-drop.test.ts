@@ -455,10 +455,13 @@ describe("storage.content in the configuration", () => {
     const channelStorage = (channel.properties as Record<string, Record<string, unknown>>)[
       "storage"
     ];
+    // Only a channel may store nothing.
     expect(channelStorage?.["properties"]).toHaveProperty("content.anyOf.0.enum", [
       "keep",
       "dropAfterDelivery",
+      "none",
     ]);
+    expect(channelStorage?.["properties"]).toHaveProperty("passTimeout");
   });
 });
 

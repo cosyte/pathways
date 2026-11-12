@@ -8,6 +8,7 @@ import type { Logger } from "pino";
 import { ConfigError } from "../config/load.js";
 import {
   DEFAULT_DELIVERY_TIMEOUT_MS,
+  DEFAULT_PASS_TIMEOUT_MS,
   DEFAULT_RETRY,
   type AzblobConfig,
   type ChannelConfig,
@@ -47,8 +48,10 @@ import { framingOf } from "../connectors/tcp-framing.js";
 import { loadClientTls, loadServerTls } from "../connectors/tls.js";
 import {
   DeliveryRejected,
+  PassFailed,
   type DestinationConnector,
   type MessageSink,
+  type ReceiveOptions,
   type SourceConnector,
 } from "../connectors/types.js";
 import {
@@ -83,7 +86,7 @@ import {
   type TransformOutcome,
 } from "./channel-worker.js";
 import type { EngineFence } from "./lease.js";
-import { channelStatus, type ChannelHealth, type EngineHealth } from "./health.js";
+import { channelStatus, type ChannelHealth, type EngineHealth, type PassCounts } from "./health.js";
 import { formatTable, type FailureSummary } from "./worker-entry.js";
 import { DeadlineTimer } from "./deadline.js";
 import { destinationKeys } from "./destination-key.js";
@@ -198,6 +201,25 @@ class PassCut extends Error {
 
 /** Readiness reads storage at most this often; a probe in between is told the last answer. */
 const STORAGE_CHECK_EVERY_MS = 1_000;
+
+/** The id {@link nextPassId} last gave, in this process. */
+let lastPassId = 0;
+
+/**
+ * A new id for a pass of a channel that stores nothing: the time now in microseconds since 1970
+ * (`nowMs` times 1,000), or one more than the last id given in this process when that is not later.
+ * Destinations name their outputs by it (a file destination writes `<id>-<seq>.<ext>`), so it must
+ * never repeat, and a counter that starts again at 1 on each start would: a restarted engine's first
+ * pass would overwrite the last run's first output before its reader took it, after the source had
+ * deleted its only other copy. A later run starts later, so its ids are higher than every id an
+ * earlier run gave, unless it gave more than 1,000 a millisecond or the clock went back. Engines that
+ * share a store run a channel one at a time, under the engine lease, and the one that takes over
+ * starts after the lease ran out. It stays a safe integer until the year 2255.
+ */
+function nextPassId(nowMs: number): number {
+  lastPassId = Math.max(lastPassId + 1, Math.floor(nowMs) * 1_000);
+  return lastPassId;
+}
 /** A storage read for readiness that takes longer than this counts as storage unreachable. */
 const STORAGE_CHECK_TIMEOUT_MS = 5_000;
 
@@ -863,6 +885,13 @@ interface RunningChannel {
    * takes a message whose facts are not set yet waits for these before it runs the transform.
    */
   readonly receiving: Set<Promise<void>>;
+  /**
+   * With `storage.content: none`: the passes of this run, one after another, so messages reach each
+   * destination in the order they came in.
+   */
+  passing: Promise<unknown>;
+  /** With `storage.content: none`: how each pass of this run ended. Counts only. */
+  readonly passes: { -readonly [K in keyof PassCounts]: number };
 }
 
 /**
@@ -1116,6 +1145,8 @@ export class Engine {
           receiving: new Set(),
           keys: destinationKeys(project.root, config.destinations),
           held: false,
+          passing: Promise.resolve(),
+          passes: { accepted: 0, filtered: 0, unreadable: 0, rejected: 0, deferred: 0 },
         };
         this.channels.push(channel);
         this.warnInsecure(config);
@@ -1136,15 +1167,41 @@ export class Engine {
    * keep every body the channel's configuration says it drops.
    */
   private checkContentPolicies(): void {
-    const { project, store } = this.options;
+    const { project, store, logger } = this.options;
+    const problems: string[] = [];
+    for (const channel of project.channels) {
+      if (channel.settings.content !== "none") continue;
+      const { source } = channel;
+      const where = `channels/${channel.name}/channel.yaml`;
+      if (source.kind === "file" && (source.s3 !== undefined || source.azblob !== undefined)) {
+        // An object store source has no errorDir to set a refused message aside in.
+        problems.push(
+          `${where}: storage.content: none cannot read from an S3 or Azure Blob source yet; store its messages (keep or dropAfterDelivery)`,
+        );
+      } else if (source.kind === "file" && source.errorDir === undefined) {
+        problems.push(
+          `${where}: storage.content: none with a file source needs errorDir, where a file no destination will accept is moved; without it, the file would be sent again on every pass`,
+        );
+      }
+    }
+    if (problems.length > 0) throw new ConfigError(problems);
+    for (const channel of project.channels) {
+      if (channel.settings.content !== "none") continue;
+      // Said once at start: nothing of this channel's messages is kept, so none can be replayed.
+      logger.warn({
+        event: "content-none",
+        channel: channel.name,
+        passTimeoutMs: channel.settings.passTimeoutMs ?? DEFAULT_PASS_TIMEOUT_MS,
+      });
+    }
     if (typeof store.markDeliveredAndDropContent === "function") return;
-    const problems = project.channels
+    const dropping = project.channels
       .filter((channel) => channel.settings.content === "dropAfterDelivery")
       .map(
         (channel) =>
           `channels/${channel.name}/channel.yaml: storage.content: dropAfterDelivery needs a store that can drop content after delivery (markDeliveredAndDropContent), and this one cannot`,
       );
-    if (problems.length > 0) throw new ConfigError(problems);
+    if (dropping.length > 0) throw new ConfigError(dropping);
   }
 
   /**
@@ -1586,6 +1643,7 @@ export class Engine {
           messages,
           deliveries,
           ...this.connectionCounts(name),
+          ...this.passCounts(name),
         };
       }
     } catch {
@@ -1596,6 +1654,7 @@ export class Engine {
           source: source(name),
           /* v8 ignore next: as above */
           state: states[name] ?? "running",
+          ...this.passCounts(name),
         };
       }
     }
@@ -1612,6 +1671,16 @@ export class Engine {
     return source instanceof MllpSource || source instanceof TcpSource
       ? { connections: { refused: source.refusedConnections } }
       : {};
+  }
+
+  /**
+   * For a channel that stores nothing: `volatile`, and how its passes ended since the engine
+   * started. Nothing for any other channel.
+   */
+  private passCounts(name: string): Pick<ChannelHealth, "storage" | "passes"> {
+    const channel = this.channels.find((running) => running.config.name === name);
+    if (channel?.config.settings.content !== "none") return {};
+    return { storage: "volatile", passes: { ...channel.passes } };
   }
 
   private warnInsecure(config: ChannelConfig): void {
@@ -1712,11 +1781,18 @@ export class Engine {
     channel.cut = cut;
     const ended = new AbortController();
     const call = (async () => {
-      // A poll method is set: pass() checks before it calls this.
-      await (channel.connectors.source.poll as NonNullable<SourceConnector["poll"]>)(
-        this.sinkFor(channel, cut.signal),
-        cut.signal,
-      );
+      try {
+        // A poll method is set: pass() checks before it calls this.
+        await (channel.connectors.source.poll as NonNullable<SourceConnector["poll"]>)(
+          this.sinkFor(channel, cut.signal),
+          cut.signal,
+        );
+      } catch (error) {
+        // A channel that stores nothing could not pass a message on: the source keeps it for a
+        // later pass, as a sender keeps one it was not answered for. Not a failure of the engine.
+        if (!(error instanceof PassFailed)) throw error;
+        logger.warn({ event: "poll-deferred", channel: name, code: error.code });
+      }
     })();
     // No other pass starts while this is set, so the one that clears it is this pass's own.
     channel.inFlight = settled(call).then(() => {
@@ -2074,6 +2150,9 @@ export class Engine {
       receive: async (body, options = {}) => {
         // Before anything is stored: the source keeps the message for a later pass.
         if (cut?.aborted === true) throw new PassCut();
+        if (channel.config.settings.content === "none") {
+          return this.passThrough(channel, body, options);
+        }
         const { duplicateKey, idempotencyKey, resumed, failure, source } = options;
         let received: ReceivedMessage;
         const receivedAt = this.at();
@@ -2166,6 +2245,242 @@ export class Engine {
     // A store that copies each body it stores makes a sink that keeps none, so a source may free a
     // body it is done with once it is stored.
     return copiesBodies(store) ? markCopiesBodies(sink) : sink;
+  }
+
+  /**
+   * One message of a channel that stores nothing (`storage.content: none`): transformed and sent to
+   * every destination before this resolves, so its source answers the sender only once every
+   * destination accepted it. Nothing of it is stored; only the channel's counts change. Resolves
+   * with the pass's id, from {@link nextPassId}. Rejects with a {@link PassFailed}: permanent when the
+   * transform failed or a destination rejected the message, so sending it again cannot help;
+   * otherwise (a destination failed or took too long, the pass ran past `passTimeout`, the channel
+   * was halted) for the sender to send it again. Passes run one at a time, in the order they came.
+   */
+  private async passThrough(
+    channel: RunningChannel,
+    body: Uint8Array,
+    options: ReceiveOptions,
+  ): Promise<number> {
+    const { config } = channel;
+    const { logger } = this.options;
+    const { failure, source } = options;
+    // Checked and copied first, as for a stored message: refused at once with INVALID_SOURCE_FACTS.
+    const passed = source === undefined ? undefined : copyFacts(source);
+    const receivedAt = this.at();
+    const pass = nextPassId(this.now());
+    if (failure !== undefined) {
+      // A message its source could not read: it answers as it does for a stored one marked failed.
+      channel.passes.unreadable += 1;
+      logger.warn({ event: "pass-unreadable", channel: config.name, pass });
+      return pass;
+    }
+    const limitMs = config.settings.passTimeoutMs ?? DEFAULT_PASS_TIMEOUT_MS;
+    const timer = new AbortController();
+    const expired = new Promise<never>((_, reject) => {
+      timer.signal.addEventListener(
+        "abort",
+        () => {
+          reject(new PassFailed("PASS_TIMEOUT", false, this.retryAfterOf(config)));
+        },
+        { once: true },
+      );
+    });
+    // Unheard when the pass ends first.
+    expired.catch(() => undefined);
+    const timeout = setTimeout(() => {
+      timer.abort();
+    }, limitMs);
+    const facts = sourceFacts(config.source.kind, passed, body.byteLength, receivedAt);
+    const turn = channel.passing.then(() => this.passOne(channel, body, facts, pass, timer.signal));
+    channel.passing = turn.catch(() => undefined);
+    let outputs: number;
+    try {
+      outputs = await Promise.race([turn, expired]);
+    } catch (error) {
+      const failed =
+        error instanceof PassFailed
+          ? error
+          : new PassFailed(errorCode(error) ?? "PASS_FAILED", false, this.retryAfterOf(config));
+      if (failed.permanent) channel.passes.rejected += 1;
+      else channel.passes.deferred += 1;
+      logger.warn({
+        event: "pass-failed",
+        channel: config.name,
+        pass,
+        code: failed.code,
+        permanent: failed.permanent,
+        ...(failed.retryAfterMs === undefined ? {} : { retryAfterMs: failed.retryAfterMs }),
+      });
+      throw failed;
+    } finally {
+      clearTimeout(timeout);
+    }
+    if (outputs === 0) {
+      channel.passes.filtered += 1;
+      logger.info({ event: "pass-filtered", channel: config.name, pass });
+    } else {
+      channel.passes.accepted += 1;
+      logger.info({ event: "passed", channel: config.name, pass, outputs });
+    }
+    faultPoint("pass-sent-before-answer");
+    return pass;
+  }
+
+  /** How long a sender might wait before it sends again: the channel's first retry wait. */
+  private retryAfterOf(config: ChannelConfig): number {
+    return config.settings.retry.firstMs;
+  }
+
+  /**
+   * The work of one {@link passThrough}, once the passes before it are done: resolves with how many
+   * outputs every destination accepted (on a channel with destination transforms, the most any one
+   * was sent), 0 when the transform, or every destination's own, filtered the message. Once the pass
+   * runs out of time, sends nothing more and resolves with 0, unheard: the sender was answered.
+   */
+  private async passOne(
+    channel: RunningChannel,
+    body: Uint8Array,
+    facts: SourceFacts,
+    pass: number,
+    expired: AbortSignal,
+  ): Promise<number> {
+    const { config, worker, connectors } = channel;
+    const { logger } = this.options;
+    // Ran out of time while it waited behind the passes before it: nothing was sent.
+    if (expired.aborted) return 0;
+    // An engine that lost its lease takes nothing more in, as for a stored message.
+    this.options.fence?.check();
+    this.step();
+    const outcome = await worker.run(body, {
+      context: { messageId: pass, attempt: 1, source: facts, meta: {} },
+    });
+    if (!outcome.ok) {
+      const { kind, name, code, where } = outcome.failure;
+      logger.warn({
+        event: "pass-transform-failed",
+        channel: config.name,
+        pass,
+        kind,
+        name,
+        code,
+        where,
+      });
+      throw new PassFailed("TRANSFORM_FAILED", true);
+    }
+    // The channel's transform filtered it: no destination transform has anything to read.
+    if (outcome.outputs.length === 0) return 0;
+    let rejected = false;
+    let failed = false;
+    let most = 0;
+    for (const [index, destination] of connectors.destinations.entries()) {
+      // On a channel with destination transforms, each destination is sent what its own made.
+      const own = outcome.destinations?.[index];
+      const outputs = own === undefined ? outcome.outputs : own.ok ? own.outputs : [];
+      most = Math.max(most, outputs.length);
+      if (runsDry(config, index, this.options.dryRun === true)) {
+        logger.info({ event: "dry-run", channel: config.name, destination: index, pass });
+        continue;
+      }
+      if (own !== undefined && !own.ok) {
+        // Its text can quote the message, so only where and what is logged; the others go on.
+        const { kind, name, code, where } = own.failure;
+        logger.warn({
+          event: "pass-transform-failed",
+          channel: config.name,
+          pass,
+          destination: index,
+          kind,
+          name,
+          code,
+          where,
+        });
+        failed = true;
+        continue;
+      }
+      for (const [seq, output] of outputs.entries()) {
+        if (expired.aborted) return 0;
+        if (!(await this.passSend(channel, destination, index, pass, seq, output, expired))) {
+          // Rejected: sending it again will not help, and the other destinations are still sent it.
+          rejected = true;
+          break;
+        }
+      }
+    }
+    if (rejected) throw new PassFailed("DESTINATION_REJECTED", true);
+    // A destination's transform failed: running it again on the same message will not help.
+    if (failed) throw new PassFailed("TRANSFORM_FAILED", true);
+    return most;
+  }
+
+  /**
+   * Sends one output of a pass to one destination, cut off at the destination's deadline, by a halt,
+   * or when the pass runs out of time. Resolves true once it is accepted and false when the
+   * destination rejected it for good; throws a {@link PassFailed} for the sender to send it again.
+   */
+  private async passSend(
+    channel: RunningChannel,
+    destination: DestinationConnector,
+    index: number,
+    pass: number,
+    seq: number,
+    body: Uint8Array,
+    expired: AbortSignal,
+  ): Promise<boolean> {
+    const { config } = channel;
+    const { logger } = this.options;
+    this.options.fence?.check();
+    this.step();
+    const halt = channel.halt.signal;
+    const limitMs = deliveryDeadlineMs(config.destinations[index]);
+    const cutOff = new AbortController();
+    let late = false;
+    const onAbort = (): void => {
+      cutOff.abort();
+    };
+    // A halt replaces the controller it aborts in the same step, so the one read here is unused.
+    halt.addEventListener("abort", onAbort, { once: true });
+    expired.addEventListener("abort", onAbort, { once: true });
+    const deadline = setTimeout(() => {
+      late = true;
+      cutOff.abort();
+    }, limitMs);
+    try {
+      await untilAborted(
+        () => destination.deliver({ messageId: pass, seq, body, signal: cutOff.signal }),
+        cutOff.signal,
+      );
+      return true;
+    } catch (thrown) {
+      if (!late && !halt.aborted && !expired.aborted && thrown instanceof DeliveryRejected) {
+        logger.warn({
+          event: "pass-rejected",
+          channel: config.name,
+          pass,
+          destination: index,
+          reason: thrown.reason,
+        });
+        return false;
+      }
+      const code = halt.aborted
+        ? "CHANNEL_HALTED"
+        : expired.aborted
+          ? "PASS_TIMEOUT"
+          : late
+            ? "DELIVERY_TIMEOUT"
+            : (errorCode(thrown) ?? "error");
+      logger.warn({ event: "pass-deferred", channel: config.name, pass, destination: index, code });
+      const hint = thrown instanceof RetryableError ? thrown.retryAfterMs : undefined;
+      // Stops here: the sender sends the message again, to every destination.
+      throw new PassFailed(
+        halt.aborted ? "CHANNEL_HALTED" : "DESTINATION_FAILED",
+        false,
+        hint ?? this.retryAfterOf(config),
+      );
+    } finally {
+      clearTimeout(deadline);
+      halt.removeEventListener("abort", onAbort);
+      expired.removeEventListener("abort", onAbort);
+    }
   }
 
   /**

@@ -273,6 +273,7 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
     const channelSettings = mergeSettings(settings, {
       ...channel,
       content: channel.storage?.content,
+      passTimeout: channel.storage?.passTimeout,
     });
     const source = resolveSource(channel.source, channelDir, channelSettings);
     const destinations = channel.destinations.map(
@@ -1035,6 +1036,7 @@ function mergeSettings(
     resendFlag?: boolean | undefined;
     retentionInterval?: number | undefined;
     content?: ContentPolicy | undefined;
+    passTimeout?: number | undefined;
     retry?: RetryYaml | undefined;
   },
 ): Settings {
@@ -1048,6 +1050,8 @@ function mergeSettings(
     retentionIntervalMs: override.retentionInterval ?? base.retentionIntervalMs,
     ...mergeRetention(base, override.retention),
     content: override.content ?? base.content,
+    // Set only by a channel with content: none, so every other channel's settings are as before.
+    ...(override.passTimeout === undefined ? {} : { passTimeoutMs: override.passTimeout }),
     retry: override.retry === undefined ? base.retry : mergeRetry(base.retry, override.retry),
   };
 }

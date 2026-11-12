@@ -12,11 +12,12 @@ import {
   type Location,
   LocalFolder,
 } from "./file-system.js";
-import type {
-  DestinationConnector,
-  MessageSink,
-  OutgoingMessage,
-  SourceConnector,
+import {
+  PassFailed,
+  type DestinationConnector,
+  type MessageSink,
+  type OutgoingMessage,
+  type SourceConnector,
 } from "./types.js";
 
 /**
@@ -54,11 +55,12 @@ export interface SourceFile {
 }
 
 /** Why a file source set a file aside, or would have with an error folder. */
-export type FileFaultReason = "too-large" | "unreadable";
+export type FileFaultReason = "too-large" | "unreadable" | "rejected";
 
 /**
- * A file a source will not store: larger than `maxSize`, or one it failed to open on `readTries`
- * passes in a row. `moved` says whether it went into `errorDir`; `error` is why it could not, when
+ * A file a source will not store: larger than `maxSize`, one it failed to open on `readTries`
+ * passes in a row, or, on a channel that stores nothing, one the transform or a destination
+ * refused for good (`rejected`). `moved` says whether it went into `errorDir`; `error` is why it could not, when
  * a move was tried and failed.
  */
 export interface FileFault {
@@ -825,6 +827,38 @@ export class FileSource implements SourceConnector {
   }
 
   /**
+   * Moves a claimed file that a channel storing nothing refused for good into `errorDir`, under its
+   * path from the source folder, or under its claimed name when a file is there already, so it is
+   * not handed in again. Start refuses such a channel without `errorDir`. A move that fails leaves
+   * it claimed, for the next pass.
+   */
+  private async setAsideRejected(file: SourceFile, parts: readonly string[]): Promise<void> {
+    const { errorDir, onFileFault } = this.options;
+    const { fs } = this;
+    /* v8 ignore next 4: start refuses a channel that stores nothing with a file source and no errorDir */
+    if (errorDir === undefined) {
+      onFileFault?.({ reason: "rejected", moved: false });
+      return;
+    }
+    try {
+      const folder = fs.join(errorDir, ...parts.slice(0, -1));
+      await fs.mkdir(folder);
+      let target = fs.join(folder, String(parts.at(-1)));
+      const taken = await fs.stat(target).then(
+        () => true,
+        () => false,
+      );
+      if (taken) target = fs.join(folder, file.name);
+      await this.relocate(file.path, target, (await fs.stat(file.path)).id);
+    } catch (error) {
+      unlessDown(error);
+      onFileFault?.({ reason: "rejected", moved: false, error });
+      return;
+    }
+    onFileFault?.({ reason: "rejected", moved: true });
+  }
+
+  /**
    * Stores a claimed file under its claimed name, then deletes it or moves it into `processed/`,
    * under its path from the source folder.
    */
@@ -847,11 +881,19 @@ export class FileSource implements SourceConnector {
     const parts = segments.some((part) => part === "" || part === "." || part === "..")
       ? [original]
       : segments;
-    const id = await sink.receive(body, {
-      idempotencyKey: `file:${file.name}`,
-      resumed,
-      source: { name: parts.join("/") },
-    });
+    let id: number;
+    try {
+      id = await sink.receive(body, {
+        idempotencyKey: `file:${file.name}`,
+        resumed,
+        source: { name: parts.join("/") },
+      });
+    } catch (error) {
+      // Any other failure leaves the file claimed, for the next pass to hand in again.
+      if (!(error instanceof PassFailed && error.permanent)) throw error;
+      await this.setAsideRejected(file, parts);
+      return;
+    }
     // A sink that copied the body keeps none of it, and this source is done with it.
     if (copiesBodies(sink)) release(body);
     if (!keepProcessed) {

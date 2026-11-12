@@ -2,7 +2,7 @@
 id: read-and-write-amazon-s3
 title: Read and write Amazon S3
 sidebar_label: Amazon S3
-description: "Take each object dropped under a prefix in an S3 bucket as one message, and write each output as an object, with each object stored once even with two engines reading."
+description: "Take each object under a prefix in an S3 bucket as one message and write each output as an object, each stored once even with two engines reading."
 ---
 
 # Read and write Amazon S3
