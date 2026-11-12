@@ -1129,18 +1129,22 @@ export class Engine {
   /** The last storage check for readiness: when it started and what it found. */
   private storageCheck: { readonly at: number; readonly reachable: Promise<boolean> } | undefined;
   /**
-   * True while a storage read for readiness that timed out has not yet answered or failed. No check
-   * starts another meanwhile, so a database that hangs holds one abandoned read, not one a second.
+   * The storage read for readiness in flight, from when it starts until it answers or fails: when it
+   * began, by the monotonic clock, and its answer raced against the timeout. No check starts another
+   * meanwhile, so a database that hangs holds one read, not one a second. Only the read that set it
+   * clears it.
    */
-  private storageHung = false;
+  private storageRead: { readonly began: number; readonly reachable: Promise<boolean> } | undefined;
   /** The last set of store reads for `/metrics`: when it started and what it found. */
   private metricsRead: { readonly at: number; readonly reading: Promise<StoreGauges> } | undefined;
   /**
-   * When a set of store reads for `/metrics` that timed out began, by the monotonic clock, while
-   * those reads have not yet all answered or failed. No scrape starts another set meanwhile, so a
-   * database that hangs holds one abandoned set, not one every {@link METRICS_STORE_CACHE_MS}.
+   * The set of store reads for `/metrics` in flight, from when it starts until its reads have all
+   * answered or one failed: when it began, by the monotonic clock, and its reading raced against the
+   * timeout. No scrape starts another set meanwhile, so a database that hangs holds one set, not one
+   * every {@link METRICS_STORE_CACHE_MS}. Only the set that set it clears it.
    */
-  private metricsHungSince: number | undefined;
+  private metricsInFlight:
+    { readonly began: number; readonly reading: Promise<StoreGauges> } | undefined;
   /** The engine-wide hooks, from `pathways.yaml`, once started. */
   private hooks: HookSet | undefined;
   /** The environment the engine started with: a reload reads the transform's configuration from it. */
@@ -1664,23 +1668,33 @@ export class Engine {
   /**
    * Readiness, as far as the engine knows: false while a source cannot listen, or when storage
    * cannot be read. Storage is read at most once a second however often this is asked, and a read
-   * that takes over 5 seconds counts as unreachable. While a read that timed out still hangs, no new
-   * read starts: storage counts as unreachable at once until that read answers or fails.
+   * that takes over 5 seconds counts as unreachable. While a read is in flight, no new read starts:
+   * a check shares its answer until it is 5 seconds old, and after that counts storage as
+   * unreachable at once, until the read answers or fails.
    */
   async ready(): Promise<boolean> {
     if (this.channels.some(isDown)) return false;
     const now = this.monotonic();
     if (this.storageCheck === undefined || now - this.storageCheck.at >= STORAGE_CHECK_EVERY_MS) {
+      const inFlight = this.storageRead;
       this.storageCheck = {
         at: now,
-        reachable: this.storageHung ? Promise.resolve(false) : this.readStorage(),
+        reachable:
+          inFlight === undefined
+            ? this.readStorage(now)
+            : now - inFlight.began < STORAGE_CHECK_TIMEOUT_MS
+              ? inFlight.reachable
+              : Promise.resolve(false),
       };
     }
     return this.storageCheck.reachable;
   }
 
-  /** One cheap read: message 0, which no store numbers, by its key. True when it answers in time. */
-  private async readStorage(): Promise<boolean> {
+  /**
+   * One cheap read: message 0, which no store numbers, by its key. True when it answers in time. It
+   * is marked in flight in {@link storageRead} from now until it settles, even after it timed out.
+   */
+  private readStorage(began: number): Promise<boolean> {
     const read = this.options.store.message(0).then(
       () => true,
       () => false,
@@ -1688,20 +1702,18 @@ export class Engine {
     let timer: NodeJS.Timeout | undefined;
     const timedOut = new Promise<boolean>((resolve) => {
       timer = setTimeout(() => {
-        // The read is left running, and none starts until it settles (see ready).
-        this.storageHung = true;
-        void read.then(() => {
-          this.storageHung = false;
-        });
         resolve(false);
       }, STORAGE_CHECK_TIMEOUT_MS);
       timer.unref();
     });
-    try {
-      return await Promise.race([read, timedOut]);
-    } finally {
+    const mine = { began, reachable: Promise.race([read, timedOut]) };
+    this.storageRead = mine;
+    void read.then(() => {
       clearTimeout(timer);
-    }
+      // Only this read's own mark: never one a later read set.
+      if (this.storageRead === mine) this.storageRead = undefined;
+    });
+    return mine.reachable;
   }
 
   /** Notes that the engine loop made a step, for liveness. */
@@ -1823,9 +1835,10 @@ export class Engine {
    * destination's queue. How long the store took is measured over all its reads; when one fails,
    * the store reads as down and its gauges are left out. The store is read at most once every
    * {@link METRICS_STORE_CACHE_MS}, however often or however many at once this is asked; the
-   * sources and the age of each queue are read at each call. While a set of reads that timed out
-   * still hangs, no new set starts: the store reads as down at once, its latency counted from when
-   * that set began, until the set answers or fails. Counts and times, never content.
+   * sources and the age of each queue are read at each call. While a set of reads is in flight, no
+   * new set starts: a scrape shares its reading until it is {@link METRICS_STORE_TIMEOUT_MS} old,
+   * and after that the store reads as down at once, its latency counted from when that set began,
+   * until the set answers or fails. Counts and times, never content.
    */
   async metricsSnapshot(): Promise<MetricsSnapshot> {
     const { project } = this.options;
@@ -1842,16 +1855,18 @@ export class Engine {
     };
     const at = this.monotonic();
     if (this.metricsRead === undefined || at - this.metricsRead.at >= METRICS_STORE_CACHE_MS) {
-      const hungSince = this.metricsHungSince;
+      const inFlight = this.metricsInFlight;
       this.metricsRead = {
         at,
         reading:
-          hungSince === undefined
-            ? this.readStoreGauges()
-            : Promise.resolve({
-                channels: undefined,
-                latencySeconds: Math.max(METRICS_TIMEOUT_SECONDS, (at - hungSince) / 1000),
-              }),
+          inFlight === undefined
+            ? this.readStoreGauges(at)
+            : at - inFlight.began < METRICS_STORE_TIMEOUT_MS
+              ? inFlight.reading
+              : Promise.resolve({
+                  channels: undefined,
+                  latencySeconds: Math.max(METRICS_TIMEOUT_SECONDS, (at - inFlight.began) / 1000),
+                }),
       };
     }
     const read = await this.metricsRead.reading;
@@ -1909,11 +1924,10 @@ export class Engine {
    * that have not all answered within {@link METRICS_STORE_TIMEOUT_MS}, as the readiness check
    * counts a read that hangs: a database that hangs reads as down, never as a scrape that hangs.
    * Its latency is then the timeout, the least it took. Reads that time out are left running, and
-   * {@link metricsHungSince} holds when they began until they settle.
+   * the set is marked in flight in {@link metricsInFlight} from when it begins until they settle.
    */
-  private async readStoreGauges(): Promise<StoreGauges> {
+  private readStoreGauges(began: number): Promise<StoreGauges> {
     const { project, store } = this.options;
-    const began = this.monotonic();
     const took = (): number => Math.max(0, this.monotonic() - began) / 1000;
     const reads = Promise.all(
       project.channels.map(async ({ name }) => {
@@ -1931,19 +1945,18 @@ export class Engine {
     const timedOut = new Promise<StoreGauges>((resolve) => {
       timer = setTimeout(() => {
         // The reads are left running, and no set starts until they settle (see metricsSnapshot).
-        this.metricsHungSince = began;
-        void reads.then(() => {
-          this.metricsHungSince = undefined;
-        });
         resolve({ channels: undefined, latencySeconds: Math.max(took(), METRICS_TIMEOUT_SECONDS) });
       }, METRICS_STORE_TIMEOUT_MS);
       timer.unref();
     });
-    try {
-      return await Promise.race([reads, timedOut]);
-    } finally {
+    const mine = { began, reading: Promise.race([reads, timedOut]) };
+    this.metricsInFlight = mine;
+    void reads.then(() => {
       clearTimeout(timer);
-    }
+      // Only this set's own mark: never one a later set made.
+      if (this.metricsInFlight === mine) this.metricsInFlight = undefined;
+    });
+    return mine.reading;
   }
 
   /**

@@ -283,9 +283,9 @@ The histogram's samples are `_bucket` (with `le`), `_count`, `_sum` and `_create
 counter's are `_total` and `_created`. When the database cannot be read, or does not answer within
 5 seconds (as long as the readiness check waits), `pathways_store_up` is 0, the scrape answers at
 once after those 5 seconds rather than waiting on the database, and the _store_ gauges are left out
-until a later set of reads answers. Reads that time out are left running; until they answer or
-fail, no new set starts, and each scrape answers `pathways_store_up` 0 at once, its latency counted
-from when that set began. A standby serves its counters, all 0, and no
+until a later set of reads answers. Reads that time out are left running; from when a set starts until its reads
+answer or fail, no new set starts, and once it is 5 seconds old each scrape answers `pathways_store_up`
+0 at once, its latency counted from when that set began. A standby serves its counters, all 0, and no
 gauges until it takes the engine lease. The _store_ gauges for a destination come from the built-in
 stores; a custom store serves them when it has `destinationQueues`.
 

@@ -72,9 +72,10 @@ One set of store gauges costs four counting reads of the database per channel, a
 seconds, so several collectors, or one that retries, read the database once. A scrape waits at most
 5 seconds for them: a database that hangs, neither answering nor failing, reads as
 `pathways_store_up 0` within that time, so the scrape does not hang with it and the
-`PathwaysStoreDown` alert below can fire. Reads that time out are left running, and until they
-answer or fail no scrape starts another set: each answers `pathways_store_up 0` at once, with
-`pathways_store_latency_seconds` counted from when the hung set began. So a database that hangs for
+`PathwaysStoreDown` alert below can fire. A set of reads counts as in flight from when it
+starts until its reads answer or one fails, and while it is in flight no scrape starts another: a
+scrape shares its reading, and once it is 5 seconds old each answers `pathways_store_up 0` at once,
+with `pathways_store_latency_seconds` counted from when the hung set began. So a database that hangs for
 an hour holds one set of abandoned reads, not one every 5 seconds; the first scrape at least 5
 seconds after the last set began, once it has settled, reads the database again.
 

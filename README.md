@@ -218,8 +218,8 @@ These are on `main` and land in the next release, not in 0.0.4:
   <!-- changesets: sqlserver-empty-body -->
 - **A scrape does not hang on a hung database.** The store reads behind `/metrics` wait at most 5
   seconds, as the readiness check does, so a database that hangs reads as `pathways_store_up 0` and
-  the store-down alert can fire, instead of the scrape hanging with it. Until reads that timed out
-  answer or fail, neither a scrape nor the readiness check starts new ones.
+  the store-down alert can fire, instead of the scrape hanging with it. From when reads start
+  until they answer or fail, neither a scrape nor the readiness check starts new ones.
   <!-- changesets: metrics-store-timeout -->
 
 ---

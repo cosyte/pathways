@@ -889,4 +889,55 @@ describe("the engine's metrics store reads", () => {
       vi.useRealTimers();
     }
   });
+
+  it("shares a set of reads that hangs with a scrape at the cache's edge, before its timer fires, and starts no second set", async () => {
+    const root = await makeProject({
+      "channels/adt/channel.yaml": CHANNEL,
+      "channels/adt/transform.ts": LAB_TRANSFORM,
+    });
+    const project = await loadProject(root);
+    const { logger } = captureLogger();
+    const store = new MemoryStore();
+    const clock = { monotonic: 1_000 };
+    const engine = new Engine({
+      project,
+      store,
+      logger,
+      monotonic: () => clock.monotonic,
+      metrics: new EngineMetrics(),
+      connectors: (): ChannelConnectors => ({
+        source: { start: () => Promise.resolve() },
+        destinations: [failing, failing],
+      }),
+    });
+    engines.push(engine);
+    await engine.start();
+    let reads = 0;
+    store.messageCounts = () => {
+      reads += 1;
+      return new Promise(() => undefined);
+    };
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const first = engine.metricsSnapshot();
+      await vi.advanceTimersByTimeAsync(METRICS_STORE_TIMEOUT_MS - 1);
+      // The cache has run out by the engine's clock, but the first set's timer has not fired.
+      clock.monotonic += METRICS_STORE_CACHE_MS;
+      const edge = engine.metricsSnapshot();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(reads).toBe(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect((await first).store).toEqual({
+        up: false,
+        latencySeconds: METRICS_STORE_TIMEOUT_MS / 1000,
+      });
+      expect((await edge).store?.up).toBe(false);
+      // Later scrapes while it hangs: down at once, and still one set.
+      clock.monotonic += METRICS_STORE_CACHE_MS;
+      expect((await engine.metricsSnapshot()).store).toEqual({ up: false, latencySeconds: 10 });
+      expect(reads).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

@@ -493,6 +493,86 @@ describe("the engine's liveness and readiness", () => {
     expect(await engine.ready()).toBe(true);
     expect(reads).toBe(2);
   });
+
+  it("holds one storage read when readiness is asked every second through the first 5 seconds of a hang", async () => {
+    const loaded = await loadProject(await project(""));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let reads = 0;
+    const store = {
+      message: () => {
+        reads += 1;
+        return new Promise(() => undefined);
+      },
+    } as unknown as MessageStore;
+    const { logger } = captureLogger();
+    const clock = { now: 0 };
+    const engine = new Engine({ project: loaded, store, logger, monotonic: () => clock.now });
+    const answers: Promise<boolean>[] = [];
+    // A probe at 0, 1, 2, 3 and 4 seconds, each before the first read's 5 second timer fires.
+    for (let second = 0; second < 5; second += 1) {
+      answers.push(engine.ready());
+      await vi.advanceTimersByTimeAsync(1_000);
+      clock.now += 1_000;
+    }
+    expect(reads).toBe(1);
+    expect(await Promise.all(answers)).toEqual([false, false, false, false, false]);
+    // Past the timeout, the read still hangs: not ready at once, and still one read.
+    for (let second = 5; second < 8; second += 1) {
+      let answered = false;
+      const later = engine.ready().finally(() => {
+        answered = true;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(answered).toBe(true);
+      expect(await later).toBe(false);
+      await vi.advanceTimersByTimeAsync(1_000);
+      clock.now += 1_000;
+    }
+    expect(reads).toBe(1);
+  });
+
+  it("does not let an older storage read that settles late start a read beside a newer one that hangs", async () => {
+    const loaded = await loadProject(await project(""));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let reads = 0;
+    let letFirstGo: () => void = () => undefined;
+    const first = new Promise<undefined>((resolve) => {
+      letFirstGo = () => {
+        resolve(undefined);
+      };
+    });
+    const store = {
+      message: () => {
+        reads += 1;
+        // The first read hangs until it is let go; every later read hangs for good.
+        return reads === 1 ? first : new Promise(() => undefined);
+      },
+    } as unknown as MessageStore;
+    const { logger } = captureLogger();
+    const clock = { now: 0 };
+    const engine = new Engine({ project: loaded, store, logger, monotonic: () => clock.now });
+    // A probe every second for 20 seconds; the first read settles at 7.5 seconds.
+    for (let tenth = 0; tenth < 200; tenth += 5) {
+      if (tenth % 10 === 0) {
+        void engine.ready();
+      } else if (tenth === 75) {
+        letFirstGo();
+      }
+      await vi.advanceTimersByTimeAsync(500);
+      clock.now += 500;
+    }
+    // The first read, then one at 8 seconds once it settled, which still hangs: two, not one a
+    // second.
+    expect(reads).toBe(2);
+    let answered = false;
+    const later = engine.ready().finally(() => {
+      answered = true;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(answered).toBe(true);
+    expect(await later).toBe(false);
+    expect(reads).toBe(2);
+  });
 });
 
 describe("pathways start with probes", () => {
