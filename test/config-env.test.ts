@@ -655,7 +655,8 @@ destinations:
   it("take a reference at every key that holds one value, but the documented exceptions", () => {
     // configuration-reference.md, "Settings from the environment": plaintext, a channel's name and
     // format, the header names an HTTP source hands a transform, a channel's index: entries, and
-    // the SHA-1 algorithms an SFTP block turns back on, and a csv channel's csv: block (how its
+    // the SHA-1 algorithms an SFTP block turns back on, the health endpoint's
+    // metrics.allowUnauthenticated, and a csv channel's csv: block (how its
     // bodies are read, which belongs with its format), are never read from the environment (encryption: none and auth: none are the short form of a
     // block, and blocks are not scalars, so the walk passes over them). Matched by the whole path,
     // so a new key that only shares one of these names is still checked.
@@ -665,6 +666,7 @@ destinations:
       "pathways.yaml.storage.sqlserver.plaintext",
       "pathways.yaml.hooks.[].webhook.plaintext",
       "pathways.yaml.health.plaintext",
+      "pathways.yaml.health.metrics.allowUnauthenticated",
       "pathways.yaml.probes.plaintext",
       "channel.yaml.name",
       "channel.yaml.format",
@@ -752,6 +754,21 @@ destinations:
   it("refuse plaintext read from the environment, as Zod does", () => {
     expect(project({ health: { port: 9090, plaintext: { env: "PLAIN" } } })).toBe(false);
     expect(project({ probes: { port: 9091, plaintext: { env: "PLAIN" } } })).toBe(false);
+    expect(
+      project({
+        health: {
+          port: 9090,
+          plaintext: true,
+          auth: "none",
+          metrics: { allowUnauthenticated: { env: "OPEN" } },
+        },
+      }),
+    ).toBe(false);
+    expect(
+      project({
+        health: { port: 9090, plaintext: true, metrics: { enabled: { env: "METRICS" } } },
+      }),
+    ).toBe(true);
     expect(
       channel({
         source: { file: { dir: "./inbox" } },

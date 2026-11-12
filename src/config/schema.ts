@@ -2064,18 +2064,19 @@ const secretProviders = restate(
 /** What the health endpoint's `/metrics` does. */
 const healthMetrics = z
   .strictObject({
-    enabled: z
-      .boolean()
-      .meta({
+    enabled: envable(
+      z.boolean().meta({
         description:
           "Whether GET /metrics serves the engine's metrics in the OpenMetrics text format. Default true.",
-      })
-      .optional(),
+      }),
+    ).optional(),
+    // Opening /metrics to anyone stays in the file, where the audit sees it, as plaintext and
+    // auth: none do: never read from the environment.
     allowUnauthenticated: z
       .boolean()
       .meta({
         description:
-          "Serve /metrics on a listener with plaintext: true and auth: none, where anyone who can reach the port reads it. Default false: such a listener answers /metrics with 403.",
+          "Serve /metrics on a listener with plaintext: true and auth: none, where anyone who can reach the port reads it. Default false: such a listener answers /metrics with 403. Not read from the environment.",
       })
       .optional(),
   })
