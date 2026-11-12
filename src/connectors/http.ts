@@ -6,14 +6,17 @@ import {
   type ServerResponse,
 } from "node:http";
 import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
+import { isIP } from "node:net";
 import type { Duplex } from "node:stream";
 
 import { NEVER_CONTEXT_HEADERS } from "../config/schema.js";
 import type { JsonValue } from "../transform.js";
 import { ackCharset, defaultAckBuilder, type AckRequest } from "./ack.js";
+import { ADDRESS_REFUSED, type AddressGuard } from "./address-guard.js";
 import { Endpoint, refuse, refuseText, reply, replyText } from "./endpoint.js";
 import { failureOf, transientError } from "./http-core.js";
 import { hl7MediaType, normalisePath } from "./http-path.js";
+import { UrlTemplate } from "./http-template.js";
 import { readHeader } from "./mllp.js";
 import { clientTlsOptions, type ClientTlsMaterial, type ServerTlsMaterial } from "./tls.js";
 import {
@@ -319,7 +322,10 @@ const NO_TLS: ClientTlsMaterial = { ca: undefined, cert: undefined, key: undefin
 
 /** Options for an {@link HttpDestination}. */
 export interface HttpDestinationOptions {
-  /** Where each output is POSTed: `https://`, or `http://` only when plaintext was allowed. */
+  /**
+   * Where each output is sent: `https://`, or `http://` only when plaintext was allowed. Its path may
+   * hold `{key}` placeholders, filled from the message's metadata.
+   */
   readonly url: string;
   /** Headers sent with every request, already resolved from the environment. */
   readonly headers: Readonly<Record<string, string>>;
@@ -334,10 +340,40 @@ export interface HttpDestinationOptions {
    * off, its value the number of attempts before. Undefined sends none.
    */
   readonly resendHeader?: string | undefined;
+  /** The method each output is sent by. Defaults to POST; GET and DELETE send no body. */
+  readonly method?: HttpDestinationMethod | undefined;
+  /**
+   * Query parameters added to `url`'s own, by name, each value text that may hold `{key}`
+   * placeholders filled from the message's metadata, as `url`'s path may. Defaults to none.
+   */
+  readonly query?: Readonly<Record<string, string>> | undefined;
+  /**
+   * The header that names each output to the receiver, the same on every attempt of it: its value
+   * is `<messageId>-<seq>`. Undefined sends none.
+   */
+  readonly idempotencyHeader?: string | undefined;
+  /**
+   * The guard every connection goes through: the address it connects to is checked at each
+   * connect, and a loopback, link-local or private one is refused unless `allow` names its network.
+   * Undefined connects to any address.
+   */
+  readonly addressGuard?: AddressGuard | undefined;
 }
 
+/** A method an HTTP destination sends by. */
+export type HttpDestinationMethod = "POST" | "PUT" | "PATCH" | "DELETE" | "GET";
+
+/** The methods that send no body. */
+const BODILESS: ReadonlySet<HttpDestinationMethod> = new Set(["GET", "DELETE"]);
+
 /**
- * POSTs each output to a URL. The server's certificate is always verified. The answer is read by
+ * Sends each output to a URL, by POST unless `method` names another. The URL's path, and the values
+ * of `query`, may hold `{key}` placeholders, each filled from the message's metadata
+ * (`OutgoingMessage.meta`) percent-encoded, so a value never reaches the scheme, the host or the port;
+ * a key the metadata lacks fails that delivery with a `DeliveryRejected`. With `addressGuard`, every
+ * connection is checked against it at connect.
+ *
+ * The server's certificate is always verified. The answer is read by
  * the shared status table (`classifyStatus`): a 2xx is delivered; a 408, 425, 429, 5xx, a network
  * error or a timeout throws a `RetryableError` with a `code`, and on a 429 or a 503 the wait its
  * Retry-After asks for; a 3xx throws a `RedirectHeld`, never followed; a 101 or any other 4xx throws
@@ -348,46 +384,84 @@ export interface HttpDestinationOptions {
  * @example
  * ```ts
  * const destination = new HttpDestination({
- *   url: "https://lab.example.test/hl7",
- *   headers: { "Content-Type": "application/hl7-v2" },
+ *   url: "https://lab.example.test/patients/{mrn}",
+ *   method: "PUT",
+ *   headers: { "Content-Type": "application/fhir+json" },
  *   timeoutMs: 30_000,
+ *   addressGuard: new AddressGuard([]),
  * });
- * await destination.deliver({ messageId: 1, seq: 0, body });
+ * await destination.deliver({ messageId: 1, seq: 0, body, meta: { mrn: "SYN-0001" } });
  * ```
  */
 export class HttpDestination implements DestinationConnector {
   private readonly options: HttpDestinationOptions;
-  private readonly url: URL;
+  private readonly target: UrlTemplate;
   private readonly agent: HttpAgent;
   private readonly send: typeof httpRequest;
   private readonly now: () => number;
+  private readonly method: HttpDestinationMethod;
+  /** The host when it is an IP address, which Node connects to without a lookup; else undefined. */
+  private readonly literal: string | undefined;
 
-  /** @param options The URL, headers, timeout, TLS and, for tests, a clock. */
+  /** @param options The URL, method, headers, timeout, TLS, guard and, for tests, a clock. */
   constructor(options: HttpDestinationOptions) {
     this.options = options;
     this.now = options.now ?? Date.now;
-    this.url = new URL(options.url);
-    if (this.url.protocol === "https:") {
-      this.agent = new HttpsAgent({ keepAlive: true, ...clientTlsOptions(options.tls ?? NO_TLS) });
+    this.method = options.method ?? "POST";
+    this.target = new UrlTemplate(options.url, options.query);
+    const url = new URL(this.target.origin);
+    const host = url.hostname.replace(/^\[(.*)\]$/, "$1");
+    this.literal = isIP(host) === 0 ? undefined : host;
+    const guard = options.addressGuard;
+    const lookup = guard === undefined ? {} : { lookup: guard.lookup };
+    if (url.protocol === "https:") {
+      this.agent = new HttpsAgent({
+        keepAlive: true,
+        ...lookup,
+        ...clientTlsOptions(options.tls ?? NO_TLS),
+      });
       this.send = httpsRequest;
     } else {
-      this.agent = new HttpAgent({ keepAlive: true });
+      this.agent = new HttpAgent({ keepAlive: true, ...lookup });
       this.send = httpRequest;
     }
   }
 
+  /** Whether a delivery reads the message's metadata: true when the URL or a query value has a placeholder. */
+  get usesMeta(): boolean {
+    return this.target.usesMeta;
+  }
+
   /** Sends one output. */
   deliver(message: OutgoingMessage): Promise<void> {
-    const { headers, timeoutMs, resendHeader } = this.options;
+    const { headers, timeoutMs, resendHeader, idempotencyHeader, addressGuard } = this.options;
     const flag =
       resendHeader === undefined || message.resend === undefined
         ? {}
         : { [resendHeader]: String(message.resend.previousAttempts) };
+    const key =
+      idempotencyHeader === undefined
+        ? {}
+        : { [idempotencyHeader]: `${String(message.messageId)}-${String(message.seq)}` };
+    const bodiless = BODILESS.has(this.method);
+    const sent: Record<string, string | number> = { ...headers, ...flag, ...key };
+    if (bodiless) {
+      for (const name of Object.keys(sent)) {
+        if (name.toLowerCase() === "content-type") delete sent[name];
+      }
+    } else {
+      sent["Content-Length"] = message.body.byteLength;
+    }
     return new Promise((resolve, reject) => {
-      const request = this.send(this.url, {
-        method: "POST",
+      // A throw here rejects the delivery: a placeholder that cannot be filled fails it for good.
+      const url = this.target.fill(message.meta);
+      if (this.literal !== undefined && addressGuard?.permits(this.literal) === false) {
+        throw transientError(ADDRESS_REFUSED);
+      }
+      const request = this.send(url, {
+        method: this.method,
         agent: this.agent,
-        headers: { ...headers, ...flag, "Content-Length": message.body.byteLength },
+        headers: sent,
         ...(message.signal === undefined ? {} : { signal: message.signal }),
       });
       const timer = setTimeout(() => request.destroy(transientError("ETIMEDOUT")), timeoutMs);
@@ -396,7 +470,7 @@ export class HttpDestination implements DestinationConnector {
         // Drain and drop the body, so the connection can be reused and nothing of it is kept.
         response.on("error", () => undefined);
         response.resume();
-        const failure = failureOf(response, this.url, this.now());
+        const failure = failureOf(response, url, this.now());
         if (failure === undefined) resolve();
         else reject(failure);
       });
@@ -414,7 +488,8 @@ export class HttpDestination implements DestinationConnector {
         const code = typeof error.code === "string" ? error.code : "EHTTP";
         reject(transientError(code));
       });
-      request.end(message.body);
+      if (bodiless) request.end();
+      else request.end(message.body);
     });
   }
 

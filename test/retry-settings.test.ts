@@ -656,7 +656,7 @@ describe("retry settings in the engine", () => {
         "",
         channel().replace(
           "  - name: a\n    module: ./destination.ts\n    options: { key: a }\n",
-          `  - http: { url: "${lab.url}", plaintext: true }\n    retry: { max: 30s, limit: 2 }\n`,
+          `  - http: { url: "${lab.url}", plaintext: true, allowNetworks: [127.0.0.1] }\n    retry: { max: 30s, limit: 2 }\n`,
         ),
       ),
     );

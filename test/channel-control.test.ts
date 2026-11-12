@@ -72,6 +72,7 @@ destinations:
   - http:
       url: http://127.0.0.1:9/in
       plaintext: true
+      allowNetworks: [127.0.0.1]
       headers: { Authorization: { secret: { provider: env, name: SYNTHETIC_CONTROL_TOKEN } } }
 `;
 

@@ -182,6 +182,11 @@ export interface OutgoingMessage {
    * as a possible duplicate when the send was marked.
    */
   readonly signal?: AbortSignal | undefined;
+  /**
+   * The message's metadata (`ctx.meta`), passed only to a destination that reads it, such as an
+   * HTTP destination whose URL has placeholders. Undefined otherwise.
+   */
+  readonly meta?: Readonly<Record<string, string | number | boolean>> | undefined;
 }
 
 /**

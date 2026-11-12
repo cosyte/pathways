@@ -868,6 +868,10 @@ function resolveConnector(
     ...resolveHttpClient(http, dir),
     timeoutMs: http.timeout ?? DEFAULT_HTTP_TIMEOUT_MS,
     resendHeader: http.resendHeader,
+    method: http.method ?? "POST",
+    query: http.query ?? {},
+    idempotencyHeader: http.idempotencyHeader,
+    allowNetworks: http.allowNetworks ?? [],
   };
 }
 

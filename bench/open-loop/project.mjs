@@ -197,6 +197,7 @@ export async function makeProject(options) {
             "  - http:",
             `      url: http://127.0.0.1:${String(options.sinks.http)}/in`,
             "      plaintext: true",
+            "      allowNetworks: [127.0.0.1]",
           ];
         default:
           return ["  - file:", `      dir: ../../data/out-${name}`];

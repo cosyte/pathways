@@ -52,6 +52,7 @@ const STORE_METHOD_LIST = {
   markDryRun: false,
   holdDeliveries: false,
   metaCandidates: false,
+  messageMeta: false,
   joinNode: false,
   nodeHeartbeat: false,
   leaveNode: false,

@@ -164,6 +164,12 @@ describe("index tags", () => {
     ]);
   });
 
+  it("hands over no metadata from a store underneath that cannot read it back", async () => {
+    const store = new UnencryptedStore(new MemoryStore());
+    const { id } = await store.receive("adt", bytes("x"), { meta: { mrn: "SYN-1" } });
+    expect(await store.messageMeta(id)).toBeUndefined();
+  });
+
   it("refuses a search on a store underneath that cannot look up tags", async () => {
     const store = new EncryptedStore(
       new MemoryStore(),
@@ -202,6 +208,23 @@ async function openRaw(database: TestDatabase): Promise<Store> {
 // The store-level suites run on every database: SQLite always, each server whose URL is set.
 for (const database of TEST_DATABASES) {
   describe.skipIf(!available(database))(`metadata search on ${database.label}`, () => {
+    it("reads one message's metadata back through the codec, for a destination that fills its URL from it", async () => {
+      const raw = await openRaw(database);
+      const store = new EncryptedStore(raw, keyring("dev")("dev"));
+      open.push(store);
+      const { id: tagged } = await store.receive("adt", bytes(ADT_A01), {
+        meta: { mrn: "SYN-000123", visit: 2, active: true },
+      });
+      const { id: bare } = await store.receive("adt", bytes(ADT_A01));
+      expect(await store.messageMeta(tagged)).toBe(
+        JSON.stringify({ mrn: "SYN-000123", visit: 2, active: true }),
+      );
+      // Underneath, it is kept encrypted.
+      expect(isEncryptedText((await raw.messageMeta(tagged)) ?? "")).toBe(true);
+      expect(await store.messageMeta(bare)).toBeUndefined();
+      expect(await store.messageMeta(bare + 1_000)).toBeUndefined();
+    });
+
     it("stores metadata encrypted, with one tag per index under the current key, and finds by it", async () => {
       const raw = await openRaw(database);
       const keys = keyring("dev")("dev");

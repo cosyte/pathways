@@ -97,7 +97,7 @@ async function setUp(
       `http: { port: ${String(port)}, path: /adt, tls: { cert: ${certs.files.serverCert}, key: ${certs.files.serverKey} } }`);
   const destination =
     options.destination ??
-    `http: { url: "${lab.url}", headers: { Authorization: { env: LAB_AUTH } }, tls: { ca: ${certs.files.ca} } }`;
+    `http: { url: "${lab.url}", allowNetworks: [127.0.0.1], headers: { Authorization: { env: LAB_AUTH } }, tls: { ca: ${certs.files.ca} } }`;
   const start = async (source: string, port: number): Promise<Setup> => {
     const root = await makeProject({
       "channels/adt/channel.yaml": `source:\n  ${source}\ntransform: ./transform.ts\ndestinations:\n  - ${destination}\n`,
@@ -293,7 +293,7 @@ describe("an HTTP channel in the engine", () => {
     receivers.push(lab);
     const { events, port } = await setUp(200, {
       source: (port) => `http: { port: ${String(port)}, plaintext: true, auth: none }`,
-      destination: `http: { url: "${lab.url}", plaintext: true }`,
+      destination: `http: { url: "${lab.url}", allowNetworks: [127.0.0.1], plaintext: true }`,
       env: {},
     });
     expect(events).toEqual([
@@ -389,7 +389,7 @@ describe("an HTTP channel in the engine", () => {
     const lab = await receiver(status(200));
     receivers.push(lab);
     const { engine, port } = await setUp(200, {
-      destination: `http: { url: "${lab.url}", plaintext: true, headers: { content-type: "x-application/hl7-v2+er7" } }`,
+      destination: `http: { url: "${lab.url}", allowNetworks: [127.0.0.1], plaintext: true, headers: { content-type: "x-application/hl7-v2+er7" } }`,
     });
     await post(port);
     await engine.tick();

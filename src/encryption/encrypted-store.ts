@@ -582,6 +582,12 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
     return body === undefined ? undefined : this.#read(body);
   }
 
+  /** A message's metadata as JSON, read back through the codec; undefined when it has none. */
+  async messageMeta(id: number): Promise<string | undefined> {
+    const stored = await this.#inner.messageMeta?.(id);
+    return stored === undefined ? undefined : this.#codec.readText(stored);
+  }
+
   /** A message's deliveries, without bodies, each error text read back. */
   async deliveries(messageId: number): Promise<StoredDelivery[]> {
     const deliveries = await this.#inner.deliveries(messageId);
