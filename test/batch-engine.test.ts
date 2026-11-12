@@ -5,7 +5,8 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { ConfigError, loadProject } from "../src/config/load.js";
 import { Engine } from "../src/engine/engine.js";
-import { Store } from "../src/storage/store.js";
+import { AuditLog } from "../src/operator/audit.js";
+import { type MessageStore, Store } from "../src/storage/store.js";
 import { runChannelTests } from "../src/testing/run-tests.js";
 import { ADT_A01, captureLogger, cleanUp, dropFile, makeProject } from "./helpers.js";
 
@@ -41,13 +42,20 @@ destinations:
 
 async function started(
   files: Record<string, string>,
+  audit?: AuditLog,
 ): Promise<{ root: string; engine: Engine; store: Store; lines: string[] }> {
   const root = await makeProject(files);
   const project = await loadProject(root);
   const store = await Store.open(project.databaseFile);
   stores.push(store);
   const { logger, lines } = captureLogger();
-  const engine = new Engine({ project, store, logger, env: {} });
+  const engine = new Engine({
+    project,
+    store,
+    logger,
+    env: {},
+    ...(audit === undefined ? {} : { audit }),
+  });
   engines.push(engine);
   await engine.start();
   return { root, engine, store, lines };
@@ -139,6 +147,33 @@ describe("A channel whose file source reads batches", () => {
   });
 });
 
+describe("A batch whose audit entry cannot be written", () => {
+  it("logs it by code, with the batch's warnings, and its pieces stay stored", async () => {
+    const failing = new AuditLog({
+      appendAudit: () => Promise.reject(new Error("synthetic audit failure")),
+    } as unknown as MessageStore);
+    const { root, engine, store, lines } = await started(
+      {
+        "channels/adt/channel.yaml": channel("{ split: hl7, onIncomplete: accept }", "hl7v2"),
+        "channels/adt/transform.ts": "export default (msg: unknown): unknown => msg;\n",
+      },
+      failing,
+    );
+    await dropFile(join(root, "data/inbox/a.hl7"), `BHS|^~\\&\r${adt(1)}BTS|2\r`);
+    await engine.tick();
+    const events = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ event: "batch", warnings: "BATCH_COUNT_MISMATCH", pieces: 1 }),
+        expect.objectContaining({ event: "batch-audit-failed", channel: "adt" }),
+      ]),
+    );
+    expect(
+      (await store.messageCounts("adt")).received + (await store.messageCounts("adt")).transformed,
+    ).toBe(1);
+  });
+});
+
 describe("The batch setting", () => {
   async function load(batch: string, source = "file"): Promise<unknown> {
     const block =
@@ -225,6 +260,25 @@ describe("pathways test on a channel that reads batches", () => {
     });
     expect(failing).toEqual([
       "FAIL notes/tests/batch.txt: output differs from the expected at line 2, column 2 (batch.expected.txt)",
+    ]);
+  });
+
+  it("names a piece whose transform failed, by its place", async () => {
+    const root = await makeProject({
+      "channels/notes/channel.yaml": channel("{ split: lines }"),
+      "channels/notes/transform.ts":
+        "export default (text: string): string => { if (text === 'boom') throw new TypeError('synthetic'); return text; };\n",
+      "channels/notes/tests/batch.txt": "one\nboom\n",
+    });
+    const out: string[] = [];
+    await runChannelTests((await loadProject(root)).channels, {
+      update: false,
+      out: (line) => out.push(line),
+    });
+    expect(out).toEqual([
+      expect.stringMatching(
+        /^FAIL notes\/tests\/batch\.txt: piece 2: the transform threw TypeError/,
+      ),
     ]);
   });
 

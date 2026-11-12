@@ -243,10 +243,12 @@ export class HttpSource implements SourceConnector {
       else reply(response, status, { error: code });
       this.options.onRefused?.(status);
     };
-    const header = request.headersDistinct[IDEMPOTENCY_KEY_HEADER];
+    // Node joins a header sent twice with ", ", which no key holds unquoted: that answers 400.
+    // Node gives a list only for set-cookie; any other header it joins into one string.
+    const header = request.headers[IDEMPOTENCY_KEY_HEADER] as string | undefined;
     let named: string | undefined;
     if (header !== undefined) {
-      const match = header.length === 1 ? IDEMPOTENCY_KEY.exec(header[0] as string) : null;
+      const match = IDEMPOTENCY_KEY.exec(header);
       if (match === null) return refused(400);
       named = match[1] ?? match[2];
     }

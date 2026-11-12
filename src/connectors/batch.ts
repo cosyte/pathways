@@ -129,7 +129,6 @@ async function* cutAt(
     return end === 0 ? undefined : own(piece.subarray(0, end));
   };
   for await (const chunk of chunks) {
-    if (chunk.byteLength === 0) continue;
     const buffer = carry.byteLength === 0 ? asBuffer(chunk) : Buffer.concat([carry, chunk]);
     // A separator that spans two chunks starts in the last bytes of the carry.
     let from = Math.max(0, carry.byteLength - (sep.byteLength - 1));
@@ -159,7 +158,7 @@ class ByteWindow {
 
   /** Holds the next chunk. */
   push(chunk: Uint8Array): void {
-    if (chunk.byteLength > 0) this.parts.push(asBuffer(chunk));
+    this.parts.push(asBuffer(chunk));
   }
 
   /**
@@ -248,10 +247,9 @@ export async function* splitPieces(
     }
     return;
   }
-  const separator =
-    options.split === "lines" ? Uint8Array.of(LF) : (options.delimiter ?? new Uint8Array(0));
-  /* v8 ignore next 3 -- the configuration refuses an empty delimiter */
-  if (separator.byteLength === 0) {
+  const separator = options.split === "lines" ? Uint8Array.of(LF) : options.delimiter;
+  /* v8 ignore next 3 -- the configuration refuses a delimiter cut without a delimiter */
+  if (separator === undefined || separator.byteLength === 0) {
     throw new TypeError("a delimiter batch needs a delimiter of at least one byte");
   }
   for await (const body of cutAt(chunks, separator, options.split === "lines")) {

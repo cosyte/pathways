@@ -1,4 +1,4 @@
-import { readdir, readFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -9,10 +9,12 @@ import {
   EnvelopeCheck,
   scanBatch,
   splitPieces,
+  upTo,
 } from "../src/connectors/batch.js";
 import { CLAIMED_DIR, FAILED_DIR, FileSource } from "../src/connectors/file.js";
 import { HttpSource, type HttpSourceOptions } from "../src/connectors/http.js";
 import type { MessageSink, ReceivedPiece, ReceiveOptions } from "../src/connectors/types.js";
+import { FakeLocation } from "./fake-location.js";
 import { ADT_A01, cleanUp, dropFile, makeProject } from "./helpers.js";
 import { makeCertificates, removeCertificates, send, type Certificates } from "./net-helpers.js";
 
@@ -118,11 +120,32 @@ describe("EnvelopeCheck", () => {
     expect(envelope(`FHS|^~\\&\rBHS|^~\\&\r${adt(1)}BTS|1\r`)).toEqual(["BATCH_MISSING_TRAILER"]);
   });
 
+  it("passes over what it cannot check: a lone trailer, one with no field, a count too large", () => {
+    expect(envelope("BTS|0\r")).toEqual([]);
+    expect(envelope(`BHS|^~\\&\r${adt(1)}BTS\r`)).toEqual([]);
+    expect(envelope(`BHS|^~\\&\r${adt(1)}BTS|99999999999999999999\r`)).toEqual([]);
+  });
+
+  it("reads an MLLP frame's MSH, and keeps only the start of a long line", () => {
+    const framed = `BHS|^~\\&\r\u000b${adt(1).slice(0, -1)}\u001c\rBTS|1\r`;
+    expect(envelope(framed)).toEqual([]);
+    const long = `BHS|^~\\&\r${adt(1)}OBX|1|TX|||${"x".repeat(400)}\rBTS|2\r`;
+    expect(envelope(long)).toEqual(["BATCH_COUNT_MISMATCH"]);
+  });
+
   it("finds a count that does not match", () => {
     expect(envelope(`BHS|^~\\&\r${adt(1)}BTS|2\r`)).toEqual(["BATCH_COUNT_MISMATCH"]);
     expect(envelope(`FHS|^~\\&\rBHS|^~\\&\r${adt(1)}BTS|1\rFTS|2\r`)).toEqual([
       "BATCH_COUNT_MISMATCH",
     ]);
+  });
+});
+
+describe("upTo", () => {
+  it("stops at the limit, part way through a chunk", async () => {
+    const read: string[] = [];
+    for await (const chunk of upTo(chunked(bytesOf("abcdefgh"), 3), 4)) read.push(latin1(chunk));
+    expect(read).toEqual(["abc", "d"]);
   });
 });
 
@@ -370,6 +393,70 @@ describe("A file source with batch", () => {
     expect(handed.map((piece) => piece.failure)).toEqual(["batch: BATCH_INCOMPLETE"]);
   });
 
+  it("moves a failed file into the claim folder's failed/ when errorDir has one of its name, or cannot be made", async () => {
+    const root = await makeProject({});
+    const dir = join(root, "inbox");
+    const errorDir = join(root, "errors");
+    await mkdir(errorDir, { recursive: true });
+    await writeFile(join(errorDir, "blank.txt"), "already here");
+    await dropFile(join(dir, "blank.txt"), "\n");
+    const { sink } = batchSink();
+    const options = { dir, channel, minAgeMs: 0, batch: { split: "lines" as const } };
+    await new FileSource({ ...options, errorDir }).poll(sink);
+    expect(await readdir(join(dir, CLAIMED_DIR, channel, FAILED_DIR))).toHaveLength(1);
+    expect(await readFile(join(errorDir, "blank.txt"), "utf8")).toBe("already here");
+
+    // An errorDir that is a file: it cannot be made, so the claim folder takes it.
+    const blocked = join(root, "blocked");
+    await writeFile(blocked, "a file, not a folder");
+    await dropFile(join(dir, "empty.txt"), "\n");
+    await new FileSource({ ...options, errorDir: join(blocked, "errors") }).poll(sink);
+    expect(await readdir(join(dir, CLAIMED_DIR, channel, FAILED_DIR))).toHaveLength(2);
+  });
+
+  it("holds a claim made by hand from when the pass finds it", async () => {
+    const dir = await inbox();
+    await dropFile(join(dir, CLAIMED_DIR, channel, "by-hand.hl7"), `BHS|^~\\&\r${adt(1)}`);
+    const { sink, handed } = batchSink();
+    await new FileSource({ dir, channel, minAgeMs: 0, batch: { split: "hl7" } }).poll(sink);
+    expect(handed).toEqual([]);
+    expect(await readdir(join(dir, CLAIMED_DIR, channel))).toEqual(["by-hand.hl7"]);
+  });
+
+  it("reads a location that cannot stream whole, and keeps a file it fails to read for the next pass", async () => {
+    const location = new FakeLocation();
+    location.put("/in/notes.txt", "one\ntwo\n");
+    const errors: unknown[] = [];
+    const source = new FileSource({
+      dir: "/in",
+      channel,
+      minAgeMs: 0,
+      location,
+      batch: { split: "lines" },
+      onReadError: (error) => errors.push(error),
+    });
+    const { sink, handed, stored } = batchSink();
+    // The first read, the scan, fails.
+    location.fail = (op) => op === "read";
+    await source.poll(sink);
+    expect(handed).toEqual([]);
+    // The second read, the cut, fails.
+    let reads = 0;
+    location.fail = (op) => op === "read" && ++reads === 2;
+    await source.poll(sink);
+    expect(handed).toEqual([]);
+    expect(errors.map((error) => (error as { code?: unknown }).code)).toEqual(["EIO", "EIO"]);
+    expect(location.under("/in/.claimed")).toHaveLength(1);
+
+    await source.poll(sink);
+    expect(handed.map((piece) => [piece.body, piece.resumed])).toEqual([
+      ["one", true],
+      ["two", true],
+    ]);
+    expect(stored.size).toBe(2);
+    expect(location.under("/in/.claimed")).toEqual([]);
+  });
+
   it("works with a sink that has only receive", async () => {
     const dir = await inbox();
     await dropFile(join(dir, "a.txt"), "a\nb\n");
@@ -485,6 +572,34 @@ describe("An HTTP source with batch", () => {
     expect(empty.status).toBe(422);
     expect(JSON.parse(empty.body)).toEqual({ error: "BATCH_EMPTY" });
     expect(handed).toEqual([]);
+  });
+
+  it("takes an unquoted key, refuses one sent twice, and gives the fixed answer when set", async () => {
+    const { sink, handed } = batchSink();
+    const port = await listening(sink, {
+      response: {
+        kind: "fixed",
+        status: 200,
+        contentType: "text/plain",
+        headers: {},
+        body: "stored",
+      },
+    });
+    const answer = await send(port, {
+      path: "/batch",
+      headers: { ...AUTH, "Idempotency-Key": "synthetic-key-0002" },
+      body: adt(1),
+      ca: certs.ca,
+    });
+    expect([answer.status, answer.body]).toEqual([200, "stored"]);
+    expect(handed[0]?.key).toBe("http:key:synthetic-key-0002#0");
+    const twice = await send(port, {
+      path: "/batch",
+      headers: { ...AUTH, "Idempotency-Key": ["synthetic-a", "synthetic-b"] },
+      body: adt(1),
+      ca: certs.ca,
+    });
+    expect(twice.status).toBe(400);
   });
 
   it("answers 503 when a piece cannot be stored", async () => {
