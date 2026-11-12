@@ -485,6 +485,173 @@ const clientTls = restate(
   },
 );
 
+/** The TLS versions an MLLP block may set as its floor: nothing older than 1.2. */
+export const MLLP_TLS_VERSIONS = ["TLSv1.2", "TLSv1.3"] as const;
+
+/** The named cipher-suite profiles an MLLP block's TLS may choose: `bcp195` is the default. */
+export const MLLP_TLS_PROFILES = ["bcp195", "atna"] as const;
+
+/** What an MLLP block's TLS adds to the shared TLS keys, on either end. */
+const mllpTlsShape = {
+  pfx: path
+    .meta({
+      description:
+        "A PKCS#12 file holding the certificate and key, in place of cert and key. PEM files are the usual choice.",
+    })
+    .optional(),
+  passphrase: secretSource("a passphrase")
+    .meta({
+      description:
+        "The pfx file's passphrase, read at start: { env: NAME }, { file: path } or { secret: { provider, name } }.",
+    })
+    .optional(),
+  minVersion: envable(
+    z.enum(MLLP_TLS_VERSIONS).meta({
+      description: "The oldest TLS version accepted: TLSv1.2 (the default) or TLSv1.3.",
+    }),
+  ).optional(),
+  profile: envable(
+    z.enum(MLLP_TLS_PROFILES).meta({
+      description:
+        "The cipher suites offered: bcp195 (the default: forward secrecy and AEAD only) or atna (the IHE ATNA suites).",
+    }),
+  ).optional(),
+  ciphers: envable(
+    z.string().min(1).meta({
+      description:
+        "An OpenSSL cipher list, in place of a profile: an escape hatch for a peer no profile reaches. Cannot be set with profile.",
+    }),
+  ).optional(),
+};
+
+/** The refinements an MLLP block's TLS adds: one cipher choice, and a passphrase only for a pfx. */
+function mllpTlsChecks(
+  value: {
+    readonly pfx?: unknown;
+    readonly passphrase?: unknown;
+    readonly profile?: unknown;
+    readonly ciphers?: unknown;
+    readonly cert?: unknown;
+    readonly key?: unknown;
+  },
+  ctx: z.RefinementCtx,
+): void {
+  if (value.profile !== undefined && value.ciphers !== undefined) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["ciphers"],
+      message: "cannot be set with profile: choose a profile, or a cipher list in its place",
+    });
+  }
+  if (value.passphrase !== undefined && value.pfx === undefined) {
+    ctx.addIssue({ code: "custom", path: ["passphrase"], message: "goes with pfx" });
+  }
+  if (value.pfx !== undefined && (value.cert !== undefined || value.key !== undefined)) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["pfx"],
+      message: "cannot be set with cert and key: the pfx file holds both",
+    });
+  }
+}
+
+/** The JSON Schema restatement of {@link mllpTlsChecks}. */
+const MLLP_TLS_JSON: JsonSchema[] = [
+  { not: { required: ["profile", "ciphers"] } },
+  { not: { anyOf: [{ required: ["pfx", "cert"] }, { required: ["pfx", "key"] }] } },
+];
+
+/** An MLLP source's TLS: a server's, with a pfx in place of cert and key, and the MLLP keys. */
+const mllpServerTls = restate(
+  z
+    .strictObject({
+      cert: path.optional(),
+      key: path.optional(),
+      ca: path.optional(),
+      ...mllpTlsShape,
+    })
+    .meta({
+      description:
+        "TLS: cert and key (PEM files) or pfx, ca to require client certificates it signed (mutual TLS), minVersion, and profile or ciphers. Required unless plaintext: true.",
+    })
+    .superRefine((value, ctx) => {
+      mllpTlsChecks(value, ctx);
+      if (value.pfx === undefined && (value.cert === undefined || value.key === undefined)) {
+        ctx.addIssue({
+          code: "custom",
+          path: [value.cert === undefined ? "cert" : "key"],
+          message: "required: set cert and key, or pfx",
+        });
+      }
+    }),
+  (json) => {
+    json["dependencies"] = { passphrase: ["pfx"] };
+    json.allOf = [
+      ...MLLP_TLS_JSON,
+      { anyOf: [{ required: ["pfx"] }, { required: ["cert", "key"] }] },
+    ];
+  },
+);
+
+/** An MLLP destination's TLS: a client's, with a pfx in place of cert and key, and the MLLP keys. */
+const mllpClientTls = restate(
+  z
+    .strictObject({
+      ca: path.optional(),
+      cert: path.optional(),
+      key: path.optional(),
+      ...mllpTlsShape,
+    })
+    .meta({
+      description:
+        "TLS: ca to trust in place of Node.js's built-in roots, cert and key (or pfx) to present a client certificate, minVersion, and profile or ciphers. {} verifies the server against the built-in roots.",
+    })
+    .superRefine((value, ctx) => {
+      mllpTlsChecks(value, ctx);
+      if ((value.cert === undefined) !== (value.key === undefined)) {
+        ctx.addIssue({
+          code: "custom",
+          path: [value.cert === undefined ? "cert" : "key"],
+          message: "cert and key go together: set both, or neither",
+        });
+      }
+    }),
+  (json) => {
+    json["dependencies"] = { cert: ["key"], key: ["cert"], passphrase: ["pfx"] };
+    json.allOf = [...MLLP_TLS_JSON];
+  },
+);
+
+/** The longest a timer may wait, in milliseconds: Node.js's own limit. */
+const MAX_TIMER_MS = 2_147_483_647;
+
+/** How long an MLLP source waits for a message on an open connection. */
+const receiveTimeout = envable(
+  durationValue
+    .refine(
+      (value) => value >= 1 && value <= MAX_TIMER_MS,
+      'a duration from 1ms to about 24 days, such as "5m"',
+    )
+    .meta({
+      description:
+        "How long a connection may go without a whole message before it is closed, a half-sent one included: a duration such as 5m, or a number of milliseconds. Default: no limit.",
+    }),
+);
+
+/** How many connections an MLLP source holds at once. */
+const maxConnections = envable(
+  z.number().int().min(1).max(100_000).meta({
+    description:
+      "The most connections the source holds at once, 1 to 100000; one over it is closed at accept. Default 100.",
+  }),
+);
+
+/** The largest message an MLLP source takes. */
+const maxMessageSize = bytes.meta({
+  description:
+    "The largest message taken: a size such as 512KB or 4MB (1 KB is 1,024 bytes), or a number of bytes. A larger one closes the connection and nothing is stored. Default 4MB.",
+});
+
 /** How a listening endpoint authenticates a request. */
 const auth = z
   .union([z.literal("none"), z.strictObject({ bearer: secretSource("a token") })], {
@@ -918,8 +1085,17 @@ const mllpSource = restate(
     .strictObject({
       port,
       host: listenerShape.host,
-      tls: serverTls.optional(),
+      tls: mllpServerTls.optional(),
       plaintext,
+      maxConnections: maxConnections.optional(),
+      receiveTimeout: receiveTimeout.optional(),
+      maxMessageSize: maxMessageSize.optional(),
+      keepOpen: envable(
+        z.boolean().meta({
+          description:
+            "false closes each connection once its ACK has been sent, for a sender that opens one per message. Default true.",
+        }),
+      ).optional(),
       onStoreFailure: onStoreFailure.optional(),
       ackBuilder: path
         .meta({
@@ -941,7 +1117,7 @@ const mllpDestination = restate(
     .strictObject({
       host: host.meta({ description: "The address to connect to." }),
       port,
-      tls: clientTls.optional(),
+      tls: mllpClientTls.optional(),
       plaintext,
       ackTimeout: settingsShape.ackTimeout,
     })
@@ -2513,12 +2689,47 @@ export interface MllpSource {
   readonly kind: "mllp";
   readonly host: string;
   readonly port: number;
-  readonly tls: ServerTlsFiles | undefined;
+  readonly tls: MllpServerTlsFiles | undefined;
   readonly plaintext: boolean;
   readonly onStoreFailure: OnStoreFailure;
   /** A module whose default export builds each ACK, or `undefined` for the default ACK. */
   readonly ackBuilder: string | undefined;
+  /** The most connections held at once, or `undefined` for the source's default (100). */
+  readonly maxConnections?: number | undefined;
+  /** How long a connection may go without a whole message, in milliseconds; `undefined` for none. */
+  readonly receiveTimeoutMs?: number | undefined;
+  /** The largest message taken, in bytes, or `undefined` for the source's default (4 MiB). */
+  readonly maxMessageSize?: number | undefined;
+  /** `false` closes each connection once its ACK is sent; `undefined` keeps it open. */
+  readonly keepOpen?: boolean | undefined;
 }
+
+/**
+ * What an MLLP block's TLS adds to the shared keys, as the YAML set it: `undefined` where it did not,
+ * and the connector's default applies (TLS 1.2 and the `bcp195` profile).
+ */
+export interface MllpTlsChoices {
+  /** The oldest TLS version accepted. */
+  readonly minVersion?: (typeof MLLP_TLS_VERSIONS)[number] | undefined;
+  /** The named cipher-suite profile. Never set together with `ciphers`. */
+  readonly profile?: (typeof MLLP_TLS_PROFILES)[number] | undefined;
+  /** An OpenSSL cipher list in place of a profile. */
+  readonly ciphers?: string | undefined;
+  /** A PKCS#12 file, an absolute path, in place of `cert` and `key`. */
+  readonly pfx?: string | undefined;
+  /** Where the pfx file's passphrase is read at start. */
+  readonly passphrase?: SecretSource | undefined;
+}
+
+/** An MLLP source's TLS files: `cert` and `key`, or `pfx`, and the MLLP choices. */
+export interface MllpServerTlsFiles extends MllpTlsChoices {
+  readonly cert: string | undefined;
+  readonly key: string | undefined;
+  readonly ca: string | undefined;
+}
+
+/** An MLLP destination's TLS files: a client's, and the MLLP choices. */
+export interface MllpClientTlsFiles extends ClientTlsFiles, MllpTlsChoices {}
 
 /**
  * An MLLP destination: each output is sent framed and waits for its ACK. `tls` is undefined exactly
@@ -2528,7 +2739,7 @@ export interface MllpDestination {
   readonly kind: "mllp";
   readonly host: string;
   readonly port: number;
-  readonly tls: ClientTlsFiles | undefined;
+  readonly tls: MllpClientTlsFiles | undefined;
   readonly plaintext: boolean;
   readonly ackTimeoutMs: number;
 }

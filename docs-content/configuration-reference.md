@@ -403,10 +403,19 @@ an API key header included.
 | ---------------- | --------------------- | --------------------------- |
 | `port`           | 1 to 65,535           | required                    |
 | `host`           | an address            | `127.0.0.1`                 |
-| `tls`            | [server TLS](#tls)    | required unless `plaintext` |
+| `tls`            | [MLLP TLS](#tls)      | required unless `plaintext` |
 | `plaintext`      | boolean               | `false`                     |
 | `onStoreFailure` | `close`, `AE` or `AR` | the channel's               |
 | `ackBuilder`     | path to a module      | the default ACK             |
+| `maxConnections` | 1 to 100,000          | `100`                       |
+| `receiveTimeout` | duration              | no limit                    |
+| `maxMessageSize` | size                  | `4MB`                       |
+| `keepOpen`       | boolean               | `true`                      |
+
+A connection over `maxConnections` is closed at accept. `receiveTimeout` closes a connection that goes
+that long without a whole message, a part-sent one included. A message over `maxMessageSize` closes
+the connection and is not stored. `keepOpen: false` closes each connection once its messages are
+answered. See [Bound connections and messages](./send-and-receive-mllp.md#bound-connections-and-messages).
 
 #### Module source
 
@@ -517,13 +526,13 @@ answer after it, and is retried when none comes within `timeout` or the connecti
 
 #### MLLP destination
 
-| Key          | Type               | Default                                                         |
-| ------------ | ------------------ | --------------------------------------------------------------- |
-| `host`       | an address         | required                                                        |
-| `port`       | 1 to 65,535        | required                                                        |
-| `tls`        | [client TLS](#tls) | required unless `plaintext`; `{}` uses Node.js's built-in roots |
-| `plaintext`  | boolean            | `false`                                                         |
-| `ackTimeout` | duration           | the channel's                                                   |
+| Key          | Type             | Default                                                         |
+| ------------ | ---------------- | --------------------------------------------------------------- |
+| `host`       | an address       | required                                                        |
+| `port`       | 1 to 65,535      | required                                                        |
+| `tls`        | [MLLP TLS](#tls) | required unless `plaintext`; `{}` uses Node.js's built-in roots |
+| `plaintext`  | boolean          | `false`                                                         |
+| `ackTimeout` | duration         | the channel's                                                   |
 
 #### Module destination
 
@@ -551,6 +560,19 @@ What the HTTP source and the health endpoint take:
 | client TLS | `ca` to trust in place of Node.js's built-in roots; `cert` and `key`, together, to present a client certificate |
 
 `tls` and `plaintext: true` cannot both be set.
+
+An MLLP source's `tls` is the server block, and an MLLP destination's the client block, each with
+these keys too:
+
+| Key          | Type                         | Default                            |
+| ------------ | ---------------------------- | ---------------------------------- |
+| `minVersion` | `TLSv1.2` or `TLSv1.3`       | `TLSv1.2`                          |
+| `profile`    | `bcp195` or `atna`           | `bcp195`, unless `ciphers` is set  |
+| `ciphers`    | an OpenSSL cipher list       | none; cannot be set with `profile` |
+| `pfx`        | path to a PKCS#12 file       | none; in place of `cert` and `key` |
+| `passphrase` | [secret reference](#secrets) | none; goes with `pfx`              |
+
+See [Choose the TLS version and cipher suites](./send-and-receive-mllp.md#choose-the-tls-version-and-cipher-suites).
 
 ### Secrets
 
