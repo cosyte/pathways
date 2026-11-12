@@ -320,7 +320,9 @@ A mapping names exactly one of `every`, `cron` and `onStart`, and may add `deadl
 `5m` by default). `cron` takes five fields (minute, hour, day of month, month, day of week), parsed
 by [croner](https://github.com/Hexagon/croner); `timezone` is an IANA name such as
 `America/Chicago`, `UTC` by default, and goes only with `cron`. Each key of the mapping
-takes an environment reference.
+takes an environment reference. When croner itself cannot be loaded, as after a broken install, a
+`cron` is refused with `croner, which reads cron expressions, could not be loaded`, and the load
+error's code when it has one, rather than as an expression of the wrong shape.
 
 - A pass never overlaps itself: a pass that comes due while the last one's `poll` call has not
   returned is skipped, logged as `poll-overlap`, and the next is scheduled as usual.
@@ -450,6 +452,8 @@ the attempt as failed with the code `DELIVERY_TIMEOUT`: it is retried by the des
 | `module`    | its `timeout`, `30s` by default                                         |
 
 The second of grace lets an HTTP or MLLP destination's own timeout, with its own code, come first.
+A deadline longer than 24 days (the longest one Node timer holds) is kept in full: the engine waits
+24 days at a time until it is due, so a `timeout: 30d` cuts an attempt off at 30 days, never sooner.
 A receiver may have the message when an attempt is cut off, and a destination that does not honour
 the `signal` may still finish its send after the cut, so a message cut off at its deadline may
 arrive twice. The retry is not flagged as a possible duplicate (no `resend` on the outgoing message,
