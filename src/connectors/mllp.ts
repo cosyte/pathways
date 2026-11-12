@@ -74,11 +74,12 @@ const LF = 0x0a;
 /** The MLLP start and end bytes, which `@cosyte/hl7` removes wherever they stand before it splits segments. */
 const VT = 0x0b;
 const FS = 0x1c;
-/**
- * Segment ids that open a message or a batch, in upper case. One after the first segment means a
- * body holds more than one message.
- */
-const OPENERS = ["MSH", "FHS", "BHS"].map((id) => Buffer.from(id, "latin1"));
+/** The segment ids that open a message (MSH) or a batch (FHS, BHS), as bytes, in upper case. */
+const M = 0x4d;
+const S = 0x53;
+const H = 0x48;
+const F = 0x46;
+const B = 0x42;
 
 /**
  * Reads the header of an HL7 v2 message: parses its first segment, which must be an MSH with an
@@ -143,8 +144,7 @@ export function holdsSecondMessage(payload: Uint8Array): boolean {
   const bytes = Buffer.from(payload.buffer, payload.byteOffset, payload.byteLength);
   let start = 0;
   while (start < bytes.length && (isBreak(bytes[start]) || isFraming(bytes[start]))) start += 1;
-  const first = openerAt(bytes, start);
-  if (first !== undefined && first !== 0) return false;
+  if (openerAt(bytes, start) === "batch") return false;
   let end = start;
   while (end < bytes.length && !isBreak(bytes[end])) end += 1;
   return opensLater(bytes, end);
@@ -159,24 +159,40 @@ function opensLater(bytes: Buffer, from: number): boolean {
 }
 
 /**
- * Which of {@link OPENERS} the segment starting at `at` opens with, as its index, matched without
- * regard to case and skipping the MLLP start and end bytes; `undefined` for none.
+ * What the segment starting at `at` opens, matched without regard to case and skipping the MLLP
+ * start and end bytes: `message` for MSH, `batch` for FHS or BHS, `undefined` for anything else.
  */
-function openerAt(bytes: Buffer, at: number): number | undefined {
-  const id = [0, 0, 0];
-  let read = 0;
-  for (let next = at; read < 3 && next < bytes.length; next += 1) {
+function openerAt(bytes: Buffer, at: number): "message" | "batch" | undefined {
+  const a = bytes[at];
+  const b = bytes[at + 1];
+  const c = bytes[at + 2];
+  // The common case, three bytes with no MLLP byte among them, reads them in place.
+  if (!isFraming(a) && !isFraming(b) && !isFraming(c)) return opener(a, b, c);
+  const id: number[] = [];
+  for (let next = at; id.length < 3 && next < bytes.length; next += 1) {
     const byte = bytes[next] as number;
-    if (isFraming(byte)) continue;
-    // Upper-case an ASCII letter; leave every other byte as it is.
-    id[read] = byte >= 0x61 && byte <= 0x7a ? byte - 0x20 : byte;
-    read += 1;
+    if (!isFraming(byte)) id.push(byte);
   }
-  if (read < 3) return undefined;
-  const found = OPENERS.findIndex(
-    (opener) => opener[0] === id[0] && opener[1] === id[1] && opener[2] === id[2],
-  );
-  return found === -1 ? undefined : found;
+  return opener(id[0], id[1], id[2]);
+}
+
+/** What a segment whose id starts with these three bytes opens, matched without regard to case. */
+function opener(
+  a: number | undefined,
+  b: number | undefined,
+  c: number | undefined,
+): "message" | "batch" | undefined {
+  const first = upper(a);
+  const second = upper(b);
+  const third = upper(c);
+  if (first === M && second === S && third === H) return "message";
+  if (second === H && third === S && (first === F || first === B)) return "batch";
+  return undefined;
+}
+
+/** An ASCII letter in upper case; any other byte as it is, and `undefined` past the end. */
+function upper(byte: number | undefined): number | undefined {
+  return byte !== undefined && byte >= 0x61 && byte <= 0x7a ? byte - 0x20 : byte;
 }
 
 function isFraming(byte: number | undefined): boolean {
