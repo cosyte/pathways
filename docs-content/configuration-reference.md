@@ -344,24 +344,29 @@ error's code when it has one, rather than as an expression of the wrong shape.
 
 #### File source
 
-| Key             | Type                           | Default    | Meaning                                                              |
-| --------------- | ------------------------------ | ---------- | -------------------------------------------------------------------- |
-| `dir`           | path                           | required   | the folder to read; created if missing                               |
-| `minAge`        | duration                       | `1s`       | how long a file must sit unchanged before it is read                 |
-| `keepProcessed` | boolean                        | `false`    | move each stored file into `processed/` instead of deleting it       |
-| `include`       | a list of globs or `{ regex }` | every file | take only a file whose path from `dir` matches one                   |
-| `exclude`       | a list of globs or `{ regex }` | none       | leave a file whose path from `dir` matches one                       |
-| `recursive`     | boolean                        | `false`    | read the subfolders too, never `.claimed`, `processed` or `errorDir` |
-| `ignoreDot`     | boolean                        | `true`     | leave files and folders whose name starts with a dot                 |
-| `minSize`       | byte size, or `0`              | `1B`       | leave a smaller file; by default an empty file is left               |
-| `maxSize`       | byte size                      | no limit   | set a larger file aside: into `errorDir`, or left where it is        |
-| `maxPerPoll`    | a whole number, 1 or more      | no limit   | the most files claimed in one pass                                   |
-| `sortBy`        | `name` or `mtime`              | `name`     | the order files are taken in                                         |
-| `stable`        | boolean                        | `false`    | take a file only once two passes in a row find it unchanged          |
-| `doneFile`      | a suffix, such as `.done`      | none       | take a file only once its marker is there, then delete the marker    |
-| `errorDir`      | path                           | none       | where a file set aside goes, under its path from `dir`               |
-| `readTries`     | a whole number, 1 or more      | `3`        | passes in a row a file fails to open before it goes into `errorDir`  |
-| `sftp`          | an [SFTP block](#sftp-block)   | none       | read `dir` on an SFTP server; `dir` and `errorDir` are its paths     |
+| Key             | Type                                     | Default    | Meaning                                                              |
+| --------------- | ---------------------------------------- | ---------- | -------------------------------------------------------------------- |
+| `dir`           | path                                     | required   | the folder to read; created if missing                               |
+| `minAge`        | duration                                 | `1s`       | how long a file must sit unchanged before it is read                 |
+| `keepProcessed` | boolean                                  | `false`    | move each stored file into `processed/` instead of deleting it       |
+| `include`       | a list of globs or `{ regex }`           | every file | take only a file whose path from `dir` matches one                   |
+| `exclude`       | a list of globs or `{ regex }`           | none       | leave a file whose path from `dir` matches one                       |
+| `recursive`     | boolean                                  | `false`    | read the subfolders too, never `.claimed`, `processed` or `errorDir` |
+| `ignoreDot`     | boolean                                  | `true`     | leave files and folders whose name starts with a dot                 |
+| `minSize`       | byte size, or `0`                        | `1B`       | leave a smaller file; by default an empty file is left               |
+| `maxSize`       | byte size                                | no limit   | set a larger file aside: into `errorDir`, or left where it is        |
+| `maxPerPoll`    | a whole number, 1 or more                | no limit   | the most files claimed in one pass                                   |
+| `sortBy`        | `name` or `mtime`                        | `name`     | the order files are taken in                                         |
+| `stable`        | boolean                                  | `false`    | take a file only once two passes in a row find it unchanged          |
+| `doneFile`      | a suffix, such as `.done`                | none       | take a file only once its marker is there, then delete the marker    |
+| `errorDir`      | path                                     | none       | where a file set aside goes, under its path from `dir`               |
+| `readTries`     | a whole number, 1 or more                | `3`        | passes in a row a file fails to open before it goes into `errorDir`  |
+| `sftp`          | an [SFTP block](#sftp-block)             | none       | read `dir` on an SFTP server; `dir` and `errorDir` are its paths     |
+| `s3`            | an [S3 block](#s3-block)                 | none       | read objects in an S3 bucket; `dir` is the key prefix                |
+| `azblob`        | an [Azure Blob block](#azure-blob-block) | none       | read blobs in an Azure Blob Storage container; `dir` is the prefix   |
+
+With `s3` or `azblob`, `keepProcessed`, `doneFile`, `errorDir` and `readTries` are refused: an object
+store claims by a marker and moves no file. At most one of `sftp`, `s3` and `azblob`.
 
 A path from `dir` is written with `/` on every system. A glob is read as Node.js's
 `path.matchesGlob` reads it, and its `*` never matches a leading dot. A `regex` is at most 256
@@ -538,6 +543,44 @@ key is always checked.
 | `keepalive`      | duration                                              | `15s`    |
 
 [Read and write over SFTP](./read-and-write-files.md#read-and-write-over-sftp) says what each does.
+
+With an [S3 block](#s3-block) or an [Azure Blob block](#azure-blob-block), a file destination
+writes each output as an object under the prefix `dir`.
+
+#### S3 block
+
+A file source's or destination's `s3:`. Credentials come from the AWS SDK's default chain, never
+the YAML.
+
+| Key          | Type                                             | Default                 |
+| ------------ | ------------------------------------------------ | ----------------------- |
+| `bucket`     | an S3 bucket name                                | required                |
+| `region`     | a region, such as `us-east-1`                    | the AWS SDK's own chain |
+| `endpoint`   | an `https://` URL, or `http://` with `plaintext` | Amazon's                |
+| `plaintext`  | boolean, only with an `http://` endpoint         | `false`                 |
+| `pathStyle`  | boolean                                          | `false`                 |
+| `timeout`    | duration, for one request                        | `30s`                   |
+| `singleNode` | boolean, a source only                           | `false`                 |
+| `mode`       | `create` or `overwrite`, a destination only      | `create`                |
+
+[Read and write Amazon S3](./read-and-write-amazon-s3.md) says what each does.
+
+#### Azure Blob block
+
+A file source's or destination's `azblob:`. The identity is Azure's default chain unless
+`connectionString` is set.
+
+| Key                | Type                                             | Default                                   |
+| ------------------ | ------------------------------------------------ | ----------------------------------------- |
+| `account`          | a storage account name                           | required                                  |
+| `container`        | a container name                                 | required                                  |
+| `endpoint`         | an `https://` URL, or `http://` with `plaintext` | `https://<account>.blob.core.windows.net` |
+| `connectionString` | a [secret](#secrets): a connection string        | none                                      |
+| `plaintext`        | boolean: allow an `http://` endpoint             | `false`                                   |
+| `singleNode`       | boolean, a source only                           | `false`                                   |
+| `mode`             | `create` or `overwrite`, a destination only      | `create`                                  |
+
+[Read and write Azure Blob Storage](./read-and-write-azure-blob-storage.md) says what each does.
 
 #### HTTP destination
 

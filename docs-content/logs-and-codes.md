@@ -196,6 +196,34 @@ package stops the engine at the first pass that needs it.
 | `ERR_PATHWAYS_SFTP_BAD_MESSAGE`      | the server could not read a request                                         |
 | `ERR_PATHWAYS_SFTP_STATUS_<n>`       | any other SFTP status, by number                                            |
 
+## Object store codes
+
+A file source or destination on Amazon S3 or Azure Blob Storage gives a failed request one of these
+codes, never the service's own text. `ENOENT` is an object that is not there. The codes marked
+down mark the source `down` until a pass runs again. A missing package, bucket or container stops
+the engine at the first pass that needs it, with its own code.
+
+| Code                                       | Meaning                                                                        |
+| ------------------------------------------ | ------------------------------------------------------------------------------ |
+| `ERR_PATHWAYS_OBJECT_NO_CONDITIONAL_WRITE` | the store does not honour `If-None-Match`, and the source has no `singleNode`  |
+| `ERR_PATHWAYS_OBJECT_CHANGED`              | an object was replaced between its claim and its read; it is taken again later |
+| `ERR_PATHWAYS_S3_CREDENTIALS`              | down: the AWS SDK's chain found no credentials                                 |
+| `ERR_PATHWAYS_S3_UNREACHABLE`              | down: the endpoint did not answer                                              |
+| `ERR_PATHWAYS_S3_HTTP_<status>`            | down: the endpoint answered with this HTTP status                              |
+| `ERR_PATHWAYS_S3_NOT_IMPLEMENTED`          | the server does not do what was asked                                          |
+| `ERR_PATHWAYS_S3_SIZE_MISMATCH`            | a read gave a different number of bytes than the object's length               |
+| `ERR_PATHWAYS_S3_NOT_INSTALLED`            | the `@aws-sdk/client-s3` package is not installed                              |
+| `ERR_PATHWAYS_S3_NO_SUCH_BUCKET`           | the bucket is not there                                                        |
+| `ERR_PATHWAYS_AZBLOB_CREDENTIALS`          | down: no Azure identity could be had                                           |
+| `ERR_PATHWAYS_AZBLOB_UNREACHABLE`          | down: the blob service did not answer                                          |
+| `ERR_PATHWAYS_AZBLOB_HTTP_<status>`        | down: the blob service answered with this HTTP status                          |
+| `ERR_PATHWAYS_AZBLOB_NOT_INSTALLED`        | the `@azure/storage-blob` or `@azure/identity` package is not installed        |
+| `ERR_PATHWAYS_AZBLOB_NO_SUCH_CONTAINER`    | the container is not there                                                     |
+| `ERR_PATHWAYS_AZBLOB_SNAPSHOTS_PRESENT`    | a stored blob has snapshots, so it was not deleted; the pass ends              |
+
+A destination that finds an object of other bytes at its key in `create` mode rejects the message
+with the reason `OBJECT_EXISTS`.
+
 ## Encryption errors
 
 | Code                          | Meaning                                                                                                                              |
