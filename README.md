@@ -27,7 +27,6 @@ version is 0.0.x, and a release may still change a key or an API, which its chan
 - [Quickstart](#quickstart)
 - [Why this exists](#why-this-exists)
 - [What the latest release ships](#what-the-latest-release-ships)
-- [In the next release](#in-the-next-release)
 - [Status](#status)
 - [Build from source](#build-from-source)
 - [Layout](#layout)
@@ -148,20 +147,6 @@ What follows is in 0.0.3, the version on npm:
 - **Security controls.** TLS in transit, encryption at rest, an audit log of operator actions, and no
   message contents in logs or errors. Compliance is a property of how an organization runs software,
   so we describe the controls Pathways provides rather than claim compliance for it.
-
----
-
-## In the next release
-
-These are on `main` and land in the next release, not in 0.0.3:
-
-- The package description on npm no longer says Pathways is not yet out.
-  <!-- changesets: release-status -->
-- An `xml` format: any XML body reaches the transform as a DOM document, read by `@cosyte/ccda`'s
-  hardened reader, with size and shape caps, and an untouched document leaves byte for byte.
-  <!-- changesets: xml-format -->
-
-The changelog lists each once it is released.
 
 ---
 
