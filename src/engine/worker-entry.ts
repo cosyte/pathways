@@ -830,9 +830,12 @@ export function holdsSecondMessage(bytes: Uint8Array): boolean {
         pastFirst = true;
       }
     }
+    // Only a separator closes a signature, so most bytes, letters, digits and spaces, end here.
     if (
       firstAt !== -1 &&
       kept - lineAt >= 9 &&
+      isPrintable(byte) &&
+      !isWordByte(byte) &&
       signatureEndsAt(ring, kept, Math.max(firstAt + 1, lineAt))
     ) {
       return true;
@@ -842,12 +845,12 @@ export function holdsSecondMessage(bytes: Uint8Array): boolean {
 }
 
 /**
- * Whether the last kept byte closes a header signature that starts at or after `from`: an opener id,
- * a separator, four or five encoding characters, the separator again.
+ * Whether the last kept byte, a printable byte other than a letter or digit, closes a header
+ * signature that starts at or after `from`: an opener id, a separator, four or five encoding
+ * characters, the separator again.
  */
 function signatureEndsAt(ring: Uint8Array, kept: number, from: number): boolean {
   const separator = ring[(kept - 1) & 15] as number;
-  if (!isPrintable(separator) || isWordByte(separator)) return false;
   for (let characters = 4; characters <= 5; characters += 1) {
     const length = characters + 5;
     const start = kept - length;
