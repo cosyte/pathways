@@ -2,7 +2,7 @@
 id: send-and-receive-tcp
 title: Send and receive over TCP
 sidebar_label: TCP
-description: "Take in and send messages over plain TCP or TLS for feeds that are not MLLP, with delimiter, length-prefix, start and end, or read-to-close framing, every frame bounded."
+description: "Take in and send messages over TCP or TLS for feeds that are not MLLP, framed by delimiter, length prefix, start and end bytes, or close."
 ---
 
 # Send and receive over TCP

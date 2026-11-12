@@ -27,16 +27,18 @@ import type { AckErrorDetail, Hl7Message } from "@cosyte/hl7";
 export type SourceAckCode = "AA" | "AE" | "AR";
 
 /**
- * Why an MLLP source answers as it does: `stored` (the message is durable), `store-failed` (it
- * could not be stored, and `onStoreFailure` asked for an ACK), or `unreadable` (it was stored,
- * marked failed, because it has no usable header or arrived damaged).
+ * Why an MLLP source answers as it does: `stored` (the message is durable or, on a channel that
+ * stores nothing, every destination accepted it), `store-failed` (it could not be stored, and
+ * `onStoreFailure` asked for an ACK), `unreadable` (it was stored, marked failed, because it has no
+ * usable header or arrived damaged), or `rejected` (on a channel that stores nothing, the transform
+ * failed or a destination rejected it, so sending it again will not help; answered `AE`).
  *
  * @example
  * ```ts
  * if (request.reason === "unreadable") console.warn(request.problem);
  * ```
  */
-export type AckReason = "stored" | "store-failed" | "unreadable";
+export type AckReason = "stored" | "store-failed" | "unreadable" | "rejected";
 
 /**
  * What an {@link AckBuilder} is asked to acknowledge.
@@ -61,7 +63,10 @@ export interface AckRequest {
    * the header is parsed: never the segments after it.
    */
   readonly header: Hl7Message | undefined;
-  /** The stored message's id, or `undefined` when it could not be stored. */
+  /**
+   * The stored message's id, or `undefined` when it could not be stored. On a channel that stores
+   * nothing, the message's pass id, which no command can look up.
+   */
   readonly messageId: number | undefined;
 }
 
@@ -94,7 +99,8 @@ const PLACEHOLDER_HEADER = "MSH|^~\\&|||||||ACK||P|2.5.1\r";
 /**
  * Builds an MLLP source's ACK with `@cosyte/hl7`'s `buildAck`: sender and receiver swapped, MSA-2
  * echoing the inbound MSH-10, and, for a negative ACK, one ERR segment with an HL7 table 0357
- * condition code (207 when storing failed, 101 for a missing MSH-10, 100 otherwise). It never puts
+ * condition code (207 when storing failed or a channel that stores nothing could not pass the
+ * message on, 101 for a missing MSH-10, 100 otherwise). It never puts
  * message content in the ERR segment. An inbound header that declares an ISO 8859 character set in
  * MSH-18 is answered in Latin-1, so MSA-2 echoes the control ID byte for byte; anything else is
  * answered in UTF-8.
@@ -152,7 +158,9 @@ function hl7(): typeof Hl7 {
 
 function errorDetail(request: AckRequest): AckErrorDetail | undefined {
   if (request.code === "AA") return undefined;
-  if (request.reason === "store-failed") return { conditionCode: "207" };
+  if (request.reason === "store-failed" || request.reason === "rejected") {
+    return { conditionCode: "207" };
+  }
   if (request.problem === "NO_CONTROL_ID") return { conditionCode: "101", location: "MSH^1^10" };
   return { conditionCode: "100" };
 }

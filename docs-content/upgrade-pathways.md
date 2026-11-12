@@ -2,7 +2,7 @@
 id: upgrade-pathways
 title: Upgrade Pathways
 sidebar_label: Upgrade
-description: "Move a running Pathways to a new version: check what it would send differently, expand the schema, start the new version, keep the way back open, and contract once nothing older runs."
+description: "Move a running Pathways to a new version: check what it would send differently, expand the schema, start it, keep the way back, then contract."
 ---
 
 # Upgrade Pathways
