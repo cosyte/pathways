@@ -1,0 +1,8 @@
+# The message database and the development key. Stored messages can hold patient data.
+/.pathways/
+
+# What the channel and the receiver read and write. Real messages land here.
+/data/
+
+# Installed packages.
+node_modules/

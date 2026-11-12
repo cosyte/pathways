@@ -3,7 +3,18 @@
     "intro",
     { "type": "category", "label": "Installation", "items": ["installation"] },
     { "type": "category", "label": "Quickstart", "items": ["quickstart"] },
-    { "type": "category", "label": "Tutorials", "items": ["write-a-channel"] },
+    {
+      "type": "category",
+      "label": "Tutorials",
+      "items": [
+        "write-a-channel",
+        "example-mllp-to-http",
+        "example-file-to-sftp",
+        "example-hl7-to-fhir",
+        "example-filter-and-route",
+        "example-replay-after-failure"
+      ]
+    },
     {
       "type": "category",
       "label": "How-to guides",

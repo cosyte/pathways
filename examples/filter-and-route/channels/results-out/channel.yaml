@@ -1,0 +1,20 @@
+# yaml-language-server: $schema=../../node_modules/@cosyte/pathways/schema/channel.json
+
+# Read HL7 v2 files from a folder, keep the final lab results, and send each to two destinations:
+# the EHR's inbound folder and an archive.
+name: results-out
+format: hl7v2
+
+source:
+  file:
+    dir: ../../data/results-out/in
+
+transform: ./transform.ts
+
+# Each output goes to every destination, and each destination keeps a queue of its own, in order:
+# when one is down, only its own messages wait.
+destinations:
+  - file:
+      dir: ../../data/results-out/ehr
+  - file:
+      dir: ../../data/results-out/archive
