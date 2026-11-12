@@ -1,10 +1,24 @@
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { chmod, cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  cp,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir, userInfo } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { parseResource, validateResource } from "@cosyte/fhir";
+import { type Hl7Message, parseHL7 } from "@cosyte/hl7";
+import { generateAdt, generateOru } from "@cosyte/synth/hl7";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 
 import {
@@ -36,8 +50,10 @@ import { SSHD, startSshd, stopAllSshd } from "./sshd.js";
  *
  * Each runs on a copy of the example in the system temp folder. `pathways` runs in this process,
  * through the command's own entry point (`run` in src/cli.ts), with its log lines kept for the
- * checks; the example's scripts run under Node as `npm run` starts them. The messages are the
- * examples' own, all synthetic.
+ * checks; the example's scripts run under Node as `npm run` starts them. The packages an example's
+ * `dependencies` names are linked into the copy from this repository's own, as `npm install` gives
+ * them to a reader. The messages are the examples' own, all synthetic; the veterinary example's are
+ * held to the `@cosyte/synth` seeds its README names.
  */
 
 const SLOW = 120_000;
@@ -49,6 +65,7 @@ const EXAMPLES = [
   "hl7-to-fhir",
   "mllp-to-http",
   "replay-after-failure",
+  "vet-lab-to-fhir",
 ] as const;
 
 /**
@@ -221,10 +238,28 @@ async function copy(name: string): Promise<string> {
     preserveTimestamps: true,
     filter: (source) => !ignored.test(source.slice(join(ROOT, "examples", name).length)),
   });
+  await linkDependencies(dir);
   const key = await script(["scripts/dev-key.ts"], dir);
   expect(key.out).toBe("wrote .pathways/dev.key\n");
   expect(key.code).toBe(0);
   return dir;
+}
+
+/**
+ * Links each package the copy's `package.json` names in `dependencies` into its `node_modules`, from
+ * this repository's own, as `npm install` puts them there: a transform that imports a library finds
+ * it. `@cosyte/pathways` is a devDependency the transforms import types from only, so it is not
+ * linked. A junction on Windows, which needs no privilege; elsewhere the type is ignored.
+ */
+async function linkDependencies(dir: string): Promise<void> {
+  const manifest = JSON.parse(await readFile(join(dir, "package.json"), "utf8")) as {
+    readonly dependencies?: Readonly<Record<string, string>>;
+  };
+  for (const name of Object.keys(manifest.dependencies ?? {})) {
+    const link = join(dir, "node_modules", name);
+    await mkdir(dirname(link), { recursive: true });
+    await symlink(await realpath(join(ROOT, "node_modules", name)), link, "junction");
+  }
 }
 
 /** Copies a test message of a channel into its inbox, keeping its time, as `cp -p` does. */
@@ -253,7 +288,7 @@ const steady = (text: string | undefined): string =>
     .replace(/^Run \d+:/m, "Run <id>:");
 
 describe("the examples", () => {
-  it("are the five folders under examples/ with a pathways.yaml", () => {
+  it("are the six folders under examples/ with a pathways.yaml", () => {
     expect(listExamples(ROOT)).toEqual([...EXAMPLES]);
   });
 
@@ -496,4 +531,374 @@ describe("a real pass of each example, as its page shows it", () => {
     },
     SLOW,
   );
+
+  it(
+    "vet-lab-to-fhir: acknowledges both over MLLP and POSTs one Bundle that keeps species and breed",
+    async () => {
+      const shown = outputs("example-vet-lab-to-fhir.md");
+      const dir = await copy("vet-lab-to-fhir");
+      const tests = "channels/vet-results-to-fhir/tests";
+      await onPickedPorts(2, async ([mllp = 0, http = 0]) => {
+        const env = {
+          MLLP_PORT: String(mllp),
+          RECEIVER_PORT: String(http),
+          FHIR_URL: `http://127.0.0.1:${String(http)}/fhir/$process-message`,
+        };
+        const receiver = launch(["scripts/receiver.ts"], dir, env);
+        const engine = startEngine(dir, env);
+        try {
+          await until(
+            "the receiver",
+            () => receiver.out().includes("listening on"),
+            receiver.ended,
+          );
+          await until(
+            "the MLLP source",
+            () => logged(engine, "mllp-listening"),
+            () =>
+              engine.events.some(
+                (line) => line.event === "source-start-failed" && line["code"] === "EADDRINUSE",
+              ),
+          );
+        } catch (error) {
+          // Another attempt opens the same database, so this engine lets go of it first.
+          await Promise.all([engine.stop(), receiver.stop()]);
+          throw error;
+        }
+
+        const sent = await script(
+          ["scripts/send.ts", `${tests}/oru.hl7`, `${tests}/adt.hl7`],
+          dir,
+          env,
+        );
+        expect(sent.code).toBe(0);
+        expect(sent.out.trimEnd()).toBe(shown[0]);
+        await until("the delivery", () => logged(engine, "delivered"));
+        await until("the filter", () => logged(engine, "filtered"));
+        expect((await engine.stop()).code).toBe(0);
+        await receiver.stop();
+
+        expect(receiver.out().trimEnd().split("\n").slice(1)).toEqual([shown[1]]);
+        const status = await pathways(["status"], dir);
+        expect(status.out).toContain("1 transformed, 1 filtered, 0 failed");
+        expect(status.out).toContain("1 delivered, 0 failed");
+      });
+
+      expect(await listed(join(dir, "data/receiver"))).toEqual(["1.json"]);
+      const body = await bytes(dir, "data/receiver/1.json");
+      expect(body).toEqual(await bytes(dir, `${tests}/oru.expected.hl7`));
+      // Each entry of the Bundle is valid FHIR R4 to @cosyte/fhir's validator: the Bundle itself is
+      // a type the validator does not model, so each entry is checked on its own.
+      const entries = (
+        JSON.parse(body.toString("utf8")) as {
+          readonly entry: readonly { readonly resource: unknown }[];
+        }
+      ).entry;
+      expect(entries.length).toBeGreaterThan(0);
+      for (const entry of entries) {
+        const { resource } = parseResource(JSON.stringify(entry.resource));
+        const { issues, valid } = validateResource(resource);
+        expect(
+          issues.filter((issue) => issue.severity === "error" || issue.severity === "fatal"),
+        ).toEqual([]);
+        expect(valid).toBe(true);
+      }
+
+      // The species and breed the lab sent in PID-35 and PID-36 are the ones the Patient carries.
+      const sentPatient = parseHL7(await readFile(join(dir, `${tests}/oru.hl7`), "latin1")).patient;
+      const bundle = JSON.parse(body.toString("utf8")) as {
+        readonly entry: readonly {
+          readonly resource: {
+            readonly resourceType: string;
+            readonly extension?: readonly {
+              readonly url: string;
+              readonly extension: readonly {
+                readonly url: string;
+                readonly valueCodeableConcept: { readonly coding: readonly { code: string }[] };
+              }[];
+            }[];
+          };
+        }[];
+      };
+      const patients = bundle.entry.filter((each) => each.resource.resourceType === "Patient");
+      expect(patients).toHaveLength(1);
+      const animal = patients[0]?.resource.extension?.find(
+        (each) => each.url === "http://hl7.org/fhir/StructureDefinition/patient-animal",
+      );
+      const part = (name: string): string | undefined =>
+        animal?.extension.find((each) => each.url === name)?.valueCodeableConcept.coding[0]?.code;
+      expect(sentPatient?.species?.identifier).toBeDefined();
+      expect(sentPatient?.breed?.identifier).toBeDefined();
+      expect(part("species")).toBe(sentPatient?.species?.identifier);
+      expect(part("breed")).toBe(sentPatient?.breed?.identifier);
+    },
+    SLOW,
+  );
+});
+
+describe("the veterinary example's messages and transform", () => {
+  const tests = join(ROOT, "examples/vet-lab-to-fhir/channels/vet-results-to-fhir/tests");
+
+  it("are the @cosyte/synth messages of the seeds its README names", async () => {
+    const readme = readFileSync(join(ROOT, "examples/vet-lab-to-fhir/README.md"), "utf8");
+    expect(readme).toContain('generateOru({ seed: 4821, subject: "animal" })');
+    expect(readme).toContain('generateAdt({ seed: 4822, trigger: "A01", subject: "animal" })');
+    expect(await readFile(join(tests, "oru.hl7"), "latin1")).toBe(
+      generateOru({ seed: 4821, subject: "animal" }).toString(),
+    );
+    expect(await readFile(join(tests, "adt.hl7"), "latin1")).toBe(
+      generateAdt({ seed: 4822, trigger: "A01", subject: "animal" }).toString(),
+    );
+  });
+
+  it("refuses a lab result with no species, so a person's result is never sent as an animal's", async () => {
+    const transform = (
+      (await import(
+        pathToFileURL(
+          join(ROOT, "examples/vet-lab-to-fhir/channels/vet-results-to-fhir/transform.ts"),
+        ).href
+      )) as { readonly default: (msg: Hl7Message) => unknown }
+    ).default;
+    const person = generateOru({ seed: 4821 });
+    expect(person.patient?.species).toBeUndefined();
+    expect(() => transform(person)).toThrow("no species in PID-35");
+  });
+
+  /**
+   * The example's synthetic lab result with PID-35 (species) and PID-36 (breed) set to the given
+   * raw field text, parsed as the channel parses it.
+   */
+  async function vetResult(species: string, breed: string): Promise<Hl7Message> {
+    const raw = await readFile(join(tests, "oru.hl7"), "latin1");
+    const segments = raw.split("\r").map((segment) => {
+      if (!segment.startsWith("PID|")) return segment;
+      const fields = segment.split("|");
+      fields[35] = species;
+      fields[36] = breed;
+      return fields.join("|");
+    });
+    return parseHL7(segments.join("\r"));
+  }
+
+  async function vetTransform(): Promise<(msg: Hl7Message) => unknown> {
+    return (
+      (await import(
+        pathToFileURL(
+          join(ROOT, "examples/vet-lab-to-fhir/channels/vet-results-to-fhir/transform.ts"),
+        ).href
+      )) as { readonly default: (msg: Hl7Message) => unknown }
+    ).default;
+  }
+
+  const BREED = "CAT-DSH^Domestic Shorthair^99COSYTE";
+  const ONE_SPECIES =
+    "PID-35 must hold exactly one species, as one plain code and one plain coding system";
+  const ONE_BREED =
+    "PID-36 must be empty or hold exactly one breed, as one plain code and one plain coding system";
+
+  it.each([
+    ["empty", "", "no species in PID-35"],
+    ["HL7 null", '""', "no species in PID-35"],
+    ["text only, no code", "^Cat^99COSYTE", ONE_SPECIES],
+    ["repeated", "CAT^Cat^99COSYTE~DOG^Dog^99COSYTE", ONE_SPECIES],
+    ["repeated, the first empty", "~DOG^Dog^99COSYTE", ONE_SPECIES],
+    ["uncoded, no coding system", "Cat", ONE_SPECIES],
+    ["a code and text, no coding system", "CAT^Cat", ONE_SPECIES],
+  ])("refuses a lab result whose species is %s", async (_case, species, reason) => {
+    const transform = await vetTransform();
+    const msg = await vetResult(species, BREED);
+    expect(() => transform(msg)).toThrow(reason);
+  });
+
+  it.each([
+    ["text only, no code", "^Domestic Shorthair"],
+    ["text and system, no code", "^Domestic Shorthair^99COSYTE"],
+    ["uncoded, no coding system", "DSH"],
+    ["repeated", "CAT-DSH^Domestic Shorthair^99COSYTE~CAT-MCO^Maine Coon^99COSYTE"],
+  ])("refuses a lab result whose breed is %s", async (_case, breed) => {
+    const transform = await vetTransform();
+    const msg = await vetResult("CAT^Cat^99COSYTE", breed);
+    expect(() => transform(msg)).toThrow(ONE_BREED);
+  });
+
+  it("sends a lab result with one coded species and no breed, and the Bundle has no breed", async () => {
+    const transform = await vetTransform();
+    const out = transform(await vetResult("CAT^Cat^99COSYTE", ""));
+    expect(typeof out).toBe("string");
+    expect(out as string).toContain('"url":"species"');
+    expect(out as string).not.toContain('"url":"breed"');
+  });
+
+  it.each([
+    ["two codes in subcomponents", "CAT&DOG^Cat^99COSYTE", ONE_SPECIES],
+    ["the HL7 null as its code", '""^Cat^99COSYTE', ONE_SPECIES],
+    ["the HL7 null as its coding system", 'CAT^Cat^""', ONE_SPECIES],
+    ["an escaped repetition separator in its code", "CAT\\R\\DOG^Cat^99COSYTE", ONE_SPECIES],
+    ["an escaped component separator in its code", "CAT\\S\\X^Cat^99COSYTE", ONE_SPECIES],
+    ["a hex escape in its code", "C\\X41\\T^Cat^99COSYTE", ONE_SPECIES],
+    ["two coding systems in subcomponents", "CAT^Cat^99COSYTE&99OTHER", ONE_SPECIES],
+    ["two texts in subcomponents", "CAT^Cat&Dog^99COSYTE", ONE_SPECIES],
+    ["an alternate code after the coding system", "CAT^Cat^99COSYTE^FEL^Feline^99X", ONE_SPECIES],
+  ])("refuses a lab result whose species has %s", async (_case, species, reason) => {
+    const transform = await vetTransform();
+    const msg = await vetResult(species, BREED);
+    expect(() => transform(msg)).toThrow(reason);
+  });
+
+  it.each([
+    ["two codes in subcomponents", "CAT-DSH&CAT-MCO^Domestic Shorthair^99COSYTE"],
+    ["the HL7 null as the whole field", '""'],
+    ["the HL7 null as its code", '""^x^99COSYTE'],
+    ["the HL7 null as its coding system", 'CAT-DSH^Domestic Shorthair^""'],
+    ["an escaped component separator in its code", "CAT\\S\\DSH^Domestic Shorthair^99COSYTE"],
+  ])("refuses a lab result whose breed has %s", async (_case, breed) => {
+    const transform = await vetTransform();
+    const msg = await vetResult("CAT^Cat^99COSYTE", breed);
+    expect(() => transform(msg)).toThrow(ONE_BREED);
+  });
+
+  /** The example's synthetic lab result, as raw text with its segments split. */
+  async function vetSegments(): Promise<string[]> {
+    return (await readFile(join(tests, "oru.hl7"), "latin1")).split("\r").filter(Boolean);
+  }
+
+  /**
+   * A person's lab result from `@cosyte/synth` (the same seed with no animal subject): its PID has no
+   * species or breed, and its OBR and OBX segments are the person's results.
+   */
+  const personSegments = (): string[] =>
+    generateOru({ seed: 4821 }).toString().split("\r").filter(Boolean);
+  const ONE_PID = "the message must hold exactly one PID segment";
+
+  it("refuses a lab result with a person's patient group after the animal's", async () => {
+    const transform = await vetTransform();
+    const segments = await vetSegments();
+    const person = personSegments();
+    const group = person.slice(person.findIndex((segment) => segment.startsWith("PID|")));
+    expect(group.some((segment) => segment.startsWith("OBX|"))).toBe(true);
+    segments.push(...group);
+    expect(() => transform(parseHL7(segments.join("\r")))).toThrow(ONE_PID);
+  });
+
+  it("refuses a lab result with a person's PID right after the animal's", async () => {
+    const transform = await vetTransform();
+    const segments = await vetSegments();
+    const at = segments.findIndex((segment) => segment.startsWith("PID|"));
+    const personPid = personSegments().find((segment) => segment.startsWith("PID|")) ?? "";
+    expect(personPid).not.toBe("");
+    segments.splice(at + 1, 0, personPid);
+    expect(() => transform(parseHL7(segments.join("\r")))).toThrow(ONE_PID);
+  });
+
+  it("refuses a lab result with a dog's PID after the cat's", async () => {
+    const transform = await vetTransform();
+    const segments = await vetSegments();
+    const cat = segments.find((segment) => segment.startsWith("PID|")) ?? "";
+    const dog = cat
+      .replace("CAT^Cat^99COSYTE", "DOG^Dog^99COSYTE")
+      .replace("CAT-DSH^Domestic Shorthair", "DOG-LAB^Labrador Retriever");
+    expect(dog).toContain("DOG^Dog^99COSYTE");
+    segments.push(dog);
+    expect(() => transform(parseHL7(segments.join("\r")))).toThrow(ONE_PID);
+  });
+
+  it.each([
+    ["absent", ""],
+    ["the HL7 null", '""'],
+  ])("refuses a lab result whose control id (MSH-10) is %s", async (_case, controlId) => {
+    const transform = await vetTransform();
+    const segments = (await vetSegments()).map((segment) => {
+      if (!segment.startsWith("MSH|")) return segment;
+      const fields = segment.split("|");
+      fields[9] = controlId;
+      return fields.join("|");
+    });
+    expect(() => transform(parseHL7(segments.join("\r")))).toThrow(
+      "MSH-10 must hold the message's control id",
+    );
+  });
+
+  it.each([
+    ["one space", " "],
+    ["spaces and a tab", "  \t "],
+  ])("refuses a lab result whose control id (MSH-10) is %s", async (_case, controlId) => {
+    const transform = await vetTransform();
+    const segments = (await vetSegments()).map((segment) => {
+      if (!segment.startsWith("MSH|")) return segment;
+      const fields = segment.split("|");
+      fields[9] = controlId;
+      return fields.join("|");
+    });
+    expect(() => transform(parseHL7(segments.join("\r")))).toThrow(
+      "MSH-10 must hold the message's control id",
+    );
+  });
+
+  /** The person's OBR and OBX segments, from the same `@cosyte/synth` seed with no animal subject. */
+  const personResults = (): string[] =>
+    personSegments().filter((segment) => segment.startsWith("OBR|") || segment.startsWith("OBX|"));
+
+  it.each([
+    ["lower case", "msh"],
+    ["upper case", "MSH"],
+    ["mixed case", "Msh"],
+  ])(
+    "refuses a lab result followed by a second MSH in %s and a person's OBR and OBX",
+    async (_case, id) => {
+      const transform = await vetTransform();
+      const segments = await vetSegments();
+      const header = personSegments()[0] ?? "";
+      expect(header.startsWith("MSH|")).toBe(true);
+      const results = personResults();
+      expect(results.some((segment) => segment.startsWith("OBX|"))).toBe(true);
+      segments.push(`${id}${header.slice(3)}`, ...results);
+      const msg = parseHL7(segments.join("\r"));
+      expect(msg.segments("MSH")).toHaveLength(2);
+      expect(msg.segments("PID")).toHaveLength(1);
+      expect(() => transform(msg)).toThrow("the message must hold exactly one MSH segment");
+    },
+  );
+
+  it.each([
+    ["a PV1", "PV1|1|O"],
+    ["a lower case pv1", "pv1|1|O"],
+    ["a PD1", "PD1|||SYNTH CLINIC"],
+    ["a PV2", "PV2|||SYNTH^Synthetic visit"],
+    ["an NK1", "NK1|1|Testerson^Sampleton|OWN^Owner^HL70063"],
+  ])(
+    "refuses a lab result with %s after an OBX, followed by another OBR and OBX",
+    async (_case, segment) => {
+      const transform = await vetTransform();
+      const segments = await vetSegments();
+      segments.push(segment, ...personResults());
+      const msg = parseHL7(segments.join("\r"));
+      expect(msg.segments("PID")).toHaveLength(1);
+      expect(msg.segments("MSH")).toHaveLength(1);
+      expect(() => transform(msg)).toThrow(
+        "no patient or visit segment (PID, PD1, NK1, PV1, PV2) may follow the first OBR",
+      );
+    },
+  );
+
+  /** The example's synthetic lab result under the delimiters `|#~\&`: `#` separates components. */
+  async function underHash(species: string): Promise<Hl7Message> {
+    const segments = (await vetSegments()).map((segment) => {
+      if (!segment.startsWith("PID|")) return segment;
+      const fields = segment.split("|");
+      fields[35] = species;
+      return fields.join("|");
+    });
+    return parseHL7(segments.join("\r").replaceAll("^", "#"));
+  }
+
+  it("reads PID-35 under the message's own delimiters", async () => {
+    const transform = await vetTransform();
+    const plain = await underHash("CAT^Cat^99COSYTE");
+    expect(plain.patient?.species?.identifier).toBe("CAT");
+    expect(typeof transform(plain)).toBe("string");
+    const subcomponents = await underHash("CAT&DOG^Cat^99COSYTE");
+    expect(() => transform(subcomponents)).toThrow(ONE_SPECIES);
+    const escaped = await underHash("CAT\\S\\DOG^Cat^99COSYTE");
+    expect(() => transform(escaped)).toThrow(ONE_SPECIES);
+  });
 });

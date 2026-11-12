@@ -134,3 +134,21 @@ ID 938684432
 ID 939444328
 ID 944242221
 ID 979100162
+
+# --- The veterinary example, examples/vet-lab-to-fhir ---
+# Its HL7 v2 messages come from @cosyte/synth 0.1.10 (generateOru and generateAdt
+# with subject "animal", each with a fixed seed), and its expected FHIR Bundle is
+# made from them: invented pet and owner name words, the pets' dates of birth,
+# record numbers, and 15-digit microchip numbers that begin 999, declared here
+# one by one.
+NAME RANDOMIR
+NAME SAMPLESNOUT
+NAME SAMPLETON
+NAME STUBTAIL
+NAME TESTERSON
+DOB 20061127
+DOB 20080719
+ID 73688379
+ID 77039870
+ID 999137940216763
+ID 999716294519549

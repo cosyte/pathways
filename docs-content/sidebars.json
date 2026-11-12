@@ -12,7 +12,8 @@
         "example-file-to-sftp",
         "example-hl7-to-fhir",
         "example-filter-and-route",
-        "example-replay-after-failure"
+        "example-replay-after-failure",
+        "example-vet-lab-to-fhir"
       ]
     },
     {
@@ -25,6 +26,7 @@
         "use-the-message-context",
         "test-a-channel",
         "make-sample-messages",
+        "route-a-veterinary-lab-result",
         "read-and-write-files",
         "read-and-write-amazon-s3",
         "read-and-write-azure-blob-storage",
