@@ -1,11 +1,19 @@
-import { readdir, readFile, writeFile } from "node:fs/promises";
+import { readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { ChannelConfig, ProjectConfig } from "../config/schema.js";
 import { transformConfigFor } from "../config/transform-config.js";
+import { once, splitPieces } from "../connectors/batch.js";
 import type { Env } from "../connectors/endpoint.js";
-import { ChannelWorker, TransformLoadError } from "../engine/channel-worker.js";
-import type { FailureSummary } from "../engine/worker-entry.js";
+import {
+  ChannelWorker,
+  destinationLabel,
+  destinationSetups,
+  TransformLoadError,
+  type DestinationResult,
+} from "../engine/channel-worker.js";
+import { formatTable, type DestinationSetup, type FailureSummary } from "../engine/worker-entry.js";
+import { processEnv } from "../env.js";
 
 /** Options for {@link runChannelTests}. */
 export interface ChannelTestOptions {
@@ -44,11 +52,36 @@ export function expectedName(input: string): string {
   return dot <= 0 ? `${input}.expected` : `${input.slice(0, dot)}.expected${input.slice(dot)}`;
 }
 
+/** Each format's file extension, as the registry gives it. */
+const EXTENSIONS = formatTable("extension");
+
+/**
+ * What one destination expects for `input`, on a channel with destination transforms:
+ * `<input without its extension>.expected.<destination name, or its place from 1>.<the extension of
+ * the destination's format>`.
+ *
+ * @example
+ * ```ts
+ * destinationExpectedName("a01.hl7", { index: 0, name: "lab", kind: "file", format: "fhir", transformFile: undefined }); // "a01.expected.lab.json"
+ * ```
+ */
+export function destinationExpectedName(input: string, destination: DestinationSetup): string {
+  const dot = input.lastIndexOf(".");
+  const stem = dot <= 0 ? input : input.slice(0, dot);
+  return `${stem}.expected.${destinationLabel(destination)}.${EXTENSIONS[destination.format]}`;
+}
+
 /**
  * Runs every input in each channel's `tests/` folder through the channel's transform, in the same
- * worker the engine uses, and compares the output with the saved `<name>.expected.<ext>`, byte for
+ * worker the engine uses (for a channel whose source reads batches, each piece of the input, cut as
+ * the source cuts it, and every piece's outputs together), and compares the output with the saved `<name>.expected.<ext>`, byte for
  * byte, whatever the channel's format. A message the transform filters out expects an empty file;
  * several outputs are joined by a newline.
+ *
+ * On a channel with destination transforms, each destination's outputs are compared with a file of
+ * their own, `<name>.expected.<destination name or place from 1>.<ext>` (see
+ * {@link destinationExpectedName}), and a missing file expects that destination to filter the
+ * input out; with `update`, a destination that filtered it has its file removed.
  *
  * Each transform gets the context of a message that is not stored (`messageId` 0, run 1, no source
  * facts) with its channel's configuration, read from the environment as the engine reads it.
@@ -77,11 +110,8 @@ export async function runChannelTests(
       continue;
     }
 
-    const config = transformConfigFor(
-      { config: options.project?.config ?? {} },
-      channel,
-      options.env ?? process.env,
-    );
+    const env = options.env ?? processEnv();
+    const config = transformConfigFor({ config: options.project?.config ?? {} }, channel, env);
     if (!("resolved" in config)) {
       options.out(`FAIL ${channel.name}: ${describeFailure(config, channel)}`);
       failed += inputs.length;
@@ -92,9 +122,12 @@ export async function runChannelTests(
       transformFile: channel.transform,
       format: channel.format,
       csv: channel.csv,
+      hl7v2: channel.hl7v2,
+      xml: channel.xml,
       timeoutMs: channel.settings.timeoutMs,
       memoryMb: channel.settings.memoryMb,
       config: config.resolved,
+      destinations: destinationSetups(channel),
     });
     try {
       await worker.start();
@@ -109,10 +142,30 @@ export async function runChannelTests(
     try {
       for (const input of inputs) {
         const label = `${channel.name}/tests/${input}`;
-        const outcome = await worker.run(new Uint8Array(await readFile(join(testsDir, input))));
-        if (!outcome.ok) {
-          options.out(`FAIL ${label}: ${describeFailure(outcome.failure, channel)}`);
+        const outcome = await runInput(
+          worker,
+          channel,
+          new Uint8Array(await readFile(join(testsDir, input))),
+        );
+        if (typeof outcome === "string") {
+          options.out(`FAIL ${label}: ${outcome}`);
           failed += 1;
+          continue;
+        }
+        const setups = destinationSetups(channel);
+        if (setups !== undefined) {
+          const counted = await compareDestinations({
+            label,
+            input,
+            testsDir,
+            channel,
+            setups,
+            results: outcome.destinations,
+            options,
+          });
+          passed += counted.passed;
+          failed += counted.failed;
+          updated += counted.updated;
           continue;
         }
         const actual = joinOutputs(outcome.outputs);
@@ -147,6 +200,129 @@ export async function runChannelTests(
   }
 
   return { passed, failed, updated };
+}
+
+/** What {@link compareDestinations} compares: one input's results, one per destination. */
+interface DestinationComparison {
+  readonly label: string;
+  readonly input: string;
+  readonly testsDir: string;
+  readonly channel: ChannelConfig;
+  readonly setups: readonly DestinationSetup[];
+  /** One per destination; set whenever the worker was given destinations. */
+  readonly results: readonly DestinationResult[] | undefined;
+  readonly options: ChannelTestOptions;
+}
+
+/** Compares, or saves, each destination's outputs for one input: one line and one count each. */
+async function compareDestinations(comparison: DestinationComparison): Promise<ChannelTestSummary> {
+  const { label, input, testsDir, channel, setups, results, options } = comparison;
+  let passed = 0;
+  let failed = 0;
+  let updated = 0;
+  for (const setup of setups) {
+    const result = results?.[setup.index];
+    const name = destinationLabel(setup);
+    const expectedFile = destinationExpectedName(input, setup);
+    const where = `${label} -> ${name}`;
+    /* v8 ignore next 4 -- the worker replies for every destination it was given */
+    if (result === undefined) {
+      failed += 1;
+      continue;
+    }
+    if (!result.ok) {
+      options.out(`FAIL ${where}: ${describeFailure(result.failure, channel)}`);
+      failed += 1;
+      continue;
+    }
+    const filtered = result.outputs.length === 0;
+    if (options.update) {
+      if (filtered) {
+        await rm(join(testsDir, expectedFile), { force: true });
+        options.out(`UPDATED ${where}: filtered, no ${expectedFile}`);
+      } else {
+        await writeFile(join(testsDir, expectedFile), joinOutputs(result.outputs));
+        options.out(`UPDATED ${where} -> ${expectedFile}`);
+      }
+      updated += 1;
+      continue;
+    }
+    let expected: Uint8Array | undefined;
+    try {
+      expected = new Uint8Array(await readFile(join(testsDir, expectedFile)));
+    } catch {
+      expected = undefined;
+    }
+    if (expected === undefined) {
+      if (filtered) {
+        options.out(`PASS ${where} (filtered)`);
+        passed += 1;
+      } else {
+        options.out(
+          `FAIL ${where}: no ${expectedFile}, which expects this destination to filter the input out; run "pathways test --update" to save the current output`,
+        );
+        failed += 1;
+      }
+      continue;
+    }
+    if (filtered) {
+      options.out(`FAIL ${where}: filtered, and ${expectedFile} expects an output`);
+      failed += 1;
+      continue;
+    }
+    const actual = joinOutputs(result.outputs);
+    if (Buffer.from(actual).equals(Buffer.from(expected))) {
+      options.out(`PASS ${where}`);
+      passed += 1;
+    } else {
+      options.out(`FAIL ${where}: ${firstDifference(actual, expected)} (${expectedFile})`);
+      failed += 1;
+    }
+  }
+  return { passed, failed, updated };
+}
+
+/** What one input came to: every output, and, with destination transforms, each destination's. */
+interface InputResult {
+  readonly outputs: readonly Uint8Array[];
+  readonly destinations?: readonly DestinationResult[] | undefined;
+}
+
+/**
+ * Runs one input through the worker: whole, or, for a channel whose source reads batches, each
+ * piece the source would cut it into, in order, every piece's outputs together (per destination
+ * too: a destination's outputs from every piece, or the first piece it failed on). The outputs, or
+ * what failed in words.
+ */
+async function runInput(
+  worker: ChannelWorker,
+  channel: ChannelConfig,
+  body: Uint8Array,
+): Promise<InputResult | string> {
+  const { source } = channel;
+  const batch = source.kind === "file" || source.kind === "http" ? source.batch : undefined;
+  if (batch === undefined) {
+    const outcome = await worker.run(body);
+    return outcome.ok ? outcome : describeFailure(outcome.failure, channel);
+  }
+  const outputs: Uint8Array[] = [];
+  let destinations: DestinationResult[] | undefined;
+  for await (const piece of splitPieces(once(body), batch)) {
+    const at = `piece ${String(piece.index + 1)}`;
+    if (piece.failure !== undefined) return `${at} could not be read (${piece.failure})`;
+    const outcome = await worker.run(piece.body);
+    if (!outcome.ok) return `${at}: ${describeFailure(outcome.failure, channel)}`;
+    outputs.push(...outcome.outputs);
+    if (outcome.destinations === undefined) continue;
+    destinations = outcome.destinations.map((result, index) => {
+      const before = destinations?.[index];
+      if (before === undefined) return result;
+      if (!before.ok) return before;
+      if (!result.ok) return result;
+      return { ok: true, outputs: [...before.outputs, ...result.outputs] };
+    });
+  }
+  return { outputs, destinations };
 }
 
 async function testInputs(dir: string): Promise<string[] | undefined> {

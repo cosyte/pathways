@@ -1,0 +1,28 @@
+# yaml-language-server: $schema=../../node_modules/@cosyte/pathways/schema/channel.json
+
+# Read HL7 v2 files from a folder, turn each admission, registration and update into a FHIR Patient,
+# and POST it to a FHIR server.
+name: adt-to-fhir
+
+# What comes in: the transform receives each message parsed by @cosyte/hl7.
+format: hl7v2
+
+source:
+  file:
+    dir: ../../data/adt-to-fhir/in
+
+transform: ./transform.ts
+
+destinations:
+  - http:
+      url: { env: FHIR_URL, default: "http://127.0.0.1:8080/fhir/Patient" }
+      headers:
+        # The channel's format names what comes in, so set the type of what goes out.
+        Content-Type: application/fhir+json
+      # The receiver in scripts/receiver.ts answers plain HTTP on the loopback. A FHIR server is
+      # an https:// URL, which needs no plaintext line.
+      plaintext: true
+      # The receiver is on this machine, an address the destination refuses unless it is named
+      # here. A real endpoint on the public internet needs no allowNetworks line; one on a private
+      # network, such as 10.20.0.0/16, needs that network named here.
+      allowNetworks: [127.0.0.1]

@@ -2,13 +2,13 @@
 id: send-and-receive-http
 title: Send and receive messages over HTTP
 sidebar_label: HTTP
-description: "Take each POST or PUT over HTTPS as one message, with a bearer token or mutual TLS, answered as you choose, and POST each output to a URL."
+description: "Take each POST or PUT over HTTPS as one message, with a bearer token or mutual TLS, answered as you choose, and send each output to a URL by the method you set."
 ---
 
 # Send and receive messages over HTTP
 
 The HTTP source takes the body of each POST (or PUT, when you allow it) as one message. The HTTP
-destination POSTs each output to a URL. Both run over HTTPS unless the block says `plaintext: true`,
+destination sends each output to a URL, by POST unless you name another method. Both run over HTTPS unless the block says `plaintext: true`,
 and both work with any format.
 
 ## Take messages over HTTPS
@@ -118,7 +118,8 @@ destinations:
 - The message is stored first, and the ACK is sent only once it is: `AA`, built the way the
   [MLLP source](./send-and-receive-mllp.md) builds it, with MSA-2 echoing the message's MSH-10.
 - A message with no usable MSH header (none that parses, no MSH-10, or more than one message in the
-  body) is stored as failed and answered `AE`, at 200. The engine logs `http-unreadable` with the
+  body: a second `MSH`, `FHS` or `BHS` header in any letter case) is stored as failed and answered
+  `AE`, at 200. A body is one message. The engine logs `http-unreadable` with the
   message id and the problem's code.
 - The request's `Content-Type` must be `x-application/hl7-v2+er7` or `application/hl7-v2`, in any
   letter case, with any parameters. The ACK goes back in the same one, with `charset=utf-8`, or
@@ -176,7 +177,7 @@ destinations:
 
 Refusals and a store failure are answered as in the table above.
 
-## POST each output to a URL
+## Send each output to a URL
 
 ```yaml title="channels/adt-to-fhir/channel.yaml"
 source:
@@ -207,6 +208,77 @@ destinations:
   of attempts before, such as `1`. The body is the same either way. See
   [Delivery and errors](./delivery-and-errors.md#a-resend-after-a-crash-is-flagged).
 
+## Choose the method, fill the URL, and name each output
+
+```yaml title="channels/orders-out/channel.yaml"
+source:
+  file: { dir: ../../data/orders-out/in }
+transform: ./transform.ts
+destinations:
+  - http:
+      url: https://orders.example.com/patients/{mrn}/orders
+      method: PUT
+      query:
+        visit: "{visit}"
+        source: pathways
+      idempotencyHeader: Idempotency-Key
+      headers:
+        Authorization: { env: ORDERS_AUTH }
+```
+
+- **`method`** is `POST` (the default), `PUT`, `PATCH`, `DELETE` or `GET`. `GET` and `DELETE` send no
+  body and no `Content-Type`.
+- **A placeholder**, a [`ctx.meta`](./use-the-message-context.md) key in braces such as `{mrn}`, may
+  stand in the URL's path and in each `query` value. Each message's own value fills it,
+  percent-encoded: `SYN/0001` becomes `SYN%2F0001`, so it stays one path segment, and no value can
+  change the scheme, the host or the port. A placeholder in the host, the port or the URL's own
+  query is refused when the configuration loads; put query values in `query:`.
+- **A message that cannot fill the URL** fails that delivery for good, and the destination moves on:
+  a key its metadata lacks (`rejected: URL_TEMPLATE_MISSING mrn`), an empty value in the path
+  (`URL_TEMPLATE_EMPTY`), a value of `.` or `..`, which would move the path (`URL_TEMPLATE_REFUSED`),
+  or text that cannot be encoded (`URL_TEMPLATE_ENCODING`). The error names the key, never the
+  value.
+- **The metadata** is the message's stored `ctx.meta`. In this release nothing sets it yet (see
+  [Use the message context](./use-the-message-context.md)), so a URL with a placeholder fails each
+  delivery until it is.
+- **`idempotencyHeader`** names a header sent on every attempt, `<messageId>-<seq>` such as `12-0`,
+  the same for each attempt of one output, so a receiver that keeps idempotency keys drops a copy
+  it already has.
+
+:::warning
+A value in a URL is written to the server's access log, and to the log of any proxy on the way.
+Fill a URL with an identifier such as an MRN only when the receiver's API asks for it there, and
+send the rest in the body.
+:::
+
+## Allow a destination on your own network
+
+Every connection the destination opens is checked against the address it connects to, at each
+connect, so a name that once resolved to a public address and now resolves to an internal one (DNS
+rebinding) is caught too. These are refused unless the destination allows them:
+
+- loopback: `127.0.0.0/8` and `::1`;
+- link-local: `169.254.0.0/16` and `fe80::/10`, where cloud metadata services answer;
+- private: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10` and `fc00::/7`;
+- unspecified: `0.0.0.0/8` and `::`.
+
+A refused connection is retried, with the code `ADDRESS_REFUSED`, until the configuration changes.
+List the networks a destination may reach in `allowNetworks`, each an address or a CIDR range:
+
+```yaml title="channels/adt-to-lab/channel.yaml"
+source:
+  file: { dir: ../../data/adt-to-lab/in }
+destinations:
+  - http:
+      url: https://lab.internal.example.com/hl7
+      allowNetworks: [10.20.0.0/16]
+```
+
+A name that resolves to both refused and allowed addresses connects to an allowed one. The webhook
+hook is not checked this way.
+
+## What the answer does
+
 The answer decides what happens:
 
 | The server answers                                     | The delivery                                                      |
@@ -229,6 +301,104 @@ Redirects are not followed, since following one could send a message to a host n
 every 5 minutes, and the engine logs `delivery-redirected` and sends hooks a `delivery-redirected`
 event, each naming the status and the host the `Location` names, never its path or query. Fix the
 destination's `url` and the queue moves on. The response body is read and dropped, never logged.
+
+## Settle by an HL7 v2 XML acknowledgement
+
+Some web services take HL7 v2 in the XML encoding and answer each POST, on the same connection, with
+an XML acknowledgement: an `ACK` whose `MSA.1` says whether the message was taken. With `ack: xml`,
+the destination reads that answer and settles the delivery by its code, much as an
+[MLLP destination](./send-and-receive-mllp.md) settles one by its ACK, with `AE` and `AR` the
+other way round (see below).
+
+```yaml title="channels/results-to-lab-network/channel.yaml"
+source:
+  file: { dir: ../../data/results-out }
+transform: ./transform.ts
+destinations:
+  - http:
+      url: https://results.example.test/hl7
+      headers:
+        Content-Type: application/xml
+      # The client certificate the service issued to the lab, and the CA its server's is signed by.
+      tls: { ca: service-ca.crt, cert: lab.crt, key: lab.key }
+      ack: xml
+```
+
+| A 2xx answer whose body is                                                            | The delivery                              |
+| ------------------------------------------------------------------------------------- | ----------------------------------------- |
+| an acknowledgement with `AA` or `CA`                                                  | delivered                                 |
+| an acknowledgement with `AE` or `CE`                                                  | retried, coded `ACK_AE` or `ACK_CE`       |
+| an acknowledgement with `AR` or `CR`                                                  | failed for good; the destination moves on |
+| an acknowledgement whose `MSA.2` is not the `MSH.10` sent                             | retried, coded `ACK_CONTROL_ID_MISMATCH`  |
+| not XML, not exactly one acknowledgement, a code not listed, over 1 MiB, or cut short | retried, coded `ACK_UNREADABLE`           |
+
+- **Any other status** is read by the status table above, whatever its body says.
+- **The answer is read within `timeout`**, from connecting to its last byte.
+- **The XML is read safely**: a document type declaration or an entity is refused, and so is a
+  document deeper than 32 elements or one with more than 20,000 nodes. Elements are matched by their
+  local name, so an answer in the HL7 namespace (`urn:hl7-org:v2xml`), one under a prefix and one in
+  no namespace read the same.
+- **One acknowledgement, in one shape.** An answer is read only when the whole document holds
+  exactly one `MSA`, a child of its root element; exactly one `MSA.1`, a child of that `MSA`; at most
+  one `MSA.2`, a child of that `MSA`; and at most one `MSH`. `MSA.1` and `MSA.2` hold text alone, no
+  element and no comment, and the code is one of the six above in upper case with nothing around
+  it: a code with spaces or a line break before or after it, or in lower case such as aa, is not
+  read. Anything else is unreadable and retried, never settled by the first thing found: an
+  answer that also holds a second `MSA` or `MSA.1` at any depth or under any prefix could also be
+  rejecting the message. An answer wrapped in a SOAP envelope, where the `MSA` sits deeper, is
+  unreadable and retried too.
+- **Only `MSA.1` and `MSA.2` are read**, and `MSH.10` of the message sent, to match them. The rest of
+  the answer is dropped, never logged.
+- **The message sent is read once per delivery**, before its first POST, whatever its size, so a
+  result with a large embedded report is checked like a small one, and an attempt after the first
+  does not read it again. It must hold exactly one `MSH`, at any depth, with exactly one `MSH.10`
+  child holding text alone. Two kinds of message sent as XML are not sent at all, and the delivery
+  fails at once, since the same body goes on every attempt and sending it again could only post it
+  to the receiver once more:
+  - XML in any other shape (no `MSH`, a batch with several, or an `MSH` without one `MSH.10`), whose
+    answer could never be matched to it, fails with the reason `SENT_XML_NO_CONTROL_ID`;
+  - XML the reader refuses (not well-formed, not UTF-8, or with a document type declaration or an
+    entity anywhere, even in a CDATA section) fails with the reason `SENT_XML_UNREADABLE`.
+
+  Either is stored as the reason, fires a `delivery-rejected` event, and can be
+  [replayed](./inspect-replay-and-clear-messages.md#replay-a-failed-message) once the transform is
+  fixed.
+
+- **The control ID check is skipped only for a body that is not XML at all**: one that does not open
+  with `<`, after any spaces, tabs, line breaks or byte order mark. So a pipe-delimited HL7 v2 body
+  sent with `ack: xml` is not checked: its answer is settled by its code alone. A destination whose
+  format is `hl7v2` or `text` sends whichever text its transform returns, pipe-delimited or XML, so
+  that cannot be told at load. A destination whose format is `fhir`, `x12`, `ccda`, `json` or `csv`
+  is refused at load with `ack: xml`, since what it sends is not an HL7 v2 message. So is one whose
+  `method` is `GET` or `DELETE`, since it sends no body for the acknowledgement to answer.
+- **The body is sent as the transform returned it.** Writing the message in the v2 XML encoding is
+  the transform's work; `ack: xml` reads the answer only.
+  [Send a lab result as v2 XML over HTTPS](./send-a-lab-result-as-v2-xml.md) writes it with
+  `toHl7Xml` from `@cosyte/hl7`, in a project to copy.
+
+### For the animal diagnostic lab network
+
+This setting follows the public description of how labs in the US National Animal Health Laboratory
+Network send results to USDA APHIS: an HTTPS web-service call that carries one message in the HL7
+v2.6 XML encoding, answered on the same connection by an XML `ACK_R25` with `AA`, `AE` or `AR`. We
+have not tested it against the network itself: onboarding needs accounts, a lab OID and certificates
+that only a lab holds. Before production, a lab sends test messages to the network's test endpoint
+until each comes back `AA`, as the network's onboarding asks.
+
+Where the network's public documents and this setting differ, or say nothing:
+
+- `AE` and `CE` are retried and `AR` and `CR` fail the delivery, following the network's public
+  description of the exchange. This is the other way round from the
+  [MLLP destination](./send-and-receive-mllp.md), where `AE` fails and `AR` is retried. A failed
+  delivery waits for someone to replay it, so a lost result is the larger harm; the retries after an
+  `AE` stop where the destination's [`retry`](./configuration-reference.md#retry) settings say,
+  and an exhausted delivery can be
+  [replayed](./inspect-replay-and-clear-messages.md#replay-a-failed-message) once the message or
+  the transform is fixed.
+- The destination always POSTs. A public walkthrough of one lab system shows it sending with PUT and
+  an account's credentials in headers; the network's quick guide asks only for an HTTPS web-service
+  call. Send credentials with `headers`, read from a secret (see [Read secrets](./read-secrets.md)),
+  and confirm the method with the network before relying on POST.
 
 ## Related
 

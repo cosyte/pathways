@@ -1,20 +1,52 @@
 import { Worker } from "node:worker_threads";
 
+import type { Logger } from "pino";
+
+import type { ChannelConfig } from "../config/schema.js";
 import { ownsBuffer } from "../storage/ownership.js";
 import type {
   CsvSettings,
+  DestinationReply,
+  DestinationSetup,
   FailureSummary,
+  Hl7v2Settings,
   MessageContext,
+  RoutedMessage,
+  ScriptLogMessage,
+  StopReply,
+  StopRequest,
   TransformReply,
   TransformRequest,
   WorkerFormat,
   WorkerHello,
   WorkerSetup,
+  XmlSettings,
 } from "./worker-entry.js";
 
-/** The result of one message's transform. */
+/**
+ * What one destination's transform gave for one message: its outputs, none when it filtered the
+ * message for that destination, or why it failed, which fails that destination's delivery only.
+ *
+ * @example
+ * ```ts
+ * const filtered = (result: DestinationResult): boolean => result.ok && result.outputs.length === 0;
+ * ```
+ */
+export type DestinationResult = DestinationReply;
+
+/**
+ * The result of one message's transform. `destinations` is set on a channel with destination
+ * transforms: one result per destination, in order, a destination without a transform holding the
+ * channel's `outputs`.
+ */
 export type TransformOutcome =
-  | { readonly ok: true; readonly outputs: readonly Uint8Array[] }
+  | {
+      readonly ok: true;
+      readonly outputs: readonly Uint8Array[];
+      readonly destinations?: readonly DestinationResult[];
+      /** What the transform handed to other channels with `ctx.route`, in order; none when unset. */
+      readonly routes?: readonly RoutedMessage[];
+    }
   | { readonly ok: false; readonly failure: FailureSummary };
 
 /**
@@ -32,17 +64,69 @@ export type TransformOutcome =
 export class TransformLoadError extends Error {
   readonly channel: string;
   readonly failure: FailureSummary;
+  /** The destination whose transform failed to load, by index and `name:`; absent for the channel's. */
+  readonly destination: { readonly index: number; readonly name: string | undefined } | undefined;
 
   /**
    * @param channel The channel whose transform failed to load.
    * @param failure What went wrong, without message content.
+   * @param destination The destination whose own transform it was, if it was one.
    */
-  constructor(channel: string, failure: FailureSummary) {
-    super(`the transform of channel ${channel} could not be loaded (${failure.name})`);
+  constructor(
+    channel: string,
+    failure: FailureSummary,
+    destination?: { readonly index: number; readonly name: string | undefined },
+  ) {
+    super(
+      destination === undefined
+        ? `the transform of channel ${channel} could not be loaded (${failure.name})`
+        : `the transform of destination ${destinationLabel(destination)} of channel ${channel} could not be loaded (${failure.name})`,
+    );
     this.name = "TransformLoadError";
     this.channel = channel;
     this.failure = failure;
+    this.destination = destination;
   }
+}
+
+/**
+ * How a destination is named in a message: its `name:`, else its place in the list from 1.
+ *
+ * @example
+ * ```ts
+ * destinationLabel({ index: 1, name: undefined }); // "2"
+ * destinationLabel({ index: 0, name: "lab" }); // "lab"
+ * ```
+ */
+export function destinationLabel(destination: {
+  readonly index: number;
+  readonly name: string | undefined;
+}): string {
+  return destination.name ?? String(destination.index + 1);
+}
+
+/**
+ * The destinations a channel's worker runs transforms for, or `undefined` when none of them has a
+ * transform, so a channel without destination transforms runs as it always has.
+ *
+ * @example
+ * ```ts
+ * new ChannelWorker({ ...options, destinations: destinationSetups(channel) });
+ * ```
+ */
+export function destinationSetups(
+  channel: Pick<ChannelConfig, "format" | "destinations">,
+): DestinationSetup[] | undefined {
+  if (!channel.destinations.some((destination) => destination.transform !== undefined)) {
+    return undefined;
+  }
+  return channel.destinations.map((destination, index) => ({
+    index,
+    name: destination.name,
+    kind: destination.kind,
+    format: destination.format ?? channel.format,
+    transformFile: destination.transform,
+  }));
 }
 
 /**
@@ -73,8 +157,28 @@ export interface ChannelWorkerOptions {
    * holds as `config`. Defaults to none.
    */
   readonly config?: Readonly<Record<string, unknown>>;
+  /**
+   * The channel's destinations, given when one of them has a transform: each runs after the
+   * channel's transform, in the same request, under the same timeout and memory cap. Leave it out
+   * when none has one.
+   */
+  readonly destinations?: readonly DestinationSetup[] | undefined;
   /** A `csv` channel's `csv:` block, as validated: how its bodies are read and written. */
   readonly csv?: CsvSettings | undefined;
+  /** An `hl7v2` channel's `hl7v2:` block, as validated: how its bodies are read and written. */
+  readonly hl7v2?: Hl7v2Settings | undefined;
+  /**
+   * How long the module's `onStart` may run on each spawn, and its `onStop` when the worker stops,
+   * in milliseconds. Defaults to `timeoutMs`.
+   */
+  readonly scriptTimeoutMs?: number | undefined;
+  /**
+   * Where the lines `onStart`'s logger writes go, with the channel's name, and where an `onStop`
+   * that failed or ran past its limit is noted. Without it they are dropped.
+   */
+  readonly logger?: Logger | undefined;
+  /** An `xml` channel's `xml:` block, as validated: the caps its bodies are read under. */
+  readonly xml?: XmlSettings | undefined;
   readonly workerUrl?: URL;
 }
 
@@ -114,6 +218,8 @@ export interface RunOptions {
 export class ChannelWorker {
   private readonly options: ChannelWorkerOptions;
   private worker: Worker | undefined;
+  /** Set while a worker is being spawned: its module loading and its `onStart` running. */
+  private starting: Promise<Worker> | undefined;
   private nextId = 1;
   private queue: Promise<unknown> = Promise.resolve();
 
@@ -122,9 +228,25 @@ export class ChannelWorker {
     this.options = options;
   }
 
-  /** Starts the worker and loads the transform. Rejects with {@link TransformLoadError}. */
+  /**
+   * Starts the worker, loads the transform and runs its `onStart`, when it has one. Rejects with
+   * {@link TransformLoadError}, also when `onStart` throws or runs past its limit. Each new worker
+   * runs `onStart` again, a replacement after a timeout or a crash among them.
+   */
   async start(): Promise<void> {
-    this.worker ??= await this.spawn();
+    if (this.worker !== undefined) return;
+    const starting = (this.starting ??= this.spawn());
+    try {
+      const worker = await starting;
+      if (this.starting === starting) this.worker = worker;
+    } finally {
+      if (this.starting === starting) this.starting = undefined;
+    }
+  }
+
+  /** How long `onStart` and `onStop` may run, in milliseconds. */
+  private get scriptTimeoutMs(): number {
+    return this.options.scriptTimeoutMs ?? this.options.timeoutMs;
   }
 
   /**
@@ -141,22 +263,75 @@ export class ChannelWorker {
     return result;
   }
 
-  /** Waits for queued messages, then stops the worker. */
+  /**
+   * Waits for queued messages and for a start under way (its `onStart` is cut at its limit), then
+   * runs the module's `onStop`, when it has one, cut at its limit too, and ends the worker.
+   */
   async stop(): Promise<void> {
     await this.queue;
-    const worker = this.worker;
+    const starting = this.starting;
+    const started = starting === undefined ? undefined : await starting.catch(() => undefined);
+    if (this.starting === starting) this.starting = undefined;
+    const worker = this.worker ?? started;
     this.worker = undefined;
-    if (worker !== undefined) await worker.terminate();
+    if (worker === undefined) return;
+    await this.runOnStop(worker);
+    await worker.terminate();
+  }
+
+  /** Asks the worker to run `onStop`, and waits for it up to the limit; notes a failure or a cut. */
+  private runOnStop(worker: Worker): Promise<void> {
+    const { channel, logger } = this.options;
+    const limitMs = this.scriptTimeoutMs;
+    return new Promise((resolve) => {
+      const finish = (): void => {
+        clearTimeout(timer);
+        worker.off("message", onReply);
+        worker.off("error", finish);
+        worker.off("exit", finish);
+        resolve();
+      };
+      const onReply = (reply: unknown): void => {
+        if (!isStopReply(reply)) return;
+        if (reply.failure !== undefined) {
+          const { name, code, where } = reply.failure;
+          logger?.warn({ event: "on-stop-failed", channel, name, code, where });
+        }
+        finish();
+      };
+      const timer = setTimeout(() => {
+        logger?.warn({ event: "on-stop-timeout", channel, limitMs });
+        finish();
+      }, limitMs);
+      worker.on("message", onReply);
+      worker.on("error", finish);
+      worker.on("exit", finish);
+      worker.postMessage({ stop: true } satisfies StopRequest);
+    });
   }
 
   private spawn(): Promise<Worker> {
-    const { channel, transformFile, format, memoryMb } = this.options;
+    const { channel, transformFile, format, memoryMb, logger } = this.options;
     const setup: WorkerSetup = {
       pathwaysWorker: true,
       transformFile,
       format,
       config: this.options.config ?? {},
-      ...(this.options.csv === undefined ? {} : { formatSettings: { csv: this.options.csv } }),
+      ...(this.options.destinations === undefined
+        ? {}
+        : { destinations: this.options.destinations }),
+      channel,
+      ...(this.options.csv === undefined &&
+      this.options.hl7v2 === undefined &&
+      this.options.xml === undefined
+        ? {}
+        : {
+            formatSettings: {
+              ...(this.options.csv === undefined ? {} : { csv: this.options.csv }),
+              ...(this.options.hl7v2 === undefined ? {} : { hl7v2: this.options.hl7v2 }),
+              ...(this.options.xml === undefined ? {} : { xml: this.options.xml }),
+            },
+          }),
     };
     const worker = new Worker(this.options.workerUrl ?? defaultWorkerUrl(), {
       workerData: setup,
@@ -172,20 +347,59 @@ export class ChannelWorker {
     };
     worker.on("error", forget);
     worker.on("exit", forget);
+    // What onStart (or anything else in the worker) logs: a code and numbers, checked again here.
+    worker.on("message", (message: unknown) => {
+      if (!isScriptLog(message)) return;
+      const { level, code, ids } = message.scriptLog;
+      logger?.[level]({ event: "channel-script", channel, code, ids: safeIds(ids) });
+    });
 
     return new Promise((resolve, reject) => {
+      let timer: NodeJS.Timeout | undefined;
       const done = (): void => {
+        clearTimeout(timer);
         worker.off("message", onHello);
         worker.off("error", onError);
         worker.off("exit", onExit);
       };
-      const onHello = (hello: WorkerHello): void => {
+      const onHello = (hello: unknown): void => {
+        if (!isHello(hello)) return;
+        if (hello.hello === "starting") {
+          // onStart runs from here, and is cut at its limit: the worker is ended, as for a load
+          // that failed.
+          const limitMs = this.scriptTimeoutMs;
+          timer = setTimeout(() => {
+            done();
+            void worker.terminate();
+            reject(
+              new TransformLoadError(channel, {
+                kind: "timeout",
+                name: "Timeout",
+                code: "ON_START_TIMEOUT",
+                detail: `onStart ran longer than ${limitMs} ms`,
+              }),
+            );
+          }, limitMs);
+          return;
+        }
         done();
         if (hello.hello === "ready") {
           resolve(worker);
         } else {
           void worker.terminate();
-          reject(new TransformLoadError(channel, hello.failure));
+          const destination =
+            hello.destination === undefined
+              ? undefined
+              : this.options.destinations?.[hello.destination];
+          reject(
+            new TransformLoadError(
+              channel,
+              hello.failure,
+              destination === undefined
+                ? undefined
+                : { index: destination.index, name: destination.name },
+            ),
+          );
         }
       };
       const onError = (error: Error): void => {
@@ -230,10 +444,7 @@ export class ChannelWorker {
         // The transform runs in this worker and can post its own messages through parentPort. Only
         // a reply that carries this message's id settles it; anything else is ignored.
         if (!isReplyTo(reply, id)) return;
-        finish(
-          reply.ok ? { ok: true, outputs: reply.outputs } : { ok: false, failure: reply.failure },
-          false,
-        );
+        finish(reply.ok ? success(reply) : { ok: false, failure: reply.failure }, false);
       };
       const onError = (error: Error): void => {
         finish({ ok: false, failure: describeWorkerError(error, "crash") }, true);
@@ -264,6 +475,62 @@ export class ChannelWorker {
       );
     });
   }
+}
+
+/**
+ * A successful reply as an outcome: a destination without a transform (`null`) holds the channel's
+ * outputs.
+ */
+function success(reply: Extract<TransformReply, { ok: true }>): TransformOutcome {
+  const { outputs, destinations, routes } = reply;
+  const routed = routes === undefined || routes.length === 0 ? {} : { routes };
+  if (destinations === undefined) return { ok: true, outputs, ...routed };
+  return {
+    ok: true,
+    outputs,
+    destinations: destinations.map((result) => result ?? { ok: true, outputs }),
+    ...routed,
+  };
+}
+
+/** Whether a message from the worker is one of its first: starting, ready or load-failed. */
+function isHello(message: unknown): message is WorkerHello {
+  const hello = (message as { hello?: unknown } | null)?.hello;
+  return hello === "starting" || hello === "ready" || hello === "load-failed";
+}
+
+/** Whether a message from the worker is the reply to a stop request. */
+function isStopReply(message: unknown): message is StopReply {
+  return (message as { stopped?: unknown } | null)?.stopped === true;
+}
+
+/** Whether a message from the worker is a line a script logged. */
+function isScriptLog(message: unknown): message is ScriptLogMessage {
+  const line = (message as { scriptLog?: unknown } | null)?.scriptLog as
+    { level?: unknown; code?: unknown; ids?: unknown } | undefined;
+  return (
+    typeof line === "object" &&
+    line !== null &&
+    (line.level === "info" || line.level === "warn" || line.level === "error") &&
+    typeof line.code === "string" &&
+    /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(line.code) &&
+    line.code.length <= 64
+  );
+}
+
+/**
+ * A script log line's ids, checked again on this side: the transform runs in the worker and can post
+ * its own messages, so only finite numbers under plain names, at most 16, reach the log.
+ */
+function safeIds(ids: unknown): Record<string, number> {
+  const kept: Record<string, number> = {};
+  if (typeof ids !== "object" || ids === null) return kept;
+  for (const [name, value] of Object.entries(ids)) {
+    if (Object.keys(kept).length >= 16) break;
+    if (name.length > 64 || !/^[A-Za-z][A-Za-z0-9]*$/.test(name)) continue;
+    if (typeof value === "number" && Number.isFinite(value)) kept[name] = value;
+  }
+  return kept;
 }
 
 /** Whether a message from the worker is the reply to request `id`. */

@@ -1,8 +1,17 @@
 import { z } from "zod";
 
+import { parseNetwork } from "../connectors/address-guard.js";
 import { normalisePath } from "../connectors/http-path.js";
+import { queryValueProblem, templateProblem } from "../connectors/http-template.js";
 import { unknownPlaceholders } from "../connectors/smtp-template.js";
-import { FORMATS, type CsvSettings } from "../engine/worker-entry.js";
+import type { EngineVariable, VariableName } from "../env.js";
+import {
+  ASSUMABLE_CHARSETS,
+  FORMATS,
+  type CsvSettings,
+  type Hl7v2Settings,
+  type XmlSettings,
+} from "../engine/worker-entry.js";
 import { LIFECYCLE_EVENTS, type LifecycleEventType } from "../extensions/events.js";
 import type { JsonValue } from "../transform.js";
 import { cronClass } from "./cron.js";
@@ -330,6 +339,9 @@ const settingsShape = {
     "How long one message's transform may run before it is stopped and the message is marked failed: a duration such as 5s, or a number of milliseconds. Default 5s.",
   ).optional(),
   memory: megabytes.optional(),
+  scriptTimeout: duration(
+    "How long a transform module's onStart may run on each new worker, and its onStop when the worker stops: a duration such as 5s, or a number of milliseconds. Default: the transform timeout.",
+  ).optional(),
   pollInterval: duration(
     "How often the engine looks for new work: a duration such as 1s, or a number of milliseconds. Default 1s. Engine-wide.",
   ).optional(),
@@ -358,6 +370,9 @@ const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 export const HEADER_VALUE = /^[\t\x20-\x7e\x80-\xff]*$/;
 /** Header names that carry a credential, by the words they usually contain. */
 const SECRET_HEADER = /auth|cookie|token|secret|password|key|signature|credential/i;
+/** The methods an HTTP destination sends by. */
+const HTTP_DESTINATION_METHODS = ["POST", "PUT", "PATCH", "DELETE", "GET"] as const;
+
 /** Headers Pathways sets itself, from the request it sends. */
 const MANAGED_HEADERS = new Set([
   "content-length",
@@ -847,6 +862,106 @@ const httpSourceResponse = z
       "How a stored message is answered: ack for an HL7 ACK as HL7 over HTTP sets it (needs format: hl7v2), or { status, contentType, headers, body }. Default: 202 with the message id as JSON.",
   });
 
+/** How a source's `batch:` cuts a file or body: there is no regular-expression cut. */
+const BATCH_SPLITS = ["hl7", "lines", "delimiter"] as const;
+
+/** The longest `delimiter` a batch takes, in characters. */
+const MAX_DELIMITER = 64;
+
+/** What `split` and `delimiter` share between the file and HTTP sources' `batch:` blocks. */
+const batchShape = {
+  split: envable(
+    z.enum(BATCH_SPLITS).meta({
+      description:
+        "How the file or body is cut into messages: hl7 (HL7 v2 messages, batch envelopes and MLLP frames read), lines (one message per line) or delimiter (at each delimiter).",
+    }),
+  ),
+  delimiter: envable(
+    z
+      .string()
+      .min(1)
+      .max(MAX_DELIMITER)
+      .meta({
+        description: `With split: delimiter, the text each message ends at, as UTF-8 bytes, 1 to ${MAX_DELIMITER} characters. YAML's escapes, such as "\\n---\\n", write a control character.`,
+      }),
+  ).optional(),
+};
+
+/** `delimiter` with `split: delimiter` alone, and `onIncomplete` and `holdFor` with `split: hl7`. */
+function batchChecks(
+  value: {
+    readonly split: (typeof BATCH_SPLITS)[number];
+    readonly delimiter?: string | undefined;
+    readonly onIncomplete?: string | undefined;
+    readonly holdFor?: number | undefined;
+  },
+  ctx: z.RefinementCtx,
+): void {
+  if (value.split === "delimiter" && value.delimiter === undefined) {
+    ctx.addIssue({ code: "custom", path: ["delimiter"], message: "split: delimiter needs one" });
+  }
+  if (value.split !== "delimiter" && value.delimiter !== undefined) {
+    ctx.addIssue({ code: "custom", path: ["delimiter"], message: "goes with split: delimiter" });
+  }
+  if (value.split !== "hl7" && value.onIncomplete !== undefined) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["onIncomplete"],
+      message: "goes with split: hl7, whose batch envelope can be incomplete",
+    });
+  }
+  if (
+    value.holdFor !== undefined &&
+    (value.split !== "hl7" || (value.onIncomplete ?? "hold") !== "hold")
+  ) {
+    ctx.addIssue({ code: "custom", path: ["holdFor"], message: "goes with onIncomplete: hold" });
+  }
+}
+
+/** A file source's `batch:`. */
+const fileBatch = z
+  .strictObject({
+    ...batchShape,
+    maxFileSize: bytes
+      .meta({
+        description:
+          "The largest file read as a batch: a size such as 100MB. A larger one is failed whole, with the code BATCH_FILE_TOO_LARGE, and moved aside. Default: no limit.",
+      })
+      .optional(),
+    onIncomplete: envable(
+      z.enum(["hold", "accept", "fail"]).meta({
+        description:
+          "With split: hl7, what a file lacking its BTS or FTS trailer, or whose trailer's count does not match, gets: hold (left claimed for holdFor, as a file still being written, then failed), accept (stored as it is) or fail (failed at once, with the code BATCH_INCOMPLETE, and moved aside). Default hold.",
+      }),
+    ).optional(),
+    holdFor: duration(
+      "How long onIncomplete: hold leaves an incomplete file, from its claim, before it is failed: a duration such as 5m. Default 5m.",
+      { ms: 1, message: 'a duration of at least 1ms, such as "5m"' },
+    ).optional(),
+  })
+  .meta({
+    description:
+      "Read each file as a batch of messages, each stored as a message of its own, rather than as one message.",
+  })
+  .superRefine(batchChecks);
+
+/** An HTTP source's `batch:`. */
+const httpBatch = z
+  .strictObject({
+    ...batchShape,
+    onIncomplete: envable(
+      z.enum(["accept", "fail"]).meta({
+        description:
+          "With split: hl7, what a body lacking its BTS or FTS trailer, or whose trailer's count does not match, gets: accept (stored as it is) or fail (422 with the code BATCH_INCOMPLETE, nothing stored). Default fail.",
+      }),
+    ).optional(),
+  })
+  .meta({
+    description:
+      "Read each body as a batch of messages, each stored as a message of its own, and answer with their ids. An Idempotency-Key header names the request, so a retry stores nothing twice.",
+  })
+  .superRefine(batchChecks);
+
 const httpSource = restate(
   z
     .strictObject({
@@ -881,6 +996,7 @@ const httpSource = restate(
             "Request headers the transform reads in ctx.source.headers, by name. Authorization, Proxy-Authorization and Cookie are never passed. Default: none.",
         })
         .optional(),
+      batch: httpBatch.optional(),
     })
     .meta({
       description:
@@ -904,10 +1020,18 @@ function httpSourceChecks(
     readonly methods?: readonly string[] | undefined;
     readonly response?: z.output<typeof httpSourceResponse> | undefined;
     readonly contextHeaders?: readonly string[] | undefined;
+    readonly batch?: unknown;
   },
   ctx: z.RefinementCtx,
 ): void {
   contextHeaderChecks(value.contextHeaders ?? [], ctx);
+  if (value.batch !== undefined && value.response === "ack") {
+    ctx.addIssue({
+      code: "custom",
+      path: ["batch"],
+      message: "cannot be set alongside response: ack, which answers one message with one ACK",
+    });
+  }
   if (value.path !== undefined && value.paths !== undefined) {
     ctx.addIssue({
       code: "custom",
@@ -1136,22 +1260,89 @@ const httpDestination = restate(
             "A header sent only on a possible duplicate, a resend after an attempt was cut off, its value the number of attempts before. Default: none is sent.",
         }),
       ).optional(),
+      method: envable(
+        z.enum(HTTP_DESTINATION_METHODS).meta({
+          description:
+            "The method each output is sent by: POST, PUT, PATCH, DELETE or GET. GET and DELETE send no body. Default POST.",
+        }),
+      ).optional(),
+      query: z
+        .record(z.string(), envable(z.string()))
+        .meta({
+          description:
+            "Query parameters added to the url's own, each value text that may hold {key} placeholders filled from ctx.meta. Default: none.",
+        })
+        .optional(),
+      idempotencyHeader: envable(
+        z.string().meta({
+          description:
+            "A header sent on every attempt, its value <messageId>-<seq>, the same for every attempt of one output. Default: none is sent.",
+        }),
+      ).optional(),
+      allowNetworks: z
+        .array(envable(z.string()))
+        .meta({
+          description:
+            "The loopback, link-local and private networks this destination may connect to, as addresses or CIDR ranges such as 10.20.0.0/16. Default: none.",
+        })
+        .optional(),
+      ack: envable(
+        z.enum(["xml"]).meta({
+          description:
+            "xml: read each 2xx answer as an HL7 v2 XML acknowledgement and settle by its MSA.1: AA or CA delivered, AR or CR failed, AE or CE (or an answer that is not exactly one acknowledgement or answers another MSH.10) retried. A message sent as XML is read first and, unsent, fails at once: SENT_XML_UNREADABLE when the XML cannot be read, SENT_XML_NO_CONTROL_ID when it holds no single MSH with one MSH.10. Needs the destination's format to be hl7v2 or text, and its method POST, PUT or PATCH: GET and DELETE send no body. Default: the status alone decides.",
+        }),
+      ).optional(),
     })
-    .meta({ description: "POST each output to url." })
+    .meta({ description: "Send each output to url, by POST unless method names another." })
     .superRefine(httpClientChecks)
     .superRefine((value, ctx) => {
-      const name = value.resendHeader;
-      if (name === undefined) return;
-      const at = ["resendHeader"];
-      const taken = Object.keys(value.headers ?? {}).some(
-        (header) => header.toLowerCase() === name.toLowerCase(),
-      );
-      if (!HEADER_NAME.test(name)) {
-        ctx.addIssue({ code: "custom", path: at, message: "not a valid header name" });
-      } else if (MANAGED_HEADERS.has(name.toLowerCase()) || name.toLowerCase() === "content-type") {
-        ctx.addIssue({ code: "custom", path: at, message: "Pathways sets this header itself" });
-      } else if (taken) {
-        ctx.addIssue({ code: "custom", path: at, message: "already set in headers" });
+      const names: [string, string][] = [];
+      if (value.resendHeader !== undefined) names.push(["resendHeader", value.resendHeader]);
+      if (value.idempotencyHeader !== undefined) {
+        names.push(["idempotencyHeader", value.idempotencyHeader]);
+      }
+      for (const [field, name] of names) {
+        const at = [field];
+        const taken = Object.keys(value.headers ?? {}).some(
+          (header) => header.toLowerCase() === name.toLowerCase(),
+        );
+        if (!HEADER_NAME.test(name)) {
+          ctx.addIssue({ code: "custom", path: at, message: "not a valid header name" });
+        } else if (
+          MANAGED_HEADERS.has(name.toLowerCase()) ||
+          name.toLowerCase() === "content-type"
+        ) {
+          ctx.addIssue({ code: "custom", path: at, message: "Pathways sets this header itself" });
+        } else if (taken) {
+          ctx.addIssue({ code: "custom", path: at, message: "already set in headers" });
+        }
+      }
+      if (
+        value.resendHeader !== undefined &&
+        value.idempotencyHeader?.toLowerCase() === value.resendHeader.toLowerCase()
+      ) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["idempotencyHeader"],
+          message: "already named by resendHeader",
+        });
+      }
+      const problem = templateProblem(value.url);
+      if (problem !== undefined) ctx.addIssue({ code: "custom", path: ["url"], message: problem });
+      for (const [name, text] of Object.entries(value.query ?? {})) {
+        const wrong = queryValueProblem(text);
+        if (wrong !== undefined) {
+          ctx.addIssue({ code: "custom", path: ["query", name], message: wrong });
+        }
+      }
+      for (const [index, entry] of (value.allowNetworks ?? []).entries()) {
+        if (parseNetwork(entry) === undefined) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["allowNetworks", index],
+            message: "an address or a CIDR range, such as 10.20.0.0/16",
+          });
+        }
       }
     }),
   (json) => {
@@ -1160,6 +1351,8 @@ const httpDestination = restate(
     const properties = json.properties as Record<string, JsonSchema>;
     const [written] = properties["resendHeader"]?.anyOf as [JsonSchema];
     written.pattern = HEADER_NAME.source;
+    const [key] = properties["idempotencyHeader"]?.anyOf as [JsonSchema];
+    key.pattern = HEADER_NAME.source;
   },
 );
 
@@ -1850,8 +2043,93 @@ const restateKinds =
     json["dependencies"] = { options: ["module"] };
   };
 
-const SOURCE_KINDS = ["file", "http", "mllp", "tcp", "module"] as const;
-const DESTINATION_KINDS = ["file", "http", "mllp", "tcp", "smtp", "module"] as const;
+const SOURCE_KINDS = ["file", "http", "mllp", "tcp", "channel", "module"] as const;
+const DESTINATION_KINDS = ["file", "http", "mllp", "tcp", "smtp", "channel", "module"] as const;
+
+/** A channel's name, as a `channel:` block names another: the rule its folder name follows. */
+const CHANNEL_NAME = /^[a-z0-9][a-z0-9-]*$/;
+
+/**
+ * How many hand-offs in a row a message may come through before the next is refused, by default:
+ * a message taken in by a source has made none, and each `channel:` destination or `ctx.route` adds
+ * one. Past it, the message that would hand over fails with {@link HOP_LIMIT_CODE}, which stops a
+ * loop made through `ctx.route` that the check at start cannot see.
+ */
+export const DEFAULT_MAX_HOPS = 8;
+
+/**
+ * How many messages a channel fed by others may hold waiting for its transform, by default, before
+ * a hand-off into it waits: a channel destination tries again later, and a transform that routes
+ * into it is run again on the next pass. It keeps a stopped or slow channel from growing the store
+ * without bound.
+ */
+export const DEFAULT_MAX_PENDING = 10_000;
+
+/** The code a message fails with when a hand-off would take it past its target's `maxHops`. */
+export const HOP_LIMIT_CODE = "ERR_PATHWAYS_HOP_LIMIT";
+
+/** The code a transform fails with when `ctx.route` names no channel with a `channel:` source. */
+export const UNKNOWN_ROUTE_CODE = "ERR_PATHWAYS_UNKNOWN_ROUTE";
+
+/** The code a channel destination's retry carries while its target holds `maxPending` messages. */
+export const TARGET_FULL_CODE = "ERR_PATHWAYS_TARGET_FULL";
+
+/**
+ * The code a transform fails with when it routes more messages to one target in one run than that
+ * target's `maxPending`: the target could never take them all at once, so waiting would not help.
+ */
+export const TOO_MANY_ROUTES_CODE = "ERR_PATHWAYS_TOO_MANY_ROUTES";
+
+/** A channel source's `channel:` block: messages come from other channels, never from outside. */
+const channelSource = z
+  .strictObject({
+    routed: envable(
+      z.boolean().meta({
+        description:
+          "true when only ctx.route in another channel's transform feeds this channel, so start does not look for a channel destination that names it. Default false.",
+      }),
+    ).optional(),
+    maxPending: envable(
+      z.number().int().positive().meta({
+        description:
+          "How many messages this channel may hold waiting for its transform before a hand-off into it waits and is tried again. Default 10000.",
+      }),
+    ).optional(),
+    maxHops: envable(
+      z.number().int().positive().meta({
+        description:
+          "How many hand-offs in a row a message may have come through to reach this channel; past it the message that would hand over fails with ERR_PATHWAYS_HOP_LIMIT. Default 8.",
+      }),
+    ).optional(),
+  })
+  .meta({
+    description:
+      "Take messages handed over by other channels: a channel destination that names this one, or ctx.route in a transform.",
+  });
+
+/** A channel destination's `channel:` block: each output becomes a new message of another channel. */
+const channelDestination = z
+  .strictObject({
+    name: z
+      .string()
+      .regex(CHANNEL_NAME, "a channel's name: lowercase letters, digits and hyphens")
+      .meta({ description: "The channel each output is handed to: its source is channel: {}." }),
+    carryMeta: z
+      .array(
+        z
+          .string()
+          .regex(
+            /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/,
+            "a ctx.meta key: a letter, then letters, digits, _, . or -, at most 64",
+          ),
+      )
+      .meta({
+        description:
+          "The ctx.meta keys of the message copied to each new message, by name. Default: none; never all of them.",
+      })
+      .optional(),
+  })
+  .meta({ description: "Hand each output to another channel of this project, as a new message." });
 const HOOK_KINDS = ["module", "webhook"] as const;
 
 /**
@@ -2841,20 +3119,36 @@ const source = restate(
           sftp: sftpBlock.optional(),
           s3: s3Block.optional(),
           azblob: azblobBlock.optional(),
+          batch: fileBatch.optional(),
         })
-        .meta({ description: "Read each file dropped into dir as one message." })
+        .meta({
+          description: "Read each file dropped into dir as one message, or with batch, as several.",
+        })
         .superRefine(sftpPaths(["dir", "errorDir"]))
         .superRefine(objectRules("source"))
+        .superRefine((value, ctx) => {
+          if (value.batch === undefined || (value.s3 === undefined && value.azblob === undefined)) {
+            return;
+          }
+          ctx.addIssue({
+            code: "custom",
+            path: ["batch"],
+            message:
+              "goes with a folder or sftp: an s3 or azblob source reads each object as one message",
+          });
+        })
         .optional(),
       http: httpSource.optional(),
       mllp: mllpSource.optional(),
       tcp: tcpSource.optional(),
+      channel: channelSource.optional(),
       module: modulePath.optional(),
       options: moduleOptions.optional(),
       poll: pollBlock.optional(),
     })
     .meta({
-      description: "Where messages come from: exactly one of file, http, mllp, tcp or module.",
+      description:
+        "Where messages come from: exactly one of file, http, mllp, tcp, channel or module.",
     })
     .superRefine(oneKind(SOURCE_KINDS))
     .superRefine(optionsWithModule)
@@ -2865,11 +3159,17 @@ const source = restate(
       ctx.addIssue({
         code: "custom",
         path: ["poll"],
-        message: "goes with file or module: http, mllp and tcp listen rather than poll",
+        message:
+          value.channel === undefined
+            ? "goes with file or module: http, mllp and tcp listen rather than poll"
+            : "goes with file or module: a channel source is handed its messages",
       });
     }),
   restateKinds(SOURCE_KINDS),
 );
+
+/** A destination's `name:`, which `pathways test` puts in a file name. */
+const DESTINATION_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 /** One entry of a channel's `destinations:` list: exactly one kind. */
 const destination = restate(
@@ -2892,6 +3192,7 @@ const destination = restate(
       mllp: mllpDestination.optional(),
       tcp: tcpDestination.optional(),
       smtp: smtpDestination.optional(),
+      channel: channelDestination.optional(),
       module: modulePath.optional(),
       options: moduleOptions.optional(),
       retry: settingsShape.retry,
@@ -2905,10 +3206,34 @@ const destination = restate(
             "Run dry: transform and record each output, mark its delivery dry-run, and never send it or open a connection. Default false.",
         }),
       ).optional(),
+      name: z
+        .string()
+        .regex(
+          DESTINATION_NAME,
+          "lowercase letters, digits and hyphens, starting with a letter or digit, at most 64",
+        )
+        .meta({
+          description:
+            "The destination's name, unique in the channel: lowercase letters, digits and hyphens. Shown by pathways messages show, and named in pathways test's expected files. Default: its place in the list.",
+        })
+        .optional(),
+      transform: path
+        .meta({
+          description:
+            "This destination's own transform module, relative to this file: it runs after the channel's transform, once for each channel output, and returns a message, several, or null to filter this destination for that message. Default: none, the channel's outputs are sent as they are.",
+        })
+        .optional(),
+      format: z
+        .enum(FORMATS)
+        .meta({
+          description:
+            "The format this destination sends: what its transform's return is written in, the extension a file destination writes and the Content-Type an http destination sends. Its transform reads the channel's format. Default: the channel's format.",
+        })
+        .optional(),
     })
     .meta({
       description:
-        "One destination: exactly one of file, http, mllp, tcp, smtp or module, its own retry settings, and dryRun.",
+        "One destination: exactly one of file, http, mllp, tcp, smtp, channel or module, its own retry settings, dryRun, and an optional name, transform and format.",
     })
     .superRefine(oneKind(DESTINATION_KINDS))
     .superRefine(optionsWithModule)
@@ -2924,6 +3249,15 @@ const destination = restate(
             message: `longer than the delivery's timeout (${String(total)}ms), which cuts it off first`,
           });
         }
+      }
+    })
+    .superRefine((value, ctx) => {
+      if (value.timeout !== undefined && value.channel !== undefined) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["timeout"],
+          message: "goes with file, smtp or module: a channel destination hands over in the store",
+        });
       }
     })
     .superRefine((value, ctx) => {
@@ -3109,6 +3443,54 @@ const csvBlock = z
       "How a csv channel reads and writes its bodies: delimiter, quote, escape, header, encoding, newline, pad, escapeFormulas and maxRowLength, or columns for fixed-width lines.",
   });
 
+/** An `hl7v2` channel's `hl7v2:` block. */
+const hl7v2Block = z
+  .strictObject({
+    assumeCharset: z
+      .enum(ASSUMABLE_CHARSETS)
+      .meta({
+        description:
+          "The character set to read and write a message in when its MSH-18 is blank, such as 8859/1. A message that declares MSH-18 keeps its own. Default: none, so a blank MSH-18 means ASCII, and a segment a transform edits in a message with other bytes fails its output.",
+      })
+      .optional(),
+  })
+  .meta({ description: "How an hl7v2 channel reads and writes its bodies: assumeCharset." });
+
+/** An `xml` channel's `xml:` block: the caps a body is read under. */
+const xmlBlock = z
+  .strictObject({
+    maxBytes: z
+      .number()
+      .int()
+      .min(1)
+      .meta({
+        description:
+          "The largest body read, in bytes; a larger one fails with INPUT_SIZE_LIMIT_EXCEEDED. Default: 10485760 (10 MiB).",
+      })
+      .optional(),
+    maxDepth: z
+      .number()
+      .int()
+      .min(1)
+      .meta({
+        description:
+          "How deep elements may nest, the root counting as 1; deeper fails with ELEMENT_DEPTH_LIMIT_EXCEEDED. Default: 1000.",
+      })
+      .optional(),
+    maxElements: z
+      .number()
+      .int()
+      .min(1)
+      .meta({
+        description:
+          "How many elements a body may hold; more fails with NODE_COUNT_LIMIT_EXCEEDED. Default: 1000000.",
+      })
+      .optional(),
+  })
+  .meta({
+    description: "How an xml channel reads its bodies: maxBytes, maxDepth and maxElements.",
+  });
+
 /** `channels/<name>/channel.yaml`. */
 export const channelSchema = restate(
   z
@@ -3128,10 +3510,12 @@ export const channelSchema = restate(
         .enum(FORMATS)
         .meta({
           description:
-            "What the transform receives: hl7v2 (the default), fhir, x12, ccda, json, text, the body unparsed, or csv, a table of rows. MLLP needs hl7v2.",
+            "What the transform receives: hl7v2 (the default), fhir, x12, ccda, json, text, the body unparsed, csv, a table of rows, or xml, a parsed XML document. MLLP needs hl7v2.",
         })
         .optional(),
       csv: csvBlock.optional(),
+      hl7v2: hl7v2Block.optional(),
+      xml: xmlBlock.optional(),
       source,
       transform: path
         .meta({
@@ -3142,12 +3526,27 @@ export const channelSchema = restate(
       destinations: z
         .array(destination)
         .min(1, "at least one destination")
-        .meta({ description: "Where each output goes: at least one destination." }),
+        .meta({ description: "Where each output goes: at least one destination." })
+        .superRefine((entries, ctx) => {
+          const seen = new Set<string>();
+          for (const [index, entry] of entries.entries()) {
+            if (entry.name === undefined) continue;
+            if (seen.has(entry.name)) {
+              ctx.addIssue({
+                code: "custom",
+                path: [index, "name"],
+                message: `${entry.name} names another destination of this channel; each name is used once`,
+              });
+            }
+            seen.add(entry.name);
+          }
+        }),
       hooks,
       // A channel overrides the transform limits, the MLLP defaults and retention; how often the
       // engine polls, and how often it runs retention, are engine-wide.
       timeout: settingsShape.timeout,
       memory: settingsShape.memory,
+      scriptTimeout: settingsShape.scriptTimeout,
       onStoreFailure: settingsShape.onStoreFailure,
       ackTimeout: settingsShape.ackTimeout,
       retention: z
@@ -3208,6 +3607,42 @@ export const channelSchema = restate(
           path: ["csv"],
           message: "a csv: block needs format: csv",
         });
+      }
+      if (channel.xml !== undefined && channel.format !== "xml") {
+        ctx.addIssue({
+          code: "custom",
+          path: ["xml"],
+          message: "an xml: block needs format: xml",
+        });
+      }
+      if (channel.hl7v2 !== undefined && (channel.format ?? "hl7v2") !== "hl7v2") {
+        ctx.addIssue({
+          code: "custom",
+          path: ["hl7v2"],
+          message: "an hl7v2: block needs format: hl7v2",
+        });
+      }
+      // An XML acknowledgement answers an HL7 v2 message, so `ack: xml` needs a destination that
+      // sends one: hl7v2, or text a transform wrote. Any other format says the body is something
+      // else, whose control ID could never be checked.
+      for (const [index, destination] of channel.destinations.entries()) {
+        const sends = destination.format ?? channel.format ?? "hl7v2";
+        if (destination.http?.ack === "xml" && sends !== "hl7v2" && sends !== "text") {
+          ctx.addIssue({
+            code: "custom",
+            path: ["destinations", index, "http", "ack"],
+            message: `an HL7 v2 XML acknowledgement answers HL7 v2 only, and this destination sends ${sends}; set its format to hl7v2 or text, or drop ack`,
+          });
+        }
+        // GET and DELETE send no body, so there is no message for an acknowledgement to answer.
+        const method = destination.http?.method;
+        if (destination.http?.ack === "xml" && (method === "GET" || method === "DELETE")) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["destinations", index, "http", "ack"],
+            message: `${method} sends no body, so there is no message for an HL7 v2 XML acknowledgement to answer; send by POST, PUT or PATCH, or drop ack`,
+          });
+        }
       }
       // MLLP frames HL7 v2 and its ACKs are HL7 v2 messages, so an MLLP endpoint needs that format.
       if ((channel.format ?? "hl7v2") === "hl7v2") return;
@@ -3281,6 +3716,11 @@ export interface Settings {
   readonly timeoutMs: number;
   /** The memory cap of the channel's transform worker, in megabytes. */
   readonly memoryMb: number;
+  /**
+   * How long the transform module's `onStart` may run on each new worker, and its `onStop` when the
+   * worker stops, in milliseconds. Unset, it is `timeoutMs`.
+   */
+  readonly scriptTimeoutMs?: number | undefined;
   /** How often `pathways start` looks for new work, in milliseconds. Engine-wide. */
   readonly pollIntervalMs: number;
   /** What an MLLP source does when a message cannot be stored. A source can override it. */
@@ -3464,6 +3904,16 @@ export const DEFAULT_DRAIN_TIMEOUT_MS = 30_000;
 /** How long a file must sit unchanged in a file source before it is read, by default. */
 export const DEFAULT_MIN_AGE_MS = 1_000;
 
+/**
+ * How long a file source holds an incomplete HL7 batch, from its claim, by default: 5 minutes.
+ *
+ * @example
+ * ```ts
+ * DEFAULT_BATCH_HOLD_MS; // 300000
+ * ```
+ */
+export const DEFAULT_BATCH_HOLD_MS = 300_000;
+
 /** How many passes in a row a file source fails to open a file before it sets it aside, by default. */
 export const DEFAULT_READ_TRIES = 3;
 
@@ -3478,7 +3928,7 @@ export const DEFAULT_DATABASE_FILE = ".pathways/pathways.db";
  * process.env[DEFAULT_DATABASE_URL_ENV]; // "postgres://pathways:...@db.internal/pathways"
  * ```
  */
-export const DEFAULT_DATABASE_URL_ENV = "PATHWAYS_DATABASE_URL";
+export const DEFAULT_DATABASE_URL_ENV = "PATHWAYS_DATABASE_URL" satisfies EngineVariable;
 
 /**
  * The most connections a database server's pool opens, by default.
@@ -3520,10 +3970,10 @@ export const DEFAULT_MAX_BYTES = 10 * 1_048_576;
 export const DEFAULT_HTTP_TIMEOUT_MS = 30_000;
 
 /** The environment variable an HTTP source reads its bearer token from when `auth` is not set. */
-export const DEFAULT_HTTP_TOKEN_ENV = "PATHWAYS_HTTP_TOKEN";
+export const DEFAULT_HTTP_TOKEN_ENV = "PATHWAYS_HTTP_TOKEN" satisfies EngineVariable;
 
 /** The environment variable the health endpoint reads its bearer token from when `auth` is not set. */
-export const DEFAULT_HEALTH_TOKEN_ENV = "PATHWAYS_HEALTH_TOKEN";
+export const DEFAULT_HEALTH_TOKEN_ENV = "PATHWAYS_HEALTH_TOKEN" satisfies EngineVariable;
 
 /**
  * How long one call to a hook may run by default, in milliseconds.
@@ -3558,6 +4008,43 @@ export interface ModuleConnector {
   readonly kind: "module";
   readonly module: string;
   readonly options: ModuleOptions;
+}
+
+/**
+ * A channel source: the channel takes in only what other channels hand it, through a channel
+ * destination that names it or `ctx.route` in a transform. Nothing listens or polls.
+ *
+ * @example
+ * ```ts
+ * const source: ChannelSourceConfig = { kind: "channel", routed: false, maxPending: 10_000, maxHops: 8 };
+ * ```
+ */
+export interface ChannelSourceConfig {
+  readonly kind: "channel";
+  /** True when only `ctx.route` feeds the channel, so start looks for no destination naming it. */
+  readonly routed: boolean;
+  /** How many messages may wait for the transform before a hand-off into the channel waits. */
+  readonly maxPending: number;
+  /** How many hand-offs in a row a message may have come through to reach the channel. */
+  readonly maxHops: number;
+}
+
+/**
+ * A channel destination: each output is handed to channel `channel` as a new message of its own,
+ * in the same transaction as this delivery's record, carrying the `ctx.meta` keys `carryMeta`
+ * lists. The block's `channel: { name }`, kept apart from the destination's own `name:`.
+ *
+ * @example
+ * ```ts
+ * const destination: ChannelDestinationConfig = { kind: "channel", channel: "lab-results", carryMeta: ["mrn"] };
+ * ```
+ */
+export interface ChannelDestinationConfig {
+  readonly kind: "channel";
+  /** The channel the outputs are handed to: the block's `channel: { name }`. */
+  readonly channel: string;
+  /** The `ctx.meta` keys copied to each new message; none by default, never all of them. */
+  readonly carryMeta: readonly string[];
 }
 
 /** A file source, with its folder resolved to an absolute path. */
@@ -3600,6 +4087,29 @@ export interface FileSource {
   readonly s3?: S3Config | undefined;
   /** The Azure Blob Storage container `dir` is a prefix in, or `undefined`. */
   readonly azblob?: AzblobConfig | undefined;
+  /** How each file is read as a batch of messages, or `undefined` to read each as one message. */
+  readonly batch?: BatchConfig | undefined;
+}
+
+/**
+ * A source's `batch:` setting, resolved: how a file or body is cut into messages, the bytes a
+ * `delimiter` cut is made at, and, for an HL7 batch, what an incomplete one gets.
+ *
+ * @example
+ * ```ts
+ * const batch: BatchConfig = { split: "hl7", delimiter: undefined, maxFileSize: undefined, onIncomplete: "hold", holdForMs: 300_000 };
+ * ```
+ */
+export interface BatchConfig {
+  readonly split: "hl7" | "lines" | "delimiter";
+  /** The delimiter's UTF-8 bytes, with `split: delimiter`. */
+  readonly delimiter: Uint8Array | undefined;
+  /** The largest file read as a batch, in bytes; `undefined` for no limit, and for HTTP. */
+  readonly maxFileSize: number | undefined;
+  /** What an incomplete HL7 batch gets: `hold` (a file source only), `accept` or `fail`. */
+  readonly onIncomplete: "hold" | "accept" | "fail";
+  /** How long a file source holds an incomplete HL7 batch, from its claim, in milliseconds. */
+  readonly holdForMs: number;
 }
 
 /** How an object store block's source claims and its destination writes. */
@@ -3726,6 +4236,8 @@ export interface HttpSource extends ListenerConfig {
   readonly maxBytes: number;
   /** The request headers passed to the transform in `ctx.source.headers`, in lower case. */
   readonly contextHeaders: readonly string[];
+  /** How each body is read as a batch of messages, or `undefined` to read each as one message. */
+  readonly batch?: BatchConfig | undefined;
 }
 
 /**
@@ -3747,15 +4259,16 @@ export interface SecretReference {
 
 /**
  * Where a secret is read at start, as the YAML wrote it: an environment variable, a file (an absolute
- * path), or a provider's secret.
+ * path), or a provider's secret. The variable is one of ENGINE_VARIABLES or a name configuration
+ * gave (configuredName), so a fixed name not on the list is a type error.
  *
  * @example
  * ```ts
- * const token: SecretSource = { env: "LAB_TOKEN" };
+ * const token: SecretSource = { env: "PATHWAYS_HTTP_TOKEN" };
  * ```
  */
 export type SecretSource =
-  { readonly env: string } | { readonly file: string } | { readonly secret: SecretReference };
+  { readonly env: VariableName } | { readonly file: string } | { readonly secret: SecretReference };
 
 /** A header an HTTP client or source sends: written in the YAML, or a secret read at start. */
 export type HeaderValue = { readonly value: string } | SecretSource;
@@ -3782,14 +4295,25 @@ export interface HttpClientConfig {
 }
 
 /**
- * An HTTP destination: each output is POSTed to `url`. With `resendHeader`, a possible duplicate (a
- * resend after an attempt was cut off) carries that header, its value the number of attempts before.
+ * An HTTP destination: each output is sent to `url` by `method`, its path and `query` values filled
+ * from `ctx.meta`. With `resendHeader`, a possible duplicate (a resend after an attempt was cut off)
+ * carries that header, its value the number of attempts before.
  */
 export interface HttpDestination extends HttpClientConfig {
   readonly kind: "http";
   readonly timeoutMs: number;
   /** The header that flags a possible duplicate, or undefined to send none. */
   readonly resendHeader: string | undefined;
+  /** The method each output is sent by. */
+  readonly method: "POST" | "PUT" | "PATCH" | "DELETE" | "GET";
+  /** Query parameters added to the url's own, each value a template filled from `ctx.meta`. */
+  readonly query: Readonly<Record<string, string>>;
+  /** The header carrying `<messageId>-<seq>` on every attempt, or undefined to send none. */
+  readonly idempotencyHeader: string | undefined;
+  /** The loopback, link-local and private networks the destination may connect to. */
+  readonly allowNetworks: readonly string[];
+  /** `xml` to settle each 2xx answer by its HL7 v2 XML acknowledgement; undefined for the status alone. */
+  readonly ack?: "xml" | undefined;
 }
 
 /**
@@ -4088,6 +4612,7 @@ export type DestinationConfig = (
   | MllpDestination
   | TcpDestination
   | SmtpDestination
+  | ChannelDestinationConfig
   | ModuleConnector
 ) & {
   readonly retry?: RetryPolicy;
@@ -4099,6 +4624,19 @@ export type DestinationConfig = (
   readonly timeoutMs?: number | undefined;
   /** True when the destination runs dry: each output recorded, marked `dry-run`, never sent. */
   readonly dryRun?: boolean | undefined;
+  /** The block's `name:`, unique in the channel, when it sets one. */
+  readonly name?: string | undefined;
+  /**
+   * The destination's own transform module, an absolute path, when the block sets one: it runs
+   * after the channel's transform, once for each channel output.
+   */
+  readonly transform?: string | undefined;
+  /**
+   * The format the destination sends, when the block sets one: what its transform reads and
+   * writes, a file destination's extension and an http destination's `Content-Type`. Unset, the
+   * channel's.
+   */
+  readonly format?: Format | undefined;
 };
 
 /**
@@ -4159,7 +4697,12 @@ export interface ChannelConfig {
   readonly format: Format;
   /** A `csv` channel's `csv:` block, as written; unset for another format or no block. */
   readonly csv?: CsvSettings | undefined;
-  readonly source: FileSource | HttpSource | MllpSource | TcpSource | ModuleConnector;
+  /** An `hl7v2` channel's `hl7v2:` block, as written; unset for another format or no block. */
+  readonly hl7v2?: Hl7v2Settings | undefined;
+  /** An `xml` channel's `xml:` block, as written; unset for another format or no block. */
+  readonly xml?: XmlSettings | undefined;
+  readonly source:
+    FileSource | HttpSource | MllpSource | TcpSource | ChannelSourceConfig | ModuleConnector;
   /** The transform module, or `undefined` to pass each message through unchanged. */
   readonly transform: string | undefined;
   readonly destinations: readonly DestinationConfig[];

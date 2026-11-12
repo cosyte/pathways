@@ -55,6 +55,7 @@ async function snapshot(dir: string): Promise<Record<string, string>> {
 // Sorted as JavaScript sorts strings: by code unit, so "D" comes before "c".
 const STARTER_FILES = [
   ".dockerignore",
+  ".env.example",
   ".gitignore",
   ".pathways/dev.key",
   "Dockerfile",
@@ -64,6 +65,7 @@ const STARTER_FILES = [
   "channels/adt-to-lab/tests/a08.expected.hl7",
   "channels/adt-to-lab/tests/a08.hl7",
   "channels/adt-to-lab/transform.ts",
+  "compose.yaml",
   "package.json",
   "pathways.yaml",
 ];
@@ -139,7 +141,20 @@ describe("pathways init", () => {
     const ignored = (await readFile(join(target, ".gitignore"), "utf8"))
       .split("\n")
       .filter((line) => line !== "" && !line.startsWith("#"));
-    expect(ignored).toEqual(["/.pathways/", "/data/", "node_modules/"]);
+    expect(ignored).toEqual(["/.pathways/", "/data/", "node_modules/", "/.env"]);
+  });
+
+  // compose.yaml runs ghcr.io/cosyte/pathways at the tag .env names, and .env starts as a copy of
+  // .env.example: init writes this version there, as it does in the Dockerfile.
+  it("writes a compose.yaml and an .env.example that run this version's image", async () => {
+    const target = await makeProject({});
+    await initProject(target);
+    const env = await readFile(join(target, ".env.example"), "utf8");
+    expect(env).not.toContain("{{pathwaysVersion}}");
+    expect(env.match(/^PATHWAYS_VERSION=.*$/gm)).toEqual([`PATHWAYS_VERSION=${VERSION}`]);
+    expect(await readFile(join(target, "compose.yaml"), "utf8")).toContain(
+      "image: ghcr.io/cosyte/pathways:${PATHWAYS_VERSION:?set PATHWAYS_VERSION in .env}",
+    );
   });
 
   // An editor with the YAML language server reads the modeline on a file's first line and checks the

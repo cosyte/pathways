@@ -23,6 +23,7 @@ import { afterAll, afterEach, describe, expect, it } from "vitest";
 
 import { loadProject } from "../src/config/load.js";
 import type { DestinationConnector } from "../src/connectors/types.js";
+import { destinationKeys } from "../src/engine/destination-key.js";
 import { Engine } from "../src/engine/engine.js";
 import { replayMessages, type ReplayResult } from "../src/operator/actions.js";
 import { AuditLog } from "../src/operator/audit.js";
@@ -123,9 +124,16 @@ for (const database of TEST_DATABASES) {
         const operatorStore = await open();
         const audit = new AuditLog(operatorStore, { actor: "tester" });
         const context = { project, store: operatorStore, audit, resend: true };
+        const keys = destinationKeys(project.root, project.channels[0]?.destinations ?? []);
         for (let i = 1; i <= NOTES; i += 1) {
           const { id } = await engineStore.receive("notes", bytes(`synthetic note ${String(i)}`));
-          await engineStore.completeTransform(id, [bytes(`synthetic note ${String(i)}`)], 1);
+          await engineStore.completeTransform(
+            id,
+            [bytes(`synthetic note ${String(i)}`)],
+            1,
+            undefined,
+            keys,
+          );
         }
         const ids = Array.from({ length: NOTES }, (_, i) => i + 1);
 
@@ -255,7 +263,8 @@ for (const database of TEST_DATABASES) {
         const store = await testStorage(database, project.databaseFile).then((s) => s.open());
         try {
           const { id } = await store.receive("notes", bytes("synthetic note 1"));
-          await store.completeTransform(id, [bytes("synthetic note 1")], 1);
+          const keys = destinationKeys(project.root, project.channels[0]?.destinations ?? []);
+          await store.completeTransform(id, [bytes("synthetic note 1")], 1, undefined, keys);
           const delivery = await store.nextDelivery("notes", 0);
           await store.markDelivered(delivery?.id ?? -1);
 

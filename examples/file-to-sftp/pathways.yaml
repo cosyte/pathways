@@ -1,0 +1,12 @@
+# yaml-language-server: $schema=./node_modules/@cosyte/pathways/schema/project.json
+
+# Messages are stored in SQLite under .pathways/, each encrypted with the development key that
+# `npm run key` writes there. .gitignore keeps the folder out of git.
+storage:
+  sqlite:
+    file: .pathways/pathways.db
+encryption:
+  keys:
+    - id: dev
+      file: .pathways/dev.key
+  current: dev

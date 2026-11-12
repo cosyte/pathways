@@ -6,6 +6,15 @@ import { DEFAULT_READ_TRIES, type PathPattern } from "../config/schema.js";
 import { faultPoint } from "../fault-points.js";
 import { copiesBodies, markCopiesBodies, release } from "../storage/ownership.js";
 import {
+  BATCH_CODES,
+  type BatchOptions,
+  DEFAULT_BATCH_HOLD_MS,
+  receivePieces,
+  scanBatch,
+  splitPieces,
+  upTo,
+} from "./batch.js";
+import {
   type FileSystem,
   inside,
   isLocationDown,
@@ -45,6 +54,15 @@ export const CLAIMED_DIR = ".claimed";
  */
 const CLAIM_NAME = /^\d{15}\.\d{8}\.[0-9a-f]{8}-(.+)$/s;
 
+/** The pass time a claim's name starts with, in epoch milliseconds. */
+const CLAIM_TIME = /^(\d{15})\./;
+
+/**
+ * The folder inside a channel's claim folder where a batch failed whole waits, under its claimed
+ * name, when the source has no `errorDir`: out of every folder a pass reads.
+ */
+export const FAILED_DIR = "failed";
+
 /** The longest file name, in bytes, that the common Linux file systems take. */
 const NAME_MAX = 255;
 
@@ -54,8 +72,14 @@ export interface SourceFile {
   readonly path: string;
 }
 
-/** Why a file source set a file aside, or would have with an error folder. */
-export type FileFaultReason = "too-large" | "unreadable" | "rejected";
+/**
+ * Why a file source set a file aside, or would have with an error folder. `rejected` is a file the
+ * transform or a destination refused for good on a channel that stores nothing. The `batch-`
+ * reasons are a batch's, once claimed: larger than `maxFileSize`, holding no piece, or an HL7 batch
+ * incomplete past its hold.
+ */
+export type FileFaultReason =
+  "too-large" | "unreadable" | "rejected" | "batch-too-large" | "batch-empty" | "batch-incomplete";
 
 /**
  * A file a source will not store: larger than `maxSize`, one it failed to open on `readTries`
@@ -320,6 +344,13 @@ export interface FileSourceOptions {
   readonly readTries?: number;
   /** Told of each file set aside, or that would have been with an `errorDir`. */
   readonly onFileFault?: (fault: FileFault) => void;
+  /**
+   * Reads each file as a batch of messages, cut as `split` says, rather than as one message. Each
+   * piece is stored as a message of its own, under a key of the claimed name, a short hash of the
+   * file's bytes and the piece's place, and the file is deleted only once its last piece is
+   * stored. Default: none, so each file is one message.
+   */
+  readonly batch?: BatchOptions | undefined;
   /**
    * Where `dir` and `errorDir` are, and the claim rule that holds there. Default: a folder on this
    * machine, a {@link LocalFolder}.
@@ -863,7 +894,11 @@ export class FileSource implements SourceConnector {
    * under its path from the source folder.
    */
   private async store(file: SourceFile, sink: MessageSink, resumed: boolean): Promise<void> {
-    const { dir, keepProcessed = false, onReadError } = this.options;
+    if (this.options.batch !== undefined) {
+      await this.storeBatch(file, sink, resumed, this.options.batch);
+      return;
+    }
+    const { onReadError } = this.options;
     const { fs } = this;
     let body: Uint8Array;
     try {
@@ -875,12 +910,7 @@ export class FileSource implements SourceConnector {
     }
     // The name as it was dropped, as its path from the source folder, which the transform reads in
     // ctx.source and nothing logs.
-    const original = CLAIM_NAME.exec(file.name)?.[1] ?? file.name;
-    const segments = decodePath(original).split("/");
-    // A claim made by hand could name a path that leaves processed/: it keeps its name, flat.
-    const parts = segments.some((part) => part === "" || part === "." || part === "..")
-      ? [original]
-      : segments;
+    const parts = originalParts(file.name);
     let id: number;
     try {
       id = await sink.receive(body, {
@@ -896,6 +926,13 @@ export class FileSource implements SourceConnector {
     }
     // A sink that copied the body keeps none of it, and this source is done with it.
     if (copiesBodies(sink)) release(body);
+    await this.finish(file, parts, id);
+  }
+
+  /** Deletes a stored file, or moves it into `processed/` under its path, prefixed with `id`. */
+  private async finish(file: SourceFile, parts: readonly string[], id: number): Promise<void> {
+    const { dir, keepProcessed = false } = this.options;
+    const { fs } = this;
     if (!keepProcessed) {
       await fs.remove(file.path);
       return;
@@ -903,6 +940,228 @@ export class FileSource implements SourceConnector {
     const folder = fs.join(dir, PROCESSED_DIR, ...parts.slice(0, -1));
     await fs.mkdir(folder);
     await fs.rename(file.path, fs.join(folder, fitted(`${String(id)}-`, String(parts.at(-1)))));
+  }
+
+  /** The claimed file a chunk at a time, or whole where the location cannot stream. */
+  private chunks(path: string): AsyncIterable<Uint8Array> {
+    const { fs } = this;
+    if (fs.chunks !== undefined) return fs.chunks(path);
+    return (async function* whole() {
+      yield await fs.read(path);
+    })();
+  }
+
+  /**
+   * Stores a claimed file as a batch: reads it once for its size, its hash and, for HL7, whether its
+   * envelope is whole; then reads it again, cutting it into pieces, and stores each under its own
+   * key, `file:<claimed name>#<hash>#<index>`, with `resumed` when an earlier run claimed it. The
+   * file is deleted (or moved into `processed/`) only once its last piece is stored, so a run that
+   * stops part way leaves it claimed, and the next pass hands every piece in again: those stored
+   * already are found by their keys. A file larger than `maxFileSize`, one with no piece, and an HL7
+   * batch incomplete past its hold are failed whole: stored as one failed message with a code and
+   * no content, and moved aside. An incomplete HL7 batch still within its hold stays claimed.
+   */
+  private async storeBatch(
+    file: SourceFile,
+    sink: MessageSink,
+    resumed: boolean,
+    batch: BatchOptions,
+  ): Promise<void> {
+    const { onReadError, now = Date.now } = this.options;
+    const parts = originalParts(file.name);
+    let scan;
+    try {
+      scan = await scanBatch(this.chunks(file.path), batch);
+    } catch (error) {
+      unlessDown(error);
+      onReadError?.(error);
+      return;
+    }
+    const { hash } = scan;
+    if (scan.tooLarge) {
+      await this.failBatch(file, sink, resumed, hash, BATCH_CODES.tooLarge, []);
+      return;
+    }
+    const warnings = new Set(scan.envelope);
+    if (scan.envelope.length > 0) {
+      const action = batch.onIncomplete ?? "hold";
+      const claimed = Number(CLAIM_TIME.exec(file.name)?.[1] ?? now());
+      const holding = now() - claimed < (batch.holdForMs ?? DEFAULT_BATCH_HOLD_MS);
+      if (action === "fail" || (action === "hold" && !holding)) {
+        await this.failBatch(file, sink, resumed, hash, BATCH_CODES.incomplete, [...warnings]);
+        return;
+      }
+      // Held: it stays claimed, and the next pass reads it again.
+      if (action === "hold") return;
+    }
+    let received;
+    try {
+      received = await receivePieces(
+        splitPieces(reading(upTo(this.chunks(file.path), scan.size)), batch, warnings),
+        sink,
+        {
+          key: (index) => `file:${file.name}#${hash}#${String(index)}`,
+          resumed,
+          facts: (index) => ({ name: parts.join("/"), batch: { piece: index, hash } }),
+        },
+      );
+    } catch (error) {
+      // A channel that stores nothing refused a piece for good: the pieces before it were sent and
+      // nothing of them is stored, so a next read would send them again. The file is set aside.
+      if (error instanceof PassFailed && error.permanent) {
+        await this.setAsideRejectedBatch(file, parts);
+        return;
+      }
+      // A read that failed part way: the pieces stored are kept, and the next pass reads the file
+      // again, with resumed, so each is stored once. A sink that refused rejects past here.
+      if (!(error instanceof ReadFailed)) throw error;
+      unlessDown(error.error);
+      onReadError?.(error.error);
+      return;
+    }
+    if (received.pieces === 0) {
+      await this.failBatch(file, sink, resumed, hash, BATCH_CODES.empty, [...warnings]);
+      return;
+    }
+    await sink.batchDone?.({
+      source: "file",
+      outcome: "stored",
+      pieces: received.pieces,
+      stored: received.stored,
+      failed: received.failed,
+      duplicates: received.duplicates,
+      warnings: [...warnings],
+    });
+    await this.finish(file, parts, Number(received.ids[0]));
+  }
+
+  /**
+   * Moves a claimed batch file that a channel storing nothing refused a piece of for good into
+   * `errorDir`, as {@link setAsideRejected} does; or, with none or one that cannot take it, into the
+   * claim folder's `failed/` under its claimed name, as a batch failed whole goes. Either way no pass
+   * reads it again, so the pieces before the refused one, sent already, are not sent twice.
+   */
+  private async setAsideRejectedBatch(file: SourceFile, parts: readonly string[]): Promise<void> {
+    const { dir, channel, errorDir, onFileFault } = this.options;
+    const { fs } = this;
+    if (errorDir !== undefined) {
+      try {
+        const folder = fs.join(errorDir, ...parts.slice(0, -1));
+        await fs.mkdir(folder);
+        let target = fs.join(folder, String(parts.at(-1)));
+        const taken = await fs.stat(target).then(
+          () => true,
+          () => false,
+        );
+        if (taken) target = fs.join(folder, file.name);
+        await this.relocate(file.path, target, (await fs.stat(file.path)).id);
+        onFileFault?.({ reason: "rejected", moved: true });
+        return;
+      } catch (error) {
+        unlessDown(error);
+      }
+    }
+    try {
+      const failed = fs.join(dir, CLAIMED_DIR, channel, FAILED_DIR);
+      await fs.mkdir(failed);
+      await this.relocate(file.path, fs.join(failed, file.name), (await fs.stat(file.path)).id);
+    } catch (error) {
+      unlessDown(error);
+      onFileFault?.({ reason: "rejected", moved: false, error });
+      return;
+    }
+    onFileFault?.({ reason: "rejected", moved: true });
+  }
+
+  /**
+   * Fails a claimed batch whole: stores one failed message, with `batch: <code>` and no content,
+   * under the key `file:<claimed name>#<hash>#file`, tells the sink and `onFileFault`, and moves the
+   * file into `errorDir` under its path, or, with none or a file already there, into the claim
+   * folder's `failed/` under its claimed name. Either way no pass reads it again.
+   */
+  private async failBatch(
+    file: SourceFile,
+    sink: MessageSink,
+    resumed: boolean,
+    hash: string,
+    code: string,
+    warnings: readonly string[],
+  ): Promise<void> {
+    const { dir, channel, errorDir, onFileFault } = this.options;
+    const { fs } = this;
+    await sink.receive(new Uint8Array(0), {
+      idempotencyKey: `file:${file.name}#${hash}#file`,
+      resumed,
+      failure: `batch: ${code}`,
+    });
+    await sink.batchDone?.({
+      source: "file",
+      outcome: "failed",
+      code,
+      pieces: 0,
+      stored: 0,
+      failed: 1,
+      duplicates: 0,
+      warnings,
+    });
+    const reason: FileFaultReason =
+      code === BATCH_CODES.tooLarge
+        ? "batch-too-large"
+        : code === BATCH_CODES.empty
+          ? "batch-empty"
+          : "batch-incomplete";
+    const parts = originalParts(file.name);
+    if (errorDir !== undefined) {
+      const target = fs.join(errorDir, ...parts);
+      try {
+        await fs.mkdir(fs.dirname(target));
+        const taken = await fs.stat(target).then(
+          () => true,
+          () => false,
+        );
+        if (!taken) {
+          await fs.rename(file.path, target);
+          onFileFault?.({ reason, moved: true });
+          return;
+        }
+      } catch (error) {
+        unlessDown(error);
+      }
+    }
+    const failed = fs.join(dir, CLAIMED_DIR, channel, FAILED_DIR);
+    await fs.mkdir(failed);
+    await fs.rename(file.path, fs.join(failed, file.name));
+    onFileFault?.({ reason, moved: true });
+  }
+}
+
+/**
+ * A claimed file's path from the source folder as it was dropped, in parts, which the transform
+ * reads in `ctx.source` and nothing logs. A claim made by hand could name a path that leaves
+ * `processed/`: it keeps its name, flat.
+ */
+function originalParts(claimed: string): string[] {
+  const original = CLAIM_NAME.exec(claimed)?.[1] ?? claimed;
+  const segments = decodePath(original).split("/");
+  return segments.some((part) => part === "" || part === "." || part === "..")
+    ? [original]
+    : segments;
+}
+
+/** A failure to read a claimed file, told apart from a sink that refused a piece. */
+class ReadFailed extends Error {
+  constructor(readonly error: unknown) {
+    super("a claimed batch file could not be read");
+    this.name = "ReadFailed";
+  }
+}
+
+/** `chunks`, with a failure to read them thrown as a {@link ReadFailed}. */
+async function* reading(chunks: AsyncIterable<Uint8Array>): AsyncGenerator<Uint8Array> {
+  try {
+    for await (const chunk of chunks) yield chunk;
+  } catch (error) {
+    throw new ReadFailed(error);
   }
 }
 

@@ -1,0 +1,27 @@
+# yaml-language-server: $schema=../../node_modules/@cosyte/pathways/schema/channel.json
+
+# Take HL7 v2 over MLLP, keep the ADT messages, address each to the EHR, and POST it there.
+name: adt-to-http
+format: hl7v2
+
+source:
+  mllp:
+    # This machine only, on port 2575 unless MLLP_PORT names another.
+    host: 127.0.0.1
+    port: { env: MLLP_PORT, default: 2575 }
+    # Plain TCP on the loopback, for this example only. A sender on another machine connects over
+    # TLS: give the source tls: { cert, key, ca } in place of this line.
+    plaintext: true
+
+transform: ./transform.ts
+
+destinations:
+  - http:
+      url: { env: RECEIVER_URL, default: "http://127.0.0.1:8080/adt" }
+      # The receiver in scripts/receiver.ts answers plain HTTP on the loopback. A real endpoint is
+      # an https:// URL, which needs no plaintext line.
+      plaintext: true
+      # The receiver is on this machine, an address the destination refuses unless it is named
+      # here. A real endpoint on the public internet needs no allowNetworks line; one on a private
+      # network, such as 10.20.0.0/16, needs that network named here.
+      allowNetworks: [127.0.0.1]

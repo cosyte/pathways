@@ -83,7 +83,8 @@ engine lease's epoch while it holds it, else `null`; and `draining`, `true` once
 and is closing its sources.
 
 The answer is 503, with `status: "unavailable"`, only when the engine itself is broken: the database
-cannot be read (`storage: "unreachable"`, and each channel's status `unknown`), or a source is down
+cannot be read (`storage: "unreachable"`, and each channel's status `unknown`), a channel's transform
+would not load in a replacement worker (below), or a source is down
 (its `source: "down"`): it cannot listen, and the engine keeps trying it, or it said it lost its
 connection (a broker, a remote server or a socket it dialled), until it says it has it again. A destination that is down shows as a
 channel `retrying`, and the answer stays 200, because restarting the engine would not bring the
@@ -102,6 +103,13 @@ them](./pass-messages-through-without-storing.md#health).
 Each channel's `state` is `running`, or `paused` or `stopped` when an operator set it so with
 `pathways channel` (see [pause, stop and reload a channel](./pause-stop-and-reload-a-channel.md)).
 Neither is a fault: the answer stays 200, and the source of a paused channel shows `up`.
+
+A channel whose transform would not load in a replacement worker (after a message timed out, ran out
+of memory or crashed the one before: its `onStart` threw or ran past its limit, or the module no
+longer loads) has `transform: { loaded: false, kind, name, code }`, the stage and the error's name
+and code, and the answer is 503. That channel is stopped until
+`pathways channel reload` loads it; the other channels run on. See
+[run code when the worker starts and stops](./transform-and-filter-messages.md#run-code-when-the-worker-starts-and-stops).
 
 A standby (`pathways start --standby`) answers 503 with `status: "standby"` and no channels until it
 takes the engine lease, so a readiness check routes nothing to it; point a liveness check at it only

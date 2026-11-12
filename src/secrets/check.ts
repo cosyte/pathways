@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import type { Logger } from "pino";
 
 import { ConfigError } from "../config/load.js";
+import { type Env, extensionEnv } from "../env.js";
 import type { ProjectConfig, SecretReference } from "../config/schema.js";
 import { KEY_BYTES, type KeyProvider } from "../encryption/keys.js";
 import { customSecretProvider } from "../extensions/build.js";
@@ -26,9 +27,6 @@ import { secretUses } from "./sources.js";
 // or a key cannot be had. What it reports is where each secret is named, its provider and name, and
 // the version, identity and expiry the provider answered with: never a value, its length or any
 // part of it. A problem is the same fixed text start would give.
-
-/** The environment Pathways reads secrets from: `process.env`, or a stand-in in tests. */
-type Env = Readonly<Record<string, string | undefined>>;
 
 /** One place a project reads a secret, and what resolving it now gave. */
 export interface SecretCheckEntry {
@@ -155,7 +153,7 @@ async function resolveFromModules(
     try {
       provider = await customSecretProvider(
         config,
-        { dir: project.root, env: context.env, logger },
+        { dir: project.root, env: extensionEnv(context.env), logger },
         `pathways.yaml: secrets.${config.name}.module`,
       );
     } catch (error) {

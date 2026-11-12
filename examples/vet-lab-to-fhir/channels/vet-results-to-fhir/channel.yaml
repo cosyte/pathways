@@ -1,0 +1,34 @@
+# yaml-language-server: $schema=../../node_modules/@cosyte/pathways/schema/channel.json
+
+# Take veterinary lab results as HL7 v2 over MLLP, turn each into a FHIR message Bundle that keeps
+# the animal's species and breed, and POST it to a FHIR server.
+name: vet-results-to-fhir
+
+# What comes in: the transform receives each message parsed by @cosyte/hl7.
+format: hl7v2
+
+source:
+  mllp:
+    # This machine only, on port 2575 unless MLLP_PORT names another.
+    host: 127.0.0.1
+    port: { env: MLLP_PORT, default: 2575 }
+    # Plain TCP on the loopback, for this example only. A lab on another machine connects over
+    # TLS: give the source tls: { cert, key, ca } in place of this line.
+    plaintext: true
+
+transform: ./transform.ts
+
+destinations:
+  - http:
+      # A FHIR server takes a message Bundle at its $process-message operation.
+      url: { env: FHIR_URL, default: "http://127.0.0.1:8080/fhir/$process-message" }
+      headers:
+        # The channel's format names what comes in, so set the type of what goes out.
+        Content-Type: application/fhir+json
+      # The receiver in scripts/receiver.ts answers plain HTTP on the loopback. A FHIR server is
+      # an https:// URL, which needs no plaintext line.
+      plaintext: true
+      # The receiver is on this machine, an address the destination refuses unless it is named
+      # here. A real endpoint on the public internet needs no allowNetworks line; one on a private
+      # network, such as 10.20.0.0/16, needs that network named here.
+      allowNetworks: [127.0.0.1]

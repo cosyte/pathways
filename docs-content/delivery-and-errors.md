@@ -52,7 +52,7 @@ What the flag does not cover:
   between the send and the record, not an attempt whose answer never came.
 - **Two engines on one database are fenced by the engine lease.** A second engine is refused, and an
   engine whose lease another has taken can no longer record an outcome: see
-  [one engine per database](./store-messages-in-a-database.md#one-engine-per-database). An engine
+  [running more than one engine](./running-more-than-one-engine.md#fencing-what-the-epoch-does). An engine
   paused around a send can still mean that delivery is sent once more; that page says when the
   extra copy is flagged and when it is not.
 - **The marker is as durable as the database.** On SQLite it survives a process kill. Whether it
@@ -73,7 +73,8 @@ after a crash goes out unflagged, as it did before.
 Each output Pathways sends carries an id that stays the same on every attempt, a resend after a
 crash, a retry after a timeout and a `pathways replay --resend` included: its message's id and its
 output number, `messageId` and `seq` on the outgoing message. A file destination names each file
-`<messageId>-<seq>`, so a second copy replaces the first. A custom destination can send the pair to
+`<messageId>-<seq + 1>`, the output number counted from 1 in the name (the first file for message 12
+is `12-1.hl7`), so a second copy replaces the first. A custom destination can send the pair to
 its receiver, as a header or a key, and the receiver can keep the last ids it took and drop a copy.
 An MLLP receiver can do the same with the MSH-10 control ID, which Pathways sends unchanged.
 
@@ -135,7 +136,10 @@ output: sending the same message again cannot help.
 An HTTP redirect (a 3xx) is neither: it is never followed, since following one could send a message to
 a host nobody configured. The delivery is held, tried again every 5 minutes with later outputs behind
 it, and reported as `delivery-redirected`, naming the host the redirect points to, until someone fixes
-the destination's URL.
+the destination's URL. A destination without a `name` is known by its URL, so once the URL changes,
+what was queued for it waits for the old one: give each destination a `name` when you add it, and it
+keeps its queue when its URL changes
+([how a destination is known](./transform-and-filter-messages.md#transform-or-filter-for-one-destination)).
 
 Retrying forever, in order, is the choice that loses nothing and reorders nothing. Its cost is that a
 destination that is down for a day holds a day of messages, and an operator has to see that; the

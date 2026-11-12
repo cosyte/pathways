@@ -1,0 +1,887 @@
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+
+import {
+  type BatchOptions,
+  type BatchResult,
+  EnvelopeCheck,
+  scanBatch,
+  splitPieces,
+  upTo,
+} from "../src/connectors/batch.js";
+import { CLAIMED_DIR, FAILED_DIR, FileSource } from "../src/connectors/file.js";
+import { HttpSource, type HttpSourceOptions } from "../src/connectors/http.js";
+import {
+  type MessageSink,
+  PassFailed,
+  type ReceivedPiece,
+  type ReceiveOptions,
+} from "../src/connectors/types.js";
+import { FakeLocation } from "./fake-location.js";
+import { ADT_A01, cleanUp, dropFile, makeProject } from "./helpers.js";
+import { makeCertificates, removeCertificates, send, type Certificates } from "./net-helpers.js";
+
+afterEach(cleanUp);
+
+/** A synthetic ADT^A01 whose control ID is `MSG<n>`: every value is made up. */
+const adt = (n: number): string => ADT_A01.replace("MSG00001", `MSG${String(n).padStart(5, "0")}`);
+
+/** `text` as bytes, `size` at a time. */
+async function* chunked(bytes: Uint8Array, size: number): AsyncGenerator<Uint8Array> {
+  await Promise.resolve();
+  for (let at = 0; at < bytes.byteLength; at += size) yield bytes.subarray(at, at + size);
+}
+
+/** A byte order mark, which opens a file and is not part of its first message. */
+const BOM = String.fromCharCode(0xfeff);
+
+const bytesOf = (text: string): Uint8Array => new Uint8Array(Buffer.from(text, "latin1"));
+const latin1 = (bytes: Uint8Array): string => Buffer.from(bytes).toString("latin1");
+
+/** Every piece `splitPieces` cuts `text` into, read `size` bytes at a time. */
+async function cut(
+  text: string | Uint8Array,
+  options: Pick<BatchOptions, "split" | "delimiter">,
+  size = 7,
+): Promise<{ bodies: string[]; failures: (string | undefined)[]; warnings: string[] }> {
+  const warnings = new Set<string>();
+  const bodies: string[] = [];
+  const failures: (string | undefined)[] = [];
+  const bytes = typeof text === "string" ? bytesOf(text) : text;
+  for await (const piece of splitPieces(chunked(bytes, size), options, warnings)) {
+    expect(piece.index).toBe(bodies.length);
+    bodies.push(latin1(piece.body));
+    failures.push(piece.failure);
+  }
+  return { bodies, failures, warnings: [...warnings] };
+}
+
+describe("splitPieces", () => {
+  it("cuts lines at LF on bytes, drops a CR before it and skips empty lines", async () => {
+    // 0xe9 alone is not UTF-8: a cut on decoded text would turn it into U+FFFD.
+    const input = new Uint8Array([...bytesOf("one\r\n"), 0xe9, ...bytesOf("two\n\n\r\nthree")]);
+    for (const size of [1, 2, 5, 64]) {
+      const { bodies } = await cut(input, { split: "lines" }, size);
+      expect(bodies).toEqual(["one", "étwo", "three"]);
+    }
+  });
+
+  it("cuts at a delimiter that spans chunks, and skips empty pieces", async () => {
+    const delimiter = bytesOf("\n---\n");
+    const input = "first\n---\nsecond\n---\n\n---\nthird\n---\n";
+    for (const size of [1, 3, 4, 100]) {
+      const { bodies } = await cut(input, { split: "delimiter", delimiter }, size);
+      expect(bodies).toEqual(["first", "second", "third"]);
+    }
+  });
+
+  it("cuts an HL7 batch into each message's own bytes, the envelope left out", async () => {
+    const one = adt(1);
+    const two = adt(2).replaceAll("\r", "\r\n");
+    const input = `${BOM}BHS|^~\\&|SYNTH\r${one}${two}BTS|2\r`;
+    const bytes = new Uint8Array(Buffer.from(input, "utf8"));
+    for (const size of [1, 13, 4096]) {
+      const { bodies, failures, warnings } = await cut(bytes, { split: "hl7" }, size);
+      // Each piece is exactly the bytes it held, CR LF and all: nothing is re-serialised.
+      expect(bodies).toEqual([one, two]);
+      expect(failures).toEqual([undefined, undefined]);
+      expect(warnings).toEqual([]);
+    }
+  });
+
+  it("yields a piece HL7 cannot read with its code and no bytes, and goes on", async () => {
+    const { bodies, failures } = await cut(`PID|1||TEST000009\r${adt(3)}`, { split: "hl7" });
+    expect(failures).toEqual(["NO_MSH_SEGMENT", undefined]);
+    expect(bodies).toEqual(["", adt(3)]);
+  });
+
+  it("says when the last HL7 message is cut off", async () => {
+    const { warnings } = await cut(adt(4).slice(0, -1), { split: "hl7" });
+    expect(warnings).toEqual(["UNTERMINATED_STREAM_MESSAGE"]);
+  });
+});
+
+/** What an envelope check says of `text`. */
+function envelope(text: string): readonly string[] {
+  const check = new EnvelopeCheck();
+  for (const byte of bytesOf(text)) check.push(Uint8Array.of(byte));
+  return check.end();
+}
+
+describe("EnvelopeCheck", () => {
+  it("finds a whole batch, and bare messages, complete", () => {
+    expect(envelope(`FHS|^~\\&\rBHS|^~\\&\r${adt(1)}${adt(2)}BTS|2\rFTS|1\r`)).toEqual([]);
+    expect(envelope(`${adt(1)}${adt(2)}`)).toEqual([]);
+    // A count that is not a number checks nothing, as in @cosyte/hl7.
+    expect(envelope(`BHS|^~\\&\r${adt(1)}BTS|x\r`)).toEqual([]);
+    // A blank line between messages is not a message.
+    expect(envelope(`BHS|^~\\&\r${adt(1)}\r\n  \r${adt(2)}BTS|2`)).toEqual([]);
+  });
+
+  it("finds a missing trailer", () => {
+    expect(envelope(`BHS|^~\\&\r${adt(1)}`)).toEqual(["BATCH_MISSING_TRAILER"]);
+    expect(envelope(`FHS|^~\\&\rBHS|^~\\&\r${adt(1)}BTS|1\r`)).toEqual(["BATCH_MISSING_TRAILER"]);
+  });
+
+  it("passes over what it cannot check: a lone trailer, one with no field, a count too large", () => {
+    expect(envelope("BTS|0\r")).toEqual([]);
+    expect(envelope(`BHS|^~\\&\r${adt(1)}BTS\r`)).toEqual([]);
+    expect(envelope(`BHS|^~\\&\r${adt(1)}BTS|99999999999999999999\r`)).toEqual([]);
+  });
+
+  it("reads an MLLP frame's MSH, and keeps only the start of a long line", () => {
+    const framed = `BHS|^~\\&\r\u000b${adt(1).slice(0, -1)}\u001c\rBTS|1\r`;
+    expect(envelope(framed)).toEqual([]);
+    const long = `BHS|^~\\&\r${adt(1)}OBX|1|TX|||${"x".repeat(400)}\rBTS|2\r`;
+    expect(envelope(long)).toEqual(["BATCH_COUNT_MISMATCH"]);
+  });
+
+  it("finds a count that does not match", () => {
+    expect(envelope(`BHS|^~\\&\r${adt(1)}BTS|2\r`)).toEqual(["BATCH_COUNT_MISMATCH"]);
+    expect(envelope(`FHS|^~\\&\rBHS|^~\\&\r${adt(1)}BTS|1\rFTS|2\r`)).toEqual([
+      "BATCH_COUNT_MISMATCH",
+    ]);
+  });
+});
+
+describe("upTo", () => {
+  it("stops at the limit, part way through a chunk", async () => {
+    const read: string[] = [];
+    for await (const chunk of upTo(chunked(bytesOf("abcdefgh"), 3), 4)) read.push(latin1(chunk));
+    expect(read).toEqual(["abc", "d"]);
+  });
+});
+
+describe("scanBatch", () => {
+  it("hashes the bytes, and stops at maxFileSize", async () => {
+    const bytes = bytesOf(`${adt(1)}${adt(2)}`);
+    const whole = await scanBatch(chunked(bytes, 10), { split: "hl7" });
+    const again = await scanBatch(chunked(bytes, 3), { split: "hl7" });
+    expect(whole).toEqual({
+      size: bytes.byteLength,
+      hash: again.hash,
+      tooLarge: false,
+      envelope: [],
+    });
+    expect(whole.hash).toMatch(/^[0-9a-f]{16}$/);
+    const large = await scanBatch(chunked(bytes, 10), { split: "lines", maxFileSize: 20 });
+    expect(large.tooLarge).toBe(true);
+  });
+});
+
+/** What a sink was handed for one piece. */
+interface Handed {
+  readonly body: string;
+  readonly key: string | undefined;
+  readonly resumed: boolean | undefined;
+  readonly failure: string | undefined;
+  readonly source: ReceiveOptions["source"];
+}
+
+/**
+ * A sink that looks a resumed message's key up, as the engine's store does, and stores it once.
+ * With `failAt`, it throws instead of storing the message handed to it that many times in. With
+ * `lag`, 20 milliseconds pass between each lookup and what follows it, as on a database
+ * whose transactions do not see each other's rows: two requests at once can both miss.
+ */
+function batchSink(options: { lag?: boolean } = {}): {
+  sink: MessageSink;
+  handed: Handed[];
+  stored: Map<string, number>;
+  results: BatchResult[];
+  failAt: { at: number };
+  /** How many messages it stored, each time, even under a key it held already. */
+  inserted: () => number;
+} {
+  const handed: Handed[] = [];
+  const stored = new Map<string, number>();
+  /** The idempotency key of the first message stored with each duplicate key. */
+  const firsts = new Map<string, string | undefined>();
+  const results: BatchResult[] = [];
+  const failAt = { at: 0 };
+  let next = 1;
+  const turn = async (): Promise<void> => {
+    if (options.lag === true) await new Promise((resolve) => setTimeout(resolve, 20));
+  };
+  const receivePiece = async (
+    body: Uint8Array,
+    receive: ReceiveOptions = {},
+  ): Promise<ReceivedPiece> => {
+    handed.push({
+      body: latin1(body),
+      key: receive.idempotencyKey,
+      resumed: receive.resumed,
+      failure: receive.failure,
+      source: receive.source,
+    });
+    if (handed.length === failAt.at) throw new Error("synthetic stop");
+    const key = receive.idempotencyKey ?? `unkeyed-${String(next)}`;
+    const found = receive.resumed === true ? stored.get(key) : undefined;
+    await turn();
+    if (found !== undefined) return { id: found, alreadyStored: true };
+    const id = next++;
+    stored.set(key, id);
+    const { duplicateKey } = receive;
+    if (duplicateKey !== undefined && !firsts.has(duplicateKey)) {
+      firsts.set(duplicateKey, receive.idempotencyKey);
+    }
+    return { id, alreadyStored: false };
+  };
+  const sink: MessageSink = {
+    receive: async (body, options) => (await receivePiece(body, options)).id,
+    receivePiece,
+    heldOrigin: async (origin, key) => {
+      const held = firsts.has(origin);
+      const first = firsts.get(origin);
+      await turn();
+      if (!held) return "none";
+      return first === key ? "same" : "other";
+    },
+    batchDone: (result) => {
+      results.push(result);
+      return Promise.resolve();
+    },
+  };
+  return { sink, handed, stored, results, failAt, inserted: () => next - 1 };
+}
+
+const channel = "adt";
+
+async function inbox(): Promise<string> {
+  return join(await makeProject({}), "inbox");
+}
+
+describe("A file source with batch", () => {
+  it("stores each piece under its own key, with the piece's facts, then deletes the file", async () => {
+    const dir = await inbox();
+    await dropFile(join(dir, "feed.hl7"), `BHS|^~\\&\r${adt(1)}${adt(2)}${adt(3)}BTS|3\r`);
+    const { sink, handed, results } = batchSink();
+    const source = new FileSource({ dir, channel, minAgeMs: 0, batch: { split: "hl7" } });
+    await source.poll(sink);
+
+    expect(handed.map((piece) => piece.body)).toEqual([adt(1), adt(2), adt(3)]);
+    const hash = (handed[0]?.source?.["batch"] as { hash: string }).hash;
+    expect(hash).toMatch(/^[0-9a-f]{16}$/);
+    handed.forEach((piece, index) => {
+      expect(piece.key).toMatch(
+        new RegExp(`^file:\\d{15}\\.\\d{8}\\.[0-9a-f]{8}-feed\\.hl7#${hash}#${String(index)}$`),
+      );
+      expect(piece.resumed).toBe(false);
+      expect(piece.source).toEqual({ name: "feed.hl7", batch: { piece: index, hash } });
+    });
+    expect(results).toEqual([
+      {
+        source: "file",
+        outcome: "stored",
+        pieces: 3,
+        stored: 3,
+        failed: 0,
+        duplicates: 0,
+        warnings: [],
+      },
+    ]);
+    expect(await readdir(dir)).toEqual([CLAIMED_DIR]);
+    expect(await readdir(join(dir, CLAIMED_DIR, channel))).toEqual([]);
+  });
+
+  it("keeps a file a stop cut short claimed, and the next pass stores each piece once", async () => {
+    const dir = await inbox();
+    await dropFile(join(dir, "notes.txt"), "note one\nnote two\nnote three\nnote four\n");
+    const { sink, handed, stored, results, failAt } = batchSink();
+    const source = new FileSource({ dir, channel, minAgeMs: 0, batch: { split: "lines" } });
+    failAt.at = 3;
+    await expect(source.poll(sink)).rejects.toThrow("synthetic stop");
+    // Two pieces stored, the third refused: the file is still claimed.
+    expect(stored.size).toBe(2);
+    expect(await readdir(join(dir, CLAIMED_DIR, channel))).toHaveLength(1);
+
+    await source.poll(sink);
+    // Every piece handed in again, resumed, and each stored once.
+    expect(handed.slice(3).map((piece) => [piece.body, piece.resumed])).toEqual([
+      ["note one", true],
+      ["note two", true],
+      ["note three", true],
+      ["note four", true],
+    ]);
+    expect(stored.size).toBe(4);
+    expect(results).toEqual([
+      expect.objectContaining({ pieces: 4, stored: 2, duplicates: 2, failed: 0 }),
+    ]);
+    expect(await readdir(join(dir, CLAIMED_DIR, channel))).toEqual([]);
+  });
+
+  it("stores a piece that cannot be read as failed with no content, and its siblings go on", async () => {
+    const dir = await inbox();
+    await dropFile(join(dir, "feed.hl7"), `PID|1||TEST000009\r${adt(5)}`);
+    const { sink, handed, results } = batchSink();
+    await new FileSource({ dir, channel, minAgeMs: 0, batch: { split: "hl7" } }).poll(sink);
+    expect(handed.map((piece) => [piece.body, piece.failure])).toEqual([
+      ["", "batch: NO_MSH_SEGMENT"],
+      [adt(5), undefined],
+    ]);
+    expect(handed[0]?.source).toBeUndefined();
+    expect(results[0]).toEqual(expect.objectContaining({ pieces: 2, stored: 1, failed: 1 }));
+  });
+
+  it("fails a file with no message and moves it aside, so no pass reads it again", async () => {
+    const dir = await inbox();
+    await dropFile(join(dir, "blank.txt"), "\n\r\n\n");
+    const { sink, handed, results } = batchSink();
+    const faults: string[] = [];
+    const source = new FileSource({
+      dir,
+      channel,
+      minAgeMs: 0,
+      batch: { split: "lines" },
+      onFileFault: ({ reason }) => faults.push(reason),
+    });
+    await source.poll(sink);
+    await source.poll(sink);
+    expect(handed.map((piece) => [piece.body, piece.failure])).toEqual([
+      ["", "batch: BATCH_EMPTY"],
+    ]);
+    expect(handed[0]?.key).toMatch(/#file$/);
+    expect(results).toEqual([
+      expect.objectContaining({ outcome: "failed", code: "BATCH_EMPTY", pieces: 0, failed: 1 }),
+    ]);
+    expect(faults).toEqual(["batch-empty"]);
+    const failed = await readdir(join(dir, CLAIMED_DIR, channel, FAILED_DIR));
+    expect(failed).toHaveLength(1);
+    expect(failed[0]).toMatch(/-blank\.txt$/);
+  });
+
+  it("fails a file larger than maxFileSize with its code, into errorDir", async () => {
+    const root = await makeProject({});
+    const dir = join(root, "inbox");
+    const errorDir = join(root, "errors");
+    await dropFile(join(dir, "big.txt"), "x".repeat(100));
+    const { sink, handed } = batchSink();
+    const source = new FileSource({
+      dir,
+      channel,
+      minAgeMs: 0,
+      errorDir,
+      batch: { split: "lines", maxFileSize: 50 },
+    });
+    await source.poll(sink);
+    expect(handed.map((piece) => piece.failure)).toEqual(["batch: BATCH_FILE_TOO_LARGE"]);
+    expect(await readFile(join(errorDir, "big.txt"), "utf8")).toBe("x".repeat(100));
+  });
+
+  it("holds an incomplete HL7 batch claimed for holdFor, then fails it", async () => {
+    const dir = await inbox();
+    await dropFile(join(dir, "feed.hl7"), `BHS|^~\\&\r${adt(1)}`);
+    const { sink, handed, results } = batchSink();
+    let now = Date.now();
+    const source = new FileSource({
+      dir,
+      channel,
+      minAgeMs: 0,
+      now: () => now,
+      batch: { split: "hl7", holdForMs: 60_000 },
+    });
+    await source.poll(sink);
+    await source.poll(sink);
+    expect(handed).toEqual([]);
+    expect(await readdir(join(dir, CLAIMED_DIR, channel))).toHaveLength(1);
+
+    now += 60_000;
+    await source.poll(sink);
+    expect(handed.map((piece) => piece.failure)).toEqual(["batch: BATCH_INCOMPLETE"]);
+    expect(results[0]).toEqual(
+      expect.objectContaining({ code: "BATCH_INCOMPLETE", warnings: ["BATCH_MISSING_TRAILER"] }),
+    );
+  });
+
+  it("stores an incomplete HL7 batch as it is with accept, and the warning goes with the result", async () => {
+    const dir = await inbox();
+    await dropFile(join(dir, "feed.hl7"), `BHS|^~\\&\r${adt(1)}BTS|2\r`);
+    const { sink, handed, results } = batchSink();
+    await new FileSource({
+      dir,
+      channel,
+      minAgeMs: 0,
+      batch: { split: "hl7", onIncomplete: "accept" },
+    }).poll(sink);
+    expect(handed.map((piece) => piece.body)).toEqual([adt(1)]);
+    expect(results[0]?.warnings).toEqual(["BATCH_COUNT_MISMATCH"]);
+  });
+
+  it("fails an incomplete HL7 batch at once with fail", async () => {
+    const dir = await inbox();
+    await dropFile(join(dir, "feed.hl7"), `FHS|^~\\&\r${adt(1)}`);
+    const { sink, handed } = batchSink();
+    await new FileSource({
+      dir,
+      channel,
+      minAgeMs: 0,
+      batch: { split: "hl7", onIncomplete: "fail" },
+    }).poll(sink);
+    expect(handed.map((piece) => piece.failure)).toEqual(["batch: BATCH_INCOMPLETE"]);
+  });
+
+  it("moves a failed file into the claim folder's failed/ when errorDir has one of its name, or cannot be made", async () => {
+    const root = await makeProject({});
+    const dir = join(root, "inbox");
+    const errorDir = join(root, "errors");
+    await mkdir(errorDir, { recursive: true });
+    await writeFile(join(errorDir, "blank.txt"), "already here");
+    await dropFile(join(dir, "blank.txt"), "\n");
+    const { sink } = batchSink();
+    const options = { dir, channel, minAgeMs: 0, batch: { split: "lines" as const } };
+    await new FileSource({ ...options, errorDir }).poll(sink);
+    expect(await readdir(join(dir, CLAIMED_DIR, channel, FAILED_DIR))).toHaveLength(1);
+    expect(await readFile(join(errorDir, "blank.txt"), "utf8")).toBe("already here");
+
+    // An errorDir that is a file: it cannot be made, so the claim folder takes it.
+    const blocked = join(root, "blocked");
+    await writeFile(blocked, "a file, not a folder");
+    await dropFile(join(dir, "empty.txt"), "\n");
+    await new FileSource({ ...options, errorDir: join(blocked, "errors") }).poll(sink);
+    expect(await readdir(join(dir, CLAIMED_DIR, channel, FAILED_DIR))).toHaveLength(2);
+  });
+
+  it("holds a claim made by hand from when the pass finds it", async () => {
+    const dir = await inbox();
+    await dropFile(join(dir, CLAIMED_DIR, channel, "by-hand.hl7"), `BHS|^~\\&\r${adt(1)}`);
+    const { sink, handed } = batchSink();
+    await new FileSource({ dir, channel, minAgeMs: 0, batch: { split: "hl7" } }).poll(sink);
+    expect(handed).toEqual([]);
+    expect(await readdir(join(dir, CLAIMED_DIR, channel))).toEqual(["by-hand.hl7"]);
+  });
+
+  describe("on a sink that refuses a piece for good, as a channel that stores nothing does", () => {
+    /**
+     * A sink that stores nothing: it takes each piece at once, as delivered, and refuses for good
+     * the one whose control ID is MSG00003.
+     */
+    function passingSink(): { sink: MessageSink; delivered: string[] } {
+      const delivered: string[] = [];
+      let pass = 0;
+      const sink: MessageSink = {
+        receive: (body) => {
+          const text = latin1(body);
+          if (text.includes("|MSG00003|")) {
+            return Promise.reject(new PassFailed("TRANSFORM_FAILED", true));
+          }
+          delivered.push(text);
+          pass += 1;
+          return Promise.resolve(pass);
+        },
+      };
+      return { sink, delivered };
+    }
+
+    const feed = `BHS|^~\\&\r${adt(1)}${adt(2)}${adt(3)}${adt(4)}BTS|4\r`;
+
+    it("sends the pieces before it once, and sets the file aside in errorDir", async () => {
+      const root = await makeProject({});
+      const dir = join(root, "inbox");
+      const errorDir = join(root, "errors");
+      await dropFile(join(dir, "feed.hl7"), feed);
+      const faults: unknown[] = [];
+      const source = new FileSource({
+        dir,
+        channel,
+        minAgeMs: 0,
+        errorDir,
+        batch: { split: "hl7" },
+        onFileFault: (fault) => faults.push(fault),
+      });
+      const { sink, delivered } = passingSink();
+      for (let pass = 0; pass < 3; pass += 1) await source.poll(sink);
+      expect(delivered).toEqual([adt(1), adt(2)]);
+      expect(await readdir(join(dir, CLAIMED_DIR, channel))).toEqual([]);
+      expect(await readFile(join(errorDir, "feed.hl7"), "latin1")).toBe(feed);
+      expect(faults).toEqual([{ reason: "rejected", moved: true }]);
+
+      // A second file of that name goes in under its claimed name, over nothing.
+      await dropFile(join(dir, "feed.hl7"), feed);
+      for (let pass = 0; pass < 2; pass += 1) await source.poll(sink);
+      expect(delivered).toHaveLength(4);
+      expect(await readdir(errorDir)).toHaveLength(2);
+    });
+
+    it("sends the pieces before it once, and sets the file aside in failed/ with no errorDir", async () => {
+      const dir = await inbox();
+      await dropFile(join(dir, "feed.hl7"), feed);
+      const faults: unknown[] = [];
+      const source = new FileSource({
+        dir,
+        channel,
+        minAgeMs: 0,
+        batch: { split: "hl7" },
+        onFileFault: (fault) => faults.push(fault),
+      });
+      const { sink, delivered } = passingSink();
+      for (let pass = 0; pass < 3; pass += 1) await source.poll(sink);
+      expect(delivered).toEqual([adt(1), adt(2)]);
+      const failed = await readdir(join(dir, CLAIMED_DIR, channel, FAILED_DIR));
+      expect(failed).toHaveLength(1);
+      expect(failed[0]).toMatch(/-feed\.hl7$/);
+      expect(await readdir(join(dir, CLAIMED_DIR, channel))).toEqual([FAILED_DIR]);
+      expect(faults).toEqual([{ reason: "rejected", moved: true }]);
+    });
+
+    it("sets the file aside in failed/ when errorDir cannot be made", async () => {
+      const root = await makeProject({});
+      const dir = join(root, "inbox");
+      const blocked = join(root, "blocked");
+      await writeFile(blocked, "a file, not a folder");
+      await dropFile(join(dir, "feed.hl7"), feed);
+      const source = new FileSource({
+        dir,
+        channel,
+        minAgeMs: 0,
+        errorDir: join(blocked, "errors"),
+        batch: { split: "hl7" },
+      });
+      const { sink, delivered } = passingSink();
+      for (let pass = 0; pass < 3; pass += 1) await source.poll(sink);
+      expect(delivered).toEqual([adt(1), adt(2)]);
+      expect(await readdir(join(dir, CLAIMED_DIR, channel, FAILED_DIR))).toHaveLength(1);
+    });
+
+    it("leaves the file claimed and says so when even failed/ cannot take it", async () => {
+      const location = new FakeLocation();
+      location.put("/in/feed.hl7", feed);
+      const faults: unknown[] = [];
+      const source = new FileSource({
+        dir: "/in",
+        channel,
+        minAgeMs: 0,
+        location,
+        batch: { split: "hl7" },
+        onFileFault: (fault) => faults.push(fault),
+      });
+      const { sink } = passingSink();
+      const refusing: MessageSink = {
+        receive: async (body, options) => {
+          try {
+            return await sink.receive(body, options);
+          } catch (error) {
+            // The move into failed/ is the next rename.
+            location.fail = (op) => op === "rename";
+            throw error;
+          }
+        },
+      };
+      await source.poll(refusing);
+      expect(faults).toEqual([
+        expect.objectContaining({
+          reason: "rejected",
+          moved: false,
+          error: expect.anything() as unknown,
+        }),
+      ]);
+      expect(
+        [...location.files.keys()].filter((path) => path.startsWith(`/in/${CLAIMED_DIR}/`)),
+      ).toHaveLength(1);
+    });
+
+    it("keeps the file claimed when the refusal may pass, for the next pass", async () => {
+      const dir = await inbox();
+      await dropFile(join(dir, "feed.hl7"), feed);
+      const source = new FileSource({ dir, channel, minAgeMs: 0, batch: { split: "hl7" } });
+      const sink: MessageSink = {
+        receive: () => Promise.reject(new PassFailed("PASS_TIMEOUT", false)),
+      };
+      await expect(source.poll(sink)).rejects.toThrow(PassFailed);
+      expect(await readdir(join(dir, CLAIMED_DIR, channel))).toHaveLength(1);
+    });
+  });
+
+  it("reads a location that cannot stream whole, and keeps a file it fails to read for the next pass", async () => {
+    const location = new FakeLocation();
+    location.put("/in/notes.txt", "one\ntwo\n");
+    const errors: unknown[] = [];
+    const source = new FileSource({
+      dir: "/in",
+      channel,
+      minAgeMs: 0,
+      location,
+      batch: { split: "lines" },
+      onReadError: (error) => errors.push(error),
+    });
+    const { sink, handed, stored } = batchSink();
+    // The first read, the scan, fails.
+    location.fail = (op) => op === "read";
+    await source.poll(sink);
+    expect(handed).toEqual([]);
+    // The second read, the cut, fails.
+    let reads = 0;
+    location.fail = (op) => op === "read" && ++reads === 2;
+    await source.poll(sink);
+    expect(handed).toEqual([]);
+    expect(errors.map((error) => (error as { code?: unknown }).code)).toEqual(["EIO", "EIO"]);
+    expect(location.under("/in/.claimed")).toHaveLength(1);
+
+    await source.poll(sink);
+    expect(handed.map((piece) => [piece.body, piece.resumed])).toEqual([
+      ["one", true],
+      ["two", true],
+    ]);
+    expect(stored.size).toBe(2);
+    expect(location.under("/in/.claimed")).toEqual([]);
+  });
+
+  it("works with a sink that has only receive", async () => {
+    const dir = await inbox();
+    await dropFile(join(dir, "a.txt"), "a\nb\n");
+    const bodies: string[] = [];
+    const sink: MessageSink = {
+      receive: (body) => {
+        bodies.push(latin1(body));
+        return Promise.resolve(bodies.length);
+      },
+    };
+    await new FileSource({ dir, channel, minAgeMs: 0, batch: { split: "lines" } }).poll(sink);
+    expect(bodies).toEqual(["a", "b"]);
+  });
+});
+
+const TOKEN = "synthetic-token-0123456789abcdef";
+const AUTH = { Authorization: `Bearer ${TOKEN}` };
+
+let certs: Certificates;
+beforeAll(() => {
+  certs = makeCertificates();
+});
+afterAll(() => removeCertificates(certs));
+
+const sources: HttpSource[] = [];
+afterEach(async () => {
+  await Promise.all(sources.splice(0).map((source) => source.stop()));
+});
+
+async function listening(
+  sink: MessageSink,
+  options: Partial<HttpSourceOptions> = {},
+): Promise<number> {
+  const source = new HttpSource({
+    host: "127.0.0.1",
+    port: 0,
+    paths: ["/batch"],
+    maxBytes: 65_536,
+    tls: { cert: certs.serverCert, key: certs.serverKey, ca: undefined },
+    token: TOKEN,
+    batch: { split: "hl7" },
+    ...options,
+  });
+  sources.push(source);
+  await source.start(sink);
+  return source.port ?? 0;
+}
+
+describe("An HTTP source with batch", () => {
+  it("keys each piece by the Idempotency-Key, answers with the ids, and stores a retry once", async () => {
+    const { sink, handed, results } = batchSink();
+    const port = await listening(sink);
+    const body = `${adt(1)}${adt(2)}`;
+    const headers = { ...AUTH, "Idempotency-Key": '"synthetic-key-0001"' };
+    const first = await send(port, { path: "/batch", headers, body, ca: certs.ca });
+    expect(first.status).toBe(202);
+    expect(JSON.parse(first.body)).toEqual({ ids: [1, 2] });
+    expect(first.body).not.toContain("MSH");
+    const again = await send(port, { path: "/batch", headers, body, ca: certs.ca });
+    expect(JSON.parse(again.body)).toEqual({ ids: [1, 2] });
+
+    const hash = (handed[0]?.source?.["batch"] as { hash: string }).hash;
+    expect(hash).toMatch(/^[0-9a-f]{16}$/);
+    expect(handed.map((piece) => [piece.key, piece.resumed])).toEqual([
+      [`http:key:synthetic-key-0001#${hash}#0`, true],
+      [`http:key:synthetic-key-0001#${hash}#1`, true],
+      [`http:key:synthetic-key-0001#${hash}#0`, true],
+      [`http:key:synthetic-key-0001#${hash}#1`, true],
+    ]);
+    expect(handed[1]?.source).toEqual(
+      expect.objectContaining({
+        method: "POST",
+        path: "/batch",
+        batch: expect.objectContaining({ piece: 1 }) as unknown,
+      }),
+    );
+    expect(results.map((result) => [result.stored, result.duplicates])).toEqual([
+      [2, 0],
+      [0, 2],
+    ]);
+  });
+
+  it("answers 422 when a channel that stores nothing refuses a piece for good, and 503 when it may pass", async () => {
+    // A sink that stores nothing: the first piece goes through, the second is refused.
+    let refusal = new PassFailed("TRANSFORM_FAILED", true);
+    const delivered: string[] = [];
+    const sink: MessageSink = {
+      receive: (body) => {
+        const text = latin1(body);
+        if (text.includes("|MSG00002|")) return Promise.reject(refusal);
+        delivered.push(text);
+        return Promise.resolve(delivered.length);
+      },
+    };
+    const port = await listening(sink);
+    const body = `${adt(1)}${adt(2)}${adt(3)}`;
+    const rejected = await send(port, { path: "/batch", headers: AUTH, body, ca: certs.ca });
+    // Sending it again cannot help, so a sender does not send the first piece twice.
+    expect(rejected.status).toBe(422);
+    expect(JSON.parse(rejected.body)).toMatchObject({ code: "TRANSFORM_FAILED" });
+    expect(rejected.headers["retry-after"]).toBeUndefined();
+    expect(rejected.body).not.toContain("MSH");
+
+    refusal = new PassFailed("DESTINATION_FAILED", false, 2_000);
+    const deferred = await send(port, { path: "/batch", headers: AUTH, body, ca: certs.ca });
+    expect(deferred.status).toBe(503);
+    expect(JSON.parse(deferred.body)).toMatchObject({ code: "DESTINATION_FAILED" });
+    expect(deferred.headers["retry-after"]).toBe("2");
+    expect(delivered).toEqual([adt(1), adt(1)]);
+  });
+
+  it("keys each piece by the body's hash without an Idempotency-Key", async () => {
+    const { sink, handed } = batchSink();
+    const port = await listening(sink, { batch: { split: "lines" } });
+    const answer = await send(port, { path: "/batch", headers: AUTH, body: "a\nb", ca: certs.ca });
+    expect(JSON.parse(answer.body)).toEqual({ ids: [1, 2] });
+    expect(handed[0]?.key).toMatch(/^http:sha256:[0-9a-f]{16}#0$/);
+  });
+
+  it("refuses an Idempotency-Key that is not one, and an incomplete or empty batch, storing nothing", async () => {
+    const { sink, handed } = batchSink();
+    const port = await listening(sink);
+    const bad = await send(port, {
+      path: "/batch",
+      headers: { ...AUTH, "Idempotency-Key": "" },
+      body: adt(1),
+      ca: certs.ca,
+    });
+    expect(bad.status).toBe(400);
+    const incomplete = await send(port, {
+      path: "/batch",
+      headers: AUTH,
+      body: `BHS|^~\\&\r${adt(1)}`,
+      ca: certs.ca,
+    });
+    expect(incomplete.status).toBe(422);
+    expect(JSON.parse(incomplete.body)).toEqual({ error: "BATCH_INCOMPLETE" });
+    const empty = await send(port, {
+      path: "/batch",
+      headers: AUTH,
+      body: "\r\n\r\n",
+      ca: certs.ca,
+    });
+    expect(empty.status).toBe(422);
+    expect(JSON.parse(empty.body)).toEqual({ error: "BATCH_EMPTY" });
+    expect(handed).toEqual([]);
+  });
+
+  it("takes an unquoted key, refuses one sent twice, and gives the fixed answer when set", async () => {
+    const { sink, handed } = batchSink();
+    const port = await listening(sink, {
+      response: {
+        kind: "fixed",
+        status: 200,
+        contentType: "text/plain",
+        headers: {},
+        body: "stored",
+      },
+    });
+    const answer = await send(port, {
+      path: "/batch",
+      headers: { ...AUTH, "Idempotency-Key": "synthetic-key-0002" },
+      body: adt(1),
+      ca: certs.ca,
+    });
+    expect([answer.status, answer.body]).toEqual([200, "stored"]);
+    expect(handed[0]?.key).toMatch(/^http:key:synthetic-key-0002#[0-9a-f]{16}#0$/);
+    const twice = await send(port, {
+      path: "/batch",
+      headers: { ...AUTH, "Idempotency-Key": ["synthetic-a", "synthetic-b"] },
+      body: adt(1),
+      ca: certs.ca,
+    });
+    expect(twice.status).toBe(400);
+  });
+
+  it("answers 422 to a changed body under a key already used, and stores none of it", async () => {
+    const { sink, handed, stored, results } = batchSink();
+    const port = await listening(sink, { batch: { split: "lines" } });
+    const headers = { ...AUTH, "Idempotency-Key": '"synthetic-key-0003"' };
+    const first = await send(port, { path: "/batch", headers, body: "a\nb\nc", ca: certs.ca });
+    expect([first.status, JSON.parse(first.body)]).toEqual([202, { ids: [1, 2, 3] }]);
+    const changed = await send(port, {
+      path: "/batch",
+      headers,
+      body: "a\nb\nc\nd\ne",
+      ca: certs.ca,
+    });
+    expect([changed.status, JSON.parse(changed.body)]).toEqual([
+      422,
+      { error: "BATCH_KEY_REUSED" },
+    ]);
+    // Nothing of the changed body is stored or answered for, and the first body's pieces stand.
+    expect(handed.map((piece) => piece.body)).toEqual(["a", "b", "c"]);
+    expect(stored.size).toBe(3);
+    expect(results).toHaveLength(1);
+    // The first body sent again is still a retry of it.
+    const again = await send(port, { path: "/batch", headers, body: "a\nb\nc", ca: certs.ca });
+    expect([again.status, JSON.parse(again.body)]).toEqual([202, { ids: [1, 2, 3] }]);
+    expect(stored.size).toBe(3);
+  });
+
+  it("stores a request sent twice at once under one key once, and refuses a changed body sent with it", async () => {
+    const { sink, inserted } = batchSink({ lag: true });
+    const port = await listening(sink, { batch: { split: "lines" } });
+    const headers = { ...AUTH, "Idempotency-Key": '"synthetic-key-0004"' };
+    const same = await Promise.all(
+      [1, 2].map(() => send(port, { path: "/batch", headers, body: "a\nb\nc", ca: certs.ca })),
+    );
+    expect(same.map((answer) => [answer.status, JSON.parse(answer.body) as unknown])).toEqual([
+      [202, { ids: [1, 2, 3] }],
+      [202, { ids: [1, 2, 3] }],
+    ]);
+    expect(inserted()).toBe(3);
+
+    const other = { ...AUTH, "Idempotency-Key": '"synthetic-key-0005"' };
+    const raced = await Promise.all(
+      ["x\ny", "x\ny\nz"].map((body) =>
+        send(port, { path: "/batch", headers: other, body, ca: certs.ca }),
+      ),
+    );
+    expect(raced.map((answer) => answer.status).sort()).toEqual([202, 422]);
+    // One body's pieces only, two or three of them, never both bodies' five.
+    expect([5, 6]).toContain(inserted());
+  });
+
+  it("stores a changed body under a used key as a batch of its own on a sink that cannot say what a key holds", async () => {
+    const bodies: string[] = [];
+    const sink: MessageSink = {
+      receive: (body) => {
+        bodies.push(latin1(body));
+        return Promise.resolve(bodies.length);
+      },
+    };
+    const port = await listening(sink, { batch: { split: "lines" } });
+    const headers = { ...AUTH, "Idempotency-Key": '"synthetic-key-0006"' };
+    const first = await send(port, { path: "/batch", headers, body: "a\nb", ca: certs.ca });
+    const changed = await send(port, { path: "/batch", headers, body: "a\nb\nc", ca: certs.ca });
+    expect([first.body, changed.body]).toEqual([
+      JSON.stringify({ ids: [1, 2] }),
+      JSON.stringify({ ids: [3, 4, 5] }),
+    ]);
+    expect(bodies).toEqual(["a", "b", "a", "b", "c"]);
+  });
+
+  it("answers 503 when a piece cannot be stored", async () => {
+    const { sink, failAt } = batchSink();
+    failAt.at = 2;
+    const port = await listening(sink);
+    const answer = await send(port, {
+      path: "/batch",
+      headers: AUTH,
+      body: `${adt(1)}${adt(2)}`,
+      ca: certs.ca,
+    });
+    expect(answer.status).toBe(503);
+  });
+});

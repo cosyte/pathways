@@ -34,17 +34,48 @@ text or a source file's name. Commands whose standard output is their report (`s
 | `delivery-rejected`       | warn  | `channel`, `destination`, `delivery`, `reason`                                         | the destination rejected it for good                                                                                                                                   |
 | `delivery-exhausted`      | warn  | `channel`, `destination`, `delivery`, `attempt`, `reason`, `code`                      | out of retries (`reason` `limit` or `maxAge`): marked failed, its body kept for a resend                                                                               |
 | `delivery-halted`         | warn  | `channel`, `destination`, `delivery`, `attempt`                                        | `pathways channel halt` cut the send off; it stays pending and is sent again, flagged, after a resume                                                                  |
+| `handed-over`             | info  | `channel`, `message`, `target`, `handedTo`                                             | `ctx.route` handed a message to channel `target`, stored there as message `handedTo`                                                                                   |
+| `hand-off-waiting`        | info  | `channel`, `message` or `destination` and `delivery`, `target`, `retryInMs`, `code`    | the target holds `maxPending` messages: the hand-off is tried again later (`code` `ERR_PATHWAYS_TARGET_FULL`)                                                          |
+| `hand-off-refused`        | warn  | `channel`, `destination`, `delivery`, `code`                                           | a channel destination's delivery failed: past the target's `maxHops`, or no such target                                                                                |
 | `passed`                  | info  | `channel`, `pass`, `outputs`                                                           | `storage.content: none`: every destination accepted the message, and its sender is answered so; `pass` is the message's pass id                                        |
 | `pass-filtered`           | info  | `channel`, `pass`                                                                      | `storage.content: none`: the transform returned no output, and the sender is answered as for one accepted                                                              |
 | `pass-unreadable`         | warn  | `channel`, `pass`                                                                      | `storage.content: none`: the source could not read the message, and answers as it does on any channel                                                                  |
-| `pass-transform-failed`   | warn  | `channel`, `pass`, `kind`, `name`, `code`, `where`                                     | `storage.content: none`: the transform failed; the sender is told not to send it again                                                                                 |
+| `pass-transform-failed`   | warn  | `channel`, `pass`, `destination`, `kind`, `name`, `code`, `where`                      | `storage.content: none`: the transform failed (`destination` is set when it was that destination's own); the sender is told not to send it again                       |
 | `pass-rejected`           | warn  | `channel`, `pass`, `destination`, `reason`                                             | `storage.content: none`: a destination rejected the message for good; the others are still sent it                                                                     |
 | `pass-deferred`           | warn  | `channel`, `pass`, `destination`, `code`                                               | `storage.content: none`: a destination failed or timed out; the later ones are not sent it, and the sender is told to send it again                                    |
 | `pass-failed`             | warn  | `channel`, `pass`, `code`, `permanent`, `retryAfterMs`                                 | `storage.content: none`: the sender is not answered as accepted; `permanent` says whether it is told not to send again, `code` why (such as `PASS_TIMEOUT`)            |
 | `smtp-recipients-refused` | warn  | `channel`, `destination`, `message`, `seq`, `refused`, `outcome`                       | an SMTP server took the email for some recipients and refused `refused` of them; `outcome` is `rejected` or `delivered` (`onPartialRefusal`), and no address is logged |
+| `deliveries-held`         | warn  | `channel`, `code`, `deliveries`                                                        | at a channel's first delivery pass, pending deliveries that none of its destinations now was made for; none is sent to another                                         |
+
+A channel's `onStart` and `onStop`, which run in its worker:
+
+| Event                   | Level | Fields                                     | Meaning                                                                                                                                |
+| ----------------------- | ----- | ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `channel-script`        | any   | `channel`, `code`, `ids`                   | a line a channel's `onStart` logged: its code and numbers only                                                                         |
+| `transform-load-failed` | error | `channel`, `kind`, `name`, `code`, `where` | a replacement worker would not load (its `onStart` threw, `ON_START_FAILED`, or ran too long, `ON_START_TIMEOUT`): the channel stopped |
+| `on-stop-failed`        | warn  | `channel`, `name`, `code`, `where`         | a channel's `onStop` threw (`ON_STOP_FAILED` unless its error had a code); the worker ended                                            |
+| `on-stop-timeout`       | warn  | `channel`, `limitMs`                       | a channel's `onStop` ran past its limit and was cut off; the worker ended                                                              |
 
 A `transform-failed` line's `kind` is `load`, `parse`, `transform`, `output`, `timeout`, `memory` or
 `crash`. `where` is `file:line:column` in the transform, when it threw.
+
+A `deliveries-held` line's `code` is `destination-gone` for deliveries made for a destination the
+channel no longer has (removed, renamed, or, without a name, given another target), which stay
+pending and are sent if it comes back; or `destination-unknown` for deliveries queued by a Pathways
+before deliveries recorded their destination, which cannot be matched to one, so each is marked
+failed with the error `delivery: destination-unknown` and its message can be replayed.
+
+A channel destination's `delivered` line also carries `handedTo`, the new message's id in its target.
+
+| Code                           | Meaning                                                                                                                                 |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `ERR_PATHWAYS_UNKNOWN_ROUTE`   | `ctx.route` named no channel whose source is `channel:`; the message fails and nothing is handed over                                   |
+| `ERR_PATHWAYS_HOP_LIMIT`       | a hand-off would take the message past its target's `maxHops`; the message, or the delivery, fails                                      |
+| `ERR_PATHWAYS_TARGET_FULL`     | with the hand-off, the target would hold more than `maxPending` messages waiting for its transform; it is tried again later, not failed |
+| `ERR_PATHWAYS_TOO_MANY_ROUTES` | a transform routed more messages to one target in one run than its `maxPending`; the message fails and nothing is handed over           |
+| `MULTIPLE_MESSAGES`            | a hand-off to an `hl7v2` channel held a second message header; the message, or the delivery, fails and nothing is handed over           |
+
+See [Route messages between channels](./route-between-channels.md).
 
 ### Sources and endpoints
 
@@ -60,6 +91,8 @@ A `transform-failed` line's `kind` is `load`, `parse`, `transform`, `output`, `t
 | `poll-overlap`                                                     | a polled source's pass came due while its last `poll` call had not returned, and was skipped                                                                                                  |
 | `source-read-failed`                                               | a file source could not claim or read a file; it stays for the next pass                                                                                                                      |
 | `source-file-set-aside`                                            | a file source will not take a file, by `reason` (`too-large`, `unreadable`, or `rejected` on a channel that stores nothing); `moved` says whether it went into `errorDir`, and `code` why not |
+| `batch`                                                            | a source read a batch to its end: `source`, `outcome`, `pieces`, `stored`, `failed`, `duplicates`, and `code` and `warnings` when it has them                                                 |
+| `batch-audit-failed`                                               | a batch's audit entry could not be written (`code`); its pieces are stored                                                                                                                    |
 | `http-refused`                                                     | an HTTP source or the health endpoint refused a request, with its `status`                                                                                                                    |
 | `http-unreadable`                                                  | an HTTP source answering with ACKs stored a message as failed, with its `problem`                                                                                                             |
 | `mllp-listening`                                                   | an MLLP source is listening, on `port`, with `tls` true or false                                                                                                                              |
@@ -132,33 +165,37 @@ A `transform-failed` line's `kind` is `load`, `parse`, `transform`, `output`, `t
 | `hook-dropped`          | a hook had 1,000 events waiting, or was stopping, and events were dropped |
 | `hook-stop-failed`      | a hook's `stop()` threw or ran out of time                                |
 | `audit-listener-failed` | a listener on the audit log failed; the entry stands                      |
+| `audit-failed`          | the `engine-stop` entry could not be written, by `code`; the stop goes on |
 
 ## Delivery codes
 
 A retried delivery stores and logs a code. These come from Pathways' own connectors; a network error
 keeps the operating system's code, such as `ECONNREFUSED` or `ENOTFOUND`.
 
-| Code                      | Connector | Meaning                                                             |
-| ------------------------- | --------- | ------------------------------------------------------------------- |
-| `CONNECT_TIMEOUT`         | MLLP      | no connection within `ackTimeout`                                   |
-| `ACK_TIMEOUT`             | MLLP      | no ACK within `ackTimeout`                                          |
-| `ACK_AR`, `ACK_CR`        | MLLP      | the receiver answered with a reject code                            |
-| `ACK_UNREADABLE`          | MLLP      | the answer was not an ACK Pathways could read                       |
-| `ACK_CONTROL_ID_MISMATCH` | MLLP      | the ACK answered another message's MSH-10                           |
-| `MLLP_CONNECTION`         | MLLP      | the connection ended with no other code                             |
-| `CONNECT_TIMEOUT`         | tcp       | no connection within `timeout`                                      |
-| `REPLY_TIMEOUT`           | tcp       | no whole reply within `timeout`                                     |
-| `WRITE_TIMEOUT`           | tcp       | the output was not taken in within `timeout`, with no `expectReply` |
-| `REPLY_OVERSIZE`          | tcp       | the reply was longer than `maxMessageSize`                          |
-| `REPLY_BAD_LENGTH`        | tcp       | the reply's inclusive length prefix was smaller than the prefix     |
-| `CONNECTION_CLOSED`       | tcp       | the receiver closed before a whole reply                            |
-| `REPLY_RETRY`             | tcp       | the reply check said `retry`                                        |
-| `REPLY_CHECK_FAILED`      | tcp       | the reply check threw, ran out of time or said something else       |
-| `ABORTED`                 | tcp       | the channel was halted while the delivery ran                       |
-| `TCP_CONNECTION`          | tcp       | the connection failed with no other code                            |
-| `HTTP_<status>`           | HTTP      | a 408, 425, 429 or 5xx answer, or a held 3xx                        |
-| `ETIMEDOUT`               | HTTP      | no answer within `timeout`                                          |
-| `DELIVERY_TIMEOUT`        | any       | the attempt ran past its deadline, cut off                          |
+| Code                      | Connector | Meaning                                                                               |
+| ------------------------- | --------- | ------------------------------------------------------------------------------------- |
+| `CONNECT_TIMEOUT`         | MLLP      | no connection within `ackTimeout`                                                     |
+| `ACK_TIMEOUT`             | MLLP      | no ACK within `ackTimeout`                                                            |
+| `ACK_AR`, `ACK_CR`        | MLLP      | the receiver answered with a reject code                                              |
+| `ACK_UNREADABLE`          | MLLP      | the answer was not an ACK Pathways could read                                         |
+| `ACK_CONTROL_ID_MISMATCH` | MLLP      | the ACK answered another message's MSH-10                                             |
+| `MLLP_CONNECTION`         | MLLP      | the connection ended with no other code                                               |
+| `CONNECT_TIMEOUT`         | tcp       | no connection within `timeout`                                                        |
+| `REPLY_TIMEOUT`           | tcp       | no whole reply within `timeout`                                                       |
+| `WRITE_TIMEOUT`           | tcp       | the output was not taken in within `timeout`, with no `expectReply`                   |
+| `REPLY_OVERSIZE`          | tcp       | the reply was longer than `maxMessageSize`                                            |
+| `REPLY_BAD_LENGTH`        | tcp       | the reply's inclusive length prefix was smaller than the prefix                       |
+| `CONNECTION_CLOSED`       | tcp       | the receiver closed before a whole reply                                              |
+| `REPLY_RETRY`             | tcp       | the reply check said `retry`                                                          |
+| `REPLY_CHECK_FAILED`      | tcp       | the reply check threw, ran out of time or said something else                         |
+| `ABORTED`                 | tcp       | the channel was halted while the delivery ran                                         |
+| `TCP_CONNECTION`          | tcp       | the connection failed with no other code                                              |
+| `HTTP_<status>`           | HTTP      | a 408, 425, 429 or 5xx answer, or a held 3xx                                          |
+| `ETIMEDOUT`               | HTTP      | no answer within `timeout`                                                            |
+| `ACK_AE`, `ACK_CE`        | HTTP      | with `ack: xml`, the acknowledgement answered with an error code                      |
+| `ACK_UNREADABLE`          | HTTP      | with `ack: xml`, the answer was not exactly one acknowledgement in the one shape read |
+| `ACK_CONTROL_ID_MISMATCH` | HTTP      | with `ack: xml`, the acknowledgement answered another `MSH.10`                        |
+| `DELIVERY_TIMEOUT`        | any       | the attempt ran past its deadline, cut off                                            |
 
 A `delivery-retry` line's `retryInMs` is the backoff, or the wait a 429's or a 503's `Retry-After`
 asked for when that is longer, up to the destination's `retry.max`, 5 minutes by default. A
@@ -168,7 +205,10 @@ asked for when that is longer, up to the destination's `retry.max`, 5 minutes by
 host (and port, when it names one) of the 3xx answer's `Location`, never its path or query, and is
 absent when there is no `Location` or it names no host.
 
-A delivery rejected for good stores its reason: the ACK code (`AE`, `CE`), `HTTP <status>` for a
+A delivery rejected for good stores its reason: the ACK code (`AE`, `CE` over MLLP; `AR`, `CR` from
+an HTTP destination with `ack: xml`), `SENT_XML_UNREADABLE` for an output in XML that an HTTP destination
+with `ack: xml` refuses to read, unsent, `SENT_XML_NO_CONTROL_ID` for an output in XML without
+exactly one `MSH` holding one `MSH.10`, such as a batch, unsent, `HTTP <status>` for a
 101 or a 4xx other than 408, 425 and 429, `MLLP_PAYLOAD_CONTAINS_...` for an output that
 holds a framing byte, `REPLY_REJECTED` when a tcp reply check said `rejected`, or
 `TCP_PAYLOAD_CONTAINS_DELIMITER`, `TCP_PAYLOAD_CONTAINS_END` or `TCP_PAYLOAD_TOO_LONG` for an output
@@ -178,7 +218,9 @@ a tcp destination's framing cannot carry.
 
 When an MLLP source stores a message as failed, the reason is one of `@cosyte/hl7`'s parse codes (such
 as `NO_MSH_SEGMENT`), `NO_CONTROL_ID`, `MULTIPLE_MESSAGES` or `MLLP_TRAILING_BYTES`. An ACK builder
-receives it as `problem`.
+receives it as `problem`. `MULTIPLE_MESSAGES` means the frame held a second message header (`MSH`,
+`FHS` or `BHS`, in any case): a frame is one message. On an `hl7v2` channel the engine stores a body
+from any other source that holds one as failed with `inbound: MULTIPLE_MESSAGES` too.
 
 ## File source codes
 
@@ -191,6 +233,13 @@ Besides the operating system's codes (`EACCES`, `EEXIST` and the like), a `sourc
 | `ESTALE`                        | a file left the source folder, or was replaced, between the pass finding it and moving it; it stays         |
 | `ERR_PATHWAYS_FILE_HELD`        | a file moved in from outside the folder could not go back, and waits in `.claimed/` as `refused-...`        |
 | `ERR_PATHWAYS_FILE_ID_UNSTEADY` | the folder's file system changes a file's id when it moves (FAT, exFAT), so the source claims nothing there |
+
+A file source with `batch:` sets a file aside with the `reason` `batch-too-large`, `batch-empty` or
+`batch-incomplete`, and stores it as a failed message with the error `batch: BATCH_FILE_TOO_LARGE`,
+`batch: BATCH_EMPTY` or `batch: BATCH_INCOMPLETE`. A piece of an HL7 batch that cannot be read is
+stored as failed with `batch: ` and the parser's code, such as `batch: NO_MSH_SEGMENT`. An HTTP
+source with `batch:` answers 422 with `BATCH_EMPTY`, `BATCH_INCOMPLETE`, or `BATCH_KEY_REUSED` for an
+`Idempotency-Key` used before for another body, and stores nothing.
 
 ## SFTP codes
 

@@ -65,6 +65,18 @@ export interface ChannelHealth {
    */
   readonly connections?: { readonly refused: number };
   /**
+   * Set when the channel's transform would not load in a replacement worker (after a transform ran
+   * past its timeout or crashed): its `onStart` threw or ran past its limit, or the module no longer
+   * loads. The channel is stopped until `pathways channel reload` loads it, the other channels run
+   * on, and the answer is 503. The stage, the error's name and its code, never its text.
+   */
+  readonly transform?: {
+    readonly loaded: false;
+    readonly kind: string;
+    readonly name: string;
+    readonly code?: string | undefined;
+  };
+  /**
    * `volatile` for a channel that stores nothing (`storage.content: none`): a message is held only
    * while its sender waits for the answer, and nothing is kept to replay. Absent for every other
    * channel.
@@ -76,7 +88,8 @@ export interface ChannelHealth {
 
 /**
  * The health endpoint's body. `status` is `unavailable` (and the answer 503) only when the engine
- * itself is broken: storage cannot be read, or a source cannot listen. A destination that is down
+ * itself is broken: storage cannot be read, a source cannot listen, or a channel's transform would
+ * not load in a replacement worker. A destination that is down
  * shows as a channel `retrying`, with the answer still 200, because restarting the engine would not
  * bring it back. A standby (`pathways start --standby`) answers `standby`, with 503 and no channels,
  * until it takes the engine lease, so a load balancer's readiness check sends it nothing.

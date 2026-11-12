@@ -37,16 +37,21 @@ afterEach(async () => {
 
 const AT = Date.UTC(2026, 10, 11, 12, 0, 0);
 
-/** A text channel from the polling source to scripted destinations `a` and `b`, each with `retry`. */
+/**
+ * A text channel from the polling source to scripted destinations `a` and `b`, each with `retry`.
+ * They share one module, so each has a name.
+ */
 const channel = (a = "", b = "", extra = ""): string => `
 format: text
 source:
   module: ./source.ts
   options: { key: in }
 destinations:
-  - module: ./destination.ts
+  - name: a
+    module: ./destination.ts
     options: { key: a }
-${a === "" ? "" : `    retry: ${a}\n`}  - module: ./destination.ts
+${a === "" ? "" : `    retry: ${a}\n`}  - name: b
+    module: ./destination.ts
     options: { key: b }
 ${b === "" ? "" : `    retry: ${b}\n`}${extra}`;
 
@@ -650,8 +655,8 @@ describe("retry settings in the engine", () => {
       files(
         "",
         channel().replace(
-          "  - module: ./destination.ts\n    options: { key: a }\n",
-          `  - http: { url: "${lab.url}", plaintext: true }\n    retry: { max: 30s, limit: 2 }\n`,
+          "  - name: a\n    module: ./destination.ts\n    options: { key: a }\n",
+          `  - http: { url: "${lab.url}", plaintext: true, allowNetworks: [127.0.0.1] }\n    retry: { max: 30s, limit: 2 }\n`,
         ),
       ),
     );

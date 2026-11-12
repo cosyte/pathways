@@ -1,0 +1,21 @@
+{
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "key": "node scripts/dev-key.ts",
+    "certs": "node scripts/dev-certs.ts",
+    "lab": "node scripts/lab.ts",
+    "send": "node scripts/send.ts",
+    "start": "pathways start",
+    "test": "pathways test"
+  },
+  "dependencies": {
+    "@cosyte/hl7": "^0.1.14"
+  },
+  "devDependencies": {
+    "@cosyte/pathways": "^0.0.3"
+  }
+}

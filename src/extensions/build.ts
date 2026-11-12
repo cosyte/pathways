@@ -50,13 +50,21 @@ const STORE_METHOD_LIST = {
   channelStates: false,
   setChannelState: false,
   markDryRun: false,
+  holdDeliveries: false,
   metaCandidates: false,
   destinationQueues: false,
+  messageMeta: false,
+  settle: false,
+  unsettled: false,
+  requeuedUnsettled: false,
   joinNode: false,
   nodeHeartbeat: false,
   leaveNode: false,
   nodes: false,
   forgetNode: false,
+  heldIdempotencyKey: false,
+  handOff: false,
+  children: false,
 } satisfies Record<keyof MessageStore, boolean>;
 
 const STORE_METHODS = Object.entries(STORE_METHOD_LIST)

@@ -7,6 +7,7 @@ import SqliteDatabase from "better-sqlite3";
 
 import { loadProject } from "../src/config/load.js";
 import type { ProjectConfig } from "../src/config/schema.js";
+import { destinationKeys } from "../src/engine/destination-key.js";
 import { EXIT } from "../src/exit.js";
 import { replayMessages } from "../src/operator/actions.js";
 import { AuditLog } from "../src/operator/audit.js";
@@ -146,7 +147,8 @@ describe("replay", () => {
     const config = await project();
     const memory = new MemoryStore();
     const { id } = await memory.receive("adt", encode("synthetic text body"));
-    await memory.completeTransform(id, [encode("synthetic output")], 1);
+    const keys = destinationKeys(config.root, config.channels[0]?.destinations ?? []);
+    await memory.completeTransform(id, [encode("synthetic output")], 1, undefined, keys);
     const [delivery] = await memory.deliveries(id);
     await memory.markDelivered(delivery?.id ?? 0);
     // A custom store's requeue is free to report the message as failed on a resend.

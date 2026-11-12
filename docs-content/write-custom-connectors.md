@@ -66,7 +66,11 @@ export default ((options, context) => {
 
 `idempotencyKey` is what names one message to its source, the same every time it is handed in. With
 `resumed: true`, a message already stored under that key is not stored again, and its id comes back.
-Only resumed messages are looked up, so a message handed in for the first time costs nothing extra.
+That holds when the same message is handed in twice at the same moment, on two connections or two
+nodes: one is stored and the other gets its id
+([One message per idempotency key](./store-messages-in-a-database.md#one-message-per-idempotency-key)).
+Only resumed messages are looked up, so a message handed in for the first time costs nothing extra,
+and it is always stored.
 [`ReceiveOptions`](./api/README.md#receiveoptions) has the rest, including `duplicateKey`, which flags
 a repeat without dropping it.
 

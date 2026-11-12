@@ -185,7 +185,7 @@ async function project(database: TestDatabase): Promise<Project> {
       "transform: ./transform.ts\ndestinations:\n" +
       DESTINATIONS.map(
         (name) =>
-          `  - module: ../../destination.ts\n` +
+          `  - name: ${name}\n    module: ../../destination.ts\n` +
           `    options: { log: ${JSON.stringify(log)}, name: ${name} }\n`,
       ).join(""),
   );
@@ -554,7 +554,7 @@ describe("A channel that stores nothing, killed between its sends and its answer
         "transform: ./transform.ts\ndestinations:\n" +
         DESTINATIONS.map(
           (name) =>
-            `  - module: ../../destination.ts\n` +
+            `  - name: ${name}\n    module: ../../destination.ts\n` +
             `    options: { log: ${JSON.stringify(log)}, name: ${name} }\n`,
         ).join(""),
     );

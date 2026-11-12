@@ -68,14 +68,113 @@ export interface TransformRequest extends MessageContext {
   readonly body: Uint8Array;
 }
 
-/** The worker's reply to one request. */
+/**
+ * What one destination's transform gave for one message: its outputs (none filters the destination
+ * for that message), or why it failed. A failure here fails that destination's delivery only.
+ */
+export type DestinationReply =
+  | { readonly ok: true; readonly outputs: readonly Uint8Array[] }
+  | { readonly ok: false; readonly failure: FailureSummary };
+
+/** One message a transform handed to another channel with `ctx.route`, serialized. */
+export interface RoutedMessage {
+  /** The channel it goes to, as the transform named it. */
+  readonly channel: string;
+  readonly body: Uint8Array;
+}
+
+/**
+ * What one message's run came to: its outputs, what it handed to other channels, and, on a channel
+ * with destination transforms, each destination's reply as {@link runDestinations} gives them.
+ */
+export interface TransformResult {
+  readonly outputs: Uint8Array[];
+  readonly routes: RoutedMessage[];
+  readonly destinations?: (DestinationReply | null)[];
+}
+
+/**
+ * The worker's reply to one request. On a channel with destination transforms, `destinations`
+ * holds one entry per destination, in order: its reply, or `null` for a destination without a
+ * transform, which sends the channel's `outputs` as they are.
+ */
 export type TransformReply =
-  | { readonly id: number; readonly ok: true; readonly outputs: readonly Uint8Array[] }
+  | {
+      readonly id: number;
+      readonly ok: true;
+      readonly outputs: readonly Uint8Array[];
+      readonly destinations?: readonly (DestinationReply | null)[];
+      readonly routes?: readonly RoutedMessage[];
+    }
   | { readonly id: number; readonly ok: false; readonly failure: FailureSummary };
 
-/** The worker's first message: ready, or the transform could not be loaded. */
+/** What `ctx.route` does with one call: given a channel's name and a message. */
+export type RouteFunction = (channel: string, message: unknown) => void;
+
+/** A `ctx.route` that keeps nothing: the context of a run whose hand-offs go nowhere. */
+const DISCARD_ROUTE: RouteFunction = () => undefined;
+
+/**
+ * The worker's first messages: `starting` once the module is loaded and its `onStart` is about to
+ * run (so the engine times `onStart` alone), then ready, or a transform could not be loaded.
+ * `destination` is the index of the destination whose transform failed to load, absent for the
+ * channel's own.
+ */
 export type WorkerHello =
-  { readonly hello: "ready" } | { readonly hello: "load-failed"; readonly failure: FailureSummary };
+  | { readonly hello: "starting" }
+  | { readonly hello: "ready" }
+  | {
+      readonly hello: "load-failed";
+      readonly failure: FailureSummary;
+      readonly destination?: number;
+    };
+
+/**
+ * One destination as its transform sees it: where it is in the channel's list, its `name:` when the
+ * block sets one, its kind, the format it sends (what its transform's return is written in), and its
+ * transform module.
+ */
+export interface DestinationSetup {
+  readonly index: number;
+  readonly name: string | undefined;
+  readonly kind: string;
+  readonly format: WorkerFormat;
+  /** The destination's transform module, or `undefined` for none: it sends the channel's outputs. */
+  readonly transformFile: string | undefined;
+}
+
+/** The engine's request before it ends the worker: run the module's `onStop`, if it has one. */
+export interface StopRequest {
+  readonly stop: true;
+}
+
+/** The worker's reply to a {@link StopRequest}: done, with what went wrong if `onStop` threw. */
+export interface StopReply {
+  readonly stopped: true;
+  readonly failure?: FailureSummary;
+}
+
+/** One line a channel script logs: a level, a fixed code and numbers only. */
+export interface ScriptLogLine {
+  readonly level: "info" | "warn" | "error";
+  readonly code: string;
+  readonly ids: Readonly<Record<string, number>>;
+}
+
+/** How a {@link ScriptLogLine} crosses to the engine. */
+export interface ScriptLogMessage {
+  readonly scriptLog: ScriptLogLine;
+}
+
+/**
+ * A channel's module as the worker runs it: the transform, and the `onStart` and `onStop` it may
+ * export beside it.
+ */
+export interface ChannelScripts {
+  readonly transform: TransformFunction;
+  readonly onStart: ((ctx: unknown) => unknown) | undefined;
+  readonly onStop: (() => unknown) | undefined;
+}
 
 /** What the engine hands a new worker. */
 export interface WorkerSetup {
@@ -88,8 +187,15 @@ export interface WorkerSetup {
    * values, frozen once here and shared by every message's context.
    */
   readonly config: Readonly<Record<string, unknown>>;
+  /**
+   * The channel's destinations, set only when one of them has a transform: each destination's
+   * transform then runs after the channel's, once per channel output, in the same request.
+   */
+  readonly destinations?: readonly DestinationSetup[] | undefined;
   /** How the channel's format reads and writes its bodies, from the channel's own block. */
   readonly formatSettings?: FormatSettings;
+  /** The channel's name, which `onStart` receives. Defaults to an empty name. */
+  readonly channel?: string;
 }
 
 /**
@@ -111,10 +217,13 @@ export function isWorkerSetup(data: unknown): data is WorkerSetup {
 
 class StageError extends Error {
   readonly kind: FailureKind;
+  /** The code a failure carries when its error has none of its own. */
+  readonly fallbackCode: string | undefined;
 
-  constructor(kind: FailureKind, cause: unknown) {
+  constructor(kind: FailureKind, cause: unknown, fallbackCode?: string) {
     super("stage failed", { cause });
     this.kind = kind;
+    this.fallbackCode = fallbackCode;
   }
 }
 
@@ -135,8 +244,10 @@ class JsonBodyError extends Error {
 const encoder = new TextEncoder();
 /** `text` keeps its first-slice behaviour: bytes that are not UTF-8 become U+FFFD. */
 const lenientUtf8 = new TextDecoder();
+/** One character per byte, for an `xml` body's declaration, which is ASCII when it is well-formed. */
+const latin1 = new TextDecoder("latin1");
 /**
- * FHIR, X12, C-CDA and JSON are read as UTF-8, and a body that is not UTF-8 fails to parse with
+ * FHIR, X12, C-CDA, XML and JSON are read as UTF-8, and a body that is not UTF-8 fails to parse with
  * `ERR_ENCODING_INVALID_ENCODED_DATA` rather than being changed in silence.
  */
 const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
@@ -248,8 +359,99 @@ export const CSV_DEFAULTS = Object.freeze({
 } as const);
 
 /**
- * The settings a format reads a channel's bodies with, beside its name: for now, a `csv` channel's
- * `csv:` block. Plain data, sent to the worker as it starts.
+ * How an `hl7v2` channel reads and writes its bodies, from the channel's `hl7v2:` block.
+ *
+ * @example
+ * ```ts
+ * const settings: Hl7v2Settings = { assumeCharset: "8859/1" };
+ * ```
+ */
+export interface Hl7v2Settings {
+  /**
+   * The character set to read and write a message in when its MSH-18 is blank or absent: `8859/1`
+   * to `8859/8`, `8859/10`, `8859/13` to `8859/16`, or `WINDOWS-1252`. A message that declares
+   * MSH-18 is read and written in the set it declares. Unset, a blank MSH-18 means ASCII, read as its UTF-8 superset: bytes that are not
+   * UTF-8 are kept as they arrived, and a segment a transform edits must then be ASCII.
+   */
+  readonly assumeCharset?: string | undefined;
+}
+
+/**
+ * The character sets `hl7v2.assumeCharset` takes: the single-byte sets `@cosyte/hl7` reads into
+ * text and writes back, by the labels MSH-18 uses for them.
+ *
+ * @example
+ * ```ts
+ * ASSUMABLE_CHARSETS.includes("8859/1"); // true
+ * ```
+ */
+export const ASSUMABLE_CHARSETS = Object.freeze([
+  "8859/1",
+  "8859/2",
+  "8859/3",
+  "8859/4",
+  "8859/5",
+  "8859/6",
+  "8859/7",
+  "8859/8",
+  "8859/10",
+  "8859/13",
+  "8859/14",
+  "8859/15",
+  "8859/16",
+  "WINDOWS-1252",
+] as const);
+
+/**
+ * How an `xml` channel reads its bodies, from the channel's `xml:` block: the caps a body is held to
+ * as it is parsed. Every key is optional; {@link XML_DEFAULTS} says what an unset one means.
+ *
+ * @example
+ * ```ts
+ * const settings: XmlSettings = { maxBytes: 1_048_576, maxDepth: 64 };
+ * ```
+ */
+export interface XmlSettings {
+  /** The largest body read, in bytes of UTF-8 after a byte order mark. Default 10,485,760. */
+  readonly maxBytes?: number | undefined;
+  /** How deep elements may nest, the root element counting as 1. Default 1,000. */
+  readonly maxDepth?: number | undefined;
+  /** How many elements a body may hold. Default 1,000,000. */
+  readonly maxElements?: number | undefined;
+}
+
+/**
+ * What each unset key of {@link XmlSettings} means.
+ *
+ * @example
+ * ```ts
+ * XML_DEFAULTS.maxBytes; // 10485760
+ * ```
+ */
+export const XML_DEFAULTS = Object.freeze({
+  maxBytes: 10_485_760,
+  maxDepth: 1000,
+  maxElements: 1_000_000,
+} as const);
+
+/**
+ * What an `xml` channel's transform receives, and may return: the document `@cosyte/ccda`'s
+ * hardened XML reader builds, an `@xmldom/xmldom` `Document`. Read and change it with the DOM API
+ * (`documentElement`, `getElementsByTagName`, `getAttribute`, `setAttribute` and the rest). A
+ * document the transform leaves as it was read is written back byte for byte.
+ *
+ * @example
+ * ```ts
+ * const id = (document: XmlDocument): string | null =>
+ *   document.documentElement?.getAttribute("id") ?? null;
+ * ```
+ */
+export type XmlDocument = ReturnType<typeof Ccda.parseSecureXml>;
+
+/**
+ * The settings a format reads a channel's bodies with, beside its name: a `csv` channel's `csv:`
+ * block, an `hl7v2` channel's `hl7v2:` block, or an `xml` channel's `xml:` block. Plain data, sent to
+ * the worker as it starts.
  *
  * @example
  * ```ts
@@ -258,6 +460,8 @@ export const CSV_DEFAULTS = Object.freeze({
  */
 export interface FormatSettings {
   readonly csv?: CsvSettings | undefined;
+  readonly hl7v2?: Hl7v2Settings | undefined;
+  readonly xml?: XmlSettings | undefined;
 }
 
 /**
@@ -293,8 +497,11 @@ export interface ModelWriter {
    * is not plain JSON, the channel's own format first.
    */
   readonly byShape: boolean;
-  /** The model as the library writes it, or `undefined` when `value` is not one. */
-  readonly write: (value: object) => Promise<Written | undefined>;
+  /**
+   * The model as the library writes it, or `undefined` when `value` is not one. `settings` are the
+   * channel's.
+   */
+  readonly write: (value: object, settings: FormatSettings) => Promise<Written | undefined>;
 }
 
 /**
@@ -339,7 +546,9 @@ function defineFormat<Message>(entry: FormatEntry<Message>): FormatEntry<Message
  * - `ccda`: a `CcdaDocument` from `@cosyte/ccda`;
  * - `json`: the value `JSON.parse` returns;
  * - `text`: the body as a string;
- * - `csv`: a {@link CsvTable}, read by the reader below with the channel's `csv:` settings.
+ * - `csv`: a {@link CsvTable}, read by the reader below with the channel's `csv:` settings;
+ * - `xml`: an {@link XmlDocument}, read by `@cosyte/ccda`'s hardened XML reader with the channel's
+ *   `xml:` caps.
  *
  * @example
  * ```ts
@@ -351,13 +560,26 @@ export const FORMAT_REGISTRY = Object.freeze({
     extension: "hl7",
     contentType: "application/hl7-v2",
     load: libraries.hl7,
-    // The library reads the bytes itself, in the charset the message declares.
-    decode: async (body) =>
-      (await libraries.hl7()).parseHL7(Buffer.from(body.buffer, body.byteOffset, body.byteLength)),
+    // The library reads the bytes itself, in the charset the message declares, or the channel's
+    // assumed one when MSH-18 is blank.
+    decode: async (body, settings) =>
+      readHl7(
+        await libraries.hl7(),
+        Buffer.from(body.buffer, body.byteOffset, body.byteLength),
+        settings.hl7v2?.assumeCharset,
+      ),
     model: {
       byShape: false,
-      write: async (value) =>
-        value instanceof (await libraries.hl7()).Hl7Message ? value.toString() : undefined,
+      // Written in the charset MSH-18 declares, or the channel's assumed one when it is blank, so a
+      // message nothing changed leaves as the bytes it arrived as. A character that set cannot hold
+      // is refused (`UNENCODABLE_CHARACTER`, naming the segment and field, never their text), never
+      // replaced.
+      write: async (value, settings) => {
+        const library = await libraries.hl7();
+        return value instanceof library.Hl7Message
+          ? writeHl7(library, value, settings.hl7v2?.assumeCharset)
+          : undefined;
+      },
     },
   }),
   fhir: defineFormat<Fhir.FhirComplex>({
@@ -414,7 +636,93 @@ export const FORMAT_REGISTRY = Object.freeze({
     value: (output, settings) =>
       isCsvTable(output) ? writeCsv(output, settings.csv ?? {}) : undefined,
   }),
+  xml: defineFormat<XmlDocument>({
+    extension: "xml",
+    contentType: "application/xml",
+    load: libraries.ccda,
+    decode: async (body, settings) => readXml(await libraries.ccda(), body, settings.xml ?? {}),
+    model: {
+      // Told by shape, so a document is written on a channel of any format without loading the
+      // library first; writing it loads the library to read the text back.
+      byShape: true,
+      write: async (value, settings) =>
+        isXmlDocument(value)
+          ? writeXml(await libraries.ccda(), value, settings.xml ?? {})
+          : undefined,
+    },
+  }),
 });
+
+/** Whether a message's MSH-18 is blank or absent, so the ASCII default or an assumed set applies. */
+function msh18Blank(message: Hl7.Hl7Message): boolean {
+  return (message.get("MSH.18") ?? "").trim() === "";
+}
+
+/**
+ * An `hl7v2` body read in the set its MSH-18 declares; with MSH-18 blank and `assumeCharset` set,
+ * read again in that set. Never a set guessed from the bytes.
+ */
+function readHl7(
+  library: typeof Hl7,
+  body: Buffer,
+  assumeCharset: string | undefined,
+): Hl7.Hl7Message {
+  const first = library.parseHL7(body);
+  const message =
+    assumeCharset === undefined || !msh18Blank(first)
+      ? first
+      : library.parseHL7(body, { charset: assumeCharset });
+  if (OPENERS.reduce((count, id) => count + message.segments(id).length, 0) > 1) {
+    throw new MultipleMessagesError();
+  }
+  return message;
+}
+
+/** Segment ids that open a message or a batch: one message holds exactly one, its MSH. */
+const OPENERS = ["MSH", "FHS", "BHS"] as const;
+
+/**
+ * An `hl7v2` body that parsed as one message with a second header in it: the second message's
+ * segments would reach the transform as the first's. The engine refuses such a body as it enters,
+ * so this holds a body stored before it did, and any other way a body reaches a transform.
+ */
+class MultipleMessagesError extends Error {
+  readonly code = "MULTIPLE_MESSAGES";
+
+  constructor() {
+    super("the body holds more than one HL7 v2 message: send one message per body");
+    this.name = "MultipleMessagesError";
+  }
+}
+
+/**
+ * An `Hl7Message` written with `toBytes`: in the set MSH-18 declares, or in `assumeCharset` when
+ * MSH-18 is blank. A refusal on a blank MSH-18 with no assumed set adds what a channel can do to the
+ * library's text, which names a segment, a field and a set, never content; its code stays.
+ */
+function writeHl7(
+  library: typeof Hl7,
+  message: Hl7.Hl7Message,
+  assumeCharset: string | undefined,
+): Buffer {
+  const blank = msh18Blank(message);
+  try {
+    return blank && assumeCharset !== undefined
+      ? message.toBytes({ charset: assumeCharset })
+      : message.toBytes();
+  } catch (error) {
+    if (
+      blank &&
+      assumeCharset === undefined &&
+      error instanceof library.Hl7EncodeError &&
+      error.code === "UNENCODABLE_CHARACTER"
+    ) {
+      error.message +=
+        " MSH-18 is blank, so a segment the transform changed is written as ASCII: have the sender declare MSH-18, or set the channel's hl7v2.assumeCharset.";
+    }
+    throw error;
+  }
+}
 
 /**
  * A message format a channel can declare, and so a worker can parse: a key of
@@ -1199,6 +1507,554 @@ function fixedText(
   return chars.join("");
 }
 
+/**
+ * An `xml` body Pathways refuses itself, or a document that cannot be written as XML that reads back
+ * as the same document. Its text is fixed and names no part of the body, since any of it can carry a
+ * patient's details.
+ *
+ * Codes: `NOT_WELL_FORMED_XML` and `INPUT_SIZE_LIMIT_EXCEEDED` on reading, as `@cosyte/ccda`'s reader
+ * uses them, and `XML_ENCODING_UNSUPPORTED`; `XML_NOT_WRITABLE` on writing.
+ */
+class XmlError extends Error {
+  readonly code: string;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = "XmlError";
+    this.code = code;
+  }
+}
+
+/** What an `xml` body was read from: its bytes, and the document as the serializer wrote it then. */
+interface XmlOrigin {
+  readonly body: Uint8Array;
+  readonly written: string;
+}
+
+/** Each document an `xml` channel read, with what it was read from. */
+const xmlOrigins = new WeakMap<object, XmlOrigin>();
+
+/** A reader's warning (a byte order mark removed, an element outside HL7's namespaces): not ours. */
+function ignoreWarning(): void {
+  // Nothing to do: the body is read as it is, and a byte order mark goes back out with it.
+}
+
+/**
+ * Reads an `xml` body with `@cosyte/ccda`'s hardened XML reader, under the channel's caps. The reader
+ * refuses a DTD or an entity declaration (`XXE_OR_DTD_PRESENT`), and here any custom entity
+ * reference (`ENTITY_EXPANSION_LIMIT`, its cap held at none, since with no DTD none can be
+ * declared); a body over `maxBytes` (`INPUT_SIZE_LIMIT_EXCEEDED`), nested deeper than `maxDepth`
+ * (`ELEMENT_DEPTH_LIMIT_EXCEEDED`) or holding more than `maxElements` elements
+ * (`NODE_COUNT_LIMIT_EXCEEDED`); and a body that is not well-formed (`NOT_WELL_FORMED_XML`), which
+ * {@link readCheckedXml} widens to what that reader lets through. Each error's text is fixed and
+ * names nothing of the body. Its size is held to `maxBytes` before it is decoded. The body must be
+ * UTF-8, and say so or say nothing: one whose declaration or first bytes name another encoding is
+ * refused (`XML_ENCODING_UNSUPPORTED`, see {@link refuseOtherEncodings}), and one that is not valid
+ * UTF-8 fails to decode (`ERR_ENCODING_INVALID_ENCODED_DATA`). An untouched body is refused the
+ * same way, so a body Pathways cannot read is never forwarded.
+ *
+ * The document is kept against its bytes and its serialization as read, so {@link writeXml} can
+ * send an untouched one as the bytes it arrived as.
+ */
+function readXml(library: typeof Ccda, body: Uint8Array, settings: XmlSettings): XmlDocument {
+  const maxBytes = settings.maxBytes ?? XML_DEFAULTS.maxBytes;
+  // Counted as the reader counts: the bytes after a UTF-8 byte order mark.
+  const mark = body[0] === 0xef && body[1] === 0xbb && body[2] === 0xbf ? 3 : 0;
+  if (body.byteLength - mark > maxBytes) {
+    throw new XmlError("INPUT_SIZE_LIMIT_EXCEEDED", "Input exceeds the byte cap.");
+  }
+  refuseOtherEncodings(body, mark);
+  const document = readCheckedXml(library, strictUtf8.decode(body), xmlLimits(library, settings));
+  xmlOrigins.set(document, { body, written: serializeXml(document) });
+  return document;
+}
+
+/** The reader's caps for an `xml` channel's settings, an unset key taking its default. */
+function xmlLimits(
+  library: typeof Ccda,
+  settings: XmlSettings,
+): ReturnType<typeof Ccda.resolveLimits> {
+  return library.resolveLimits({
+    maxInputBytes: settings.maxBytes ?? XML_DEFAULTS.maxBytes,
+    maxDepth: settings.maxDepth ?? XML_DEFAULTS.maxDepth,
+    maxNodeCount: settings.maxElements ?? XML_DEFAULTS.maxElements,
+    maxEntityExpansions: 0,
+  });
+}
+
+/**
+ * The first bytes of a body in an encoding other than UTF-8 that XML 1.0 (appendix F) tells apart
+ * before any declaration: a UTF-32 or UTF-16 byte order mark, `<` in UTF-32 or `<?` in UTF-16 with
+ * none, and `<?xm` in EBCDIC. UTF-32's marks come first, since each starts with a UTF-16 mark.
+ */
+const OTHER_ENCODING_STARTS: readonly (readonly [string, readonly number[]])[] = [
+  ["UTF-32", [0xff, 0xfe, 0x00, 0x00]],
+  ["UTF-32", [0x00, 0x00, 0xfe, 0xff]],
+  ["UTF-32", [0x3c, 0x00, 0x00, 0x00]],
+  ["UTF-32", [0x00, 0x00, 0x00, 0x3c]],
+  ["UTF-16", [0xff, 0xfe]],
+  ["UTF-16", [0xfe, 0xff]],
+  ["UTF-16", [0x3c, 0x00, 0x3f, 0x00]],
+  ["UTF-16", [0x00, 0x3c, 0x00, 0x3f]],
+  ["EBCDIC", [0x4c, 0x6f, 0xa7, 0x94]],
+];
+
+/** An XML declaration's start: `<?xml` and whitespace, as ASCII bytes. */
+const DECLARATION_START = [0x3c, 0x3f, 0x78, 0x6d, 0x6c];
+
+/** An encoding name as XML 1.0 (section 4.3.3) shapes it, short enough to name in an error. */
+const ENCODING_NAME = /^[A-Za-z][A-Za-z0-9._-]{0,39}$/;
+
+/**
+ * Refuses, as `XML_ENCODING_UNSUPPORTED`, a body that is not in UTF-8 by its own account: one that
+ * starts as XML in UTF-16, UTF-32 or EBCDIC does, or whose XML declaration names an encoding other
+ * than UTF-8 (in any case). Such a body may still be valid UTF-8, and read as UTF-8 would reach the
+ * transform as other characters, so it is refused rather than misread; decoding other encodings is
+ * not supported yet. A body with no declaration, or one that names no encoding, is UTF-8.
+ *
+ * The declaration is read from the bytes after a UTF-8 byte order mark (`mark` of them), where XML
+ * puts it; a declaration anywhere else is not well-formed, and the reader refuses it. The error
+ * names the encoding only when the name has an encoding name's shape, so it never carries the body.
+ */
+function refuseOtherEncodings(body: Uint8Array, mark: number): void {
+  for (const [encoding, start] of OTHER_ENCODING_STARTS) {
+    if (start.every((byte, at) => body[mark + at] === byte)) throw encodingUnsupported(encoding);
+  }
+  if (!DECLARATION_START.every((byte, at) => body[mark + at] === byte)) return;
+  const after = body[mark + DECLARATION_START.length];
+  if (after !== 0x20 && after !== 0x09 && after !== 0x0d && after !== 0x0a) return;
+  // The declaration's bytes up to its `?>`, one character each: it is ASCII when it is well-formed.
+  const end = indexOfBytes(body, [0x3f, 0x3e], mark);
+  const declaration = latin1.decode(body.subarray(mark, end === -1 ? body.byteLength : end));
+  const keyword = /[ \t\r\n]encoding(?![A-Za-z0-9._:-])/.exec(declaration);
+  if (keyword === null) return;
+  const value = /^[ \t\r\n]encoding[ \t\r\n]*=[ \t\r\n]*(["'])([^"']*)\1/.exec(
+    declaration.slice(keyword.index),
+  )?.[2];
+  if (value !== undefined && value.toUpperCase() === "UTF-8") return;
+  throw encodingUnsupported(value !== undefined && ENCODING_NAME.test(value) ? value : undefined);
+}
+
+/** Where `needle` first starts in `haystack` at or after `from`, or -1. */
+function indexOfBytes(haystack: Uint8Array, needle: readonly number[], from: number): number {
+  outer: for (let at = from; at + needle.length <= haystack.byteLength; at += 1) {
+    for (const [offset, byte] of needle.entries()) {
+      if (haystack[at + offset] !== byte) continue outer;
+    }
+    return at;
+  }
+  return -1;
+}
+
+/** The refusal of a body in an encoding other than UTF-8, naming it only when given. */
+function encodingUnsupported(encoding: string | undefined): XmlError {
+  return new XmlError(
+    "XML_ENCODING_UNSUPPORTED",
+    encoding === undefined
+      ? "Input is not in UTF-8: its XML declaration names another encoding, and only UTF-8 is read."
+      : `Input is not in UTF-8: it is in "${encoding}", and only UTF-8 is read.`,
+  );
+}
+
+/**
+ * Reads XML text with `@cosyte/ccda`'s hardened reader, then refuses as `NOT_WELL_FORMED_XML` what
+ * that reader (`@cosyte/ccda` 0.1.6, on `@xmldom/xmldom`) lets through though XML 1.0 forbids it: a
+ * character XML forbids, as it is or as a character reference, and text or a CDATA section outside
+ * the root element, which the reader drops without a word. Both reading a body and reading back a
+ * written document go through here.
+ */
+function readCheckedXml(
+  library: typeof Ccda,
+  source: string,
+  limits: ReturnType<typeof Ccda.resolveLimits>,
+): XmlDocument {
+  const document = library.parseSecureXml(source, limits, ignoreWarning, ignoreWarning);
+  if (
+    FORBIDDEN_XML_CHARACTER.test(source) ||
+    !markupOnlyOutsideRoot(source) ||
+    holdsForbiddenData(document)
+  ) {
+    throw new XmlError("NOT_WELL_FORMED_XML", "Input is not well-formed XML.");
+  }
+  return document;
+}
+
+/**
+ * Whether XML text holds only whitespace, comments and processing instructions outside its root
+ * element. It runs on text the reader has already taken as well-formed, so it only has to find
+ * where the root starts and ends: it steps over comments, processing instructions, CDATA sections
+ * and tags (a quoted attribute value may hold `>`), counting how deep it is.
+ */
+function markupOnlyOutsideRoot(source: string): boolean {
+  let at = 0;
+  let depth = 0;
+  while (at < source.length) {
+    if (source[at] !== "<") {
+      const next = source.indexOf("<", at);
+      const end = next === -1 ? source.length : next;
+      if (depth === 0 && !XML_WHITESPACE.test(source.slice(at, end))) return false;
+      at = end;
+    } else if (source.startsWith("<!--", at)) {
+      at = past(source, "-->", at + 4);
+    } else if (source.startsWith("<?", at)) {
+      at = past(source, "?>", at + 2);
+    } else if (source.startsWith("<![CDATA[", at)) {
+      if (depth === 0) return false;
+      at = past(source, "]]>", at + 9);
+    } else if (source.startsWith("</", at)) {
+      depth -= 1;
+      at = past(source, ">", at + 2);
+    } else {
+      let quote = "";
+      let end = at + 1;
+      for (; end < source.length; end += 1) {
+        const char = source[end];
+        if (quote !== "") {
+          if (char === quote) quote = "";
+        } else if (char === '"' || char === "'") {
+          quote = char;
+        } else if (char === ">") {
+          break;
+        }
+      }
+      if (source[end - 1] !== "/") depth += 1;
+      at = end + 1;
+    }
+  }
+  return true;
+}
+
+/** Only XML's whitespace: space, tab, line feed and carriage return. */
+const XML_WHITESPACE = /^[ \t\r\n]*$/;
+
+/** The index just past the next `end` from `from`, or the text's length when there is none. */
+function past(source: string, end: string, from: number): number {
+  const found = source.indexOf(end, from);
+  /* v8 ignore next -- the reader has refused text whose comment, instruction, section or tag never ends */
+  return found === -1 ? source.length : found + end.length;
+}
+
+/**
+ * The parts of a DOM node the writer and its checks read: `@xmldom/xmldom`'s nodes, as plain
+ * properties, so a node of any kind is read the same way.
+ */
+interface XmlNode {
+  readonly nodeType: number;
+  readonly nodeName: string;
+  readonly localName?: string | null;
+  readonly namespaceURI?: string | null;
+  readonly data?: string;
+  readonly target?: string;
+  readonly firstChild: XmlNode | null;
+  readonly nextSibling: XmlNode | null;
+  readonly attributes?: ArrayLike<XmlAttribute>;
+}
+
+/** The parts of a DOM attribute the writer and its checks read. */
+interface XmlAttribute {
+  readonly nodeName: string;
+  readonly namespaceURI: string | null;
+  readonly value: string;
+}
+
+const ELEMENT_NODE = 1;
+const TEXT_NODE = 3;
+const CDATA_SECTION_NODE = 4;
+const PROCESSING_INSTRUCTION_NODE = 7;
+const COMMENT_NODE = 8;
+const DOCUMENT_NODE = 9;
+
+/** Every node under `root`, `root` included, in document order, without recursion. */
+function* nodesOf(root: XmlNode): Generator<XmlNode> {
+  const pending: XmlNode[] = [root];
+  for (let node = pending.pop(); node !== undefined; node = pending.pop()) {
+    yield node;
+    const children: XmlNode[] = [];
+    for (let child = node.firstChild; child !== null; child = child.nextSibling) {
+      children.push(child);
+    }
+    pending.push(...children.reverse());
+  }
+}
+
+/** The attributes of an element that are not namespace declarations. */
+function ownAttributes(element: XmlNode): XmlAttribute[] {
+  return Array.from(element.attributes as ArrayLike<XmlAttribute>).filter(
+    ({ nodeName }) => nodeName !== "xmlns" && !nodeName.startsWith("xmlns:"),
+  );
+}
+
+/**
+ * Whether a document holds a character XML forbids in a text, an attribute value, a CDATA section, a
+ * comment or a processing instruction: the reader turns a character reference such as `&#1;` into
+ * the character it names, so this finds what a look at the text alone cannot.
+ */
+function holdsForbiddenData(document: XmlNode): boolean {
+  for (const node of nodesOf(document)) {
+    if (FORBIDDEN_XML_CHARACTER.test(node.data ?? "")) return true;
+    if (node.nodeType !== ELEMENT_NODE) continue;
+    for (const attribute of ownAttributes(node)) {
+      if (FORBIDDEN_XML_CHARACTER.test(attribute.value)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * A document as `@xmldom/xmldom`'s serializer writes it: its nodes' own `toString`, which its types
+ * do not declare. `@cosyte/ccda` exports no writer for a bare document yet.
+ */
+function serializeXml(document: XmlDocument): string {
+  return (document as unknown as { toString(): string }).toString();
+}
+
+/** Whether a transform's output is an XML document: a DOM document node, not plain JSON. */
+function isXmlDocument(value: object): value is XmlDocument {
+  const node = value as { nodeType?: unknown; documentElement?: unknown; toString?: unknown };
+  return (
+    !isPlain(value) &&
+    node.nodeType === 9 &&
+    "documentElement" in node &&
+    typeof node.toString === "function"
+  );
+}
+
+/**
+ * Writes an XML document. One that serializes as it did when it was read goes out as the bytes it
+ * arrived as, declaration, quoting, spacing, line endings and byte order mark included.
+ *
+ * Any other is checked, serialized, read back and compared, and refused with `XML_NOT_WRITABLE` at
+ * the first doubt:
+ *
+ * - first, what XML cannot carry is refused outright: a comment holding `--` or ending in `-`, a
+ *   processing instruction whose data holds `?>`, a CDATA section holding `]]>`, and a processing
+ *   instruction named `xml` in any case, other than an XML declaration of the right form at the
+ *   start;
+ * - it is written as UTF-8, so an XML declaration that names another encoding is written naming
+ *   UTF-8 (one that names none means UTF-8 already);
+ * - the text is read back with the same reader and its checks, under the channel's own caps, and
+ *   the two documents are compared node by node: kinds, names, namespaces, attributes, text,
+ *   comment and processing-instruction data, and order. A text fixed point is not enough: a
+ *   comment holding `-->` writes as markup that reads back as itself.
+ *
+ * Every error from the DOM library is caught here, so its text never reaches the failure.
+ */
+function writeXml(library: typeof Ccda, document: XmlDocument, settings: XmlSettings): Written {
+  let written: string;
+  try {
+    written = serializeXml(document);
+  } catch (error) {
+    throw notWritable(error);
+  }
+  const origin = xmlOrigins.get(document);
+  if (origin !== undefined && origin.written === written) return origin.body;
+  try {
+    const root = document as unknown as XmlNode;
+    const declaration = writableDeclaration(root);
+    let declared: string | undefined;
+    if (declaration !== undefined) {
+      const data = declaration.data as string;
+      const as = `<?xml ${data}?>`;
+      /* v8 ignore next -- the serializer writes the first node first, as <?target data?> */
+      if (!written.startsWith(as)) throw notWritable(undefined);
+      declared = utf8Declaration(data);
+      written = `<?xml ${declared}?>${written.slice(as.length)}`;
+    }
+    const again = readCheckedXml(library, written, xmlLimits(library, settings));
+    if (holdsForbiddenCharacter(written)) throw notWritable(undefined);
+    if (!sameDocument(root, again, declaration, declared)) {
+      throw notWritable(undefined);
+    }
+  } catch (error) {
+    throw error instanceof XmlError && error.code === "XML_NOT_WRITABLE"
+      ? error
+      : notWritable(error);
+  }
+  return written;
+}
+
+/**
+ * An XML declaration's data: `version`, then `encoding` and `standalone` if given, quoted with `"`
+ * or `'`. The encoding name's place is captured, so it can be set to UTF-8.
+ */
+const XML_DECLARATION =
+  /^version[ \t\r\n]*=[ \t\r\n]*(["'])1\.[0-9]+\1(?:[ \t\r\n]+encoding[ \t\r\n]*=[ \t\r\n]*(["'])([A-Za-z][A-Za-z0-9._-]*)\2)?(?:[ \t\r\n]+standalone[ \t\r\n]*=[ \t\r\n]*(["'])(?:yes|no)\4)?[ \t\r\n]*$/d;
+
+/**
+ * Refuses, as `XML_NOT_WRITABLE`, a node XML cannot carry (see {@link writeXml}), and returns the
+ * document's XML declaration: a processing instruction named `xml`, first in the document, whose
+ * data is a declaration's.
+ */
+function writableDeclaration(document: XmlNode): XmlNode | undefined {
+  let declaration: XmlNode | undefined;
+  for (const node of nodesOf(document)) {
+    const data = node.data ?? "";
+    if (node.nodeType === COMMENT_NODE && (data.includes("--") || data.endsWith("-"))) {
+      throw notWritable(undefined);
+    }
+    if (node.nodeType === CDATA_SECTION_NODE && data.includes("]]>")) throw notWritable(undefined);
+    if (node.nodeType !== PROCESSING_INSTRUCTION_NODE) continue;
+    if (data.includes("?>")) throw notWritable(undefined);
+    if ((node.target as string).toLowerCase() !== "xml") continue;
+    if (node.target !== "xml" || node !== document.firstChild || !XML_DECLARATION.test(data)) {
+      throw notWritable(undefined);
+    }
+    declaration = node;
+  }
+  return declaration;
+}
+
+/** An XML declaration's data with its encoding, if it names one other than UTF-8, set to UTF-8. */
+function utf8Declaration(data: string): string {
+  const name = XML_DECLARATION.exec(data)?.indices?.[3];
+  if (name === undefined || data.slice(name[0], name[1]).toUpperCase() === "UTF-8") return data;
+  return `${data.slice(0, name[0])}UTF-8${data.slice(name[1])}`;
+}
+
+/**
+ * A node as it is compared: itself, or for a run of text nodes the first of them with their joined
+ * text, since the reader joins adjacent text nodes into one.
+ */
+interface ComparedNode {
+  readonly node: XmlNode;
+  readonly text: string;
+}
+
+/**
+ * The children of a node as they read back: adjacent text joined, empty text and empty CDATA
+ * sections dropped (neither writes anything), and at the document level whitespace text dropped,
+ * since the reader keeps it only before the root.
+ */
+function comparedChildren(parent: XmlNode): ComparedNode[] {
+  const children: ComparedNode[] = [];
+  let run: { node: XmlNode; text: string } | undefined;
+  const flush = (): void => {
+    if (run === undefined) return;
+    const atDocument = parent.nodeType === DOCUMENT_NODE;
+    if (run.text !== "" && !(atDocument && XML_WHITESPACE.test(run.text))) children.push(run);
+    run = undefined;
+  };
+  for (let child = parent.firstChild; child !== null; child = child.nextSibling) {
+    if (child.nodeType === TEXT_NODE) {
+      run ??= { node: child, text: "" };
+      run.text += child.data as string;
+      continue;
+    }
+    if (child.nodeType === CDATA_SECTION_NODE && child.data === "") continue;
+    flush();
+    children.push({ node: child, text: child.data ?? "" });
+  }
+  flush();
+  return children;
+}
+
+/**
+ * Whether a document and the one its written text read back as are the same, node by node: each
+ * pair, in order, has the same {@link signature}, and the same number of children.
+ * `declaration` is the written document's XML declaration and `declared` the data it was written
+ * with, set to UTF-8.
+ */
+function sameDocument(
+  written: XmlNode,
+  read: XmlNode,
+  declaration: XmlNode | undefined,
+  declared: string | undefined,
+): boolean {
+  const pending: [ComparedNode, ComparedNode][] = [
+    [
+      { node: written, text: "" },
+      { node: read, text: "" },
+    ],
+  ];
+  for (let pair = pending.pop(); pair !== undefined; pair = pending.pop()) {
+    const [left, right] = pair;
+    if (signature(left, declaration, declared) !== signature(right, declaration, declared)) {
+      return false;
+    }
+    const ones = comparedChildren(left.node);
+    const others = comparedChildren(right.node);
+    if (ones.length !== others.length) return false;
+    ones.forEach((child, index) => pending.push([child, others[index] as ComparedNode]));
+  }
+  return true;
+}
+
+/**
+ * What a node is compared by: its kind, and for an element its namespace, its name and its
+ * attributes other than namespace declarations, in any order; for a processing instruction its
+ * target and data (the declaration's data as written); for any other its text. A node of a kind no
+ * read document holds, such as an entity reference, has a kind the read-back one cannot match.
+ */
+function signature(
+  compared: ComparedNode,
+  declaration: XmlNode | undefined,
+  declared: string | undefined,
+): string {
+  const { node } = compared;
+  switch (node.nodeType) {
+    case ELEMENT_NODE:
+      return JSON.stringify([
+        node.nodeType,
+        node.namespaceURI,
+        node.nodeName,
+        ownAttributes(node)
+          .map(({ namespaceURI, nodeName, value }) =>
+            JSON.stringify([namespaceURI, nodeName, value]),
+          )
+          .sort(),
+      ]);
+    case PROCESSING_INSTRUCTION_NODE:
+      return JSON.stringify([
+        node.nodeType,
+        node.target,
+        node === declaration ? declared : node.data,
+      ]);
+    default:
+      return JSON.stringify([node.nodeType, compared.text]);
+  }
+}
+
+/**
+ * A character XML 1.0 forbids (section 2.2): a C0 control other than tab, line feed and carriage
+ * return, an unpaired surrogate (the `u` flag reads a pair as one character, so only an unpaired
+ * one matches the surrogate range), U+FFFE or U+FFFF. The reader of `@cosyte/ccda` 0.1.6 takes one
+ * in, as it is or as a character reference, so {@link readCheckedXml} looks for it itself.
+ */
+const FORBIDDEN_XML_CHARACTER = /[\0-\x08\x0B\x0C\x0E-\x1F\uD800-\uDFFF￾￿]/u;
+
+/** A character reference, `&#...;` or `&#x...;`, as the serializer may write one. */
+const CHARACTER_REFERENCE = /&#(?:x([0-9a-fA-F]+)|([0-9]+));/g;
+
+/**
+ * Whether written XML holds a character reference to a character XML forbids anywhere, a CDATA
+ * section or a comment included: stricter than the reader, so a changed document never carries one.
+ */
+function holdsForbiddenCharacter(written: string): boolean {
+  for (const [, hex, decimal] of written.matchAll(CHARACTER_REFERENCE)) {
+    const code = hex === undefined ? Number(decimal) : Number.parseInt(hex, 16);
+    if (code > 0x10ffff || FORBIDDEN_XML_CHARACTER.test(String.fromCodePoint(code))) return true;
+  }
+  return false;
+}
+
+/**
+ * The refusal of a document that cannot be written. Only a reader's code goes into it: the text of
+ * the cause, which a DOM library may build from the document, stays out.
+ */
+function notWritable(cause: unknown): XmlError {
+  const code =
+    typeof cause === "object" &&
+    cause !== null &&
+    typeof (cause as { code?: unknown }).code === "string" &&
+    /^[A-Z_]+$/.test((cause as { code: string }).code)
+      ? ` (${(cause as { code: string }).code})`
+      : "";
+  return new XmlError(
+    "XML_NOT_WRITABLE",
+    `the transform's document cannot be written as XML that reads back the same${code}: it holds a character XML does not allow, a carriage return, a comment or processing instruction XML cannot carry, or a node the serializer cannot write`,
+  );
+}
+
 /** The model writers told by shape, in the registry's order. */
 const shapeWriters: ModelWriter[] = [];
 /** The model writers told by class, with their formats, in the registry's order. */
@@ -1215,9 +2071,13 @@ for (const format of FORMATS) {
  * `value` is not one. A model is written whatever the channel's format, so a transform can turn one
  * format into another.
  */
-async function writeModel(format: WorkerFormat, value: object): Promise<Written | undefined> {
+async function writeModel(
+  format: WorkerFormat,
+  value: object,
+  settings: FormatSettings,
+): Promise<Written | undefined> {
   for (const writer of shapeWriters) {
-    const written = await writer.write(value);
+    const written = await writer.write(value, settings);
     if (written !== undefined) return written;
   }
   // A JSON object is never a message or a document; only a class instance can be one, and checking
@@ -1225,7 +2085,7 @@ async function writeModel(format: WorkerFormat, value: object): Promise<Written 
   if (isPlain(value)) return undefined;
   const own = classWriters.filter(([owner]) => owner === format);
   for (const [, writer] of [...own, ...classWriters.filter(([owner]) => owner !== format)]) {
-    const written = await writer.write(value);
+    const written = await writer.write(value, settings);
     if (written !== undefined) return written;
   }
   return undefined;
@@ -1263,7 +2123,7 @@ export function bytesOf(written: Written): Uint8Array {
  *
  * @example
  * ```ts
- * const bytes = await encode("hl7v2", message); // message.toString(), as UTF-8
+ * const bytes = await encode("hl7v2", message); // message.toBytes(), in its MSH-18 charset
  * const json = await encode("json", { status: "ok" }); // {"status":"ok"}
  * ```
  */
@@ -1274,7 +2134,7 @@ export async function encode(
 ): Promise<Uint8Array> {
   if (typeof output === "string" || output instanceof Uint8Array) return bytesOf(output);
   if (typeof output === "object" && output !== null) {
-    const written = await writeModel(format, output);
+    const written = await writeModel(format, output, settings);
     if (written !== undefined) return bytesOf(written);
   }
   const entry: FormatEntry<unknown> = FORMAT_REGISTRY[format];
@@ -1314,20 +2174,94 @@ export function freezeDeep<T>(value: T): T {
 export function buildContext(
   message: MessageContext,
   config: Readonly<Record<string, unknown>>,
-): Readonly<MessageContext & { readonly config: Readonly<Record<string, unknown>> }> {
+  route: RouteFunction = DISCARD_ROUTE,
+): Readonly<
+  MessageContext & {
+    readonly config: Readonly<Record<string, unknown>>;
+    readonly route: RouteFunction;
+  }
+> {
   return freezeDeep({
     messageId: message.messageId,
     attempt: message.attempt,
     source: message.source,
     meta: message.meta,
     config: freezeDeep(config),
+    route,
   });
+}
+
+/**
+ * Runs one message through `transform` as {@link runTransform} does, with a `ctx.route` that keeps
+ * each message handed to another channel, and serializes those as it does the outputs, in the order
+ * they were routed. `ctx.route` takes a channel's name and a message (anything a transform may
+ * return but `null` and `undefined`), returns nothing, and throws a `TypeError` for anything else,
+ * or once the transform has settled. Given `destinations`, each destination's transform then runs
+ * on the outputs as {@link runDestinations} runs it; the channel's transform has settled by then,
+ * so a destination transform that calls `ctx.route` fails that destination.
+ *
+ * @example
+ * ```ts
+ * const { outputs, routes } = await transformMessage((msg, ctx) => {
+ *   ctx.route("audit-copy", msg);
+ *   return msg;
+ * }, "text", body, UNSTORED, {});
+ * ```
+ */
+export async function transformMessage(
+  transform: TransformFunction,
+  format: WorkerFormat,
+  body: Uint8Array,
+  message: MessageContext,
+  config: Readonly<Record<string, unknown>>,
+  settings: FormatSettings = {},
+  destinations?: readonly LoadedDestination[],
+): Promise<TransformResult> {
+  const routed: { readonly channel: string; readonly output: unknown }[] = [];
+  let settled = false;
+  const route: RouteFunction = (channel, output) => {
+    if (settled) throw new TypeError("ctx.route was called after the transform settled");
+    if (typeof channel !== "string" || channel === "") {
+      throw new TypeError("ctx.route takes a channel's name first");
+    }
+    if (output === null || output === undefined) {
+      throw new TypeError("ctx.route takes a message to hand over second");
+    }
+    routed.push({ channel, output });
+  };
+  const ctx = buildContext(message, config, route);
+  let outputs: Uint8Array[];
+  try {
+    outputs = await runTransform(transform, format, body, ctx, settings);
+  } finally {
+    settled = true;
+  }
+  let routes: RoutedMessage[];
+  try {
+    routes = await Promise.all(
+      routed.map(async ({ channel, output }) => ({
+        channel,
+        body: await encode(format, output, settings),
+      })),
+    );
+  } catch (error) {
+    throw new StageError("output", error);
+  }
+  if (destinations === undefined) return { outputs, routes };
+  return {
+    outputs,
+    routes,
+    destinations: await destinationReplies(outputs, format, ctx, destinations, settings),
+  };
 }
 
 /**
  * Runs one message through `transform`: parse, call with its context, serialize. `null` or
  * `undefined` filters the message out; an array sends several. Without a context, the transform
- * gets that of a message that is not stored, with no configuration.
+ * gets that of a message that is not stored, with no configuration. `settings` is how the channel's
+ * own block reads and writes its format's bodies (a `csv` channel's `csv:`). The outputs are
+ * written in `outFormat`, the format read by default: a destination's transform reads the channel's
+ * format and writes its destination's.
  *
  * @example
  * ```ts
@@ -1340,6 +2274,7 @@ export async function runTransform(
   body: Uint8Array,
   ctx: unknown = buildContext(UNSTORED, {}),
   settings: FormatSettings = {},
+  outFormat: WorkerFormat = format,
 ): Promise<Uint8Array[]> {
   let message: unknown;
   try {
@@ -1356,9 +2291,144 @@ export async function runTransform(
   if (result === null || result === undefined) return [];
   const outputs: unknown[] = Array.isArray(result) ? result : [result];
   try {
-    return await Promise.all(outputs.map((output) => encode(format, output, settings)));
+    return await Promise.all(outputs.map((output) => encode(outFormat, output, settings)));
   } catch (error) {
     throw new StageError("output", error);
+  }
+}
+
+/**
+ * The context a destination's transform receives: the channel's, with `destination` beside it.
+ *
+ * @example
+ * ```ts
+ * const ctx = destinationContext(buildContext(UNSTORED, {}), { index: 0, name: "lab", kind: "file", format: "hl7v2", transformFile: undefined });
+ * ctx.destination; // { index: 0, name: "lab", kind: "file" }
+ * ```
+ */
+export function destinationContext(
+  ctx: object,
+  destination: DestinationSetup,
+): Readonly<Record<string, unknown>> {
+  return freezeDeep({
+    ...ctx,
+    destination: { index: destination.index, name: destination.name, kind: destination.kind },
+  });
+}
+
+/** A destination's setup with its transform loaded. */
+export interface LoadedDestination {
+  readonly setup: DestinationSetup;
+  readonly transform: TransformFunction | undefined;
+}
+
+/**
+ * Runs one message through the channel's transform and then each destination's transform, once per
+ * channel output, in order: a destination's outputs are what its transform returned for each
+ * channel output, joined in order, and none filters that destination for the message. Each
+ * destination transform reads the channel output parsed in the channel's format, and what it returns
+ * is written in its destination's format. A destination transform that throws, or whose output cannot be read or written, fails that
+ * destination only: the others go on. A destination without a transform sends the channel's
+ * outputs, and its entry is `null`. A failure of the channel's own transform rejects, as
+ * {@link runTransform} does. `settings` is the channel's, as {@link runTransform} takes it.
+ *
+ * @example
+ * ```ts
+ * const { outputs, destinations } = await runDestinations(transform, "text", body, ctx, loaded);
+ * ```
+ */
+export async function runDestinations(
+  transform: TransformFunction,
+  format: WorkerFormat,
+  body: Uint8Array,
+  ctx: object,
+  destinations: readonly LoadedDestination[],
+  settings: FormatSettings = {},
+): Promise<{ outputs: Uint8Array[]; destinations: (DestinationReply | null)[] }> {
+  const outputs = await runTransform(transform, format, body, ctx, settings);
+  return {
+    outputs,
+    destinations: await destinationReplies(outputs, format, ctx, destinations, settings),
+  };
+}
+
+/**
+ * Each destination's reply for a message's channel `outputs`, as {@link runDestinations} gives
+ * them: its transform run once per output, or `null` for a destination without one.
+ */
+async function destinationReplies(
+  outputs: readonly Uint8Array[],
+  format: WorkerFormat,
+  ctx: object,
+  destinations: readonly LoadedDestination[],
+  settings: FormatSettings,
+): Promise<(DestinationReply | null)[]> {
+  const replies: (DestinationReply | null)[] = [];
+  for (const { setup, transform: own } of destinations) {
+    if (own === undefined) {
+      replies.push(null);
+      continue;
+    }
+    const context = destinationContext(ctx, setup);
+    try {
+      const sent: Uint8Array[] = [];
+      for (const output of outputs) {
+        sent.push(...(await runTransform(own, format, output, context, settings, setup.format)));
+      }
+      replies.push({ ok: true, outputs: sent });
+    } catch (error) {
+      replies.push({ ok: false, failure: summarize(error, setup.transformFile) });
+    }
+  }
+  return replies;
+}
+
+/**
+ * Loads each destination's transform, in order. A module that fails to load rejects with a
+ * {@link DestinationLoadError} naming the destination.
+ *
+ * @example
+ * ```ts
+ * const loaded = await loadDestinations(setup.destinations ?? []);
+ * ```
+ */
+export async function loadDestinations(
+  destinations: readonly DestinationSetup[],
+): Promise<LoadedDestination[]> {
+  const loaded: LoadedDestination[] = [];
+  for (const setup of destinations) {
+    if (setup.transformFile === undefined) {
+      loaded.push({ setup, transform: undefined });
+      continue;
+    }
+    try {
+      loaded.push({ setup, transform: await loadTransform(setup.transformFile) });
+    } catch (error) {
+      throw new DestinationLoadError(setup, error);
+    }
+  }
+  return loaded;
+}
+
+/**
+ * A destination's transform could not be loaded: which one, and why.
+ *
+ * @example
+ * ```ts
+ * if (error instanceof DestinationLoadError) console.error(error.destination.index);
+ * ```
+ */
+export class DestinationLoadError extends Error {
+  readonly destination: DestinationSetup;
+
+  /**
+   * @param destination The destination whose transform it was.
+   * @param cause What {@link loadTransform} threw: a load failure.
+   */
+  constructor(destination: DestinationSetup, cause: unknown) {
+    super("a destination transform failed to load", { cause });
+    this.name = "DestinationLoadError";
+    this.destination = destination;
   }
 }
 
@@ -1372,11 +2442,27 @@ export async function runTransform(
  * ```
  */
 export async function loadTransform(transformFile: string | undefined): Promise<TransformFunction> {
+  return (await loadScripts(transformFile)).transform;
+}
+
+/**
+ * Loads the transform module: its default export, and the `onStart` and `onStop` it may export.
+ * An `onStart` or `onStop` that is exported and is not a function will not load. With no
+ * transform, each message passes through as it was parsed, and there are no scripts.
+ *
+ * @example
+ * ```ts
+ * const { transform, onStart } = await loadScripts("/project/channels/adt-to-lab/transform.ts");
+ * ```
+ */
+export async function loadScripts(transformFile: string | undefined): Promise<ChannelScripts> {
   // Wrapped, so a message that is itself an array (a JSON array) passes through as one message.
-  if (transformFile === undefined) return (message) => [message];
-  let module: { default?: unknown };
+  if (transformFile === undefined) {
+    return { transform: (message) => [message], onStart: undefined, onStop: undefined };
+  }
+  let module: { default?: unknown; onStart?: unknown; onStop?: unknown };
   try {
-    module = (await import(pathToFileURL(transformFile).href)) as { default?: unknown };
+    module = (await import(pathToFileURL(transformFile).href)) as typeof module;
   } catch (error) {
     throw new StageError("load", error);
   }
@@ -1386,7 +2472,139 @@ export async function loadTransform(transformFile: string | undefined): Promise<
       new TypeError("the transform module has no default export function"),
     );
   }
-  return module.default as TransformFunction;
+  for (const name of ["onStart", "onStop"] as const) {
+    if (module[name] !== undefined && typeof module[name] !== "function") {
+      throw new StageError(
+        "load",
+        new TypeError(`the transform module's ${name} is not a function`),
+      );
+    }
+  }
+  return {
+    transform: module.default as TransformFunction,
+    onStart: module.onStart as ChannelScripts["onStart"],
+    onStop: module.onStop as ChannelScripts["onStop"],
+  };
+}
+
+/** A script log line's code: lower-case words joined by hyphens, as the engine's own events are. */
+const SCRIPT_CODE = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+/** A script log line's id names: a letter, then letters and digits. */
+const SCRIPT_ID = /^[A-Za-z][A-Za-z0-9]*$/;
+/** At most this many ids on one line, and this long a code or an id's name. */
+const SCRIPT_IDS = 16;
+const SCRIPT_NAME_LENGTH = 64;
+
+/**
+ * One line a channel script logs, kept to what is safe in the engine's log: a code of lower-case
+ * words joined by hyphens (anything else becomes `script-log`), and ids that are finite numbers,
+ * named by a letter and then letters and digits, at most 16 of them. Strings, and anything else
+ * that could carry a message's content, are dropped.
+ *
+ * @example
+ * ```ts
+ * scriptLogLine("info", "cache-warmed", { entries: 12, name: "dropped" });
+ * // { level: "info", code: "cache-warmed", ids: { entries: 12 } }
+ * ```
+ */
+export function scriptLogLine(
+  level: ScriptLogLine["level"],
+  code: unknown,
+  ids: unknown,
+): ScriptLogLine {
+  const safeCode =
+    typeof code === "string" && code.length <= SCRIPT_NAME_LENGTH && SCRIPT_CODE.test(code)
+      ? code
+      : "script-log";
+  const kept: Record<string, number> = {};
+  if (typeof ids === "object" && ids !== null) {
+    for (const [name, value] of Object.entries(ids)) {
+      if (Object.keys(kept).length >= SCRIPT_IDS) break;
+      if (name.length > SCRIPT_NAME_LENGTH || !SCRIPT_ID.test(name)) continue;
+      if (typeof value === "number" && Number.isFinite(value)) kept[name] = value;
+    }
+  }
+  return { level, code: safeCode, ids: kept };
+}
+
+/**
+ * The context `onStart` receives: the channel's name, its configuration (frozen, as each message's
+ * context holds it), and a logger that takes a code and numbers only, each line posted to the
+ * engine through `post`.
+ *
+ * @example
+ * ```ts
+ * const ctx = scriptContext("adt-to-lab", freezeDeep({}), (line) => lines.push(line));
+ * ```
+ */
+export function scriptContext(
+  channel: string,
+  config: Readonly<Record<string, unknown>>,
+  post: (line: ScriptLogLine) => void,
+): unknown {
+  const at =
+    (level: ScriptLogLine["level"]) =>
+    (code: unknown, ids?: unknown): void => {
+      post(scriptLogLine(level, code, ids));
+    };
+  return Object.freeze({
+    channel,
+    config: freezeDeep(config),
+    logger: Object.freeze({ info: at("info"), warn: at("warn"), error: at("error") }),
+  });
+}
+
+/**
+ * Runs the module's `onStart`, when it has one: a throw is a load failure, coded `ON_START_FAILED`
+ * unless the error has a code of its own.
+ *
+ * @example
+ * ```ts
+ * await runOnStart(scripts.onStart, ctx);
+ * ```
+ */
+export async function runOnStart(onStart: ChannelScripts["onStart"], ctx: unknown): Promise<void> {
+  if (onStart === undefined) return;
+  try {
+    await onStart(ctx);
+  } catch (error) {
+    throw new StageError("load", error, "ON_START_FAILED");
+  }
+}
+
+/**
+ * Runs the module's `onStop`, when it has one, and says how it went: a throw is described, never
+ * passed on, since the worker ends either way.
+ *
+ * @example
+ * ```ts
+ * port.postMessage(await runOnStop(scripts.onStop, transformFile));
+ * ```
+ */
+export async function runOnStop(
+  onStop: ChannelScripts["onStop"],
+  transformFile?: string,
+): Promise<StopReply> {
+  if (onStop === undefined) return { stopped: true };
+  try {
+    await onStop();
+    return { stopped: true };
+  } catch (error) {
+    const failure = summarize(new StageError("load", error, "ON_STOP_FAILED"), transformFile);
+    return { stopped: true, failure };
+  }
+}
+
+/**
+ * Whether a message from the engine is a {@link StopRequest}.
+ *
+ * @example
+ * ```ts
+ * isStopRequest({ stop: true }); // true
+ * ```
+ */
+export function isStopRequest(message: unknown): message is StopRequest {
+  return typeof message === "object" && message !== null && (message as StopRequest).stop === true;
 }
 
 /**
@@ -1402,7 +2620,12 @@ export function summarize(error: unknown, transformFile?: string): FailureSummar
   const cause = error instanceof StageError ? error.cause : error;
   const name = cause instanceof Error ? cause.name : typeof cause;
   const rawCode = cause instanceof Error ? (cause as Error & { code?: unknown }).code : undefined;
-  const code = typeof rawCode === "string" ? rawCode : undefined;
+  const code =
+    typeof rawCode === "string"
+      ? rawCode
+      : error instanceof StageError
+        ? error.fallbackCode
+        : undefined;
   const detail = cause instanceof Error ? cause.message : String(cause);
   const where = transformFile === undefined ? undefined : locate(cause, transformFile);
   return {
@@ -1487,43 +2710,81 @@ export function transferable(outputs: readonly Uint8Array[]): ArrayBuffer[] {
 if (!isMainThread && parentPort !== null && isWorkerSetup(workerData)) {
   const port = parentPort;
   const setup = workerData;
-  const parser = loadFormat(setup.format).catch((error: unknown) => {
+  // The channel's format, and each destination's, loaded before the first message.
+  const formats = new Set([setup.format, ...(setup.destinations ?? []).map((d) => d.format)]);
+  const parser = Promise.all([...formats].map(loadFormat)).catch((error: unknown) => {
     throw new StageError("load", error);
   });
   // Frozen once: every message's context shares it.
   const config = freezeDeep(setup.config);
   const formatSettings = freezeDeep(setup.formatSettings ?? {});
-  Promise.all([loadTransform(setup.transformFile), parser]).then(
-    ([transform]) => {
-      port.on("message", (request: TransformRequest) => {
-        runTransform(
-          transform,
-          setup.format,
-          request.body,
-          buildContext(request, config),
-          formatSettings,
-        ).then(
-          (outputs) =>
-            port.postMessage(
-              { id: request.id, ok: true, outputs } satisfies TransformReply,
-              transferable(outputs),
-            ),
-          (error: unknown) =>
-            port.postMessage({
-              id: request.id,
-              ok: false,
-              failure: summarize(error, setup.transformFile),
-            } satisfies TransformReply),
+  const post = (line: ScriptLogLine): void => {
+    port.postMessage({ scriptLog: line } satisfies ScriptLogMessage);
+  };
+  Promise.all([loadScripts(setup.transformFile), parser])
+    .then(async ([scripts]) => {
+      const destinations =
+        setup.destinations === undefined ? undefined : await loadDestinations(setup.destinations);
+      if (scripts.onStart !== undefined) {
+        // Told first, so the engine times onStart alone, not the modules' load.
+        port.postMessage({ hello: "starting" } satisfies WorkerHello);
+        await runOnStart(scripts.onStart, scriptContext(setup.channel ?? "", config, post));
+      }
+      return { ...scripts, destinations };
+    })
+    .then(
+      ({ transform, onStop, destinations }) => {
+        port.on("message", (request: TransformRequest | StopRequest) => {
+          if (isStopRequest(request)) {
+            void runOnStop(onStop, setup.transformFile).then((reply) => {
+              port.postMessage(reply);
+            });
+            return;
+          }
+          transformMessage(
+            transform,
+            setup.format,
+            request.body,
+            request,
+            config,
+            formatSettings,
+            destinations,
+          ).then(
+            (result) =>
+              port.postMessage(
+                { id: request.id, ok: true, ...result } satisfies TransformReply,
+                transferable([
+                  ...result.outputs,
+                  ...result.routes.map((routed) => routed.body),
+                  ...(result.destinations ?? []).flatMap((reply) =>
+                    reply?.ok === true ? reply.outputs : [],
+                  ),
+                ]),
+              ),
+            (error: unknown) =>
+              port.postMessage({
+                id: request.id,
+                ok: false,
+                failure: summarize(error, setup.transformFile),
+              } satisfies TransformReply),
+          );
+        });
+        port.postMessage({ hello: "ready" } satisfies WorkerHello);
+      },
+      (error: unknown) => {
+        port.postMessage(
+          (error instanceof DestinationLoadError
+            ? {
+                hello: "load-failed",
+                failure: summarize(error.cause, error.destination.transformFile),
+                destination: error.destination.index,
+              }
+            : {
+                hello: "load-failed",
+                failure: summarize(error, setup.transformFile),
+              }) satisfies WorkerHello,
         );
-      });
-      port.postMessage({ hello: "ready" } satisfies WorkerHello);
-    },
-    (error: unknown) => {
-      port.postMessage({
-        hello: "load-failed",
-        failure: summarize(error, setup.transformFile),
-      } satisfies WorkerHello);
-    },
-  );
+      },
+    );
 }
 /* v8 ignore stop */

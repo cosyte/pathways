@@ -62,3 +62,118 @@ DOB 19700101
 # --- Synthetic ids: SSN / MRN / member-id shapes ---
 # None needed: the fixtures' identifiers carry a TEST prefix, which no detector
 # reads as a real identifier.
+
+# --- The example projects in examples/ ---
+# Their HL7 v2 messages come from @cosyte/synth 0.1.5 (generateAdt, generateOru
+# and generateOrm, each with a fixed seed; the preliminary result's OBX-11 then
+# set to P): invented name words, dates of birth, record numbers and
+# SSN-shaped numbers, declared here one by one.
+NAME CORPORA
+NAME DETERIA
+NAME DETERWOOD
+NAME DUMMERTON
+NAME DUMMETT
+NAME EXAMPLEWOOD
+NAME FABRICANT
+NAME FAUXMAN
+NAME FIXTINGHAM
+NAME FIXTURA
+NAME MOCKRIDGE
+NAME MOCKTAVIA
+NAME NONESUCH
+NAME PLACEHOLDA
+NAME QUILLFEATHER
+NAME QUILLIAM
+NAME RANDOMSON
+NAME REPRODUS
+NAME SEEDWIN
+NAME SIMULA
+NAME SIMULACRE
+NAME SYNTHWELL
+NAME TESTRY
+NAME VOIDWIN
+DOB 19331022
+DOB 19400208
+DOB 19490430
+DOB 19520409
+DOB 19520813
+DOB 19620715
+DOB 19691007
+DOB 19801004
+DOB 19841102
+DOB 19951126
+DOB 20020731
+DOB 20030126
+DOB 20090711
+DOB 20100423
+ID 13416379
+ID 19692877
+ID 21771217
+ID 22261938
+ID 35929766
+ID 38662454
+ID 39727854
+ID 41763005
+ID 41921852
+ID 55209184
+ID 57457574
+ID 65974625
+ID 87548484
+ID 95746244
+ID 901072221
+ID 901310404
+ID 905319656
+ID 920169591
+ID 922336089
+ID 929054511
+ID 930492332
+ID 931297671
+ID 934054569
+ID 934172867
+ID 938684432
+ID 939444328
+ID 944242221
+ID 979100162
+
+# --- The veterinary example, examples/vet-lab-to-fhir ---
+# Its HL7 v2 messages come from @cosyte/synth 0.1.10 (generateOru and generateAdt
+# with subject "animal", each with a fixed seed), and its expected FHIR Bundle is
+# made from them: invented pet and owner name words, the pets' dates of birth,
+# record numbers, and 15-digit microchip numbers that begin 999, declared here
+# one by one.
+NAME RANDOMIR
+NAME SAMPLESNOUT
+NAME SAMPLETON
+NAME STUBTAIL
+NAME TESTERSON
+DOB 20061127
+DOB 20080719
+ID 73688379
+ID 77039870
+ID 999137940216763
+ID 999716294519549
+
+# --- The v2 XML example, examples/vet-lab-to-v2-xml ---
+# Its HL7 v2 messages come from @cosyte/synth 0.1.10 (generateOru with subject
+# "animal" and the seeds 4831 to 4834), and its expected v2 XML documents are
+# written from them: invented pet and owner name words, the pets' dates of birth,
+# record numbers, and 15-digit microchip numbers that begin 999, declared here
+# one by one. Name words declared above are not repeated.
+NAME CORPUSWORTH
+NAME FABRICA
+NAME FIXTUREPAW
+NAME MOCKWHISKER
+NAME PLACEHOLT
+NAME TESTBISCUIT
+DOB 20050810
+DOB 20070630
+DOB 20130720
+DOB 20170808
+ID 19189187
+ID 20040387
+ID 84910503
+ID 90158063
+ID 999135338116760
+ID 999740221020013
+ID 999773370184489
+ID 999862338928059

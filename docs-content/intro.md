@@ -29,8 +29,9 @@ so a restart loses nothing.
 - **Formats.** HL7 v2, FHIR R4 JSON, X12, and C-CDA arrive parsed, through our open-source
   `@cosyte/*` libraries. CSV and fixed-width text arrive as a table. JSON arrives as a value and
   anything else as text.
-- **Connectors.** MLLP, HTTP, TCP with your own framing, and files in a folder, on an SFTP server,
-  or on Amazon S3 and Azure Blob Storage, in and out, and an SMTP destination, over TLS by default.
+- **Connectors.** Sources and destinations for MLLP, HTTP, TCP with your own framing, and files (in
+  a folder, on an SFTP server, or on Amazon S3 and Azure Blob Storage), your own module in either
+  place, and an SMTP destination. TLS is on by default.
 - **Storage.** SQLite with no setup, or PostgreSQL, MySQL or MariaDB, and SQL Server, with every
   stored message encrypted at rest.
 - **Operations from the command line.** `pathways status`, `messages`, `replay`, `clear`,
@@ -42,7 +43,9 @@ so a restart loses nothing.
 
 A developer who writes and runs integrations: someone who would rather review a channel in a pull
 request and test a transform with sample messages than configure both in a product. Pathways runs
-on one machine, from the command line or in Docker.
+from the command line or in Docker. One engine is active on a database at a time; a second engine
+can wait as a standby and take over through the engine lease, and
+[running more than one engine](./running-more-than-one-engine.md) says how.
 
 ## What it is not
 
@@ -60,6 +63,13 @@ on one machine, from the command line or in Docker.
 - [Install Pathways](./installation.md), then follow the [quickstart](./quickstart.md) from
   `pathways init` to a delivered message.
 - [Write a channel](./write-a-channel.md) from nothing, with its tests.
+- Start from an example, a small project that runs on synthetic messages:
+  [HL7 v2 over MLLP in, HTTP out](./example-mllp-to-http.md),
+  [a file drop to SFTP](./example-file-to-sftp.md), [HL7 v2 to FHIR](./example-hl7-to-fhir.md),
+  [filter, then send to two destinations](./example-filter-and-route.md),
+  [replay after a failure](./example-replay-after-failure.md),
+  [a veterinary lab result to FHIR](./example-vet-lab-to-fhir.md), and
+  [a veterinary lab result as v2 XML over HTTPS](./example-vet-lab-to-v2-xml.md).
 - [How delivery and errors work](./delivery-and-errors.md), before you run Pathways for real.
 
 The repository: https://github.com/cosyte/pathways

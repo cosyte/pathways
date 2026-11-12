@@ -198,7 +198,8 @@ describe("pathways start", () => {
         received_at text not null, body blob not null, status text not null, error text,
         updated_at text not null, dedup_key text, duplicate_of integer, size integer,
         generation integer default 0 not null);
-      CREATE TABLE deliveries (id integer primary key autoincrement, message_id integer not null);
+      CREATE TABLE deliveries (id integer primary key autoincrement, message_id integer not null,
+        channel text not null, status text not null, generation integer default 0 not null);
       CREATE TABLE audit_log (id integer primary key autoincrement, at text not null,
         actor text not null, action text not null, outcome text not null, channel text,
         message_id integer, detail text);

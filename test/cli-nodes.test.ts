@@ -147,7 +147,7 @@ describe("pathways start's node, on SQLite", () => {
         host: hostname(),
         pid: process.pid,
         version: VERSION,
-        schemaGeneration: 12,
+        schemaGeneration: 16,
         role: "active",
         draining: false,
         staleAfterMs: 3_000,
@@ -336,12 +336,12 @@ describe("pathways nodes forget", () => {
     // No database yet: none is made, and there is nothing to audit into.
     expect(await bad()).toMatchObject({ code: EXIT.usage, out: "", err: rule });
     expect(existsSync(db(root))).toBe(false);
-    // A database one generation behind: left at that generation, unaudited, since this version
-    // writes only to a schema it runs on.
+    // A database from before the nodes table: left at its generation, unaudited, since this
+    // version writes only to a schema it runs on.
     expect((await cli(["migrate", "-C", root])).code).toBe(EXIT.ok);
     const older = new SqliteDatabase(db(root));
     older.exec(
-      "drop table nodes; delete from kysely_migration where name = '0012-nodes'; delete from schema_info where step = '0012-nodes'",
+      "drop index messages_by_channel_idempotency_claim; alter table messages drop column idempotency_claim; drop index deliveries_by_destination_key; alter table deliveries drop column destination_key; drop index messages_by_parent; alter table messages drop column parent_channel; alter table messages drop column parent_message; alter table messages drop column parent_delivery; alter table messages drop column parent_generation; alter table messages drop column hops; drop index messages_by_channel_settled; alter table messages drop column settled_generation; drop table nodes; delete from kysely_migration where name in ('0012-nodes', '0013-destination-keys', '0014-idempotency-claims', '0015-channel-links', '0016-settled'); delete from schema_info where step in ('0012-nodes', '0013-destination-keys', '0014-idempotency-claims', '0015-channel-links', '0016-settled')",
     );
     older.close();
     expect(await bad()).toMatchObject({ code: EXIT.usage, out: "", err: rule });

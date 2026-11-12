@@ -416,6 +416,13 @@ The output it carried, in base64; `null` once its message's content was dropped.
 
 > `readonly` **destination**: `number`
 
+##### destinationKey
+
+> `readonly` **destinationKey**: `string` \| `null`
+
+The key of the destination it was made for; null when it records none. An archive written
+before deliveries recorded one leaves it out.
+
 ##### error
 
 > `readonly` **error**: `string` \| `null`
@@ -530,9 +537,20 @@ Why it failed, as stored: can quote the message.
 
 > `readonly` **generation**: `number`
 
+##### hops?
+
+> `readonly` `optional` **hops?**: `number` \| `null`
+
 ##### id
 
 > `readonly` **id**: `number`
+
+##### idempotencyClaim?
+
+> `readonly` `optional` **idempotencyClaim?**: `string` \| `null`
+
+The same hash when it held its channel's claim to the key, the one message stored under it;
+`null` when it did not. Absent from an archive an older Pathways wrote.
 
 ##### idempotencyKey
 
@@ -552,9 +570,36 @@ Its `ctx.meta`, which can hold identifiers; `null` when it had none or it was dr
 
 The outputs of its current generation, in order, in base64: those of its first destination.
 
+##### parentChannel?
+
+> `readonly` `optional` **parentChannel?**: `string` \| `null`
+
+The channel that handed it over, the message there, the channel destination's delivery and
+that message's generation, and how many hand-offs in a row brought it: `null` for a message
+a source took in, and absent from an archive written before channels could hand over.
+
+##### parentDelivery?
+
+> `readonly` `optional` **parentDelivery?**: `number` \| `null`
+
+##### parentGeneration?
+
+> `readonly` `optional` **parentGeneration?**: `number` \| `null`
+
+##### parentMessage?
+
+> `readonly` `optional` **parentMessage?**: `number` \| `null`
+
 ##### receivedAt
 
 > `readonly` **receivedAt**: `string`
+
+##### settledGeneration?
+
+> `readonly` `optional` **settledGeneration?**: `number` \| `null`
+
+The generation whose settled event was recorded, when one was and the store recorded it; null
+otherwise, and in an archive written before Pathways recorded it. Read back, it is always set.
 
 ##### size
 
@@ -630,7 +675,7 @@ const line = (entry: AuditEntry): string => `${entry.at} ${entry.actor} ${entry.
 
 ##### action
 
-> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"bulk-replay"` \| `"archive"` \| `"node-forget"`
+> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"bulk-replay"` \| `"archive"` \| `"batch"` \| `"node-forget"` \| `"engine-start"` \| `"engine-stop"` \| `"unclean-shutdown"`
 
 ##### actor
 
@@ -750,7 +795,7 @@ await store.appendAudit("noah", [{ action: "content-view", channel: "adt", messa
 
 ##### action
 
-> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"bulk-replay"` \| `"archive"` \| `"node-forget"`
+> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"bulk-replay"` \| `"archive"` \| `"batch"` \| `"node-forget"` \| `"engine-start"` \| `"engine-stop"` \| `"unclean-shutdown"`
 
 ##### channel?
 
@@ -786,7 +831,7 @@ const views = await store.auditEntries({ action: "content-view", since: "2026-11
 
 ##### action?
 
-> `readonly` `optional` **action?**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"bulk-replay"` \| `"archive"` \| `"node-forget"`
+> `readonly` `optional` **action?**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"bulk-replay"` \| `"archive"` \| `"batch"` \| `"node-forget"` \| `"engine-start"` \| `"engine-stop"` \| `"unclean-shutdown"`
 
 ##### before?
 
@@ -817,6 +862,87 @@ At or after this time (ISO 8601, UTC).
 > `readonly` `optional` **until?**: `string`
 
 Before this time (ISO 8601, UTC).
+
+***
+
+### BatchFacts
+
+Where a message sat in the batch a source's `batch:` cut it from: its place, from 0, and the first
+16 hexadecimal digits of the SHA-256 of the whole file or request body, which every piece of it
+shares.
+
+#### Example
+
+```ts
+const first = (source: FileSourceFacts): boolean => source.batch?.piece === 0;
+```
+
+#### Properties
+
+##### hash
+
+> `readonly` **hash**: `string`
+
+##### piece
+
+> `readonly` **piece**: `number`
+
+***
+
+### BatchResult
+
+What a whole batch came to, which a source hands to the sink's `batchDone`, and the engine
+records in the audit log. Counts and codes only: never a file's name or message text.
+
+#### Properties
+
+##### code?
+
+> `readonly` `optional` **code?**: `string`
+
+Why it was failed: one of BATCH\_CODES.
+
+##### duplicates
+
+> `readonly` **duplicates**: `number`
+
+The pieces the store held already, from an earlier run or an earlier request with the key.
+
+##### failed
+
+> `readonly` **failed**: `number`
+
+The pieces stored as failed, with no content.
+
+##### outcome
+
+> `readonly` **outcome**: `"stored"` \| `"failed"`
+
+`stored` once every piece is stored, or `failed` when the batch was set aside whole.
+
+##### pieces
+
+> `readonly` **pieces**: `number`
+
+The pieces handed to the sink.
+
+##### source
+
+> `readonly` **source**: `"file"` \| `"http"`
+
+The kind of source that read it.
+
+##### stored
+
+> `readonly` **stored**: `number`
+
+The pieces stored as new messages that are not failed.
+
+##### warnings
+
+> `readonly` **warnings**: readonly `string`[]
+
+The envelope's warning codes, such as `BATCH_COUNT_MISMATCH`, each once.
 
 ***
 
@@ -864,7 +990,7 @@ Where to read credentials and other settings from: `process.env` when the engine
 
 ##### format
 
-> `readonly` **format**: `"hl7v2"` \| `"json"` \| `"fhir"` \| `"x12"` \| `"ccda"` \| `"text"` \| `"csv"`
+> `readonly` **format**: `"hl7v2"` \| `"json"` \| `"fhir"` \| `"x12"` \| `"xml"` \| `"ccda"` \| `"text"` \| `"csv"`
 
 ##### logger
 
@@ -872,7 +998,42 @@ Where to read credentials and other settings from: `process.env` when the engine
 
 ###### Inherited from
 
-[`ExtensionContext`](#extensioncontext).[`logger`](#logger-1)
+[`ExtensionContext`](#extensioncontext).[`logger`](#logger-2)
+
+***
+
+### ChannelScriptContext
+
+What a channel's `onStart` receives: the channel's name, its configuration as each message's
+context holds it, and a logger that takes a code and numbers only. A frozen plain object.
+
+#### Example
+
+```ts
+import type { ChannelScriptContext } from "@cosyte/pathways";
+
+const channelOf = (ctx: ChannelScriptContext): string => ctx.channel;
+```
+
+#### Properties
+
+##### channel
+
+> `readonly` **channel**: `string`
+
+The channel's name.
+
+##### config
+
+> `readonly` **config**: `Readonly`\<[`TransformConfig`](#transformconfig)\>
+
+The channel's configuration, resolved when the engine (or the command) started.
+
+##### logger
+
+> `readonly` **logger**: [`ScriptLogger`](#scriptlogger)
+
+Writes a line to the engine's log: a code and numbers only.
 
 ***
 
@@ -1097,7 +1258,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-8)
+[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-9)
 
 ##### deliveryId
 
@@ -1199,7 +1360,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-15)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-17)
 
 ##### deliveryId
 
@@ -1229,7 +1390,7 @@ Absent otherwise.
 
 ##### type
 
-> `readonly` **type**: `"delivered"` \| `"received"` \| `"receive-failed"` \| `"transformed"` \| `"filtered"` \| `"transform-failed"` \| `"delivery-retry"` \| `"delivery-redirected"` \| `"delivery-rejected"` \| `"delivery-exhausted"` \| `"source-down"` \| `"source-up"` \| `"audit"`
+> `readonly` **type**: `"delivered"` \| `"received"` \| `"receive-failed"` \| `"transformed"` \| `"filtered"` \| `"transform-failed"` \| `"delivery-retry"` \| `"delivery-redirected"` \| `"delivery-rejected"` \| `"delivery-exhausted"` \| `"settled"` \| `"source-down"` \| `"source-up"` \| `"audit"`
 
 ###### Inherited from
 
@@ -1284,7 +1445,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-8)
+[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-9)
 
 ##### code
 
@@ -1403,7 +1564,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-8)
+[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-9)
 
 ##### deliveryId
 
@@ -1526,7 +1687,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-8)
+[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-9)
 
 ##### deliveryId
 
@@ -1633,7 +1794,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-8)
+[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-9)
 
 ##### code
 
@@ -1754,6 +1915,54 @@ Releases what the destination keeps open between deliveries, such as connections
 ###### Returns
 
 `Promise`\<`void`\>
+
+***
+
+### DestinationFacts
+
+Which destination a destination transform runs for: its place in the channel's `destinations:`
+list, from 0, its `name:` when the block sets one, and its kind.
+
+#### Example
+
+```ts
+import type { Transform } from "@cosyte/pathways";
+export default ((msg, ctx) => (ctx?.destination?.name === "billing" ? msg : null)) satisfies Transform;
+```
+
+#### Properties
+
+##### index
+
+> `readonly` **index**: `number`
+
+##### kind
+
+> `readonly` **kind**: `string`
+
+`file`, `http`, `mllp`, `tcp`, `smtp`, `channel` or `module`.
+
+##### name
+
+> `readonly` **name**: `string` \| `undefined`
+
+***
+
+### DestinationKey
+
+A destination named by its key rather than its place, for [MessageStore.outputs](#outputs-1).
+
+#### Example
+
+```ts
+const theirs = await store.outputs(12, { key: keys[1] });
+```
+
+#### Properties
+
+##### key
+
+> `readonly` **key**: `string`
 
 ***
 
@@ -2096,6 +2305,12 @@ const name = (source: FileSourceFacts): string => source.name;
 
 #### Properties
 
+##### batch?
+
+> `readonly` `optional` **batch?**: [`BatchFacts`](#batchfacts)
+
+With `batch:`, where the message sat in the file it was cut from.
+
 ##### kind
 
 > `readonly` **kind**: `"file"`
@@ -2116,7 +2331,7 @@ When the message was stored, as an ISO 8601 time.
 
 > `readonly` **size**: `number`
 
-The body's size in bytes.
+The body's size in bytes: with `batch:`, the piece's.
 
 ***
 
@@ -2154,7 +2369,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-15)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-17)
 
 ##### messageId
 
@@ -2167,6 +2382,85 @@ The channel's name.
 ###### Overrides
 
 [`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-8)
+
+***
+
+### HandOff
+
+One message to hand to another channel: its target, body and what is stored with it (the
+parent link, hop count, idempotency key and metadata), and the most messages the target may
+hold waiting for its transform, counting this one.
+
+#### Example
+
+```ts
+const handOff: HandOff = { channel: "lab-results", body, options: { parent, hops: 1 }, maxPending: 10_000 };
+```
+
+#### Properties
+
+##### body
+
+> `readonly` **body**: `Uint8Array`
+
+##### channel
+
+> `readonly` **channel**: `string`
+
+##### maxPending
+
+> `readonly` **maxPending**: `number`
+
+##### options
+
+> `readonly` **options**: [`StoreReceiveOptions`](#storereceiveoptions)
+
+***
+
+### HeldDeliveries
+
+What [MessageStore.holdDeliveries](#holddeliveries) held: `unknown`, pending deliveries queued before
+destinations were recorded, now failed; `gone`, pending deliveries made for a destination the
+channel no longer has, still pending.
+
+#### Example
+
+```ts
+const held: HeldDeliveries = { unknown: 0, gone: 2 };
+```
+
+#### Properties
+
+##### gone
+
+> `readonly` **gone**: `number`
+
+##### unknown
+
+> `readonly` **unknown**: `number`
+
+***
+
+### Hl7v2Settings
+
+How an `hl7v2` channel reads and writes its bodies, from the channel's `hl7v2:` block.
+
+#### Example
+
+```ts
+const settings: Hl7v2Settings = { assumeCharset: "8859/1" };
+```
+
+#### Properties
+
+##### assumeCharset?
+
+> `readonly` `optional` **assumeCharset?**: `string`
+
+The character set to read and write a message in when its MSH-18 is blank or absent: `8859/1`
+to `8859/8`, `8859/10`, `8859/13` to `8859/16`, or `WINDOWS-1252`. A message that declares
+MSH-18 is read and written in the set it declares. Unset, a blank MSH-18 means ASCII, read as its UTF-8 superset: bytes that are not
+UTF-8 are kept as they arrived, and a segment a transform edits must then be ASCII.
 
 ***
 
@@ -2218,7 +2512,7 @@ Where to read credentials and other settings from: `process.env` when the engine
 
 ###### Inherited from
 
-[`ExtensionContext`](#extensioncontext).[`logger`](#logger-1)
+[`ExtensionContext`](#extensioncontext).[`logger`](#logger-2)
 
 ***
 
@@ -2235,6 +2529,12 @@ const requestId = (source: HttpSourceFacts): string | undefined => source.header
 ```
 
 #### Properties
+
+##### batch?
+
+> `readonly` `optional` **batch?**: [`BatchFacts`](#batchfacts)
+
+With `batch:`, where the message sat in the request body it was cut from.
 
 ##### headers
 
@@ -2456,6 +2756,7 @@ const line = (event: LifecycleEventBase): string => `${event.at} ${event.channel
 - [`FilteredEvent`](#filteredevent)
 - [`ReceivedEvent`](#receivedevent)
 - [`ReceiveFailedEvent`](#receivefailedevent)
+- [`SettledEvent`](#settledevent)
 - [`SourceDownEvent`](#sourcedownevent)
 - [`SourceUpEvent`](#sourceupevent)
 - [`TransformedEvent`](#transformedevent)
@@ -2477,7 +2778,7 @@ The channel's name.
 
 ##### type
 
-> `readonly` **type**: `"delivered"` \| `"received"` \| `"receive-failed"` \| `"transformed"` \| `"filtered"` \| `"transform-failed"` \| `"delivery-retry"` \| `"delivery-redirected"` \| `"delivery-rejected"` \| `"delivery-exhausted"` \| `"source-down"` \| `"source-up"` \| `"audit"`
+> `readonly` **type**: `"delivered"` \| `"received"` \| `"receive-failed"` \| `"transformed"` \| `"filtered"` \| `"transform-failed"` \| `"delivery-retry"` \| `"delivery-redirected"` \| `"delivery-rejected"` \| `"delivery-exhausted"` \| `"settled"` \| `"source-down"` \| `"source-up"` \| `"audit"`
 
 ***
 
@@ -2575,6 +2876,42 @@ const fields: LogFields = { event: "inbox-read-failed", code: "EACCES" };
 
 ***
 
+### MessageParent
+
+Where a message handed over from another channel came from: that channel, its message, the
+channel destination's delivery (none for `ctx.route`), and the parent's generation at the time,
+which is above 0 when the hand-off came from a replay or a resend.
+
+#### Example
+
+```ts
+const parent: MessageParent = { channel: "adt-in", messageId: 12, deliveryId: 40, generation: 0 };
+```
+
+#### Properties
+
+##### channel
+
+> `readonly` **channel**: `string`
+
+##### deliveryId
+
+> `readonly` **deliveryId**: `number` \| `undefined`
+
+The channel destination's delivery that handed it over; `undefined` for `ctx.route`.
+
+##### generation
+
+> `readonly` **generation**: `number`
+
+The parent's generation when it handed over: 0 the first time, more for a replay or resend.
+
+##### messageId
+
+> `readonly` **messageId**: `number`
+
+***
+
 ### MessageQuery
 
 Which messages [MessageStore.listMessages](#listmessages) returns: newest first, every filter optional.
@@ -2615,7 +2952,7 @@ Received at or after this time (ISO 8601, UTC).
 
 ##### state?
 
-> `readonly` `optional` **state?**: `"delivered"` \| `"received"` \| `"filtered"` \| `"failed"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
+> `readonly` `optional` **state?**: `"failed"` \| `"delivered"` \| `"received"` \| `"filtered"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
 
 ##### until?
 
@@ -2668,6 +3005,49 @@ socket.on("ready", () => sink.sourceUp?.());
 
 #### Methods
 
+##### batchDone()?
+
+> `optional` **batchDone**(`result`): `Promise`\<`void`\>
+
+Told what a whole batch came to once every piece is stored, or once it was failed whole: counts
+and codes, never content. The engine records it in the audit log as a `batch` entry. Optional,
+as [receivePiece](#receivepiece) is.
+
+###### Parameters
+
+###### result
+
+[`BatchResult`](#batchresult)
+
+###### Returns
+
+`Promise`\<`void`\>
+
+##### heldOrigin()?
+
+> `optional` **heldOrigin**(`origin`, `key`): `Promise`\<`"none"` \| `"same"` \| `"other"`\>
+
+What the store holds under a batch's `origin`, the `duplicateKey` its first piece was handed
+in with: `none` when no message carries it, `same` when the first that does was stored under
+`key` (the same batch, read again), and `other` when it was stored under another key (another
+batch under the same origin). The HTTP source asks this before it stores a batch sent with an
+`Idempotency-Key`, and answers 422 to `other`. The engine's own sink has it when its store has
+`heldIdempotencyKey`; a sink without it is never asked.
+
+###### Parameters
+
+###### origin
+
+`string`
+
+###### key
+
+`string`
+
+###### Returns
+
+`Promise`\<`"none"` \| `"same"` \| `"other"`\>
+
 ##### receive()
 
 > **receive**(`body`, `options?`): `Promise`\<`number`\>
@@ -2695,6 +3075,29 @@ time it came in, in microseconds since 1970, never given twice), and rejects wit
 ###### Returns
 
 `Promise`\<`number`\>
+
+##### receivePiece()?
+
+> `optional` **receivePiece**(`body`, `options?`): `Promise`\<[`ReceivedPiece`](#receivedpiece)\>
+
+As [receive](#receive), and also says whether the store held the message already, under its
+`idempotencyKey`, so nothing new was stored. The built-in sources call it for each piece of a
+batch, to count what the batch came to; the engine's own sink always has it, and a sink a test
+builds by hand may leave it out.
+
+###### Parameters
+
+###### body
+
+`Uint8Array`
+
+###### options?
+
+[`ReceiveOptions`](#receiveoptions)
+
+###### Returns
+
+`Promise`\<[`ReceivedPiece`](#receivedpiece)\>
 
 ##### sourceDown()?
 
@@ -2860,6 +3263,27 @@ so a restart forgets it.
 
 `Promise`\<`Record`\<`string`, [`ChannelRunState`](#channelrunstate)\>\>
 
+##### children()?
+
+> `optional` **children**(`messageId`, `limit`): `Promise`\<[`MessageSummary`](#messagesummary)[]\>
+
+The messages handed over from message `messageId`, oldest first, at most `limit`. Optional: a
+store without it shows no children.
+
+###### Parameters
+
+###### messageId
+
+`number`
+
+###### limit
+
+`number`
+
+###### Returns
+
+`Promise`\<[`MessageSummary`](#messagesummary)[]\>
+
 ##### clear()
 
 > **clear**(`messageId`, `actor`): `Promise`\<[`ClearResult`](#clearresult)\>
@@ -2891,9 +3315,20 @@ is nothing failed. The audit entry is written in the same transaction.
 
 ##### completeTransform()
 
-> **completeTransform**(`messageId`, `outputs`, `destinations`, `epoch?`): `Promise`\<`void`\>
+> **completeTransform**(`messageId`, `outputs`, `destinations`, `epoch?`, `keys?`): `Promise`\<`void`\>
 
-Fenced by `epoch` when it is given: see the lease methods above.
+Records a transform's outputs and the message's new status, all or nothing: given a list, one
+pending delivery per output per destination, and the message `filtered` when the list is
+empty; given `{ byDestination }`, each destination's own outputs as pending deliveries, a
+destination with none as one `filtered` delivery and one that failed as one `failed` delivery
+with its error, and the message `filtered` only when every destination filtered it. Fenced by
+`epoch` when it is given: see the lease methods above.
+
+`keys` names each destination, in the channel's order, by a key it keeps when others are added,
+removed or moved (its `name:`, or its kind and target); each delivery records its destination's
+key, so it is sent to, and resent or verified against, that destination only. The engine always
+gives them, and storage needs them with `{ byDestination }`. A store that ignores them finds
+deliveries by place, as before keys.
 
 ###### Parameters
 
@@ -2903,7 +3338,7 @@ Fenced by `epoch` when it is given: see the lease methods above.
 
 ###### outputs
 
-readonly `Uint8Array`\<`ArrayBufferLike`\>[]
+[`TransformOutputs`](#transformoutputs)
 
 ###### destinations
 
@@ -2912,6 +3347,10 @@ readonly `Uint8Array`\<`ArrayBufferLike`\>[]
 ###### epoch?
 
 `number`
+
+###### keys?
+
+readonly `string`[]
 
 ###### Returns
 
@@ -3056,6 +3495,95 @@ Removes the row of `node` only while it is stale. Returns whether it did. Option
 ###### Returns
 
 `Promise`\<`boolean`\>
+
+##### handOff()?
+
+> `optional` **handOff**(`from`, `handOffs`, `epoch?`): `Promise`\<[`HandOffResult`](#handoffresult)\>
+
+Hands messages to other channels in one transaction with what they come from: `from` a
+channel destination's delivery, marked delivered, or a transform's outcome, recorded as
+[completeTransform](#completetransform) records it. Each new message is stored as `received` in its target
+channel with its parent link and hop count, as [receive](#receive-1) stores one. When a target then
+holds more than its hand-off's `maxPending` messages waiting for the transform, nothing is
+kept and the result names it. Fenced by `epoch` when it is given. Optional: without it the
+engine stores each hand-off with [receive](#receive-1) under an idempotency key built from the source
+channel, the delivery or message, and the generation, then records the source, so a crash
+between the two hands over once.
+
+###### Parameters
+
+###### from
+
+[`HandOffFrom`](#handofffrom)
+
+###### handOffs
+
+readonly [`HandOff`](#handoff)[]
+
+###### epoch?
+
+`number`
+
+###### Returns
+
+`Promise`\<[`HandOffResult`](#handoffresult)\>
+
+##### heldIdempotencyKey()?
+
+> `optional` **heldIdempotencyKey**(`channel`, `duplicateKey`): `Promise`\<`string` \| `null` \| `undefined`\>
+
+The idempotency key of the channel's first message stored with `duplicateKey`: `null` when it
+was stored without one, `undefined` when no message of the channel has the key. A batch source
+reads it to tell a batch read again from another batch sent under the same origin. Optional: a
+store without it never has a batch refused for that.
+
+###### Parameters
+
+###### channel
+
+`string`
+
+###### duplicateKey
+
+`string`
+
+###### Returns
+
+`Promise`\<`string` \| `null` \| `undefined`\>
+
+##### holdDeliveries()?
+
+> `optional` **holdDeliveries**(`channel`, `keys`, `error`, `epoch?`): `Promise`\<[`HeldDeliveries`](#helddeliveries)\>
+
+Holds the channel's pending deliveries that no destination it has now was made for, so none is
+sent to another: fails each one queued before destinations were recorded (no key, so which
+destination it was made for cannot be told), with `error`, so an operator can replay its
+message; and counts those made for a destination that is not among `keys` (removed, or its
+`name:` or target changed), which stay pending and go out if it comes back. Fenced by `epoch`
+when it is given. The engine calls it once per channel at its first delivery pass; a store
+without it holds nothing.
+
+###### Parameters
+
+###### channel
+
+`string`
+
+###### keys
+
+readonly `string`[]
+
+###### error
+
+`string`
+
+###### epoch?
+
+`number`
+
+###### Returns
+
+`Promise`\<[`HeldDeliveries`](#helddeliveries)\>
 
 ##### joinNode()?
 
@@ -3293,6 +3821,25 @@ How many messages of a channel stand at each status. The health endpoint reports
 
 `Promise`\<`Record`\<[`MessageStatus`](#messagestatus), `number`\>\>
 
+##### messageMeta()?
+
+> `optional` **messageMeta**(`id`): `Promise`\<`string` \| `undefined`\>
+
+One message's metadata (`ctx.meta`) as JSON text, through the codec like a body, or `undefined`
+when it has none or it was dropped. Optional: a store without it hands a destination that reads
+metadata none, so a URL placeholder fails its delivery, and a channel destination with
+`carryMeta` carries nothing.
+
+###### Parameters
+
+###### id
+
+`number`
+
+###### Returns
+
+`Promise`\<`string` \| `undefined`\>
+
 ##### metaCandidates()?
 
 > `optional` **metaCandidates**(`query`): `Promise`\<[`MetaCandidate`](#metacandidate)[]\>
@@ -3380,15 +3927,22 @@ Every node row, by node id, with its heartbeat age by the database's clock. Opti
 
 ##### outputs()
 
-> **outputs**(`messageId`): `Promise`\<`Uint8Array`\<`ArrayBufferLike`\>[]\>
+> **outputs**(`messageId`, `destination?`): `Promise`\<`Uint8Array`\<`ArrayBufferLike`\>[]\>
 
-The outputs of a message's current generation, in order; none when it has none or they were dropped.
+The outputs of a message's current generation, in order; none when it has none or they were
+dropped. Those of `destination` when it is given, by its place or, as `{ key }`, by the key its
+deliveries record (see [completeTransform](#completetransform)), else those of the first destination that has
+any.
 
 ###### Parameters
 
 ###### messageId
 
 `number`
+
+###### destination?
+
+`number` \| [`DestinationKey`](#destinationkey-1)
 
 ###### Returns
 
@@ -3402,9 +3956,11 @@ Stores an incoming message, durably, before its source acknowledges it: as `rece
 `failed` when `options.failure` is set. Flags it as a possible duplicate when an earlier
 message of the channel has the same `options.duplicateKey`. Given `options.resumed`, when a
 message of the channel was already stored with the same `options.idempotencyKey`, stores
-nothing and returns that message's id with `alreadyStored: true`. A store that ignores the key
-still works, and a source that stops between storing and acknowledging then stores that
-message twice.
+nothing and returns that message's id with `alreadyStored: true`. A store that more than one
+connection writes to makes that lookup and the insert one atomic step (Pathways' own store
+claims the key in a column a unique index covers), or two hand-ins of one message at the same
+moment can both be stored. A store that ignores the key still works, and a source that stops
+between storing and acknowledging then stores that message twice.
 
 ###### Parameters
 
@@ -3498,6 +4054,32 @@ same transaction, whichever way it goes.
 
 `Promise`\<[`RequeueResult`](#requeueresult)\>
 
+##### requeuedUnsettled()?
+
+> `optional` **requeuedUnsettled**(`channel`, `limit`): `Promise`\<`number`[]\>
+
+The ids of a channel's messages a replay or a resend left filtered or failed (no delivery
+queued) and not yet recorded as settled, lowest first, at most `limit`. A replay runs in its own
+process, so the engine reads these on every pass and settles each: such a message gets its
+settled event while the engine runs, not at its next start. `requeue` marks the new generation
+unsettled by clearing `settled_generation`, and an index on the channel, that column and the
+status serves this read, so it reads only the rows it returns. Optional, beside [settle](#settle):
+without it such a message settles at the next start.
+
+###### Parameters
+
+###### channel
+
+`string`
+
+###### limit
+
+`number`
+
+###### Returns
+
+`Promise`\<`number`[]\>
+
 ##### retryingDeliveries()
 
 > **retryingDeliveries**(`channel`): `Promise`\<`number`\>
@@ -3566,6 +4148,53 @@ Sets a channel's state; `running` removes its row. Optional, with [channelStates
 
 `Promise`\<`void`\>
 
+##### settle()?
+
+> `optional` **settle**(`messageId`): `Promise`\<[`SettledMessage`](#settledmessage) \| `undefined`\>
+
+Records that a message has settled, when it has: filtered, failed, or transformed with no
+delivery of its current generation left pending. One conditional update marks the generation
+settled, so of every caller (the engine after each outcome, a restart's sweep, a second
+engine) one gets the message's deliveries back and the rest get `undefined`; a message still
+under way, or settled already, gets `undefined` too. A replay or a resend starts a new
+generation, which settles again. Optional: without it the engine sends no settled events.
+
+###### Parameters
+
+###### messageId
+
+`number`
+
+###### Returns
+
+`Promise`\<[`SettledMessage`](#settledmessage) \| `undefined`\>
+
+##### unsettled()?
+
+> `optional` **unsettled**(`channel`, `after`, `limit`): `Promise`\<`number`[]\>
+
+The ids of a channel's messages that have ended and are not yet recorded as settled, above
+`after`, lowest first, at most `limit`: what a crash between an outcome and its settle left.
+Optional, beside [settle](#settle).
+
+###### Parameters
+
+###### channel
+
+`string`
+
+###### after
+
+`number`
+
+###### limit
+
+`number`
+
+###### Returns
+
+`Promise`\<`number`[]\>
+
 ***
 
 ### MessageSummary
@@ -3621,9 +4250,21 @@ The latest earlier message with the same sender and control ID, when there is on
 
 0 until the message is first replayed or resent; one more each time.
 
+##### hops?
+
+> `readonly` `optional` **hops?**: `number`
+
+How many hand-offs in a row brought it here, when another channel handed it over.
+
 ##### id
 
 > `readonly` **id**: `number`
+
+##### parent?
+
+> `readonly` `optional` **parent?**: [`MessageParent`](#messageparent)
+
+Where the message was handed over from, when another channel handed it over.
 
 ##### receivedAt
 
@@ -3637,7 +4278,7 @@ The body's size in bytes, or null for a message stored before sizes were kept.
 
 ##### state
 
-> `readonly` **state**: `"delivered"` \| `"received"` \| `"filtered"` \| `"failed"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
+> `readonly` **state**: `"failed"` \| `"delivered"` \| `"received"` \| `"filtered"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
 
 The status and the current deliveries, as an operator sees them.
 
@@ -3715,7 +4356,7 @@ Received at or after this time (ISO 8601, UTC).
 
 ##### state?
 
-> `readonly` `optional` **state?**: `"delivered"` \| `"received"` \| `"filtered"` \| `"failed"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
+> `readonly` `optional` **state?**: `"failed"` \| `"delivered"` \| `"received"` \| `"filtered"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
 
 ##### until?
 
@@ -3960,6 +4601,14 @@ const due = await store.nextDelivery("adt", 0, { dueBy: Date.now() });
 Only a delivery due by this time, in epoch milliseconds: the oldest whose `nextAttemptAt` is at
 or before it, passing over any still waiting for a retry. The engine asks this for a destination
 with `retry.rotate: true`. A store that ignores it keeps that destination in order.
+
+##### key?
+
+> `readonly` `optional` **key?**: `string`
+
+Only a delivery made for the destination with this key, wherever it stands in the list now
+(see [MessageStore.completeTransform](#completetransform)); `destination` is then not read. The engine always
+gives it. A store that ignores it finds deliveries by place, as before keys.
 
 ***
 
@@ -4289,6 +4938,13 @@ The id of the stored message this came from; on a channel that stores nothing, t
 pass id: the time it came in, in microseconds since 1970, never given twice, so outputs named by
 it stay apart across restarts.
 
+##### meta?
+
+> `readonly` `optional` **meta?**: `Readonly`\<`Record`\<`string`, `string` \| `number` \| `boolean`\>\>
+
+The message's metadata (`ctx.meta`), passed only to a destination that reads it, such as an
+HTTP destination whose URL has placeholders. Undefined otherwise.
+
 ##### resend?
 
 > `readonly` `optional` **resend?**: [`Resend`](#resend-7)
@@ -4413,6 +5069,12 @@ const next: PendingMessage | undefined = await store.nextToTransform("adt");
 
 > `readonly` **body**: `Uint8Array`
 
+##### hops?
+
+> `readonly` `optional` **hops?**: `number`
+
+How many hand-offs in a row brought it here; unset for a message a source took in.
+
 ##### id
 
 > `readonly` **id**: `number`
@@ -4459,7 +5121,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-15)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-17)
 
 ##### duplicateOf
 
@@ -4518,6 +5180,29 @@ The latest earlier message of the channel with the same duplicate key, when ther
 
 ***
 
+### ReceivedPiece
+
+What [MessageSink.receivePiece](#receivepiece) resolves with: the stored message's id, and whether the
+store held it already, so nothing new was stored.
+
+#### Example
+
+```ts
+const { id, alreadyStored } = await sink.receivePiece(body, { idempotencyKey, resumed: true });
+```
+
+#### Properties
+
+##### alreadyStored
+
+> `readonly` **alreadyStored**: `boolean`
+
+##### id
+
+> `readonly` **id**: `number`
+
+***
+
 ### ReceiveFailedEvent
 
 A message could not be stored, so its source did not acknowledge it and its sender should send it
@@ -4553,7 +5238,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-15)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-17)
 
 ##### code
 
@@ -4656,6 +5341,14 @@ const request: RequeueRequest = { mode: "resend", expected: "transformed", outpu
 
 #### Properties
 
+##### byDestination?
+
+> `readonly` `optional` **byDestination?**: readonly [`DestinationOutcome`](#destinationoutcome)[]
+
+On a channel with destination transforms: what each destination gets, in order, in place of
+`outputs` for every one. A destination's failure is recorded as its failed delivery, and one
+`notStored` gets no delivery; how many were is `notStored` in the result and its audit entry.
+
 ##### destinations
 
 > `readonly` **destinations**: `number`
@@ -4680,6 +5373,13 @@ was replayed or resent since, so a bulk replay never replays a message twice.
 > `readonly` `optional` **failure?**: `string`
 
 What the replayed transform failed with, as stored; the message is marked failed.
+
+##### keys?
+
+> `readonly` `optional` **keys?**: readonly `string`[]
+
+Each destination's key, in the channel's order now, recorded on its deliveries: see
+[MessageStore.completeTransform](#completetransform). Needed with `byDestination`.
 
 ##### mode
 
@@ -4937,6 +5637,81 @@ Epoch milliseconds of the next try.
 
 ***
 
+### ScriptLogger
+
+The logger a channel script receives: each line is a fixed code and numbers only, so nothing of a
+message, a patient or a secret can reach the engine's log through it. The code is lower-case
+words joined by hyphens, such as `cache-warmed` (anything else is logged as `script-log`); each
+id is a finite number under a name of a letter and then letters and digits, at most 16 of them,
+and anything else is dropped. Lines land in the engine's log as `channel-script` events, with the
+channel's name.
+
+#### Example
+
+```ts
+import type { ScriptLogger } from "@cosyte/pathways";
+
+const warmed = (logger: ScriptLogger, entries: number): void => logger.info("cache-warmed", { entries });
+```
+
+#### Methods
+
+##### error()
+
+> **error**(`code`, `ids?`): `void`
+
+###### Parameters
+
+###### code
+
+`string`
+
+###### ids?
+
+`Readonly`\<`Record`\<`string`, `number`\>\>
+
+###### Returns
+
+`void`
+
+##### info()
+
+> **info**(`code`, `ids?`): `void`
+
+###### Parameters
+
+###### code
+
+`string`
+
+###### ids?
+
+`Readonly`\<`Record`\<`string`, `number`\>\>
+
+###### Returns
+
+`void`
+
+##### warn()
+
+> **warn**(`code`, `ids?`): `void`
+
+###### Parameters
+
+###### code
+
+`string`
+
+###### ids?
+
+`Readonly`\<`Record`\<`string`, `number`\>\>
+
+###### Returns
+
+`void`
+
+***
+
 ### SecretProvider
 
 Where secrets come from: an environment variable, a file, or a secret store such as a cloud
@@ -5109,6 +5884,107 @@ The attempt found cut off, kept on the delivery so every later send of it is fla
 
 ***
 
+### SettledEvent
+
+A message has settled: its last delivery was delivered or failed for good, or it was filtered,
+or its transform failed. Sent once per message, and once more for each replay or resend, which
+settles again: the engine records it on the message's row by one conditional update, so a
+restart sends one the engine stopped before sending, and neither a restart nor a second engine
+sends one twice. It carries the message's id and where it stands with each destination, never
+content.
+
+Hooks are best effort: past 1,000 events waiting for one hook, new ones are dropped, and a hard
+stop loses those waiting. Where every settled message must be counted, read the message states
+(`pathways messages`) or the audit log rather than the events.
+
+#### Example
+
+```ts
+if (event.type === "settled" && event.destinations.some((d) => d.state === "failed")) {
+  page(`${event.channel}: message ${event.messageId} did not reach every destination`);
+}
+```
+
+#### Extends
+
+- [`LifecycleEventBase`](#lifecycleeventbase)
+
+#### Properties
+
+##### at
+
+> `readonly` **at**: `string`
+
+When it happened, as an ISO 8601 time in UTC, such as `2026-11-07T12:00:00.000Z`.
+
+###### Inherited from
+
+[`LifecycleEventBase`](#lifecycleeventbase).[`at`](#at-9)
+
+##### channel
+
+> `readonly` **channel**: `string`
+
+The channel's name.
+
+###### Inherited from
+
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-17)
+
+##### destinations
+
+> `readonly` **destinations**: readonly `object`[]
+
+Each destination in the channel's `destinations:` list, in order.
+
+##### messageId
+
+> `readonly` **messageId**: `number`
+
+##### type
+
+> `readonly` **type**: `"settled"`
+
+###### Overrides
+
+[`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-8)
+
+***
+
+### SettledMessage
+
+A message as [MessageStore.settle](#settle) found it once it settled: its status and each of its
+current generation's deliveries, by destination and status. Ids and states only.
+
+#### Example
+
+```ts
+const settled: SettledMessage = {
+  messageId: 12, channel: "adt", status: "transformed",
+  deliveries: [{ destination: 0, status: "delivered" }],
+};
+```
+
+#### Properties
+
+##### channel
+
+> `readonly` **channel**: `string`
+
+##### deliveries
+
+> `readonly` **deliveries**: readonly `object`[]
+
+##### messageId
+
+> `readonly` **messageId**: `number`
+
+##### status
+
+> `readonly` **status**: [`MessageStatus`](#messagestatus)
+
+***
+
 ### SourceConnector
 
 Brings messages in. A source that polls (a folder, an inbox) implements `poll`, which the engine
@@ -5219,7 +6095,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-15)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-17)
 
 ##### code
 
@@ -5287,7 +6163,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-15)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-17)
 
 ##### type
 
@@ -5354,6 +6230,16 @@ const waiting = (await store.deliveries(12)).filter((d: StoredDelivery) => d.sta
 
 > `readonly` **destination**: `number`
 
+The destination's place in the channel's list when the delivery was made, from 0.
+
+##### destinationKey?
+
+> `readonly` `optional` **destinationKey?**: `string`
+
+The key of the destination it was made for, which a destination keeps when others are added,
+removed or moved; undefined for one queued before destinations were recorded, or by a caller
+that gave no keys. See [MessageStore.completeTransform](#completetransform).
+
 ##### error
 
 > `readonly` **error**: `string` \| `null`
@@ -5393,7 +6279,8 @@ Epoch milliseconds before which it is not tried again; 0 when due at once.
 
 > `readonly` **seq**: `number`
 
-Which output of the transform this is, from 0.
+Which output of the transform this is, from 0; -1 for a delivery with no output, which its
+destination's own transform filtered (`filtered`) or failed (`failed`, then `cleared`).
 
 ##### status
 
@@ -5430,6 +6317,12 @@ const old = (row: StoredDeliveryRow, current: number): boolean => row.generation
 ##### destination
 
 > `readonly` **destination**: `number`
+
+##### destinationKey
+
+> `readonly` **destinationKey**: `string` \| `null`
+
+The key of the destination it was made for; null when it records none.
 
 ##### error
 
@@ -5499,7 +6392,7 @@ const message: StoredMessage | undefined = await store.message(12);
 
 ###### Inherited from
 
-[`MessageSummary`](#messagesummary).[`channel`](#channel-17)
+[`MessageSummary`](#messagesummary).[`channel`](#channel-20)
 
 ##### contentDroppedAt?
 
@@ -5558,7 +6451,17 @@ which can quote the message: never print it.
 
 ###### Inherited from
 
-[`MessageSummary`](#messagesummary).[`generation`](#generation-2)
+[`MessageSummary`](#messagesummary).[`generation`](#generation-3)
+
+##### hops?
+
+> `readonly` `optional` **hops?**: `number`
+
+How many hand-offs in a row brought it here, when another channel handed it over.
+
+###### Inherited from
+
+[`MessageSummary`](#messagesummary).[`hops`](#hops-1)
 
 ##### id
 
@@ -5567,6 +6470,16 @@ which can quote the message: never print it.
 ###### Inherited from
 
 [`MessageSummary`](#messagesummary).[`id`](#id-3)
+
+##### parent?
+
+> `readonly` `optional` **parent?**: [`MessageParent`](#messageparent)
+
+Where the message was handed over from, when another channel handed it over.
+
+###### Inherited from
+
+[`MessageSummary`](#messagesummary).[`parent`](#parent)
 
 ##### receivedAt
 
@@ -5588,7 +6501,7 @@ The body's size in bytes, or null for a message stored before sizes were kept.
 
 ##### state
 
-> `readonly` **state**: `"delivered"` \| `"received"` \| `"filtered"` \| `"failed"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
+> `readonly` **state**: `"failed"` \| `"delivered"` \| `"received"` \| `"filtered"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
 
 The status and the current deliveries, as an operator sees them.
 
@@ -5664,9 +6577,19 @@ Why it failed, as stored: can quote the message.
 
 > `readonly` **generation**: `number`
 
+##### hops?
+
+> `readonly` `optional` **hops?**: `number` \| `null`
+
 ##### id
 
 > `readonly` **id**: `number`
+
+##### idempotencyClaim
+
+> `readonly` **idempotencyClaim**: `string` \| `null`
+
+The idempotency key again when this message holds its claim; null when it does not.
 
 ##### idempotencyKey
 
@@ -5676,9 +6599,34 @@ Why it failed, as stored: can quote the message.
 
 > `readonly` **meta**: `string` \| `null`
 
+##### parentChannel?
+
+> `readonly` `optional` **parentChannel?**: `string` \| `null`
+
+The parent link of a message another channel handed over; all null for one taken in.
+
+##### parentDelivery?
+
+> `readonly` `optional` **parentDelivery?**: `number` \| `null`
+
+##### parentGeneration?
+
+> `readonly` `optional` **parentGeneration?**: `number` \| `null`
+
+##### parentMessage?
+
+> `readonly` `optional` **parentMessage?**: `number` \| `null`
+
 ##### receivedAt
 
 > `readonly` **receivedAt**: `string`
+
+##### settledGeneration?
+
+> `readonly` `optional` **settledGeneration?**: `number` \| `null`
+
+The generation whose settled event was recorded; null while none was. Unset on a store that
+does not record it.
 
 ##### size
 
@@ -5758,6 +6706,12 @@ duplicate of it.
 
 Stores the message as `failed`, with this reason, so it is kept but never transformed.
 
+##### hops?
+
+> `readonly` `optional` **hops?**: `number`
+
+How many hand-offs in a row brought the message here: 1 for the first hand-off.
+
 ##### idempotencyKey?
 
 > `readonly` `optional` **idempotencyKey?**: `string`
@@ -5766,7 +6720,9 @@ An opaque key that names this one message to its source (the engine passes a has
 with the message. With `resumed`, when a message of the channel was already stored with the
 same key, nothing is stored and that message's id comes back with `alreadyStored`: a source
 that stored a message and then stopped before it could acknowledge it hands it in again on
-restart, and it is stored once.
+restart, and it is stored once. That holds for two hand-ins at the same moment too, on two
+connections or two nodes: one is stored, and the other gets its id. Without `resumed` the
+message is always stored.
 
 ##### meta?
 
@@ -5780,6 +6736,12 @@ The message's metadata. A store wrapper (encryption at rest) turns it into `stor
 > `readonly` `optional` **metaTags?**: readonly [`MetaTag`](#metatag)[]
 
 The metadata's index tags, stored with the message in the same transaction. Set by a wrapper.
+
+##### parent?
+
+> `readonly` `optional` **parent?**: [`MessageParent`](#messageparent)
+
+The message of another channel this one was handed over from, kept with it.
 
 ##### resumed?
 
@@ -5952,6 +6914,13 @@ replay or resend before this one.
 
 The channel's configuration, resolved when the engine (or the command) started.
 
+##### destination?
+
+> `readonly` `optional` **destination?**: [`DestinationFacts`](#destinationfacts)
+
+The destination whose own transform this is: set only for a destination's `transform:`, never
+for the channel's.
+
 ##### messageId
 
 > `readonly` **messageId**: `number`
@@ -5963,6 +6932,34 @@ The stored message's id. 0 under `pathways test`, which stores nothing.
 > `readonly` **meta**: `Readonly`\<`Record`\<`string`, `string` \| `number` \| `boolean`\>\>
 
 A per-message map of flat values. Always empty in this release: nothing sets it yet.
+
+##### route
+
+> `readonly` **route**: (`channel`, `message`) => `void`
+
+Hands `message` to channel `channel` as a new message of its own, beside what the transform
+returns: a model, a string or bytes, written as an output is. Returns nothing. The target's
+source is `channel:`. The hand-off is stored in the same transaction as this message's outcome,
+so it happens once the transform succeeds and never without it; when the transform fails, none
+of its routes are kept. A name that is no such channel fails this message with
+`ERR_PATHWAYS_UNKNOWN_ROUTE`, and a message that has come through more hand-offs than the
+target's `maxHops` fails with `ERR_PATHWAYS_HOP_LIMIT`. Under `pathways test` it keeps nothing,
+and `pathways replay` refuses a message whose transform routes (`--resend` still works). Throws a `TypeError` when `channel` is not a name or `message` is `null` or
+`undefined`, and when called after the transform settled.
+
+###### Parameters
+
+###### channel
+
+`string`
+
+###### message
+
+`string` \| `number` \| `boolean` \| `object`
+
+###### Returns
+
+`void`
 
 ##### source
 
@@ -6009,7 +7006,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-15)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-17)
 
 ##### messageId
 
@@ -6066,7 +7063,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-15)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-17)
 
 ##### code
 
@@ -6130,6 +7127,39 @@ read after another key becomes current. Printable ASCII with no space, 1 to 255 
 > `readonly` **wrapped**: `Uint8Array`
 
 The data key, encrypted by that master key, in the provider's own layout: 1 to 65,535 bytes.
+
+***
+
+### XmlSettings
+
+How an `xml` channel reads its bodies, from the channel's `xml:` block: the caps a body is held to
+as it is parsed. Every key is optional; XML\_DEFAULTS says what an unset one means.
+
+#### Example
+
+```ts
+const settings: XmlSettings = { maxBytes: 1_048_576, maxDepth: 64 };
+```
+
+#### Properties
+
+##### maxBytes?
+
+> `readonly` `optional` **maxBytes?**: `number`
+
+The largest body read, in bytes of UTF-8 after a byte order mark. Default 10,485,760.
+
+##### maxDepth?
+
+> `readonly` `optional` **maxDepth?**: `number`
+
+How deep elements may nest, the root element counting as 1. Default 1,000.
+
+##### maxElements?
+
+> `readonly` `optional` **maxElements?**: `number`
+
+How many elements a body may hold. Default 1,000,000.
 
 ## Type Aliases
 
@@ -6240,7 +7270,7 @@ const detail: AuditDetail = { status: "transformed", queued: 2 };
 
 ### AuditEventAction
 
-> **AuditEventAction** = `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"bulk-replay"` \| `"archive"` \| `"node-forget"`
+> **AuditEventAction** = `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"bulk-replay"` \| `"archive"` \| `"batch"` \| `"node-forget"` \| `"engine-start"` \| `"engine-stop"` \| `"unclean-shutdown"`
 
 Every action the audit log records, as an [AuditEvent](#auditevent)'s `action`: `search` (messages
 listed), `view` (one message's details, without content), `content-view`, `replay`, `resend`,
@@ -6250,8 +7280,11 @@ applied by `pathways migrate`), `channel-pause`, `channel-resume`, `channel-stop
 `channel-halt` and `channel-reload` (a `pathways channel` command), `verify` (a stored
 message read by `pathways verify`), `bulk-replay` (a run of `pathways replay --status failed`:
 its scope, each batch and a summary), `archive` (a sealed archive retention wrote and checked
-before changing what it holds), and `node-forget` (a stale node's row removed by
-`pathways nodes forget`). Kept equal to the audit log's own list by a test.
+before changing what it holds), `node-forget` (a stale node's row removed by
+`pathways nodes forget`), `engine-start` and `engine-stop` (`pathways start` began running or
+began to stop, with the version, the channel count and the node id), and `unclean-shutdown`
+(found at a start: the run before it left no `engine-stop`). Kept equal to the audit log's own
+list by a test.
 
 #### Example
 
@@ -6446,16 +7479,21 @@ const table: CsvTable = { header: null, rows: [["TEST-001", "Example"]] };
 
 ### DeliveryCounts
 
-> **DeliveryCounts** = `Readonly`\<`Record`\<`Exclude`\<[`DeliveryStatus`](#deliverystatus), `"dry-run"`\>, `number`\>\> & `object`
+> **DeliveryCounts** = `Readonly`\<`Record`\<`Exclude`\<[`DeliveryStatus`](#deliverystatus), `"dry-run"` \| `"filtered"`\>, `number`\>\> & `object`
 
-How many deliveries stand at each status. `dry-run` is there only when some delivery ran dry, so
-the counts of a project that never runs a destination dry read as they did before dry runs.
+How many deliveries stand at each status. `dry-run` is there only when some delivery ran dry, and
+`filtered` only when a destination's transform filtered one, so the counts of a project that does
+neither read as they did before.
 
 #### Type Declaration
 
 ##### dry-run?
 
 > `readonly` `optional` **dry-run?**: `number`
+
+##### filtered?
+
+> `readonly` `optional` **filtered?**: `number`
 
 #### Example
 
@@ -6467,11 +7505,13 @@ const recorded = (counts: DeliveryCounts): number => counts.delivered + (counts[
 
 ### DeliveryStatus
 
-> **DeliveryStatus** = `"pending"` \| `"delivered"` \| `"failed"` \| `"cleared"` \| `"dry-run"`
+> **DeliveryStatus** = `"pending"` \| `"delivered"` \| `"failed"` \| `"cleared"` \| `"dry-run"` \| `"filtered"`
 
 Where one delivery of a message to one destination stands. `cleared`: it failed for good, and an
 operator cleared it, or replayed its message. `dry-run`: its destination runs dry (`dryRun: true`,
-or `pathways start --dry-run`), so its output was recorded and never sent.
+or `pathways start --dry-run`), so its output was recorded and never sent. `filtered`: the
+destination's own transform returned nothing for the message, so nothing goes to it; done, as a
+delivered one is.
 
 #### Example
 
@@ -6544,6 +7584,34 @@ export default ((options) => ({
     if (status !== 200) throw Object.assign(new Error("not stored"), { code: `HTTP_${status}` });
   },
 })) satisfies DestinationFactory<{ bucket: string }>;
+```
+
+***
+
+### DestinationOutcome
+
+> **DestinationOutcome** = (\{ `outputs`: readonly `Uint8Array`[]; \} \| \{ `failure`: `string`; \} \| \{ `notStored`: `true`; \}) & `object`
+
+What one destination's transform gave for a message, as storage records it: its outputs, in
+order, none meaning it filtered the message for that destination; or why it failed, as stored,
+which fails that destination's delivery only. On a resend only, `{ notStored: true }`: nothing is
+stored for this destination in the message's generation (it was added to the channel since), so
+it gets no delivery at all, never another destination's outputs.
+
+#### Type Declaration
+
+##### emptyBody?
+
+> `readonly` `optional` **emptyBody?**: `Uint8Array`
+
+For a destination with no output: the body its one delivery row holds, as the store keeps it.
+A layer that encodes every body on its way in (encryption at rest) passes its encoding of an
+empty body here, so no row holds a body that did not pass through it. Empty when not given.
+
+#### Example
+
+```ts
+const results: DestinationOutcome[] = [{ outputs: [body] }, { outputs: [] }, { failure: "transform: TypeError: ..." }];
 ```
 
 ***
@@ -6632,6 +7700,71 @@ A channel's message format, and so what its transform receives:
 
 ```ts
 const format: Format = "x12";
+```
+
+***
+
+### HandOffFrom
+
+> **HandOffFrom** = \{ `deliveryId`: `number`; `kind`: `"delivery"`; \} \| \{ `destinations`: `number`; `keys?`: readonly `string`[]; `kind`: `"transform"`; `messageId`: `number`; `outputs`: [`TransformOutputs`](#transformoutputs); \}
+
+What a hand-off is recorded with, in the same transaction: a channel destination's delivery
+marked delivered, or a transform's outcome (its outputs queued for the destinations) when the
+transform routed with `ctx.route`.
+
+#### Union Members
+
+##### Type Literal
+
+\{ `deliveryId`: `number`; `kind`: `"delivery"`; \}
+
+***
+
+##### Type Literal
+
+\{ `destinations`: `number`; `keys?`: readonly `string`[]; `kind`: `"transform"`; `messageId`: `number`; `outputs`: [`TransformOutputs`](#transformoutputs); \}
+
+###### destinations
+
+> `readonly` **destinations**: `number`
+
+###### keys?
+
+> `readonly` `optional` **keys?**: readonly `string`[]
+
+Each destination's key, in order, as [MessageStore.completeTransform](#completetransform) takes them.
+
+###### kind
+
+> `readonly` **kind**: `"transform"`
+
+###### messageId
+
+> `readonly` **messageId**: `number`
+
+###### outputs
+
+> `readonly` **outputs**: [`TransformOutputs`](#transformoutputs)
+
+#### Example
+
+```ts
+const from: HandOffFrom = { kind: "delivery", deliveryId: 40 };
+```
+
+***
+
+### HandOffResult
+
+> **HandOffResult** = \{ `ids`: readonly `number`[]; `ok`: `true`; \} \| \{ `full`: `string`; `ok`: `false`; \}
+
+What a hand-off came to: the new messages' ids, in order, or, when a target would then hold more
+than its `maxPending` messages waiting, nothing changed and the full target's name.
+
+#### Example
+
+```ts
+if (!result.ok) console.log(`${result.full} is full`);
 ```
 
 ***
@@ -6791,7 +7924,7 @@ const leases: LeaseStore | undefined = leaseStore(store);
 
 ### LifecycleEvent
 
-> **LifecycleEvent** = [`ReceivedEvent`](#receivedevent) \| [`ReceiveFailedEvent`](#receivefailedevent) \| [`TransformedEvent`](#transformedevent) \| [`FilteredEvent`](#filteredevent) \| [`TransformFailedEvent`](#transformfailedevent) \| [`DeliveredEvent`](#deliveredevent) \| [`DeliveryRetryEvent`](#deliveryretryevent) \| [`DeliveryRedirectedEvent`](#deliveryredirectedevent) \| [`DeliveryRejectedEvent`](#deliveryrejectedevent) \| [`DeliveryExhaustedEvent`](#deliveryexhaustedevent) \| [`SourceDownEvent`](#sourcedownevent) \| [`SourceUpEvent`](#sourceupevent) \| [`AuditEvent`](#auditevent)
+> **LifecycleEvent** = [`ReceivedEvent`](#receivedevent) \| [`ReceiveFailedEvent`](#receivefailedevent) \| [`TransformedEvent`](#transformedevent) \| [`FilteredEvent`](#filteredevent) \| [`TransformFailedEvent`](#transformfailedevent) \| [`DeliveredEvent`](#deliveredevent) \| [`DeliveryRetryEvent`](#deliveryretryevent) \| [`DeliveryRedirectedEvent`](#deliveryredirectedevent) \| [`DeliveryRejectedEvent`](#deliveryrejectedevent) \| [`DeliveryExhaustedEvent`](#deliveryexhaustedevent) \| [`SettledEvent`](#settledevent) \| [`SourceDownEvent`](#sourcedownevent) \| [`SourceUpEvent`](#sourceupevent) \| [`AuditEvent`](#auditevent)
 
 Any lifecycle event: switch on `type` to narrow it. Engine-wide hooks receive every channel's
 events and the audit log's; a channel's own hooks receive that channel's events.
@@ -6914,8 +8047,8 @@ const done = (status: MessageStatus): boolean => status === "transformed" || sta
 The message each format hands a transform, by the `format` a channel declares, read from the
 format registry: `hl7v2` an [Hl7Message](#hl7message), `fhir` a [FhirResource](#fhirresource), `x12` an
 [X12Interchange](#x12interchange), `ccda` a [CcdaDocument](#ccdadocument), `json` a [JsonValue](#jsonvalue) (a string a
-`json` transform returns is sent as it is, not JSON-quoted), `text` the body as a string, and
-`csv` a `CsvTable`.
+`json` transform returns is sent as it is, not JSON-quoted), `text` the body as a string, `csv` a
+`CsvTable`, and `xml` an `XmlDocument`.
 
 #### Example
 
@@ -6982,6 +8115,73 @@ const nodes: NodeStore | undefined = nodeStore(store);
 
 ***
 
+### OnStart
+
+> **OnStart** = (`ctx`) => `void` \| `Promise`\<`void`\>
+
+A channel's start script: the `onStart` its `transform.ts` may export beside the transform. It
+runs in the channel's transform worker, before the worker takes its first message, on every new
+worker: when the engine starts, on a reload, and again for the replacement worker after a
+transform runs past its timeout, runs out of memory or crashes. So it must be idempotent: safe to
+run again in a fresh worker, with nothing carried over but what it sets up anew.
+
+It may be async. A throw, or a run past its limit (the channel's `scriptTimeout`, its transform
+`timeout` unless set), is a load failure: at engine start, the start stops and says why; for a
+replacement worker, that channel stops, the health endpoint says why, and the other channels run
+on; on a reload, the reload is refused and the running transform kept.
+
+It is user code with the worker's full Node access, not a sandbox: it can read files, open
+connections and read what the worker can.
+
+#### Parameters
+
+##### ctx
+
+[`ChannelScriptContext`](#channelscriptcontext)
+
+#### Returns
+
+`void` \| `Promise`\<`void`\>
+
+#### Example
+
+```ts
+import type { OnStart } from "@cosyte/pathways";
+
+export const onStart: OnStart = async (ctx) => {
+  ctx.logger.info("lookup-loaded", { entries: 120 });
+};
+```
+
+***
+
+### OnStop
+
+> **OnStop** = () => `void` \| `Promise`\<`void`\>
+
+A channel's stop script: the `onStop` its `transform.ts` may export beside the transform. It runs
+in the transform worker once the worker's last message is done, before the worker ends: when the
+engine stops (on `SIGTERM` and `SIGINT` among the ways), for the old worker on a reload, and when
+a `pathways` command that ran the transform ends. It is cut at the channel's `scriptTimeout` (its
+transform `timeout` unless set); a throw is logged by name and code, and the worker ends either
+way. A worker ended because a transform ran past its timeout or crashed runs no `onStop`.
+
+#### Returns
+
+`void` \| `Promise`\<`void`\>
+
+#### Example
+
+```ts
+import type { OnStop } from "@cosyte/pathways";
+
+export const onStop: OnStop = async () => {
+  await Promise.resolve();
+};
+```
+
+***
+
 ### RefusalReason
 
 > **RefusalReason** = `"not-found"` \| `"changed"` \| `"pending"` \| `"not-failed"` \| `"content-dropped"`
@@ -6999,7 +8199,7 @@ const retryable = (reason: RefusalReason): boolean => reason === "changed" || re
 
 ### RequeueResult
 
-> **RequeueResult** = \{ `done`: `true`; `entry`: [`AuditEntry`](#auditentry); `generation`: `number`; `queued`: `number`; `status`: [`MessageStatus`](#messagestatus); `superseded`: `number`; \} \| \{ `done`: `false`; `entry`: [`AuditEntry`](#auditentry); `reason`: `Extract`\<[`RefusalReason`](#refusalreason), `"not-found"` \| `"changed"` \| `"pending"` \| `"content-dropped"`\>; \}
+> **RequeueResult** = \{ `done`: `true`; `entry`: [`AuditEntry`](#auditentry); `generation`: `number`; `notStored?`: `number`; `queued`: `number`; `status`: [`MessageStatus`](#messagestatus); `superseded`: `number`; \} \| \{ `done`: `false`; `entry`: [`AuditEntry`](#auditentry); `reason`: `Extract`\<[`RefusalReason`](#refusalreason), `"not-found"` \| `"changed"` \| `"pending"` \| `"content-dropped"`\>; \}
 
 What a replay or a resend did, with the audit entry written in the same transaction.
 
@@ -7007,7 +8207,7 @@ What a replay or a resend did, with the audit entry written in the same transact
 
 ##### Type Literal
 
-\{ `done`: `true`; `entry`: [`AuditEntry`](#auditentry); `generation`: `number`; `queued`: `number`; `status`: [`MessageStatus`](#messagestatus); `superseded`: `number`; \}
+\{ `done`: `true`; `entry`: [`AuditEntry`](#auditentry); `generation`: `number`; `notStored?`: `number`; `queued`: `number`; `status`: [`MessageStatus`](#messagestatus); `superseded`: `number`; \}
 
 ###### done
 
@@ -7020,6 +8220,12 @@ What a replay or a resend did, with the audit entry written in the same transact
 ###### generation
 
 > `readonly` **generation**: `number`
+
+###### notStored?
+
+> `readonly` `optional` **notStored?**: `number`
+
+Destinations given `notStored` that got no delivery; absent when none.
 
 ###### queued
 
@@ -7136,6 +8342,23 @@ export default (async (options, context) => {
     stop: () => client.close(),
   };
 }) satisfies SecretProviderFactory<{ address: string }>;
+```
+
+***
+
+### SettledDestinationState
+
+> **SettledDestinationState** = `"delivered"` \| `"failed"` \| `"filtered"` \| `"cleared"` \| `"dry-run"`
+
+Where a message stands with one destination once it has settled: `delivered` (every output it
+was given was accepted), `failed` (one failed for good, or the message's transform failed, so
+nothing was sent), `filtered` (the transform returned nothing for it), `cleared` (an operator
+cleared a failed one) or `dry-run` (recorded and never sent).
+
+#### Example
+
+```ts
+const reached = (state: SettledDestinationState): boolean => state === "delivered";
 ```
 
 ***
@@ -7463,6 +8686,23 @@ const bytes: TransformOutput<string> = Buffer.from("MSH|^~\\&|LAB", "latin1");
 
 ***
 
+### TransformOutputs
+
+> **TransformOutputs** = readonly `Uint8Array`[] \| \{ `byDestination`: readonly [`DestinationOutcome`](#destinationoutcome)[]; \}
+
+What a transform gave, as [MessageStore.completeTransform](#completetransform) records it: the same outputs for
+every destination, or, on a channel with destination transforms, one [DestinationOutcome](#destinationoutcome)
+per destination, in order.
+
+#### Example
+
+```ts
+const same: TransformOutputs = [body];
+const each: TransformOutputs = { byDestination: [{ outputs: [body] }, { outputs: [] }] };
+```
+
+***
+
 ### X12Interchange
 
 > **X12Interchange** = `X12.X12Interchange`
@@ -7478,7 +8718,47 @@ import type { Transform, X12Interchange } from "@cosyte/pathways";
 export default ((interchange) => interchange) satisfies Transform<X12Interchange>;
 ```
 
+***
+
+### XmlDocument
+
+> **XmlDocument** = `ReturnType`\<*typeof* `Ccda.parseSecureXml`\>
+
+What an `xml` channel's transform receives, and may return: the document `@cosyte/ccda`'s
+hardened XML reader builds, an `@xmldom/xmldom` `Document`. Read and change it with the DOM API
+(`documentElement`, `getElementsByTagName`, `getAttribute`, `setAttribute` and the rest). A
+document the transform leaves as it was read is written back byte for byte.
+
+#### Example
+
+```ts
+const id = (document: XmlDocument): string | null =>
+  document.documentElement?.getAttribute("id") ?? null;
+```
+
 ## Variables
+
+### DEFAULT\_MAX\_HOPS
+
+> `const` **DEFAULT\_MAX\_HOPS**: `8` = `8`
+
+How many hand-offs in a row a message may come through before the next is refused, by default:
+a message taken in by a source has made none, and each `channel:` destination or `ctx.route` adds
+one. Past it, the message that would hand over fails with [HOP\_LIMIT\_CODE](#hop_limit_code), which stops a
+loop made through `ctx.route` that the check at start cannot see.
+
+***
+
+### DEFAULT\_MAX\_PENDING
+
+> `const` **DEFAULT\_MAX\_PENDING**: `10000` = `10_000`
+
+How many messages a channel fed by others may hold waiting for its transform, by default, before
+a hand-off into it waits: a channel destination tries again later, and a transform that routes
+into it is run again on the next pass. It keeps a stopped or slow channel from growing the store
+without bound.
+
+***
 
 ### ENGINE\_LEASE
 
@@ -7495,9 +8775,17 @@ const holder = await store.leaseHolder?.(ENGINE_LEASE);
 
 ***
 
+### HOP\_LIMIT\_CODE
+
+> `const` **HOP\_LIMIT\_CODE**: `"ERR_PATHWAYS_HOP_LIMIT"` = `"ERR_PATHWAYS_HOP_LIMIT"`
+
+The code a message fails with when a hand-off would take it past its target's `maxHops`.
+
+***
+
 ### LIFECYCLE\_EVENTS
 
-> `const` **LIFECYCLE\_EVENTS**: readonly \[`"received"`, `"receive-failed"`, `"transformed"`, `"filtered"`, `"transform-failed"`, `"delivered"`, `"delivery-retry"`, `"delivery-redirected"`, `"delivery-rejected"`, `"delivery-exhausted"`, `"source-down"`, `"source-up"`, `"audit"`\]
+> `const` **LIFECYCLE\_EVENTS**: readonly \[`"received"`, `"receive-failed"`, `"transformed"`, `"filtered"`, `"transform-failed"`, `"delivered"`, `"delivery-retry"`, `"delivery-redirected"`, `"delivery-rejected"`, `"delivery-exhausted"`, `"settled"`, `"source-down"`, `"source-up"`, `"audit"`\]
 
 Every lifecycle event's `type`, in the order a message meets them. A hook entry's `events:` list in
 the YAML names some of these to receive only those.
@@ -7557,6 +8845,31 @@ The media type `/metrics` answers with: OpenMetrics 1.0.0 text.
 ```ts
 response.setHeader("Content-Type", OPENMETRICS_CONTENT_TYPE);
 ```
+
+***
+
+### TARGET\_FULL\_CODE
+
+> `const` **TARGET\_FULL\_CODE**: `"ERR_PATHWAYS_TARGET_FULL"` = `"ERR_PATHWAYS_TARGET_FULL"`
+
+The code a channel destination's retry carries while its target holds `maxPending` messages.
+
+***
+
+### TOO\_MANY\_ROUTES\_CODE
+
+> `const` **TOO\_MANY\_ROUTES\_CODE**: `"ERR_PATHWAYS_TOO_MANY_ROUTES"` = `"ERR_PATHWAYS_TOO_MANY_ROUTES"`
+
+The code a transform fails with when it routes more messages to one target in one run than that
+target's `maxPending`: the target could never take them all at once, so waiting would not help.
+
+***
+
+### UNKNOWN\_ROUTE\_CODE
+
+> `const` **UNKNOWN\_ROUTE\_CODE**: `"ERR_PATHWAYS_UNKNOWN_ROUTE"` = `"ERR_PATHWAYS_UNKNOWN_ROUTE"`
+
+The code a transform fails with when `ctx.route` names no channel with a `channel:` source.
 
 ***
 

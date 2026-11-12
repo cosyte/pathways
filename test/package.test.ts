@@ -157,7 +157,7 @@ describe("the release workflow", () => {
 
   it("has the scripts the shared pipeline runs", () => {
     expect(pkg.scripts["version"]).toBe(
-      "changeset version && tsx scripts/sync-version.ts && cosyte-process format && cosyte-docs-reference",
+      "changeset version && tsx scripts/sync-version.ts && tsx scripts/example-pages.ts && cosyte-process format && cosyte-docs-reference",
     );
     expect(pkg.scripts["pack:docs"]).toBe("cosyte-process pack-docs");
     expect(pkg.scripts["release"]).toBe("changeset publish");
@@ -172,6 +172,16 @@ describe("the release workflow", () => {
     const reference = steps.indexOf("cosyte-docs-reference");
     expect(sync, "the version script must sync src/version.ts").toBeGreaterThan(-1);
     expect(reference, "the version script must regenerate docs-content/api/").toBeGreaterThan(sync);
+  });
+
+  // Each example under examples/ asks for ^<this version> of the package, and its page shows its
+  // package.json, so the bump moves both before the format pass; test/examples.test.ts fails a pull
+  // request whose examples or pages lag the version.
+  it("moves the examples' pin and their pages after the version bump", () => {
+    const steps = (pkg.scripts["version"] ?? "").split(" && ");
+    const examples = steps.indexOf("tsx scripts/example-pages.ts");
+    expect(examples).toBeGreaterThan(steps.indexOf("changeset version"));
+    expect(examples).toBeLessThan(steps.indexOf("cosyte-process format"));
   });
 
   // A pull request that changes an export without regenerating docs-content/api/, or adds an export

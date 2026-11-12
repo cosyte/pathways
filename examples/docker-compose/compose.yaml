@@ -1,0 +1,113 @@
+# Pathways under Docker Compose: the engine from the published image, beside a PostgreSQL server that
+# stores its messages, running the adt-to-lab channel in channels/. Every message the channel's tests
+# hold is synthetic.
+#
+#   cp .env.example .env     # then fill in what it leaves empty
+#   docker compose up --detach --wait
+#   docker compose cp channels/adt-to-lab/tests/a01.hl7 pathways:/project/data/adt-to-lab/in/
+#   docker compose cp pathways:/project/data/adt-to-lab/out ./delivered
+#   docker compose down      # add --volumes to delete the stored messages too
+#
+# Under Compose the engine reads the pathways.yaml at the bottom of this file (`configs`), not a
+# pathways.yaml beside it: storage goes to the PostgreSQL service and the master key comes from
+# .env. A project's own pathways.yaml, where `pathways init` wrote one, stays for running on this
+# machine. Put a setting the engine needs under Compose in both.
+#
+# .env holds secrets: .gitignore keeps it out of git. Compose reads it for the ${...} values below,
+# and hands every variable in it to the engine, so a channel's { env: NAME } settings go there too.
+# Nothing is published to the host: the channel reads files, and the database is reached only on
+# this project's own network.
+
+services:
+  postgres:
+    # postgres:17 (PostgreSQL 17.11), pinned 2026-11-07 by the digest of its multi-platform index.
+    image: postgres@sha256:ff87138949ad9a46f32ff23bd6852b52ce024a13dffe9b4087be98292cdd3b4f
+    environment:
+      POSTGRES_USER: pathways
+      POSTGRES_DB: pathways
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "--username", "pathways", "--dbname", "pathways"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  # The engine runs as uid 65532, and a new volume belongs to root: this gives the message folders'
+  # volume to that user alone (mode 700), then exits. It reuses the PostgreSQL image, which has sh,
+  # chown and chmod, so nothing more is pulled.
+  data-owner:
+    image: postgres@sha256:ff87138949ad9a46f32ff23bd6852b52ce024a13dffe9b4087be98292cdd3b4f
+    user: "0:0"
+    entrypoint: ["sh", "-c", "chown 65532:65532 /data && chmod 700 /data"]
+    network_mode: none
+    volumes:
+      - pathways-data:/data
+    restart: "no"
+
+  pathways:
+    # A version tag of ghcr.io/cosyte/pathways, from .env. Pin it by digest for production, as
+    # PATHWAYS_VERSION=0.1.0@sha256:<digest>: docs-content/run-in-docker.md says how to check the
+    # image's signature.
+    image: ghcr.io/cosyte/pathways:${PATHWAYS_VERSION:?set PATHWAYS_VERSION in .env}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      data-owner:
+        condition: service_completed_successfully
+    env_file: .env
+    environment:
+      # The PostgreSQL service above, unless .env names another server.
+      PATHWAYS_DATABASE_URL: ${PATHWAYS_DATABASE_URL:-postgres://pathways:${POSTGRES_PASSWORD}@postgres:5432/pathways}
+      PATHWAYS_KEY: ${PATHWAYS_KEY:?set PATHWAYS_KEY in .env, from openssl rand -base64 32}
+    configs:
+      - source: pathways-yaml
+        target: /project/pathways.yaml
+    volumes:
+      # The channels, read-only: the engine reads them and never writes there.
+      - ./channels:/project/channels:ro
+      # The folders the channel reads from and writes to (data/adt-to-lab/in and out).
+      - pathways-data:/project/data
+    # Ready once every channel has started; `docker compose up --wait` waits for it.
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "/nodejs/bin/node",
+          "/app/dist/bin/pathways.mjs",
+          "probe",
+          "--ready",
+          "-C",
+          "/project",
+        ]
+      interval: 5s
+      timeout: 10s
+      start_period: 30s
+      retries: 6
+    restart: unless-stopped
+
+configs:
+  pathways-yaml:
+    content: |
+      # Messages and their errors are stored in the PostgreSQL service, on Compose's own network,
+      # which is why the connection is plaintext. Use tls: {} for a server elsewhere.
+      storage:
+        postgres:
+          url: { env: PATHWAYS_DATABASE_URL }
+          plaintext: true
+      # Each stored message is encrypted with a data key of its own, wrapped by this master key.
+      encryption:
+        keys:
+          - id: compose
+            env: PATHWAYS_KEY
+        current: compose
+      # /livez and /readyz, inside the container only, for the health check above.
+      probes:
+        port: 9091
+        plaintext: true
+
+volumes:
+  postgres-data:
+  pathways-data:

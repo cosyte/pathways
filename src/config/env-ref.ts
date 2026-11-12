@@ -1,7 +1,6 @@
 import { z } from "zod";
 
-/** The environment a reference is read from: variable names to values. */
-type Env = Readonly<Record<string, string | undefined>>;
+import { configuredName, configuredVariable, type Env, processEnv } from "../env.js";
 
 /** What an environment variable's name may hold. */
 export const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -121,8 +120,8 @@ export function fromEnvironment<T extends z.ZodType>(schema: T) {
     }
     const reference: EnvReferenceYaml = parsed.data;
     // A parse outside resolvingEnv, such as a direct safeParse, reads the process's environment.
-    const scope = current ?? { env: process.env, resolved: new Map() };
-    const text = scope.env[reference.env];
+    const scope = current ?? { env: processEnv(), resolved: new Map() };
+    const text = configuredVariable(scope.env, configuredName(reference.env));
     if (text !== undefined && text !== "") {
       scope.resolved.set(value, { variable: reference.env, from: "environment" });
       return typed(text, schema);

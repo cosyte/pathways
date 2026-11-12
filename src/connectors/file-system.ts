@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { constants } from "node:fs";
+import { constants, createReadStream } from "node:fs";
 import {
   link,
   lstat,
@@ -16,6 +16,9 @@ import {
 import { basename, dirname, join, resolve, sep } from "node:path";
 
 import { ownsBuffer } from "../storage/ownership.js";
+
+/** How much of a file {@link LocalFolder.chunks} reads at a time: 64 KiB. */
+const CHUNK_BYTES = 65_536;
 
 /**
  * What a location's file system promises, which decides the claim rule a file source can run there.
@@ -76,6 +79,11 @@ export interface FileSystem {
   stat(path: string): Promise<FileStat>;
   /** The whole file, in a buffer of its own. */
   read(path: string): Promise<Uint8Array>;
+  /**
+   * The file a chunk at a time, read only as each is asked for, so a batch is read without holding
+   * the whole file. A location without it is read whole, with {@link FileSystem.read}.
+   */
+  chunks?(path: string): AsyncIterable<Uint8Array>;
   /**
    * Writes `body` to a hidden temporary name beside `path`, then renames it to `path`, so a reader
    * never sees half a file.
@@ -278,6 +286,11 @@ export class LocalFolder implements Location {
     // one (a small file comes back as a slice of Node's shared pool, and is copied).
     const read = await readFile(path);
     return ownsBuffer(read) ? new Uint8Array(read.buffer) : new Uint8Array(read);
+  }
+
+  /** The file at `path`, 64 KiB at a time. */
+  chunks(path: string): AsyncIterable<Uint8Array> {
+    return createReadStream(path, { highWaterMark: CHUNK_BYTES }) as AsyncIterable<Buffer>;
   }
 
   /** Writes `.<name>.partial` beside `path`, then renames it to `path`. */

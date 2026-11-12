@@ -10,8 +10,14 @@ import {
   DEFAULT_DELIVERY_TIMEOUT_MS,
   DEFAULT_PASS_TIMEOUT_MS,
   DEFAULT_RETRY,
+  HOP_LIMIT_CODE,
+  TARGET_FULL_CODE,
+  TOO_MANY_ROUTES_CODE,
+  UNKNOWN_ROUTE_CODE,
   type AzblobConfig,
   type ChannelConfig,
+  type ChannelDestinationConfig,
+  type ChannelSourceConfig,
   type DestinationConfig,
   type Format,
   type ProjectConfig,
@@ -33,9 +39,10 @@ import { KnownHosts, pinnedKey } from "../connectors/known-hosts.js";
 import { ObjectDestination, ObjectSource, type ObjectStore } from "../connectors/object-store.js";
 import { S3Bucket } from "../connectors/s3.js";
 import { SftpLocation } from "../connectors/sftp.js";
+import { AddressGuard } from "../connectors/address-guard.js";
 import { HttpDestination, HttpSource } from "../connectors/http.js";
 import { RedirectHeld, RetryableError } from "../connectors/http-core.js";
-import { MllpDestination, MllpSource } from "../connectors/mllp.js";
+import { holdsSecondMessage, MllpDestination, MllpSource } from "../connectors/mllp.js";
 import { loadMllpClientTls, loadMllpServerTls } from "../connectors/mllp-tls.js";
 import {
   TcpDestination,
@@ -51,9 +58,12 @@ import {
   PassFailed,
   type DestinationConnector,
   type MessageSink,
+  type ReceivedPiece,
   type ReceiveOptions,
   type SourceConnector,
 } from "../connectors/types.js";
+import type { BatchResult } from "../connectors/batch.js";
+import type { MessageMeta } from "../encryption/blind-index.js";
 import {
   customDestination,
   customSource,
@@ -61,12 +71,13 @@ import {
   loadTcpFunction,
 } from "../extensions/build.js";
 import { faultPoint } from "../fault-points.js";
-import type { LifecycleEvent } from "../extensions/events.js";
+import type { LifecycleEvent, SettledDestinationState } from "../extensions/events.js";
 import { HookSet } from "../extensions/hooks.js";
 import type { ChannelContext } from "../extensions/types.js";
 import { AuditLog, auditEvent } from "../operator/audit.js";
 import { resolveSecrets, type Secrets, secretsOf } from "../secrets/resolve.js";
 import type { KeyProvider } from "../encryption/keys.js";
+import { extensionEnv, processEnv } from "../env.js";
 import { recordRetention, runRetention, type RetentionReport } from "../operator/retention.js";
 import { copiesBodies, markCopiesBodies, release } from "../storage/ownership.js";
 import {
@@ -74,11 +85,24 @@ import {
   type AuditAction,
   type ChannelRunState,
   type DestinationQueue,
+  type DestinationOutcome,
+  type HandOff,
+  type HandOffFrom,
+  type HandOffResult,
   type MessageStore,
+  type PendingDelivery,
   type ReceivedMessage,
+  type SettledMessage,
+  type TransformOutputs,
 } from "../storage/store.js";
 import type { SourceFacts } from "../transform.js";
-import { ChannelWorker, TransformLoadError, type TransformOutcome } from "./channel-worker.js";
+import {
+  ChannelWorker,
+  destinationSetups,
+  TransformLoadError,
+  type DestinationResult,
+  type TransformOutcome,
+} from "./channel-worker.js";
 import type { EngineFence } from "./lease.js";
 import { channelStatus, type ChannelHealth, type EngineHealth, type PassCounts } from "./health.js";
 import {
@@ -88,8 +112,9 @@ import {
   type EngineMetrics,
   type MetricsSnapshot,
 } from "./metrics.js";
-import { formatTable, type FailureSummary } from "./worker-entry.js";
+import { formatTable, type FailureSummary, type RoutedMessage } from "./worker-entry.js";
 import { DeadlineTimer } from "./deadline.js";
+import { destinationKeys } from "./destination-key.js";
 import { nextPollAt, pollOf } from "./schedule.js";
 import { copyFacts, keepFacts, sourceFacts } from "./source-facts.js";
 
@@ -344,6 +369,34 @@ export function storedFailure(failure: FailureSummary): string {
   return `${failure.kind}: ${failure.name}${code}${where}: ${failure.detail}`;
 }
 
+/**
+ * What each destination gets from a transform's outcome, as storage records it, on a channel with
+ * destination transforms; `undefined` on one without, or when the channel's transform filtered the
+ * message, which then has no deliveries at all.
+ *
+ * @example
+ * ```ts
+ * const byDestination = destinationOutcomes(outcome);
+ * ```
+ */
+export function destinationOutcomes(
+  outcome: Extract<TransformOutcome, { ok: true }>,
+): DestinationOutcome[] | undefined {
+  if (outcome.destinations === undefined || outcome.outputs.length === 0) return undefined;
+  return outcome.destinations.map((result) =>
+    result.ok ? { outputs: result.outputs } : { failure: storedFailure(result.failure) },
+  );
+}
+
+/** Frees every output of an outcome once stored, each buffer once. */
+function releaseOutputs(outcome: Extract<TransformOutcome, { ok: true }>): void {
+  const all = new Set(outcome.outputs);
+  for (const result of outcome.destinations ?? []) {
+    if (result.ok) for (const output of result.outputs) all.add(output);
+  }
+  for (const output of all) release(output);
+}
+
 /** A channel's connectors. */
 export interface ChannelConnectors {
   readonly source: SourceConnector;
@@ -375,6 +428,20 @@ export interface ConnectorContext {
  */
 const DRY_RUN_CONNECTOR: DestinationConnector = {
   deliver: () => Promise.reject(new Error("a destination that runs dry was handed a message")),
+};
+
+/**
+ * The source of a channel that other channels feed: nothing listens or polls, since what it takes
+ * in is stored for it by the channel that hands it over.
+ */
+const CHANNEL_SOURCE: SourceConnector = { start: () => Promise.resolve() };
+
+/**
+ * The connector a channel destination gets: the engine hands over through the store and never calls
+ * it, so a send that reached it would be a defect, and it rejects rather than drop one quietly.
+ */
+const CHANNEL_DESTINATION: DestinationConnector = {
+  deliver: () => Promise.reject(new Error("a channel destination was handed a message to send")),
 };
 
 /**
@@ -413,7 +480,7 @@ export async function connectorsFor(
     channel: channel.name,
     format: channel.format,
     dir: channel.dir,
-    env,
+    env: extensionEnv(env),
     logger: logger.child({ channel: channel.name, ...fields }),
   });
   const { source } = channel;
@@ -487,6 +554,7 @@ export async function connectorsFor(
             : response,
         maxBytes: source.maxBytes,
         contextHeaders: source.contextHeaders,
+        ...(source.batch === undefined ? {} : { batch: source.batch }),
         tls,
         token,
         onRefused: (status) => {
@@ -561,6 +629,9 @@ export async function connectorsFor(
       });
       break;
     }
+    case "channel":
+      sourceConnector = CHANNEL_SOURCE;
+      break;
     case "module":
       sourceConnector = await customSource(
         source,
@@ -593,7 +664,7 @@ export async function connectorsFor(
         destinations.push(
           new FileDestination({
             dir: destination.dir,
-            extension: EXTENSIONS[channel.format],
+            extension: EXTENSIONS[destination.format ?? channel.format],
             ...(destination.sftp === undefined
               ? {}
               : {
@@ -613,13 +684,18 @@ export async function connectorsFor(
           new HttpDestination({
             url: destination.url,
             headers: resolveHeaders(
-              { "Content-Type": CONTENT_TYPES[channel.format] },
+              { "Content-Type": CONTENT_TYPES[destination.format ?? channel.format] },
               destination.headers,
               secrets,
               where,
             ),
             timeoutMs: destination.timeoutMs,
             resendHeader: destination.resendHeader,
+            method: destination.method,
+            query: destination.query,
+            idempotencyHeader: destination.idempotencyHeader,
+            addressGuard: new AddressGuard(destination.allowNetworks),
+            ack: destination.ack,
             now,
             ...(destination.tls === undefined
               ? {}
@@ -728,6 +804,9 @@ export async function connectorsFor(
         );
         break;
       }
+      case "channel":
+        destinations.push(CHANNEL_DESTINATION);
+        break;
       case "module":
         destinations.push(
           await customDestination(
@@ -817,6 +896,13 @@ interface StoreGauges {
 interface RunningChannel {
   /** Replaced by a reload, between messages. */
   config: ChannelConfig;
+  /**
+   * Each destination's key, in order, which its deliveries record: a reload keeps the destinations,
+   * so it keeps these.
+   */
+  readonly keys: readonly string[];
+  /** Whether the deliveries no destination was made for were held, at the first delivery pass. */
+  held: boolean;
   /** Replaced by a reload, between messages. */
   worker: ChannelWorker;
   readonly connectors: ChannelConnectors;
@@ -862,6 +948,12 @@ interface RunningChannel {
   draining: boolean;
   /** The reloads, one after another. */
   reloads: Promise<unknown>;
+  /**
+   * Set when a replacement worker's transform would not load (its `onStart` threw or ran past its
+   * limit, say): the channel takes no part in a pass until a reload loads it, and the health
+   * endpoint says why.
+   */
+  loadFailed: FailureSummary | undefined;
   /**
    * What the source knew about each message it took in that waits for its transform, by message id:
    * in memory only, dropped once the message is transformed, and bounded: past the bound the oldest
@@ -928,6 +1020,34 @@ export interface ChannelCommandReport {
     | "state-not-stored";
   readonly changed?: readonly string[];
   readonly failure?: string;
+}
+
+/** How many unsettled messages a start, or a pass, reads at a time. */
+const SETTLE_BATCH = 500;
+
+/**
+ * Where a settled message stands with destination `index`: filtered or cleared with the message,
+ * failed when its transform failed, and otherwise by the destination's deliveries of the message's
+ * last generation: none is filtered (it was given no output), then failed, cleared, dry-run and
+ * delivered, in that order.
+ *
+ * @example
+ * ```ts
+ * settledState({ messageId: 1, channel: "adt", status: "transformed", deliveries: [] }, 0); // "filtered"
+ * ```
+ */
+export function settledState(settled: SettledMessage, index: number): SettledDestinationState {
+  if (settled.status === "filtered" || settled.status === "cleared") return settled.status;
+  if (settled.status !== "transformed") return "failed";
+  const statuses = new Set(
+    settled.deliveries.filter((d) => d.destination === index).map((d) => d.status),
+  );
+  // A destination given no output of this message was filtered for it.
+  if (statuses.size === 0) return "filtered";
+  if (statuses.has("failed")) return "failed";
+  if (statuses.has("cleared")) return "cleared";
+  if (statuses.has("dry-run")) return "dry-run";
+  return "delivered";
 }
 
 /** How long `stop` waits for a channel's work in flight, unless told otherwise. */
@@ -1002,7 +1122,7 @@ export class Engine {
   /** The engine-wide hooks, from `pathways.yaml`, once started. */
   private hooks: HookSet | undefined;
   /** The environment the engine started with: a reload reads the transform's configuration from it. */
-  private env: Env = process.env;
+  private env: Env = processEnv();
   private readonly wait: EngineWait;
   /**
    * Set while {@link run} runs: aborted to wake its loop when a pass ends, and the first failure of
@@ -1046,7 +1166,7 @@ export class Engine {
    */
   async start(): Promise<void> {
     const { project, logger } = this.options;
-    const env = this.options.env ?? process.env;
+    const env = this.options.env ?? processEnv();
     this.env = env;
     const dryRun = this.options.dryRun === true;
     if (this.options.store.markDryRun === undefined) {
@@ -1075,16 +1195,9 @@ export class Engine {
       });
       this.checkContentPolicies();
       for (const config of project.channels) {
-        const worker = new ChannelWorker({
-          channel: config.name,
-          transformFile: config.transform,
-          format: config.format,
-          csv: config.csv,
-          timeoutMs: config.settings.timeoutMs,
-          memoryMb: config.settings.memoryMb,
-          // Read here, in the engine's process, so a worker never sees the environment.
-          config: resolveTransformConfig(project.config, config, env),
-        });
+        // Its configuration is read here, in the engine's process, so a worker never sees the
+        // environment.
+        const worker = this.workerFor(config, resolveTransformConfig(project.config, config, env));
         const hooks = await HookSet.open(config.hooks, {
           file: `channels/${config.name}/channel.yaml`,
           channel: config.name,
@@ -1130,8 +1243,11 @@ export class Engine {
           halt: new AbortController(),
           draining: false,
           reloads: Promise.resolve(),
+          loadFailed: undefined,
           facts: new Map(),
           receiving: new Set(),
+          keys: destinationKeys(project.root, config.destinations),
+          held: false,
           passing: Promise.resolve(),
           passes: { accepted: 0, filtered: 0, unreadable: 0, rejected: 0, deferred: 0 },
         };
@@ -1143,6 +1259,8 @@ export class Engine {
         if (channel.state === "running") await this.matchSource(channel);
         else logger.info({ event: "channel-state", channel: config.name, state: channel.state });
       }
+      // What the last run ended and did not get to settle, each settled once now.
+      for (const channel of this.channels) await this.settleLeft(channel);
     } catch (error) {
       await this.stop();
       throw error;
@@ -1160,7 +1278,18 @@ export class Engine {
       if (channel.settings.content !== "none") continue;
       const { source } = channel;
       const where = `channels/${channel.name}/channel.yaml`;
-      if (source.kind === "file" && (source.s3 !== undefined || source.azblob !== undefined)) {
+      if (
+        source.kind === "channel" ||
+        channel.destinations.some((destination) => destination.kind === "channel")
+      ) {
+        // A hand-off is a stored message, in a transaction with the source's record.
+        problems.push(
+          `${where}: storage.content: none stores nothing, so the channel can neither hand messages to another channel nor be handed them; store its messages (keep or dropAfterDelivery)`,
+        );
+      } else if (
+        source.kind === "file" &&
+        (source.s3 !== undefined || source.azblob !== undefined)
+      ) {
         // An object store source has no errorDir to set a refused message aside in.
         problems.push(
           `${where}: storage.content: none cannot read from an S3 or Azure Blob source yet; store its messages (keep or dropAfterDelivery)`,
@@ -1250,7 +1379,7 @@ export class Engine {
     for (const channel of this.channels) {
       this.step();
       this.options.fence?.check();
-      if (channel.state === "stopped") continue;
+      if (channel.state === "stopped" || channel.loadFailed !== undefined) continue;
       const pass = this.pass(channel, polls);
       channel.busy = settled(pass);
       try {
@@ -1630,6 +1759,7 @@ export class Engine {
           messages,
           deliveries,
           ...this.connectionCounts(name),
+          ...this.transformHealth(name),
           ...this.passCounts(name),
         };
       }
@@ -1641,11 +1771,13 @@ export class Engine {
           source: source(name),
           /* v8 ignore next: as above */
           state: states[name] ?? "running",
+          ...this.transformHealth(name),
           ...this.passCounts(name),
         };
       }
     }
-    const broken = storage !== "ok" || down.size > 0;
+    const unloaded = this.channels.some((channel) => channel.loadFailed !== undefined);
+    const broken = storage !== "ok" || down.size > 0 || unloaded;
     return { status: broken ? "unavailable" : "ok", storage, channels };
   }
 
@@ -1737,6 +1869,13 @@ export class Engine {
    * How many connections a channel's MLLP or tcp source closed at accept for being over its cap, for
    * the health body; nothing for any other source. A count only, never who connected.
    */
+  private transformHealth(name: string): Pick<ChannelHealth, "transform"> {
+    const failed = this.channels.find((channel) => channel.config.name === name)?.loadFailed;
+    if (failed === undefined) return {};
+    const { kind, name: error, code } = failed;
+    return { transform: { loaded: false, kind, name: error, code } };
+  }
+
   private connectionCounts(name: string): Pick<ChannelHealth, "connections"> {
     const source = this.channels.find((channel) => channel.config.name === name)?.connectors.source;
     return source instanceof MllpSource || source instanceof TcpSource
@@ -1808,6 +1947,7 @@ export class Engine {
     }
     await this.transformAll(channel);
     await this.deliverAll(channel);
+    await this.settleRequeued(channel);
   }
 
   /**
@@ -2090,15 +2230,7 @@ export class Engine {
       if (!(error instanceof ConfigError)) throw error;
       return { channel: name, refused: "invalid-config" };
     }
-    const worker = new ChannelWorker({
-      channel: name,
-      transformFile: next.transform,
-      format: next.format,
-      csv: next.csv,
-      timeoutMs: next.settings.timeoutMs,
-      memoryMb: next.settings.memoryMb,
-      config,
-    });
+    const worker = this.workerFor(next, config);
     try {
       // A fresh worker, so the transform's module and every module it imports are read anew.
       await worker.start();
@@ -2118,9 +2250,32 @@ export class Engine {
     const old = channel.worker;
     channel.worker = worker;
     channel.config = next;
+    // A transform that would not load in a replacement worker loads again now: the channel runs.
+    channel.loadFailed = undefined;
     await old.stop();
     this.options.logger.info({ event: "channel-reloaded", channel: name });
     return { channel: name, state: channel.state };
+  }
+
+  /** A channel's transform worker, with the engine's logger for what its scripts log. */
+  private workerFor(
+    config: ChannelConfig,
+    transformConfig: Record<string, unknown>,
+  ): ChannelWorker {
+    return new ChannelWorker({
+      channel: config.name,
+      transformFile: config.transform,
+      format: config.format,
+      csv: config.csv,
+      hl7v2: config.hl7v2,
+      xml: config.xml,
+      timeoutMs: config.settings.timeoutMs,
+      scriptTimeoutMs: config.settings.scriptTimeoutMs,
+      memoryMb: config.settings.memoryMb,
+      config: transformConfig,
+      destinations: destinationSetups(config),
+      logger: this.options.logger,
+    });
   }
 
   private async startSource(channel: RunningChannel): Promise<void> {
@@ -2214,106 +2369,123 @@ export class Engine {
   private sinkFor(channel: RunningChannel, cut?: AbortSignal): MessageSink {
     const { config } = channel;
     const { store, logger } = this.options;
+    const receivePiece = async (
+      body: Uint8Array,
+      given: ReceiveOptions = {},
+    ): Promise<ReceivedPiece> => {
+      // Before anything is stored: the source keeps the message for a later pass.
+      if (cut?.aborted === true) throw new PassCut();
+      const options = oneMessage(config.format, body, given);
+      if (channel.config.settings.content === "none") {
+        return { id: await this.passThrough(channel, body, options), alreadyStored: false };
+      }
+      const { duplicateKey, idempotencyKey, resumed, failure, source } = options;
+      let received: ReceivedMessage;
+      const receivedAt = this.at();
+      // Settled once this message's facts are set or the receive failed, so a pass that takes
+      // the message from the store before this call has returned waits for its facts.
+      let settle!: () => void;
+      const receiving = new Promise<void>((resolve) => (settle = resolve));
+      channel.receiving.add(receiving);
+      const settled = (): void => {
+        channel.receiving.delete(receiving);
+        settle();
+      };
+      try {
+        // Checked and copied before anything is stored, so a source that passes what a
+        // transform cannot be handed learns it at once and the sender keeps the message, and a
+        // source that changes its object afterwards changes nothing the transform reads.
+        const passed = source === undefined ? undefined : copyFacts(source);
+        // An engine that lost its lease takes nothing more in: the source answers as it does
+        // when a message cannot be stored, so the sender keeps it.
+        this.options.fence?.check();
+        received = await store.receive(config.name, body, {
+          // Storage keeps a hash of each key, so a sender's identifiers and a file's name are not
+          // stored.
+          duplicateKey: hashed(duplicateKey),
+          idempotencyKey: hashed(idempotencyKey),
+          resumed,
+          failure,
+          size: body.byteLength,
+          // Kept with the metadata once the body is dropped, to match a copy held elsewhere.
+          ...(config.settings.content === "dropAfterDelivery"
+            ? { contentHash: createHash("sha256").update(body).digest("hex") }
+            : {}),
+        });
+        // Set at once, with no wait between the store call and here.
+        if (failure === undefined && received.alreadyStored !== true) {
+          keepFacts(
+            channel.facts,
+            received.id,
+            sourceFacts(config.source.kind, passed, body.byteLength, receivedAt),
+          );
+        }
+        settled();
+      } catch (error) {
+        settled();
+        const code = errorCode(error);
+        logger.error({ event: "receive-failed", channel: config.name, code });
+        this.emit(channel, () => ({
+          type: "receive-failed",
+          at: this.at(),
+          channel: config.name,
+          name: errorName(error),
+          code,
+        }));
+        throw error;
+      }
+      faultPoint("after-store-before-ack");
+      this.step();
+      if (received.alreadyStored === true) {
+        // Handed in again after a stop between storing and acknowledging: stored once already.
+        logger.info({ event: "already-stored", channel: config.name, message: received.id });
+        return { id: received.id, alreadyStored: true };
+      }
+      logger.info({
+        event: "received",
+        channel: config.name,
+        message: received.id,
+        bytes: body.byteLength,
+        ...(failure === undefined ? {} : { failed: true }),
+      });
+      this.emit(channel, () => ({
+        type: "received",
+        at: this.at(),
+        channel: config.name,
+        messageId: received.id,
+        bytes: body.byteLength,
+        failed: failure !== undefined,
+        duplicateOf: received.duplicateOf,
+      }));
+      if (received.duplicateOf !== undefined) {
+        logger.warn({
+          event: "possible-duplicate",
+          channel: config.name,
+          message: received.id,
+          duplicateOf: received.duplicateOf,
+        });
+      }
+      return { id: received.id, alreadyStored: false };
+    };
     const sink: MessageSink = {
       sourceDown: (code) => this.sourceDown(channel, code),
       sourceUp: () => {
         this.sourceUp(channel);
       },
-      receive: async (body, options = {}) => {
-        // Before anything is stored: the source keeps the message for a later pass.
-        if (cut?.aborted === true) throw new PassCut();
-        if (channel.config.settings.content === "none") {
-          return this.passThrough(channel, body, options);
-        }
-        const { duplicateKey, idempotencyKey, resumed, failure, source } = options;
-        let received: ReceivedMessage;
-        const receivedAt = this.at();
-        // Settled once this message's facts are set or the receive failed, so a pass that takes
-        // the message from the store before this call has returned waits for its facts.
-        let settle!: () => void;
-        const receiving = new Promise<void>((resolve) => (settle = resolve));
-        channel.receiving.add(receiving);
-        const settled = (): void => {
-          channel.receiving.delete(receiving);
-          settle();
-        };
-        try {
-          // Checked and copied before anything is stored, so a source that passes what a
-          // transform cannot be handed learns it at once and the sender keeps the message, and a
-          // source that changes its object afterwards changes nothing the transform reads.
-          const passed = source === undefined ? undefined : copyFacts(source);
-          // An engine that lost its lease takes nothing more in: the source answers as it does
-          // when a message cannot be stored, so the sender keeps it.
-          this.options.fence?.check();
-          received = await store.receive(config.name, body, {
-            // Storage keeps a hash of each key, so a sender's identifiers and a file's name are not
-            // stored.
-            duplicateKey: hashed(duplicateKey),
-            idempotencyKey: hashed(idempotencyKey),
-            resumed,
-            failure,
-            size: body.byteLength,
-            // Kept with the metadata once the body is dropped, to match a copy held elsewhere.
-            ...(config.settings.content === "dropAfterDelivery"
-              ? { contentHash: createHash("sha256").update(body).digest("hex") }
-              : {}),
-          });
-          // Set at once, with no wait between the store call and here.
-          if (failure === undefined && received.alreadyStored !== true) {
-            keepFacts(
-              channel.facts,
-              received.id,
-              sourceFacts(config.source.kind, passed, body.byteLength, receivedAt),
-            );
-          }
-          settled();
-        } catch (error) {
-          settled();
-          const code = errorCode(error);
-          logger.error({ event: "receive-failed", channel: config.name, code });
-          this.emit(channel, () => ({
-            type: "receive-failed",
-            at: this.at(),
-            channel: config.name,
-            name: errorName(error),
-            code,
-          }));
-          throw error;
-        }
-        faultPoint("after-store-before-ack");
-        this.step();
-        if (received.alreadyStored === true) {
-          // Handed in again after a stop between storing and acknowledging: stored once already.
-          logger.info({ event: "already-stored", channel: config.name, message: received.id });
-          return received.id;
-        }
-        logger.info({
-          event: "received",
-          channel: config.name,
-          message: received.id,
-          bytes: body.byteLength,
-          ...(failure === undefined ? {} : { failed: true }),
-        });
-        this.emit(channel, () => ({
-          type: "received",
-          at: this.at(),
-          channel: config.name,
-          messageId: received.id,
-          bytes: body.byteLength,
-          failed: failure !== undefined,
-          duplicateOf: received.duplicateOf,
-        }));
-        if (received.duplicateOf !== undefined) {
-          logger.warn({
-            event: "possible-duplicate",
-            channel: config.name,
-            message: received.id,
-            duplicateOf: received.duplicateOf,
-          });
-        }
-        return received.id;
-      },
+      receive: async (body, options) => (await receivePiece(body, options)).id,
+      receivePiece,
+      batchDone: (result) => this.batchDone(config.name, result),
     };
+    if (store.heldIdempotencyKey !== undefined) {
+      const heldIdempotencyKey = store.heldIdempotencyKey.bind(store);
+      // Both keys are compared as the hashes the store keeps.
+      const digest = (text: string): string => createHash("sha256").update(text).digest("hex");
+      sink.heldOrigin = async (origin, key) => {
+        const held = await heldIdempotencyKey(config.name, digest(origin));
+        if (held === undefined) return "none";
+        return held === digest(key) ? "same" : "other";
+      };
+    }
     // A store that copies each body it stores makes a sink that keeps none, so a source may free a
     // body it is done with once it is stored.
     return copiesBodies(store) ? markCopiesBodies(sink) : sink;
@@ -2405,7 +2577,8 @@ export class Engine {
 
   /**
    * The work of one {@link passThrough}, once the passes before it are done: resolves with how many
-   * outputs every destination accepted, 0 when the transform filtered the message. Once the pass
+   * outputs every destination accepted (on a channel with destination transforms, the most any one
+   * was sent), 0 when the transform, or every destination's own, filtered the message. Once the pass
    * runs out of time, sends nothing more and resolves with 0, unheard: the sender was answered.
    */
   private async passOne(
@@ -2438,13 +2611,49 @@ export class Engine {
       });
       throw new PassFailed("TRANSFORM_FAILED", true);
     }
+    if ((outcome.routes?.length ?? 0) > 0) {
+      // A route is a stored message, and this channel stores nothing: refused, never dropped.
+      logger.warn({
+        event: "pass-transform-failed",
+        channel: config.name,
+        pass,
+        kind: "output",
+        name: "RouteError",
+        code: UNKNOWN_ROUTE_CODE,
+      });
+      throw new PassFailed("ROUTE_UNSTORED", true);
+    }
+    // The channel's transform filtered it: no destination transform has anything to read.
+    if (outcome.outputs.length === 0) return 0;
     let rejected = false;
+    let failed = false;
+    let most = 0;
     for (const [index, destination] of connectors.destinations.entries()) {
+      // On a channel with destination transforms, each destination is sent what its own made.
+      const own = outcome.destinations?.[index];
+      const outputs = own === undefined ? outcome.outputs : own.ok ? own.outputs : [];
+      most = Math.max(most, outputs.length);
       if (runsDry(config, index, this.options.dryRun === true)) {
         logger.info({ event: "dry-run", channel: config.name, destination: index, pass });
         continue;
       }
-      for (const [seq, output] of outcome.outputs.entries()) {
+      if (own !== undefined && !own.ok) {
+        // Its text can quote the message, so only where and what is logged; the others go on.
+        const { kind, name, code, where } = own.failure;
+        logger.warn({
+          event: "pass-transform-failed",
+          channel: config.name,
+          pass,
+          destination: index,
+          kind,
+          name,
+          code,
+          where,
+        });
+        failed = true;
+        continue;
+      }
+      for (const [seq, output] of outputs.entries()) {
         if (expired.aborted) return 0;
         if (!(await this.passSend(channel, destination, index, pass, seq, output, expired))) {
           // Rejected: sending it again will not help, and the other destinations are still sent it.
@@ -2454,7 +2663,9 @@ export class Engine {
       }
     }
     if (rejected) throw new PassFailed("DESTINATION_REJECTED", true);
-    return outcome.outputs.length;
+    // A destination's transform failed: running it again on the same message will not help.
+    if (failed) throw new PassFailed("TRANSFORM_FAILED", true);
+    return most;
   }
 
   /**
@@ -2529,6 +2740,35 @@ export class Engine {
   }
 
   /**
+   * Logs what a batch came to and records it in the audit log as a `batch` entry: counts and codes,
+   * never a name or content. A batch failed whole is recorded `refused`, with its code. An audit
+   * log that cannot be written is logged and the batch goes on: its pieces are stored already.
+   */
+  private async batchDone(channel: string, result: BatchResult): Promise<void> {
+    const { logger } = this.options;
+    const { source, outcome, code, pieces, stored, failed, duplicates, warnings } = result;
+    const counts = { pieces, stored, failed, duplicates };
+    const warned = warnings.length === 0 ? {} : { warnings: warnings.join(",") };
+    const why = code === undefined ? {} : { code };
+    logger.info({ event: "batch", channel, source, outcome, ...counts, ...why, ...warned });
+    try {
+      await this.audit.record({
+        action: "batch",
+        outcome: outcome === "stored" ? "ok" : "refused",
+        channel,
+        detail: {
+          source,
+          ...counts,
+          ...(code === undefined ? {} : { reason: code }),
+          ...warned,
+        },
+      });
+    } catch (error) {
+      logger.warn({ event: "batch-audit-failed", channel, code: errorCode(error) });
+    }
+  }
+
+  /**
    * A running source lost its connection: noted, so health shows the source down and readiness
    * fails, logged and sent to the hooks as `source-down`. Returns how long the source should wait
    * before it tries again: 1 second, doubling with each report in a row, to 5 minutes. A code that
@@ -2589,22 +2829,55 @@ export class Engine {
         await Promise.all(channel.receiving);
       }
       const source = channel.facts.get(next.id);
+      let outcome: TransformOutcome;
+      try {
+        outcome = await worker.run(next.body, {
+          // A worker that will not start is never handed the body: it stays with the message.
+          transfer: owned,
+          // Every message the engine transforms is on its first run: a replay runs elsewhere.
+          context: { messageId: next.id, attempt: 1, source, meta: {} },
+        });
+      } catch (error) {
+        /* v8 ignore next: run rejects only with TransformLoadError */
+        if (!(error instanceof TransformLoadError)) throw error;
+        // A replacement worker would not start: its transform, or its onStart, failed to load. The
+        // message keeps its facts, and waits for a reload.
+        this.markLoadFailed(channel, error.failure);
+        return;
+      }
       channel.facts.delete(next.id);
-      const outcome: TransformOutcome = await worker.run(next.body, {
-        transfer: owned,
-        // Every message the engine transforms is on its first run: a replay runs elsewhere.
-        context: { messageId: next.id, attempt: 1, source, meta: {} },
-      });
       if (outcome.ok) {
         faultPoint("after-transform-before-complete");
-        await store.completeTransform(
-          next.id,
-          outcome.outputs,
-          config.destinations.length,
-          ...this.epoch(),
-        );
-        if (owned) for (const output of outcome.outputs) release(output);
-        const outputs = outcome.outputs.length;
+        const byDestination = destinationOutcomes(outcome);
+        const transformed = byDestination === undefined ? outcome.outputs : { byDestination };
+        const routes = outcome.routes ?? [];
+        if (routes.length === 0) {
+          await store.completeTransform(
+            next.id,
+            transformed,
+            config.destinations.length,
+            this.options.fence?.epoch,
+            channel.keys,
+          );
+        } else {
+          const routed = await this.handRoutes(channel, next, transformed, routes);
+          // Full: the message stays received, and is run again on a later pass, in its turn.
+          if (routed === "full") return;
+          if (routed === "failed") {
+            // The transform's outcome is the failure handRoutes recorded: the message ended.
+            await this.settle(channel, next.id);
+            continue;
+          }
+        }
+        if (owned) releaseOutputs(outcome);
+        if (outcome.destinations !== undefined && byDestination !== undefined) {
+          this.reportDestinations(config.name, next.id, outcome.destinations);
+        }
+        // Filtered when every destination's transform filtered it too, as storage records it.
+        const outputs =
+          byDestination?.every((o) => "outputs" in o && o.outputs.length === 0) === true
+            ? 0
+            : outcome.outputs.length;
         logger.info({
           event: outputs === 0 ? "filtered" : "transformed",
           channel: config.name,
@@ -2618,6 +2891,7 @@ export class Engine {
             ? { type: "filtered", ...base }
             : { type: "transformed", ...base, outputs };
         });
+        if (outputs === 0) await this.settle(channel, messageId);
       } else {
         await store.failTransform(next.id, storedFailure(outcome.failure), ...this.epoch());
         const { kind, name, code, where } = outcome.failure;
@@ -2640,8 +2914,431 @@ export class Engine {
           code,
           where,
         }));
+        await this.settle(channel, next.id);
       }
     }
+  }
+
+  /**
+   * Logs each destination whose own transform failed for a message: its index, the failure's kind,
+   * name, code and where, never the error's text, which is stored with its delivery.
+   */
+  private reportDestinations(
+    channel: string,
+    message: number,
+    results: readonly DestinationResult[],
+  ): void {
+    for (const [destination, result] of results.entries()) {
+      if (result.ok) continue;
+      const { kind, name, code, where } = result.failure;
+      this.options.logger.warn({
+        event: "destination-transform-failed",
+        channel,
+        message,
+        destination,
+        kind,
+        name,
+        code,
+        where,
+      });
+    }
+  }
+
+  /**
+   * The settings of channel `name` as a target of hand-offs: its `channel:` source, or `undefined`
+   * when no channel of the project by that name takes them.
+   */
+  private handOffTarget(name: string): ChannelSourceConfig | undefined {
+    const target = this.options.project.channels.find((channel) => channel.name === name);
+    return target?.source.kind === "channel" ? target.source : undefined;
+  }
+
+  /**
+   * Whether channel `name` reads `hl7v2` and `body` holds a second message header. A source's body
+   * is refused as it enters the engine when it does; a hand-off does not pass that entry point, so
+   * it is refused here, before the target stores it, with the same code.
+   */
+  private holdsSecondMessageFor(name: string, body: Uint8Array): boolean {
+    const target = this.options.project.channels.find((channel) => channel.name === name);
+    return target?.format === "hl7v2" && holdsSecondMessage(body);
+  }
+
+  /**
+   * Records hand-offs with what they come from, in one transaction through the store's `handOff`.
+   * A store without it gets each new message through `receive`, under the idempotency key the
+   * hand-off carries, looked up as a source that resumes looks one up, and then the source's record:
+   * a crash between the two hands each one over once when the work is done again. Either way, the
+   * same rule holds: a target takes nothing when its backlog before the batch, with the batch's
+   * messages for it, would come to more than its `maxPending`. `source` is the channel the
+   * hand-offs come from: the message a transform routes from is still received when the fallback
+   * counts, and a route back into its own channel does not count it, as `handOff`, which records
+   * the transform first, does not.
+   */
+  private async commitHandOffs(
+    source: string,
+    from: HandOffFrom,
+    handOffs: readonly HandOff[],
+    dropContent: boolean,
+  ): Promise<HandOffResult> {
+    const { store } = this.options;
+    this.options.fence?.check();
+    if (typeof store.handOff === "function" && !dropContent) {
+      return store.handOff(from, handOffs, ...this.epoch());
+    }
+    for (const [channel, { count, maxPending }] of batchPerTarget(handOffs)) {
+      const { received } = await store.messageCounts(channel);
+      const self = from.kind === "transform" && channel === source ? 1 : 0;
+      if (received - self + count > maxPending) return { ok: false, full: channel };
+    }
+    const ids: number[] = [];
+    for (const handOff of handOffs) {
+      ids.push((await store.receive(handOff.channel, handOff.body, handOff.options)).id);
+    }
+    if (from.kind === "transform") {
+      await store.completeTransform(
+        from.messageId,
+        from.outputs,
+        from.destinations,
+        this.options.fence?.epoch,
+        from.keys,
+      );
+    } else if (dropContent) {
+      // start() refused a store without the method for such a channel.
+      const dropping = store as Required<Pick<MessageStore, "markDeliveredAndDropContent">>;
+      await dropping.markDeliveredAndDropContent(from.deliveryId, ...this.epoch());
+    } else {
+      await store.markDelivered(from.deliveryId, ...this.epoch());
+    }
+    return { ok: true, ids };
+  }
+
+  /**
+   * Hands what a transform routed with `ctx.route` to its targets, with the transform's outcome,
+   * in one transaction. A route to a channel that takes no hand-offs, or past a target's
+   * `maxHops`, or more routes to one target than its `maxPending`, fails the message with a stable
+   * code and hands nothing over; a full target leaves the message received, to run again on a later
+   * pass.
+   */
+  private async handRoutes(
+    channel: RunningChannel,
+    message: { readonly id: number; readonly hops?: number | undefined },
+    outputs: TransformOutputs,
+    routes: readonly RoutedMessage[],
+  ): Promise<"done" | "failed" | "full"> {
+    const { config } = channel;
+    const { store, logger } = this.options;
+    const hops = (message.hops ?? 0) + 1;
+    const generation = (await store.message(message.id))?.generation ?? 0;
+    const fail = async (code: string, detail: string, index: number): Promise<"failed"> => {
+      const failure: FailureSummary = { kind: "output", name: "RouteError", code, detail };
+      await store.failTransform(message.id, storedFailure(failure), ...this.epoch());
+      logger.warn({
+        event: "transform-failed",
+        channel: config.name,
+        message: message.id,
+        kind: failure.kind,
+        name: failure.name,
+        code: failure.code,
+        route: index,
+      });
+      this.emit(channel, () => ({
+        type: "transform-failed",
+        at: this.at(),
+        channel: config.name,
+        messageId: message.id,
+        kind: failure.kind,
+        name: failure.name,
+        code: failure.code,
+        where: undefined,
+      }));
+      return "failed";
+    };
+    const handOffs: HandOff[] = [];
+    for (const [index, route] of routes.entries()) {
+      const target = this.handOffTarget(route.channel);
+      if (target === undefined) {
+        return fail(
+          UNKNOWN_ROUTE_CODE,
+          "ctx.route named no channel whose source is channel:",
+          index,
+        );
+      }
+      if (hops > target.maxHops) {
+        return fail(
+          HOP_LIMIT_CODE,
+          `the message has come through ${String(hops - 1)} hand-offs, the most its target takes`,
+          index,
+        );
+      }
+      if (this.holdsSecondMessageFor(route.channel, route.body)) {
+        return fail(
+          MULTIPLE_MESSAGES_CODE,
+          "ctx.route handed an hl7v2 channel a body holding more than one message",
+          index,
+        );
+      }
+      handOffs.push({
+        channel: route.channel,
+        body: route.body,
+        maxPending: target.maxPending,
+        options: {
+          parent: {
+            channel: config.name,
+            messageId: message.id,
+            deliveryId: undefined,
+            generation,
+          },
+          hops,
+          idempotencyKey: hashed(
+            `route:${config.name}:${String(message.id)}:${String(generation)}:${String(index)}`,
+          ),
+          resumed: true,
+          size: route.body.byteLength,
+        },
+      });
+    }
+    // A batch bigger than its target's cap could never be taken whole, however long it waited:
+    // fail it now, or the channel's transform queue would stall behind it for good.
+    for (const [target, { count, maxPending }] of batchPerTarget(handOffs)) {
+      if (count > maxPending) {
+        return fail(
+          TOO_MANY_ROUTES_CODE,
+          `the transform routed ${String(count)} messages to ${target}, more than its maxPending of ${String(maxPending)}`,
+          handOffs.findIndex((handOff) => handOff.channel === target),
+        );
+      }
+    }
+    const result = await this.commitHandOffs(
+      config.name,
+      {
+        kind: "transform",
+        messageId: message.id,
+        outputs,
+        destinations: config.destinations.length,
+        keys: channel.keys,
+      },
+      handOffs,
+      false,
+    );
+    if (!result.ok) {
+      logger.info({
+        event: "hand-off-waiting",
+        channel: config.name,
+        message: message.id,
+        target: result.full,
+        code: TARGET_FULL_CODE,
+      });
+      return "full";
+    }
+    for (const [index, id] of result.ids.entries()) {
+      logger.info({
+        event: "handed-over",
+        channel: config.name,
+        message: message.id,
+        target: handOffs[index]?.channel,
+        handedTo: id,
+      });
+    }
+    return "done";
+  }
+
+  /**
+   * Hands one delivery of a channel destination to its target channel as a new message, in the
+   * same transaction as the delivery's record, carrying the `ctx.meta` keys `carryMeta` names.
+   * Returns `wait` when the target is full: the delivery is tried again later, and in order the
+   * deliveries behind it wait.
+   */
+  private async handDelivery(
+    channel: RunningChannel,
+    index: number,
+    destination: ChannelDestinationConfig,
+    delivery: PendingDelivery,
+    policy: RetryPolicy,
+  ): Promise<"next" | "wait"> {
+    const { config } = channel;
+    const { store, logger } = this.options;
+    const message = await store.message(delivery.messageId);
+    const generation = message?.generation ?? 0;
+    const hops = (message?.hops ?? 0) + 1;
+    const target = this.handOffTarget(destination.channel);
+    const about = {
+      channel: config.name,
+      messageId: delivery.messageId,
+      destination: index,
+      deliveryId: delivery.id,
+      attempt: delivery.attempts + 1,
+    };
+    if (
+      target === undefined ||
+      hops > target.maxHops ||
+      this.holdsSecondMessageFor(destination.channel, delivery.body)
+    ) {
+      // Checked at start for a target; a hop count past the limit is a loop through ctx.route; and
+      // an hl7v2 target refuses a body holding a second message, as the engine does where a
+      // source's message enters it.
+      const code =
+        target === undefined
+          ? UNKNOWN_ROUTE_CODE
+          : hops > target.maxHops
+            ? HOP_LIMIT_CODE
+            : MULTIPLE_MESSAGES_CODE;
+      this.options.fence?.check();
+      await store.failDelivery(delivery.id, `hand-off: ${code}`, ...this.epoch());
+      logger.warn({
+        event: "hand-off-refused",
+        channel: config.name,
+        destination: index,
+        delivery: delivery.id,
+        code,
+      });
+      this.emit(channel, () => ({
+        type: "delivery-rejected",
+        at: this.at(),
+        ...about,
+        reason: code,
+      }));
+      return "next";
+    }
+    const carried =
+      destination.carryMeta.length === 0 ? undefined : await this.messageMeta(delivery.messageId);
+    const meta =
+      carried === undefined
+        ? undefined
+        : Object.fromEntries(
+            destination.carryMeta.flatMap((key) =>
+              Object.hasOwn(carried, key) ? [[key, carried[key] as string | number | boolean]] : [],
+            ),
+          );
+    const result = await this.commitHandOffs(
+      config.name,
+      { kind: "delivery", deliveryId: delivery.id },
+      [
+        {
+          channel: destination.channel,
+          body: delivery.body,
+          maxPending: target.maxPending,
+          options: {
+            parent: {
+              channel: config.name,
+              messageId: delivery.messageId,
+              deliveryId: delivery.id,
+              generation,
+            },
+            hops,
+            // The source channel, the delivery and the generation: a crash re-send of the same
+            // delivery finds the message stored, and a replay's new delivery hands over anew.
+            idempotencyKey: hashed(
+              `channel:${config.name}:${String(delivery.id)}:${String(generation)}`,
+            ),
+            resumed: true,
+            size: delivery.body.byteLength,
+            ...(meta === undefined || Object.keys(meta).length === 0 ? {} : { meta }),
+          },
+        },
+      ],
+      config.settings.content === "dropAfterDelivery",
+    );
+    if (!result.ok) {
+      const wait = policy.firstMs;
+      await store.scheduleRetry(
+        delivery.id,
+        delivery.attempts,
+        this.now() + wait,
+        `hand-off: ${TARGET_FULL_CODE}`,
+        ...this.epoch(),
+      );
+      logger.info({
+        event: "hand-off-waiting",
+        channel: config.name,
+        destination: index,
+        delivery: delivery.id,
+        target: result.full,
+        retryInMs: wait,
+        code: TARGET_FULL_CODE,
+      });
+      return "wait";
+    }
+    logger.info({
+      event: "delivered",
+      channel: config.name,
+      destination: index,
+      delivery: delivery.id,
+      handedTo: result.ids[0],
+    });
+    this.emit(channel, () => ({ type: "delivered", at: this.at(), ...about }));
+    return "next";
+  }
+
+  /**
+   * Records a message as settled when it has, and sends its settled event: the store's conditional
+   * update lets one caller through, so the event goes out once. Emitting only queues, so a hook's
+   * full queue never holds this up: the event is dropped and logged, and the record stands.
+   */
+  private async settle(channel: RunningChannel, messageId: number): Promise<void> {
+    const { store } = this.options;
+    if (store.settle === undefined) return;
+    const settled = await store.settle(messageId);
+    if (settled === undefined) return;
+    const { config } = channel;
+    this.emit(channel, () => ({
+      type: "settled",
+      at: this.at(),
+      channel: config.name,
+      messageId,
+      destinations: config.destinations.map((destination, index) => ({
+        index,
+        name: destination.kind,
+        state: settledState(settled, index),
+      })),
+    }));
+  }
+
+  /**
+   * Settles what a crash or a hard stop left between a message's last outcome and its settle, for
+   * one channel, a batch at a time: each gets its settled event now, once.
+   */
+  private async settleLeft(channel: RunningChannel): Promise<void> {
+    const { store } = this.options;
+    if (store.unsettled === undefined) return;
+    const name = channel.config.name;
+    for (
+      let ids = await store.unsettled(name, 0, SETTLE_BATCH);
+      ids.length > 0;
+      ids = await store.unsettled(name, Math.max(...ids), SETTLE_BATCH)
+    ) {
+      for (const id of ids) await this.settle(channel, id);
+    }
+  }
+
+  /**
+   * Settles what a replay or a resend, run in another process, left filtered or failed: it queued
+   * no delivery, so neither the transform nor the delivery pass ends it here. One batch a pass, read
+   * through an index; the rest at the passes after.
+   */
+  private async settleRequeued(channel: RunningChannel): Promise<void> {
+    const { store } = this.options;
+    if (store.requeuedUnsettled === undefined) return;
+    for (const id of await store.requeuedUnsettled(channel.config.name, SETTLE_BATCH)) {
+      await this.settle(channel, id);
+    }
+  }
+
+  /**
+   * Stops a channel whose replacement worker would not load: the message it held stays to be
+   * transformed, nothing more of the channel runs until a reload loads it, and the other channels
+   * run on. Logged, and shown on the health endpoint, by kind, name and code.
+   */
+  private markLoadFailed(channel: RunningChannel, failure: FailureSummary): void {
+    channel.loadFailed = failure;
+    const { kind, name, code, where } = failure;
+    this.options.logger.error({
+      event: "transform-load-failed",
+      channel: channel.config.name,
+      kind,
+      name,
+      code,
+      where,
+    });
   }
 
   /**
@@ -2656,22 +3353,75 @@ export class Engine {
   }
 
   /**
+   * Holds, once per start, the channel's pending deliveries that none of its destinations now was
+   * made for, so none goes to another destination: one queued before destinations were recorded is
+   * failed with the code `destination-unknown`, its message then replayed by an operator; one made
+   * for a destination the channel no longer has (`destination-gone`) waits for it to come back.
+   * Each kind is logged with a count, never content.
+   */
+  private async holdDeliveries(channel: RunningChannel): Promise<void> {
+    const { store, logger } = this.options;
+    channel.held = true;
+    if (store.holdDeliveries === undefined) return;
+    this.options.fence?.check();
+    const held = await store.holdDeliveries(
+      channel.config.name,
+      channel.keys,
+      "delivery: destination-unknown",
+      ...this.epoch(),
+    );
+    const name = channel.config.name;
+    if (held.unknown > 0) {
+      logger.warn({
+        event: "deliveries-held",
+        channel: name,
+        code: "destination-unknown",
+        deliveries: held.unknown,
+      });
+    }
+    if (held.gone > 0) {
+      logger.warn({
+        event: "deliveries-held",
+        channel: name,
+        code: "destination-gone",
+        deliveries: held.gone,
+      });
+    }
+  }
+
+  /**
    * Delivers what the channel has due, one attempt at a time, each cut off at its destination's
    * deadline by one timer between them all.
    */
   private async deliverAll(channel: RunningChannel): Promise<void> {
     const deadline = new DeadlineTimer(() => this.now(), this.wait);
+    // The messages whose deliveries ended this pass, each settled once the pass is through.
+    const settling = new Set<number>();
     try {
-      await this.deliverEach(channel, deadline);
+      await this.deliverEach(channel, deadline, settling);
     } finally {
       deadline.close();
     }
+    for (const messageId of settling) await this.settle(channel, messageId);
   }
 
-  private async deliverEach(channel: RunningChannel, deadline: DeadlineTimer): Promise<void> {
+  /** A message's metadata, read back from the store: empty when it has none or the store keeps none. */
+  private async messageMeta(messageId: number): Promise<MessageMeta> {
+    const text = await this.options.store.messageMeta?.(messageId);
+    // Stored by receive() from a MessageMeta: flat values only.
+    return text === undefined ? {} : (JSON.parse(text) as MessageMeta);
+  }
+
+  private async deliverEach(
+    channel: RunningChannel,
+    deadline: DeadlineTimer,
+    settling: Set<number>,
+  ): Promise<void> {
     const { config, connectors } = channel;
     const { store, logger } = this.options;
+    if (!channel.held) await this.holdDeliveries(channel);
     for (const [index, destination] of connectors.destinations.entries()) {
+      const key = channel.keys[index];
       const dry = runsDry(config, index, this.options.dryRun === true);
       const policy = config.destinations[index]?.retry ?? config.settings.retry;
       // With rotate, a delivery waiting for a retry steps aside for the due ones behind it; each is
@@ -2680,9 +3430,10 @@ export class Engine {
       for (;;) {
         if (channel.state === "stopped" || this.cutOff) return;
         this.step();
+        // By key: the deliveries made for this destination, wherever it stood in the list then.
         const delivery = await (policy.rotate
-          ? store.nextDelivery(config.name, index, { dueBy: this.now() })
-          : store.nextDelivery(config.name, index));
+          ? store.nextDelivery(config.name, index, { dueBy: this.now(), key })
+          : store.nextDelivery(config.name, index, { key }));
         if (delivery === undefined || delivery.nextAttemptAt > this.now()) break;
         if (tried.has(delivery.id)) break;
         tried.add(delivery.id);
@@ -2691,6 +3442,7 @@ export class Engine {
           // the destination moves on. Nothing is handed to a connector, so nothing is opened.
           this.options.fence?.check();
           await this.markDryRun(delivery.id);
+          settling.add(delivery.messageId);
           logger.info({
             event: "dry-run",
             channel: config.name,
@@ -2698,6 +3450,15 @@ export class Engine {
             delivery: delivery.id,
           });
           this.options.metrics?.deliveryAttempt(config.name, index, "dry_run");
+          continue;
+        }
+        const handTo = config.destinations[index];
+        if (handTo?.kind === "channel") {
+          // No connector: the output is stored for the target channel with this delivery's record.
+          this.options.fence?.check();
+          if ((await this.handDelivery(channel, index, handTo, delivery, policy)) === "wait") break;
+          // Delivered, or failed for good: either way this delivery ended.
+          settling.add(delivery.messageId);
           continue;
         }
         // Still marked: an attempt was handed over and its outcome never recorded, so it counts.
@@ -2770,6 +3531,13 @@ export class Engine {
           this.options.metrics?.deliveryAttempt(config.name, index, outcome, tookMs / 1000);
         };
         try {
+          // Read only for a destination that fills its URL from it: the metadata stays in storage
+          // otherwise. A store that keeps none hands over none, and a placeholder fails the
+          // delivery. Read inside the attempt, so `ended` runs however the read settles.
+          const meta =
+            destination instanceof HttpDestination && destination.usesMeta
+              ? await this.messageMeta(delivery.messageId)
+              : undefined;
           await untilAborted(
             () =>
               destination.deliver({
@@ -2777,6 +3545,7 @@ export class Engine {
                 seq: delivery.seq,
                 body: delivery.body,
                 ...(resend === undefined ? {} : { resend }),
+                ...(meta === undefined ? {} : { meta }),
                 signal,
               }),
             signal,
@@ -2799,6 +3568,7 @@ export class Engine {
           const error = expired ? new DeliveryTimeout(limitMs) : thrown;
           if (error instanceof DeliveryRejected) {
             await store.failDelivery(delivery.id, `rejected: ${error.reason}`, ...this.epoch());
+            settling.add(delivery.messageId);
             logger.warn({
               event: "delivery-rejected",
               channel: config.name,
@@ -2838,6 +3608,7 @@ export class Engine {
               `exhausted (${exhausted}, ${String(attempts)} attempts): ${failure}`,
               ...this.epoch(),
             );
+            settling.add(delivery.messageId);
             logger.warn({
               event: "delivery-exhausted",
               channel: config.name,
@@ -2931,6 +3702,7 @@ export class Engine {
         } else {
           await store.markDelivered(delivery.id, ...this.epoch());
         }
+        settling.add(delivery.messageId);
         logger.info({
           event: "delivered",
           channel: config.name,
@@ -3028,6 +3800,29 @@ function auditDetail(
 function errorName(error: unknown): string {
   return error instanceof Error ? error.name : typeof error;
 }
+
+/**
+ * What a source handed in, with `failure` set to `inbound: MULTIPLE_MESSAGES` when an `hl7v2` body
+ * holds a second message: one header after another, in any case and after any line ending the HL7
+ * parser accepts. The parser would read it as one message with two MSH segments, and hand the
+ * transform the second message's segments as the first's. Here, where every source's messages enter
+ * the engine, so a file, HTTP, database or any other source is held to it as MLLP is. The body is
+ * stored as failed, or on a channel that stores nothing counted as unreadable, and never reaches a
+ * transform or a destination.
+ */
+function oneMessage(format: Format, body: Uint8Array, options: ReceiveOptions): ReceiveOptions {
+  if (format !== "hl7v2" || options.failure !== undefined || !holdsSecondMessage(body)) {
+    return options;
+  }
+  // No duplicate key, as for any message a source could not read: its header is not one message's.
+  return { ...options, duplicateKey: undefined, failure: "inbound: MULTIPLE_MESSAGES" };
+}
+
+/**
+ * The code a hand-off to an `hl7v2` channel is refused with when its body holds a second message,
+ * the code a source's body is refused with as it enters the engine.
+ */
+const MULTIPLE_MESSAGES_CODE = "MULTIPLE_MESSAGES";
 
 /** A key's SHA-256 in hex, as storage keeps it, or undefined when there is no key. */
 function hashed(key: string | undefined): string | undefined {
@@ -3170,4 +3965,19 @@ function modeOpen(path: string, bits: number): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * How many of `handOffs` go to each target, in the order the targets first appear, with the
+ * target's `maxPending`.
+ */
+function batchPerTarget(
+  handOffs: readonly HandOff[],
+): Map<string, { count: number; maxPending: number }> {
+  const batch = new Map<string, { count: number; maxPending: number }>();
+  for (const { channel, maxPending } of handOffs) {
+    const seen = batch.get(channel);
+    batch.set(channel, { count: (seen?.count ?? 0) + 1, maxPending });
+  }
+  return batch;
 }

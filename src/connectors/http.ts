@@ -6,14 +6,25 @@ import {
   type ServerResponse,
 } from "node:http";
 import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
+import { isIP } from "node:net";
 import type { Duplex } from "node:stream";
 
 import { NEVER_CONTEXT_HEADERS } from "../config/schema.js";
 import type { JsonValue } from "../transform.js";
 import { ackCharset, defaultAckBuilder, type AckRequest } from "./ack.js";
+import { ADDRESS_REFUSED, type AddressGuard } from "./address-guard.js";
+import {
+  BATCH_CODES,
+  type BatchOptions,
+  once,
+  receivePieces,
+  scanBatch,
+  splitPieces,
+} from "./batch.js";
 import { Endpoint, refuse, refuseText, reply, replyText } from "./endpoint.js";
 import { failureOf, transientError } from "./http-core.js";
 import { hl7MediaType, normalisePath } from "./http-path.js";
+import { UrlTemplate } from "./http-template.js";
 import { readHeader } from "./mllp.js";
 import { clientTlsOptions, type ClientTlsMaterial, type ServerTlsMaterial } from "./tls.js";
 import {
@@ -24,6 +35,16 @@ import {
   type OutgoingMessage,
   type SourceConnector,
 } from "./types.js";
+import {
+  MAX_XML_ACK_BYTES,
+  MISFIT,
+  readXmlAck,
+  REFUSED,
+  SENT_XML_NO_CONTROL_ID,
+  SENT_XML_UNREADABLE,
+  settleXmlAck,
+  xmlControlId,
+} from "./xml-ack.js";
 
 /** A method an HTTP source can take a message by. */
 export type HttpSourceMethod = "POST" | "PUT";
@@ -83,7 +104,22 @@ export interface HttpSourceOptions {
    * its id and the problem's code, never its content.
    */
   readonly onUnreadable?: (messageId: number, problem: string) => void;
+  /**
+   * Reads each body as a batch of messages, cut as `split` says, and stores each piece as a message
+   * of its own, under a key of the request's `Idempotency-Key` header, or the body's hash without
+   * one, and the piece's place. Answers with every piece's id. Not with `ack` mode. Default: none.
+   */
+  readonly batch?: BatchOptions | undefined;
 }
+
+/**
+ * The header that names a batch request, so a retry of it stores no piece twice: its value is the
+ * origin of each piece's key. As in the IETF HTTPAPI working group's draft, a string, quoted or not.
+ */
+export const IDEMPOTENCY_KEY_HEADER = "idempotency-key";
+
+/** An `Idempotency-Key` value: 1 to 255 visible ASCII characters, or that quoted. */
+const IDEMPOTENCY_KEY = /^(?:"([\x20\x21\x23-\x5b\x5d-\x7e]{1,255})"|([\x21-\x7e]{1,255}))$/;
 
 const STORE_FAILED = "the message could not be stored; send it again";
 const PASS_DEFERRED = "the message could not be passed on yet; send it again";
@@ -124,6 +160,12 @@ function retryAfter(error: PassFailed): OutgoingHttpHeaders {
 export class HttpSource implements SourceConnector {
   private readonly options: HttpSourceOptions;
   private endpoint: Endpoint | undefined;
+  /**
+   * The last batch request in line for each origin, so requests under one origin are stored one
+   * after another: one sent twice at once stores its pieces once, and a changed body sent beside it
+   * sees the first one's pieces and is refused.
+   */
+  private readonly inLine = new Map<string, Promise<void>>();
 
   /** @param options Where to listen, what to take, how to answer, TLS and the token. */
   constructor(options: HttpSourceOptions) {
@@ -192,6 +234,9 @@ export class HttpSource implements SourceConnector {
     if (body.byteLength === 0) return refused(400);
 
     const source = this.facts(request, pathname);
+    if (this.options.batch !== undefined) {
+      return this.receiveBatch(this.options.batch, request, body, response, sink, source);
+    }
     if (answer.kind === "ack") {
       return this.acknowledge(body, String(mediaType), response, sink, source);
     }
@@ -208,13 +253,109 @@ export class HttpSource implements SourceConnector {
       return;
     }
     if (answer.kind === "id") return reply(response, 202, { id });
-    response.writeHead(answer.status, {
-      "Cache-Control": "no-store",
-      ...(answer.contentType === undefined ? {} : { "Content-Type": answer.contentType }),
-      ...answer.headers,
-      "Content-Length": Buffer.byteLength(answer.body),
+    fixedAnswer(response, answer);
+  }
+
+  /**
+   * Stores a body as a batch: each piece under the key `http:key:<Idempotency-Key>#<hash>#<index>`,
+   * or `http:sha256:<hash>#<index>` without the header, where the hash is the body's, and always
+   * looked up first, so a request sent again stores nothing twice. Requests under one origin are
+   * stored one at a time. Answers 202 with every piece's id, in order, or the fixed answer; 400 for
+   * an `Idempotency-Key` that is not one; 422 for a body with no piece, an incomplete HL7 batch
+   * unless `onIncomplete: accept`, or an `Idempotency-Key` used before for another body, with the
+   * code and nothing stored; 503 when a piece could not be stored, so the sender sends it again
+   * under the same key. On a channel that stores nothing, a piece refused for good answers 422 with
+   * its code, and one that may pass later 503 with `Retry-After`, as a single message does.
+   */
+  private async receiveBatch(
+    batch: BatchOptions,
+    request: IncomingMessage,
+    body: Buffer,
+    response: ServerResponse,
+    sink: MessageSink,
+    source: Readonly<Record<string, JsonValue>>,
+  ): Promise<void> {
+    const answer = this.options.response ?? { kind: "id" };
+    const refused = (status: number, code?: string): void => {
+      if (code === undefined) refuse(response, status);
+      else reply(response, status, { error: code });
+      this.options.onRefused?.(status);
+    };
+    // Node joins a header sent twice with ", ", which no key holds unquoted: that answers 400.
+    // Node gives a list only for set-cookie; any other header it joins into one string.
+    const header = request.headers[IDEMPOTENCY_KEY_HEADER] as string | undefined;
+    let named: string | undefined;
+    if (header !== undefined) {
+      const match = IDEMPOTENCY_KEY.exec(header);
+      if (match === null) return refused(400);
+      named = match[1] ?? match[2];
+    }
+    const scan = await scanBatch(once(body), batch);
+    if (scan.envelope.length > 0 && batch.onIncomplete !== "accept") {
+      return refused(422, BATCH_CODES.incomplete);
+    }
+    // The body's hash is in every key, so a changed body sent under a key already used never
+    // matches a piece of the first body: it is refused below, or, on a sink that cannot say what
+    // the key holds, stored as a batch of its own. Nothing of either is dropped.
+    const origin = named === undefined ? `http:sha256:${scan.hash}` : `http:key:${named}`;
+    const prefix = named === undefined ? origin : `${origin}#${scan.hash}`;
+    const key = (index: number): string => `${prefix}#${String(index)}`;
+    const warnings = new Set(scan.envelope);
+    const done = await this.oneAtATime(origin);
+    let received;
+    try {
+      if (named !== undefined && (await sink.heldOrigin?.(origin, key(0))) === "other") {
+        return refused(422, BATCH_CODES.keyReused);
+      }
+      received = await receivePieces(splitPieces(once(body), batch, warnings), sink, {
+        key,
+        resumed: true,
+        ...(named === undefined ? {} : { origin }),
+        facts: (index) => ({ ...source, batch: { piece: index, hash: scan.hash } }),
+      });
+    } catch (error) {
+      // On a channel that stores nothing, the pieces before a refused one were sent: one refused for
+      // good is answered so, as a single message is, and the sender does not send them again.
+      if (error instanceof PassFailed) {
+        if (error.permanent) reply(response, 422, { error: PASS_REJECTED, code: error.code });
+        else reply(response, 503, { error: PASS_DEFERRED, code: error.code }, retryAfter(error));
+        return;
+      }
+      reply(response, 503, { error: STORE_FAILED });
+      return;
+    } finally {
+      done();
+    }
+    if (received.pieces === 0) return refused(422, BATCH_CODES.empty);
+    await sink.batchDone?.({
+      source: "http",
+      outcome: "stored",
+      pieces: received.pieces,
+      stored: received.stored,
+      failed: received.failed,
+      duplicates: received.duplicates,
+      warnings: [...warnings],
     });
-    response.end(answer.body);
+    if (answer.kind === "fixed") return fixedAnswer(response, answer);
+    reply(response, 202, { ids: received.ids });
+  }
+
+  /**
+   * Waits until no other batch request under `origin` is being stored, then holds the origin until
+   * the function it resolves with is called. On one node this keeps two requests under one key from
+   * both missing each other's pieces; across nodes on one database, the store's own lookup is all
+   * there is.
+   */
+  private async oneAtATime(origin: string): Promise<() => void> {
+    const before = this.inLine.get(origin);
+    let release!: () => void;
+    const mine = new Promise<void>((resolve) => (release = resolve));
+    this.inLine.set(origin, mine);
+    await before;
+    return () => {
+      release();
+      if (this.inLine.get(origin) === mine) this.inLine.delete(origin);
+    };
   }
 
   /**
@@ -288,6 +429,20 @@ export class HttpSource implements SourceConnector {
   }
 }
 
+/** Sends a fixed answer, the same for every message: never the message. */
+function fixedAnswer(
+  response: ServerResponse,
+  answer: Extract<HttpSourceResponse, { kind: "fixed" }>,
+): void {
+  response.writeHead(answer.status, {
+    "Cache-Control": "no-store",
+    ...(answer.contentType === undefined ? {} : { "Content-Type": answer.contentType }),
+    ...answer.headers,
+    "Content-Length": Buffer.byteLength(answer.body),
+  });
+  response.end(answer.body);
+}
+
 /** Reads a request body of at most `maxBytes`: the bytes, `too-large`, or undefined if cut short. */
 function readBody(
   request: IncomingMessage,
@@ -319,7 +474,10 @@ const NO_TLS: ClientTlsMaterial = { ca: undefined, cert: undefined, key: undefin
 
 /** Options for an {@link HttpDestination}. */
 export interface HttpDestinationOptions {
-  /** Where each output is POSTed: `https://`, or `http://` only when plaintext was allowed. */
+  /**
+   * Where each output is sent: `https://`, or `http://` only when plaintext was allowed. Its path may
+   * hold `{key}` placeholders, filled from the message's metadata.
+   */
   readonly url: string;
   /** Headers sent with every request, already resolved from the environment. */
   readonly headers: Readonly<Record<string, string>>;
@@ -334,10 +492,45 @@ export interface HttpDestinationOptions {
    * off, its value the number of attempts before. Undefined sends none.
    */
   readonly resendHeader?: string | undefined;
+  /** The method each output is sent by. Defaults to POST; GET and DELETE send no body. */
+  readonly method?: HttpDestinationMethod | undefined;
+  /**
+   * Query parameters added to `url`'s own, by name, each value text that may hold `{key}`
+   * placeholders filled from the message's metadata, as `url`'s path may. Defaults to none.
+   */
+  readonly query?: Readonly<Record<string, string>> | undefined;
+  /**
+   * The header that names each output to the receiver, the same on every attempt of it: its value
+   * is `<messageId>-<seq>`. Undefined sends none.
+   */
+  readonly idempotencyHeader?: string | undefined;
+  /**
+   * The guard every connection goes through: the address it connects to is checked at each
+   * connect, and a loopback, link-local or private one is refused unless `allow` names its network.
+   * Undefined connects to any address.
+   */
+  readonly addressGuard?: AddressGuard | undefined;
+  /**
+   * How a 2xx answer's body is read: undefined to drop it, or `xml` to read it as an HL7 v2 XML
+   * acknowledgement and settle the delivery by its code, as an MLLP ACK settles one.
+   */
+  readonly ack?: "xml" | undefined;
 }
 
+/** A method an HTTP destination sends by. */
+export type HttpDestinationMethod = "POST" | "PUT" | "PATCH" | "DELETE" | "GET";
+
+/** The methods that send no body. */
+const BODILESS: ReadonlySet<HttpDestinationMethod> = new Set(["GET", "DELETE"]);
+
 /**
- * POSTs each output to a URL. The server's certificate is always verified. The answer is read by
+ * Sends each output to a URL, by POST unless `method` names another. The URL's path, and the values
+ * of `query`, may hold `{key}` placeholders, each filled from the message's metadata
+ * (`OutgoingMessage.meta`) percent-encoded, so a value never reaches the scheme, the host or the port;
+ * a key the metadata lacks fails that delivery with a `DeliveryRejected`. With `addressGuard`, every
+ * connection is checked against it at connect.
+ *
+ * The server's certificate is always verified. The answer is read by
  * the shared status table (`classifyStatus`): a 2xx is delivered; a 408, 425, 429, 5xx, a network
  * error or a timeout throws a `RetryableError` with a `code`, and on a 429 or a 503 the wait its
  * Retry-After asks for; a 3xx throws a `RedirectHeld`, never followed; a 101 or any other 4xx throws
@@ -345,58 +538,175 @@ export interface HttpDestinationOptions {
  * answer, so one with nothing after it ends as a timeout or a network error. The response body is read and dropped,
  * never logged.
  *
+ * With `ack: "xml"`, a 2xx answer's body is read, up to 1 MiB and within the same time limit, as an
+ * HL7 v2 XML acknowledgement, the way a web service that takes v2 XML answers on the same connection:
+ * `AA` or `CA` is delivered; `AR` or `CR` a `DeliveryRejected`; `AE` or `CE`, an answer that is not
+ * exactly one acknowledgement, a larger one, or one that answers another `MSH.10` than the message
+ * sent, a `RetryableError` coded `ACK_AE`, `ACK_CE`, `ACK_UNREADABLE` or `ACK_CONTROL_ID_MISMATCH`.
+ * The message sent is read once per delivery, before its first POST; when it is XML the hardened
+ * reader refuses, or XML that is not one `MSH` with one `MSH.10`, nothing is sent and the delivery
+ * fails at once, a `DeliveryRejected` whose reason is `SENT_XML_UNREADABLE` or
+ * `SENT_XML_NO_CONTROL_ID`: the same body goes on every attempt, so a retry could only post it
+ * again. Only
+ * the code and the control ID are read; the rest is dropped, never logged.
+ *
  * @example
  * ```ts
  * const destination = new HttpDestination({
- *   url: "https://lab.example.test/hl7",
- *   headers: { "Content-Type": "application/hl7-v2" },
+ *   url: "https://lab.example.test/patients/{mrn}",
+ *   method: "PUT",
+ *   headers: { "Content-Type": "application/fhir+json" },
  *   timeoutMs: 30_000,
+ *   addressGuard: new AddressGuard([]),
  * });
- * await destination.deliver({ messageId: 1, seq: 0, body });
+ * await destination.deliver({ messageId: 1, seq: 0, body, meta: { mrn: "SYN-0001" } });
  * ```
  */
 export class HttpDestination implements DestinationConnector {
   private readonly options: HttpDestinationOptions;
-  private readonly url: URL;
+  private readonly target: UrlTemplate;
   private readonly agent: HttpAgent;
   private readonly send: typeof httpRequest;
   private readonly now: () => number;
+  private readonly method: HttpDestinationMethod;
+  /** The host when it is an IP address, which Node connects to without a lookup; else undefined. */
+  private readonly literal: string | undefined;
+  /**
+   * The control ID read from the last message delivered with `ack: xml`, kept so the attempts after
+   * the first one of a delivery do not read the message again: its id, output and bytes.
+   */
+  private lastSent:
+    | {
+        readonly messageId: number;
+        readonly seq: number;
+        readonly body: Buffer;
+        readonly controlId: string | typeof REFUSED | typeof MISFIT | undefined;
+      }
+    | undefined;
 
-  /** @param options The URL, headers, timeout, TLS and, for tests, a clock. */
+  /** @param options The URL, method, headers, timeout, TLS, guard and, for tests, a clock. */
   constructor(options: HttpDestinationOptions) {
     this.options = options;
     this.now = options.now ?? Date.now;
-    this.url = new URL(options.url);
-    if (this.url.protocol === "https:") {
-      this.agent = new HttpsAgent({ keepAlive: true, ...clientTlsOptions(options.tls ?? NO_TLS) });
+    this.method = options.method ?? "POST";
+    this.target = new UrlTemplate(options.url, options.query);
+    const url = new URL(this.target.origin);
+    const host = url.hostname.replace(/^\[(.*)\]$/, "$1");
+    this.literal = isIP(host) === 0 ? undefined : host;
+    const guard = options.addressGuard;
+    const lookup = guard === undefined ? {} : { lookup: guard.lookup };
+    if (url.protocol === "https:") {
+      this.agent = new HttpsAgent({
+        keepAlive: true,
+        ...lookup,
+        ...clientTlsOptions(options.tls ?? NO_TLS),
+      });
       this.send = httpsRequest;
     } else {
-      this.agent = new HttpAgent({ keepAlive: true });
+      this.agent = new HttpAgent({ keepAlive: true, ...lookup });
       this.send = httpRequest;
     }
   }
 
+  /** Whether a delivery reads the message's metadata: true when the URL or a query value has a placeholder. */
+  get usesMeta(): boolean {
+    return this.target.usesMeta;
+  }
+
   /** Sends one output. */
   deliver(message: OutgoingMessage): Promise<void> {
-    const { headers, timeoutMs, resendHeader } = this.options;
+    if (this.options.ack !== "xml") return this.post(message, undefined);
+    return this.sentControlId(message).then((sent) => {
+      if (sent === REFUSED) throw new DeliveryRejected(SENT_XML_UNREADABLE);
+      if (sent === MISFIT) throw new DeliveryRejected(SENT_XML_NO_CONTROL_ID);
+      return this.post(message, sent);
+    });
+  }
+
+  /**
+   * The control ID of `message`, read once per delivery: an attempt that sends the same output of the
+   * same message, byte for byte, as the one before takes what was read then.
+   */
+  private async sentControlId(
+    message: OutgoingMessage,
+  ): Promise<string | typeof REFUSED | typeof MISFIT | undefined> {
+    const body = Buffer.from(message.body.buffer, message.body.byteOffset, message.body.byteLength);
+    const last = this.lastSent;
+    if (
+      last?.messageId === message.messageId &&
+      last.seq === message.seq &&
+      last.body.equals(body)
+    ) {
+      return last.controlId;
+    }
+    const controlId = await xmlControlId(message.body);
+    this.lastSent = {
+      messageId: message.messageId,
+      seq: message.seq,
+      body: Buffer.from(body),
+      controlId,
+    };
+    return controlId;
+  }
+
+  /** Sends one output, and with `ack: xml` settles it by the answer matched to `sent`. */
+  private post(message: OutgoingMessage, sent: string | undefined): Promise<void> {
+    const { headers, timeoutMs, resendHeader, idempotencyHeader, addressGuard } = this.options;
     const flag =
       resendHeader === undefined || message.resend === undefined
         ? {}
         : { [resendHeader]: String(message.resend.previousAttempts) };
+    const key =
+      idempotencyHeader === undefined
+        ? {}
+        : { [idempotencyHeader]: `${String(message.messageId)}-${String(message.seq)}` };
+    const bodiless = BODILESS.has(this.method);
+    const outgoing: Record<string, string | number> = { ...headers, ...flag, ...key };
+    if (bodiless) {
+      for (const name of Object.keys(outgoing)) {
+        if (name.toLowerCase() === "content-type") delete outgoing[name];
+      }
+    } else {
+      outgoing["Content-Length"] = message.body.byteLength;
+    }
     return new Promise((resolve, reject) => {
-      const request = this.send(this.url, {
-        method: "POST",
+      // A throw here rejects the delivery: a placeholder that cannot be filled fails it for good.
+      const url = this.target.fill(message.meta);
+      if (this.literal !== undefined && addressGuard?.permits(this.literal) === false) {
+        throw transientError(ADDRESS_REFUSED);
+      }
+      const request = this.send(url, {
+        method: this.method,
         agent: this.agent,
-        headers: { ...headers, ...flag, "Content-Length": message.body.byteLength },
+        headers: outgoing,
         ...(message.signal === undefined ? {} : { signal: message.signal }),
       });
-      const timer = setTimeout(() => request.destroy(transientError("ETIMEDOUT")), timeoutMs);
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        request.destroy(transientError("ETIMEDOUT"));
+      }, timeoutMs);
       request.once("response", (response) => {
+        response.on("error", () => undefined);
+        const failure = failureOf(response, url, this.now());
+        if (failure === undefined && this.options.ack === "xml") {
+          // The acknowledgement is the answer: read it within the attempt's time limit.
+          readAnswer(response).then(
+            (answer) => {
+              clearTimeout(timer);
+              this.settle(answer, sent).then(resolve, reject);
+            },
+            () => {
+              clearTimeout(timer);
+              request.destroy();
+              reject(transientError(timedOut ? "ETIMEDOUT" : "ACK_UNREADABLE"));
+            },
+          );
+          return;
+        }
         clearTimeout(timer);
         // Drain and drop the body, so the connection can be reused and nothing of it is kept.
-        response.on("error", () => undefined);
         response.resume();
-        const failure = failureOf(response, this.url, this.now());
         if (failure === undefined) resolve();
         else reject(failure);
       });
@@ -414,8 +724,15 @@ export class HttpDestination implements DestinationConnector {
         const code = typeof error.code === "string" ? error.code : "EHTTP";
         reject(transientError(code));
       });
-      request.end(message.body);
+      if (bodiless) request.end();
+      else request.end(message.body);
     });
+  }
+
+  /** Settles a delivery by the XML acknowledgement `answer`, matched to the control ID `sent`. */
+  private async settle(answer: Buffer | "too-large", sent: string | undefined): Promise<void> {
+    if (answer === "too-large") throw transientError("ACK_UNREADABLE");
+    settleXmlAck(await readXmlAck(answer), sent);
   }
 
   /** Closes the connections kept open between deliveries. */
@@ -423,4 +740,25 @@ export class HttpDestination implements DestinationConnector {
     this.agent.destroy();
     return Promise.resolve();
   }
+}
+
+/**
+ * Reads an answer's body of at most {@link MAX_XML_ACK_BYTES}: the bytes, or `too-large`, after
+ * which the rest is drained and dropped. Rejects when the body breaks off.
+ */
+function readAnswer(response: IncomingMessage): Promise<Buffer | "too-large"> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    response.on("data", (chunk: Buffer) => {
+      size += chunk.byteLength;
+      if (size <= MAX_XML_ACK_BYTES) chunks.push(chunk);
+    });
+    response.once("end", () =>
+      resolve(size > MAX_XML_ACK_BYTES ? "too-large" : Buffer.concat(chunks, size)),
+    );
+    response.once("close", () => {
+      if (!response.complete) reject(new Error("the answer broke off"));
+    });
+  });
 }

@@ -28,8 +28,9 @@ pathways init [dir]
 Writes the starter project into `dir` (default: the project folder), which must be empty or not exist
 yet: `pathways.yaml`, the `adt-to-lab` channel with its transform and tests, a `.gitignore`, a
 `package.json`, a `Dockerfile` and `.dockerignore` that build the project's own image (see
-[Deploy the image](./deploy-the-image.md)), and a development master key generated for this project
-in `.pathways/dev.key`.
+[Deploy the image](./deploy-the-image.md)), a `compose.yaml` and `.env.example` that run it under
+Docker Compose beside PostgreSQL (see [Run Pathways with Docker Compose](./run-with-docker-compose.md)),
+and a development master key generated for this project in `.pathways/dev.key`.
 On Linux and macOS the key is readable by its owner only (mode 0600, in a folder with mode 0700). On
 Windows a file's mode does not limit who can read it, so there the project folder's access control
 list is what keeps the key private, and `init` says so: keep the folder to the accounts that run
@@ -120,6 +121,20 @@ It never prints a value. Stored messages are read through encryption at rest, de
 only, and each one is written to the audit log (`verify`) before its content is read; nothing is
 written to the message or delivery tables. A message with no recorded outputs (received, failed or
 cleared) is skipped. Two outputs are the same only when they are the same bytes.
+
+Each destination is compared on its own: the outputs it is given now (its transform's, in its own
+`format`, on a channel with destination transforms) with the outputs stored for that destination,
+found by the identity its deliveries recorded (its `name`, or its kind and target), never by its
+place in the list. A changed destination transform shows as different on its destination only. A
+destination its transform filtered was recorded with no output, as was one whose transform failed. A
+destination with nothing stored under its identity (added to the channel since, or renamed) is not
+compared, and is counted on a line of its own with the code `not-stored`. A message stored by a
+Pathways before deliveries recorded their destination is compared once for every destination on a
+channel without destination transforms, which sent each the same outputs; on a channel with them,
+it fails with the code `destination-unknown`. A sample is compared per destination with
+`<sample without its extension>.expected.<destination name, or its place from 1>.<extension>`, named
+as [`pathways test`](./test-a-channel.md) names it, and a missing file expects that destination to
+filter the sample out.
 
 It opens the database as `start --no-migrate` does: it applies no schema step, and refuses, naming
 both versions, a database that lacks a step the candidate's Pathways needs. The candidate's

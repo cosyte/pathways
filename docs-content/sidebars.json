@@ -3,7 +3,20 @@
     "intro",
     { "type": "category", "label": "Installation", "items": ["installation"] },
     { "type": "category", "label": "Quickstart", "items": ["quickstart"] },
-    { "type": "category", "label": "Tutorials", "items": ["write-a-channel"] },
+    {
+      "type": "category",
+      "label": "Tutorials",
+      "items": [
+        "write-a-channel",
+        "example-mllp-to-http",
+        "example-file-to-sftp",
+        "example-hl7-to-fhir",
+        "example-filter-and-route",
+        "example-replay-after-failure",
+        "example-vet-lab-to-fhir",
+        "example-vet-lab-to-v2-xml"
+      ]
+    },
     {
       "type": "category",
       "label": "How-to guides",
@@ -12,11 +25,15 @@
         "check-configuration",
         "transform-and-filter-messages",
         "use-the-message-context",
+        "route-between-channels",
         "test-a-channel",
         "make-sample-messages",
+        "route-a-veterinary-lab-result",
+        "send-a-lab-result-as-v2-xml",
         "read-and-write-files",
         "read-and-write-amazon-s3",
         "read-and-write-azure-blob-storage",
+        "read-batch-files",
         "send-and-receive-mllp",
         "send-and-receive-tcp",
         "send-and-receive-http",
@@ -39,13 +56,23 @@
         "upgrade-pathways",
         "stop-and-upgrade-a-node",
         "run-in-docker",
+        "run-with-docker-compose",
         "deploy-the-image"
       ]
     },
     {
       "type": "category",
       "label": "Explanation",
-      "items": ["delivery-and-errors", "the-transform-worker", "security-model"]
+      "items": [
+        "the-message-model",
+        "delivery-and-errors",
+        "the-transform-worker",
+        "file-and-object-claims",
+        "storage-and-encryption",
+        "retention-and-archives",
+        "running-more-than-one-engine",
+        "security-model"
+      ]
     },
     {
       "type": "category",

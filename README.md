@@ -91,6 +91,18 @@ filtered out. Stop the engine with Ctrl+C, and `npx pathways status` counts one 
 [quickstart](https://github.com/cosyte/pathways/blob/main/docs-content/quickstart.md) walks through
 each step and what the engine logs.
 
+For the common shapes, start from an example in
+[`examples/`](https://github.com/cosyte/pathways/tree/main/examples): a small project that runs on
+synthetic messages, with its tests, which CI runs on every change. Each has a page:
+
+- [HL7 v2 over MLLP in, HTTP out](https://github.com/cosyte/pathways/blob/main/docs-content/example-mllp-to-http.md)
+- [A file drop to SFTP](https://github.com/cosyte/pathways/blob/main/docs-content/example-file-to-sftp.md)
+- [HL7 v2 to FHIR](https://github.com/cosyte/pathways/blob/main/docs-content/example-hl7-to-fhir.md)
+- [Filter, then send to two destinations](https://github.com/cosyte/pathways/blob/main/docs-content/example-filter-and-route.md)
+- [Replay after a failure](https://github.com/cosyte/pathways/blob/main/docs-content/example-replay-after-failure.md)
+- [A veterinary lab result to FHIR](https://github.com/cosyte/pathways/blob/main/docs-content/example-vet-lab-to-fhir.md)
+- [A veterinary lab result as v2 XML over HTTPS](https://github.com/cosyte/pathways/blob/main/docs-content/example-vet-lab-to-v2-xml.md)
+
 ---
 
 ## Why this exists
@@ -98,7 +110,8 @@ each step and what the engine logs.
 Pathways is for a developer who writes and runs integrations: someone who would rather review a
 channel in a pull request and test a transform with sample messages than configure both in a product.
 So a channel is a file in git, a transform is TypeScript, and both go through review and tests like
-the rest of a project's code. Pathways runs on one machine, from the command line or in Docker.
+the rest of a project's code. Pathways runs from the command line or in Docker, and more than one engine can share a database
+through the engine lease: one is active and the rest wait as standbys.
 
 It is not a web UI, not a drop-in replacement for another engine (it does not import channels from
 one), and not a sandbox: a transform is your own trusted code.
@@ -144,6 +157,9 @@ These are on `main` and land in the next release, not in 0.0.3:
 
 - The package description on npm no longer says Pathways is not yet out.
   <!-- changesets: release-status -->
+- An `xml` format: any XML body reaches the transform as a DOM document, read by `@cosyte/ccda`'s
+  hardened reader, with size and shape caps, and an untouched document leaves byte for byte.
+  <!-- changesets: xml-format -->
 
 The changelog lists each once it is released.
 
@@ -184,6 +200,8 @@ node dist/bin/pathways.mjs --version
 - `src/`: the engine, its connectors, storage, encryption and the `pathways` command.
 - `test/`: the test suites.
 - `templates/starter/`: the starter project `pathways init` writes.
+- `examples/`: example projects, each with its tests and a page in `docs-content/`.
+- `examples/docker-compose/`: the engine under Docker Compose, beside PostgreSQL.
 - `docs-content/`: the documentation pages.
 - `bench/`: the benchmark suites.
 - `scripts/`: the repository's own scripts.
@@ -204,6 +222,10 @@ The pages live in this repository's
   before you run Pathways for real.
 - [The security model](https://github.com/cosyte/pathways/blob/main/docs-content/security-model.md):
   what Pathways does to protect the data it moves and stores, and what stays with you.
+- [Run Pathways with Docker Compose](https://github.com/cosyte/pathways/blob/main/docs-content/run-with-docker-compose.md):
+  the engine beside PostgreSQL, from
+  [`examples/docker-compose/`](https://github.com/cosyte/pathways/tree/main/examples/docker-compose),
+  with a synthetic message sent through.
 - [Testing and quality](https://github.com/cosyte/pathways/blob/main/docs-content/testing-and-quality.md)
   and [Performance](https://github.com/cosyte/pathways/blob/main/docs-content/performance.md).
 

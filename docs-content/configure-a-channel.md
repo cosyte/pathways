@@ -45,7 +45,7 @@ destinations:
 ```
 
 - **`format`** says how the transform receives each message: `hl7v2` (the default), `fhir`, `x12`,
-  `ccda`, `json`, `text` or `csv`. See [Handle FHIR, X12, C-CDA, JSON, CSV and text](./work-with-formats.md).
+  `ccda`, `json`, `text`, `csv` or `xml`. See [Handle FHIR, X12, C-CDA, JSON, CSV, XML and text](./work-with-formats.md).
 - **`source`** names exactly one of `file`, `http`, `mllp` or `module` (your own).
 - **`transform`** is optional. Without one, each message passes through as it arrived.
 - **`destinations`** is a list. Each output of the transform goes to every destination, and each
@@ -77,6 +77,7 @@ defaults:
 | ------------------- | ------- | ------------------------------------- | --------------------------------------------------------------------- |
 | `timeout`           | `5s`    | `defaults`, channel                   | how long one message's transform may run                              |
 | `memory`            | `256MB` | `defaults`, channel                   | the memory cap of the channel's transform worker                      |
+| `scriptTimeout`     | none    | `defaults`, channel                   | how long `onStart` and `onStop` may run; the `timeout` unless set     |
 | `onStoreFailure`    | `close` | `defaults`, channel, MLLP source      | what an MLLP source does when a message cannot be stored              |
 | `ackTimeout`        | `10s`   | `defaults`, channel, MLLP destination | how long an MLLP destination waits to connect, then for an ACK        |
 | `retention`         | `30d`   | `defaults`, channel                   | how long a done message is kept after its last activity               |

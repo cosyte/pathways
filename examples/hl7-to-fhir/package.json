@@ -1,0 +1,16 @@
+{
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "key": "node scripts/dev-key.ts",
+    "receiver": "node scripts/receiver.ts",
+    "start": "pathways start",
+    "test": "pathways test"
+  },
+  "devDependencies": {
+    "@cosyte/pathways": "^0.0.3"
+  }
+}

@@ -2,7 +2,7 @@
 id: pass-messages-through-without-storing
 title: Pass messages through without storing them
 sidebar_label: Store nothing
-description: "Run a channel that stores no message: each one is transformed and delivered while its sender waits, and the sender is answered only once every destination accepted it."
+description: "Run a channel that stores no message: the sender waits while each is transformed and delivered, and is answered once every destination accepted it."
 ---
 
 # Pass messages through without storing them
@@ -45,6 +45,19 @@ that throws, a receiver that answers `AE` or a 4xx) is answered so, and the send
 it again. A message with no usable MSH header is answered as on any channel, and counted
 `unreadable`. Over MLLP, `onStoreFailure` still says what a failure that may pass is answered with: by
 default it closes the connection without an ACK.
+
+A destination with its own `transform:` is sent what that transform made, as on a stored channel,
+and nothing when it filters the message; the pass counts as filtered only when every destination's
+transform filtered it. When one destination's transform throws, the others are still sent the
+message, and the sender is answered as for a channel transform that throws.
+
+A batch, a file or an HTTP body cut into pieces with `batch:`, passes one piece at a time, in order,
+and is answered as one message is by its first piece that does not pass. The pieces before that one
+were already sent to every destination, and are not undone. A piece refused for good stops the
+batch: the rest of it is not sent, an HTTP sender is answered 422, and the file moves into
+`errorDir`, or into the claim folder's `failed/` when `errorDir` cannot take it, so no pass reads it
+again and no piece is sent twice. A failure that may pass leaves the whole batch to be sent again, so
+the pieces before it are sent again too: a destination should take a repeated message.
 
 `Retry-After` is the wait the receiver asked for, when it asked, or else the channel's first retry
 wait (`retry.first`, 1 second by default), in whole seconds.

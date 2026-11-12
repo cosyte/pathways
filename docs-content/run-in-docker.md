@@ -135,6 +135,8 @@ docker run --rm -it --entrypoint /busybox/sh --volume "$PWD:/project" pathways:d
 
 - [Deploy the image](./deploy-the-image.md): your project's own image, built on this one, and
   rollbacks.
+- [Run Pathways with Docker Compose](./run-with-docker-compose.md): the image beside PostgreSQL, with
+  a synthetic message sent through.
 - [Store messages in a database server](./store-messages-in-a-database.md).
 - [Check status and health](./check-status-and-health.md): the health endpoint, for a monitor, and
   the probe listener, for a load balancer or an orchestrator.

@@ -70,8 +70,9 @@ accepts. These are left to `pathways validate` and `start`:
 
 - a URL that is not `http://` or `https://`, or that holds a user name or password;
 - the headers: a credential written as a value rather than `{ env: NAME }`, a header Pathways sets
-  itself, a header name or value HTTP does not allow, and a `resendHeader` that `headers` already
-  sets;
+  itself, a header name or value HTTP does not allow, and a `resendHeader` or `idempotencyHeader`
+  that `headers` already sets;
+- an HTTP destination's URL placeholders and `query` values, and its `allowNetworks` entries;
 - that `current` names a key in `keys`, and that no two keys share an id;
 - a hook `timeout` of zero;
 - that a channel's `name` matches its folder;

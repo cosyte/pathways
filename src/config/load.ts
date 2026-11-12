@@ -5,12 +5,16 @@ import { parse as parseYaml, YAMLParseError } from "yaml";
 import type { z } from "zod";
 
 import { normalisePath } from "../connectors/http-path.js";
+import { alikeDestinations } from "../engine/destination-key.js";
 import { secretSourceOf, secretUses, type SecretSourceYaml } from "../secrets/sources.js";
+import { type Env, processEnv, type VariableName } from "../env.js";
+import { channelGraphProblems } from "./channel-graph.js";
 import { referencesIn, resolvingEnv, variableAt, type EnvReference } from "./env-ref.js";
 import { DEFAULT_INDEX_BITS, isLowEntropyKey } from "./meta-index.js";
 import {
   BUILT_IN_SECRET_PROVIDERS,
   channelSchema,
+  DEFAULT_BATCH_HOLD_MS,
   DEFAULT_DATABASE_CONNECT_TIMEOUT_MS,
   DEFAULT_DATABASE_FILE,
   DEFAULT_DATABASE_URL_ENV,
@@ -24,6 +28,8 @@ import {
   DEFAULT_LEASE_TTL_MS,
   DEFAULT_DELIVERY_TIMEOUT_MS,
   DEFAULT_MAX_BYTES,
+  DEFAULT_MAX_HOPS,
+  DEFAULT_MAX_PENDING,
   DEFAULT_MIN_AGE_MS,
   DEFAULT_POLL_DEADLINE_MS,
   DEFAULT_READ_TRIES,
@@ -41,6 +47,7 @@ import {
   DEFAULT_TCP_TIMEOUT_MS,
   projectSchema,
   type AzblobConfig,
+  type BatchConfig,
   type ChannelConfig,
   type ClientTlsFiles,
   type MllpClientTlsFiles,
@@ -119,7 +126,7 @@ export interface LoadOptions {
    * Where each `{ env: NAME }` setting is read from. Defaults to `process.env`. Only the variables
    * the files name are read: there is no scan for a prefix.
    */
-  readonly env?: Readonly<Record<string, string | undefined>> | undefined;
+  readonly env?: Env | undefined;
 }
 
 /**
@@ -134,7 +141,7 @@ export interface LoadOptions {
  * ```
  */
 export async function loadProject(root: string, options: LoadOptions = {}): Promise<ProjectConfig> {
-  const env = options.env ?? process.env;
+  const env = options.env ?? processEnv();
   const projectRoot = resolve(root);
   const problems: string[] = [];
   // The project folder itself shows as ".", so a problem never repeats the path the caller typed.
@@ -286,8 +293,35 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
         ...resolveDestination(destination, channelDir, channelSettings),
         // Set only when true, so a destination that sends resolves as it always has.
         ...(destination.dryRun === true ? { dryRun: true } : {}),
+        // Each set only when the block sets it, likewise.
+        ...(destination.name === undefined ? {} : { name: destination.name }),
+        ...(destination.transform === undefined
+          ? {}
+          : { transform: resolve(channelDir, destination.transform) }),
+        ...(destination.format === undefined ? {} : { format: destination.format }),
       }),
     );
+    // Two unnamed destinations of one kind and target would share one identity, and a pending
+    // delivery or a resend could reach the wrong one after either is removed or moved.
+    const alike = alikeDestinations(projectRoot, destinations).map(
+      ([index, earlier]) =>
+        `${show(file)}: destinations.${index}: sends where destinations.${earlier} sends, and neither has a name:; give each a name: so each keeps its own deliveries`,
+    );
+    if (alike.length > 0) {
+      problems.push(...alike);
+      continue;
+    }
+    const missingTransforms: string[] = [];
+    for (const [index, destination] of destinations.entries()) {
+      if (destination.transform === undefined || (await exists(destination.transform))) continue;
+      missingTransforms.push(
+        `${show(file)}: destinations.${index}.transform: ${absent(destination.transform, `destinations.${index}.transform`, channelEnv, show)}`,
+      );
+    }
+    if (missingTransforms.length > 0) {
+      problems.push(...missingTransforms);
+      continue;
+    }
     const channelRetry: RetryLevel = { key: "retry", block: channel.retry, fromEnv: channelEnv };
     const badRetry = [
       ...retryProblems(show(file), [channelRetry, projectRetry], channelSettings.retry),
@@ -377,6 +411,8 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
       dir: channelDir,
       format,
       ...(channel.csv === undefined ? {} : { csv: channel.csv }),
+      ...(channel.hl7v2 === undefined ? {} : { hl7v2: channel.hl7v2 }),
+      ...(channel.xml === undefined ? {} : { xml: channel.xml }),
       source,
       transform,
       destinations,
@@ -390,6 +426,20 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
     });
   }
 
+  if (problems.length === 0) {
+    problems.push(
+      ...channelGraphProblems(
+        channels.map((channel) => ({
+          name: channel.name,
+          takesHandOffs: channel.source.kind === "channel",
+          routed: channel.source.kind === "channel" && channel.source.routed,
+          targets: channel.destinations.flatMap((destination, index) =>
+            destination.kind === "channel" ? [{ index, name: destination.channel }] : [],
+          ),
+        })),
+      ),
+    );
+  }
   if (problems.length === 0 && channels.length === 0) {
     problems.push(
       `${show(channelsDir)}: no channels; each channel lives in channels/<name>/channel.yaml`,
@@ -567,9 +617,17 @@ function resolveSource(
   dir: string,
   settings: Settings,
 ): ChannelConfig["source"] {
-  const { http, mllp, tcp } = source;
+  const { http, mllp, tcp, channel } = source;
   const module = resolveModule(source, dir);
   if (module !== undefined) return module;
+  if (channel !== undefined) {
+    return {
+      kind: "channel",
+      routed: channel.routed === true,
+      maxPending: channel.maxPending ?? DEFAULT_MAX_PENDING,
+      maxHops: channel.maxHops ?? DEFAULT_MAX_HOPS,
+    };
+  }
   if (tcp !== undefined) {
     const { reply } = tcp;
     return {
@@ -623,6 +681,7 @@ function resolveSource(
       response: resolveSourceResponse(http.response, dir),
       maxBytes: http.maxBytes ?? DEFAULT_MAX_BYTES,
       contextHeaders: (http.contextHeaders ?? []).map((name) => name.toLowerCase()),
+      ...(http.batch === undefined ? {} : { batch: resolveBatch(http.batch, "fail") }),
     };
   }
   // The schema lets exactly one kind through, so a source that is not HTTP is a file source.
@@ -652,6 +711,28 @@ function resolveSource(
     readTries: file.readTries ?? DEFAULT_READ_TRIES,
     sftp,
     ...objects,
+    ...(file.batch === undefined ? {} : { batch: resolveBatch(file.batch, "hold") }),
+  };
+}
+
+/** A source's `batch:`, resolved: the delimiter as UTF-8 bytes, and the defaults filled in. */
+function resolveBatch(
+  batch: {
+    readonly split: BatchConfig["split"];
+    readonly delimiter?: string | undefined;
+    readonly maxFileSize?: number | undefined;
+    readonly onIncomplete?: BatchConfig["onIncomplete"] | undefined;
+    readonly holdFor?: number | undefined;
+  },
+  incomplete: BatchConfig["onIncomplete"],
+): BatchConfig {
+  return {
+    split: batch.split,
+    delimiter:
+      batch.delimiter === undefined ? undefined : new TextEncoder().encode(batch.delimiter),
+    maxFileSize: batch.maxFileSize,
+    onIncomplete: batch.onIncomplete ?? incomplete,
+    holdForMs: batch.holdFor ?? DEFAULT_BATCH_HOLD_MS,
   };
 }
 
@@ -803,9 +884,12 @@ function resolveConnector(
   dir: string,
   settings: Settings,
 ): ChannelConfig["destinations"][number] {
-  const { http, mllp, smtp, tcp } = destination;
+  const { http, mllp, smtp, tcp, channel } = destination;
   const module = resolveModule(destination, dir);
   if (module !== undefined) return module;
+  if (channel !== undefined) {
+    return { kind: "channel", channel: channel.name, carryMeta: channel.carryMeta ?? [] };
+  }
   if (smtp !== undefined) {
     return resolveSmtp(smtp, dir, destination.timeout ?? DEFAULT_DELIVERY_TIMEOUT_MS);
   }
@@ -846,6 +930,11 @@ function resolveConnector(
     ...resolveHttpClient(http, dir),
     timeoutMs: http.timeout ?? DEFAULT_HTTP_TIMEOUT_MS,
     resendHeader: http.resendHeader,
+    method: http.method ?? "POST",
+    query: http.query ?? {},
+    idempotencyHeader: http.idempotencyHeader,
+    allowNetworks: http.allowNetworks ?? [],
+    ack: http.ack,
   };
 }
 
@@ -932,7 +1021,7 @@ function resolveHttpClient(http: Omit<HttpClientYaml, "timeout">, dir: string): 
 function resolveListener(
   listener: ListenerYaml,
   dir: string,
-  defaultTokenEnv: string,
+  defaultTokenEnv: VariableName,
 ): ListenerConfig {
   const { tls } = listener;
   let auth: EndpointAuth;
@@ -1012,6 +1101,7 @@ function mergeSettings(
   override: {
     timeout?: number | undefined;
     memory?: number | undefined;
+    scriptTimeout?: number | undefined;
     pollInterval?: number | undefined;
     onStoreFailure?: OnStoreFailure | undefined;
     ackTimeout?: number | undefined;
@@ -1026,6 +1116,10 @@ function mergeSettings(
   return {
     timeoutMs: override.timeout ?? base.timeoutMs,
     memoryMb: override.memory ?? base.memoryMb,
+    // Set only when written, so settings without it resolve as they always have.
+    ...((override.scriptTimeout ?? base.scriptTimeoutMs) === undefined
+      ? {}
+      : { scriptTimeoutMs: override.scriptTimeout ?? base.scriptTimeoutMs }),
     pollIntervalMs: override.pollInterval ?? base.pollIntervalMs,
     onStoreFailure: override.onStoreFailure ?? base.onStoreFailure,
     ackTimeoutMs: override.ackTimeout ?? base.ackTimeoutMs,

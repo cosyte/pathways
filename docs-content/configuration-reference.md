@@ -70,15 +70,18 @@ health:
 - Secrets keep their own meaning of `{ env: NAME }`: a token, a credential header, a connection URL
   or a master key is a [secret reference](#secrets), read when a command starts and never printed,
   and it takes no `default`. `plaintext`,
-  `encryption: none`, `auth: none`, a channel's `name` and `format`, and a block (`tls`, `options`)
+  `encryption: none`, `auth: none`, a channel's or a destination's `name` and `format`, and a block (`tls`, `options`)
   are not read from the environment: turning TLS, encryption or authentication off stays in the
   file, where the audit sees it. Nor are the names in an HTTP source's `contextHeaders`: which
   request headers reach a transform stays in the file, where a credential header is refused at load.
   Nor is a channel's `index:` block: which `ctx.meta` keys are stored as searchable tags, and how
   many bits each keeps, stays in the file, where the audit sees it. Nor is an SFTP block's
   `weakAlgorithms`: turning a SHA-1 algorithm back on stays in the file too. Nor is the health
-  block's `metrics.allowUnauthenticated`: opening `/metrics` to anyone stays in the file too. Nor is a `csv` channel's
-  `csv:` block: how its bodies are read and written belongs with its `format`.
+  block's `metrics.allowUnauthenticated`: opening `/metrics` to anyone stays in the file too. Nor
+  are a channel destination's `name` and `carryMeta`: the links between channels, which start checks
+  for loops, and the identifiers a message carries across them, stay in the file. Nor is a `csv`
+  channel's `csv:` block, an `hl7v2` channel's `hl7v2:` block or an `xml` channel's `xml:` block:
+  how its bodies are read and written belongs with its `format`.
 - `pathways validate --print` prints the configuration as `start` reads it, with every setting the
   environment gave and the variable it named; see
   [Command reference](./command-reference.md#pathways-validate). The query string of a URL read
@@ -168,21 +171,22 @@ See [Store messages in a database server](./store-messages-in-a-database.md).
 
 ### Settings
 
-`defaults:` in `pathways.yaml` sets these for every channel. A channel overrides the first six, and
+`defaults:` in `pathways.yaml` sets these for every channel. A channel overrides the first seven, and
 `retry`, at the top level of its `channel.yaml`; an MLLP source overrides `onStoreFailure`, an MLLP
 destination `ackTimeout`, and any destination `retry`.
 
-| Key                 | Type                  | Default | Meaning                                                                                                                                                                                                        |
-| ------------------- | --------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `timeout`           | duration              | `5s`    | how long one message's transform may run                                                                                                                                                                       |
-| `memory`            | memory size           | `256MB` | the memory cap of a channel's transform worker                                                                                                                                                                 |
-| `onStoreFailure`    | `close`, `AE` or `AR` | `close` | what an MLLP source answers when a message cannot be stored                                                                                                                                                    |
-| `ackTimeout`        | duration              | `10s`   | how long an MLLP destination waits to connect, then for each ACK                                                                                                                                               |
-| `retention`         | duration, or a block  | `30d`   | how long a done message is kept after its last activity, or `{ content, metadata, failed }` with `archive` and `audit` in the project; see [Set message retention](./set-message-retention.md#separate-clocks) |
-| `resendFlag`        | boolean               | `true`  | write a marker before each send, so a resend after a crash is flagged; see [Delivery and errors](./delivery-and-errors.md#a-resend-after-a-crash-is-flagged)                                                   |
-| `pollInterval`      | duration              | `1s`    | how often the engine looks for new work, and polls a source that sets no [`poll`](#poll-schedule); project only                                                                                                |
-| `retentionInterval` | duration              | `1h`    | how often a running engine runs retention; project only                                                                                                                                                        |
-| `retry`             | see [Retry](#retry)   | below   | how a failed delivery is retried                                                                                                                                                                               |
+| Key                 | Type                  | Default | Meaning                                                                                                                                                                                                                                                 |
+| ------------------- | --------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `timeout`           | duration              | `5s`    | how long one message's transform may run                                                                                                                                                                                                                |
+| `memory`            | memory size           | `256MB` | the memory cap of a channel's transform worker                                                                                                                                                                                                          |
+| `scriptTimeout`     | duration              | none    | how long a transform module's `onStart` may run in each new worker, and its `onStop` when the worker stops; the `timeout` unless set; see [Transform and filter messages](./transform-and-filter-messages.md#run-code-when-the-worker-starts-and-stops) |
+| `onStoreFailure`    | `close`, `AE` or `AR` | `close` | what an MLLP source answers when a message cannot be stored                                                                                                                                                                                             |
+| `ackTimeout`        | duration              | `10s`   | how long an MLLP destination waits to connect, then for each ACK                                                                                                                                                                                        |
+| `retention`         | duration, or a block  | `30d`   | how long a done message is kept after its last activity, or `{ content, metadata, failed }` with `archive` and `audit` in the project; see [Set message retention](./set-message-retention.md#separate-clocks)                                          |
+| `resendFlag`        | boolean               | `true`  | write a marker before each send, so a resend after a crash is flagged; see [Delivery and errors](./delivery-and-errors.md#a-resend-after-a-crash-is-flagged)                                                                                            |
+| `pollInterval`      | duration              | `1s`    | how often the engine looks for new work, and polls a source that sets no [`poll`](#poll-schedule); project only                                                                                                                                         |
+| `retentionInterval` | duration              | `1h`    | how often a running engine runs retention; project only                                                                                                                                                                                                 |
+| `retry`             | see [Retry](#retry)   | below   | how a failed delivery is retried                                                                                                                                                                                                                        |
 
 #### Retry
 
@@ -354,20 +358,22 @@ by key. See [Use the message context](./use-the-message-context.md).
 
 ## channel.yaml
 
-| Key                                                              | Type                                                                                                                                                                                     | Default                                              |
-| ---------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
-| `name`                                                           | lowercase letters, digits and hyphens                                                                                                                                                    | the folder's name; must match it                     |
-| `format`                                                         | `hl7v2`, `fhir`, `x12`, `ccda`, `json`, `text` or `csv`                                                                                                                                  | `hl7v2`                                              |
-| `csv`                                                            | how a `csv` channel reads and writes; see [Read delimited and fixed-width text](./work-with-formats.md#read-delimited-and-fixed-width-text)                                              | comma-delimited, with a header                       |
-| `source`                                                         | exactly one [source](#sources)                                                                                                                                                           | required                                             |
-| `transform`                                                      | path to the transform module                                                                                                                                                             | none: messages pass through                          |
-| `destinations`                                                   | a list of at least one [destination](#destinations)                                                                                                                                      | required                                             |
-| `hooks`                                                          | a list of [hooks](#hooks)                                                                                                                                                                | none                                                 |
-| `storage`                                                        | `{ content: keep }`, `{ content: dropAfterDelivery }`, or `{ content: none, passTimeout }`; see [Pass messages through without storing them](./pass-messages-through-without-storing.md) | the project's `storage.content`; `passTimeout` `30s` |
-| `config`                                                         | see [Transform configuration](#transform-configuration)                                                                                                                                  | the project's, key by key                            |
-| `index`                                                          | a list of `ctx.meta` keys, each a key or `{ key, bits }`; `bits` 4 to 32, default 12; see [Search messages by metadata](./search-messages-by-metadata.md)                                | none                                                 |
-| `timeout`, `memory`, `onStoreFailure`, `ackTimeout`, `retention` | see [Settings](#settings)                                                                                                                                                                | the project's                                        |
-| `resendFlag`, `retry`                                            | see [Settings](#settings)                                                                                                                                                                | the project's                                        |
+| Key                                                              | Type                                                                                                                                                                                        | Default                                              |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| `name`                                                           | lowercase letters, digits and hyphens                                                                                                                                                       | the folder's name; must match it                     |
+| `format`                                                         | `hl7v2`, `fhir`, `x12`, `ccda`, `json`, `text`, `csv` or `xml`                                                                                                                              | `hl7v2`                                              |
+| `csv`                                                            | how a `csv` channel reads and writes; see [Read delimited and fixed-width text](./work-with-formats.md#read-delimited-and-fixed-width-text)                                                 | comma-delimited, with a header                       |
+| `hl7v2`                                                          | how an `hl7v2` channel reads and writes: `assumeCharset`, the character set to assume when MSH-18 is blank; see [Character sets in HL7 v2](./work-with-formats.md#character-sets-in-hl7-v2) | none: a blank MSH-18 means ASCII                     |
+| `xml`                                                            | the caps an `xml` channel reads under: `maxBytes`, `maxDepth` and `maxElements`; see [Read XML](./work-with-formats.md#read-xml)                                                            | 10 MiB, 1000 deep, 1000000 elements                  |
+| `source`                                                         | exactly one [source](#sources)                                                                                                                                                              | required                                             |
+| `transform`                                                      | path to the transform module                                                                                                                                                                | none: messages pass through                          |
+| `destinations`                                                   | a list of at least one [destination](#destinations)                                                                                                                                         | required                                             |
+| `hooks`                                                          | a list of [hooks](#hooks)                                                                                                                                                                   | none                                                 |
+| `storage`                                                        | `{ content: keep }`, `{ content: dropAfterDelivery }`, or `{ content: none, passTimeout }`; see [Pass messages through without storing them](./pass-messages-through-without-storing.md)    | the project's `storage.content`; `passTimeout` `30s` |
+| `config`                                                         | see [Transform configuration](#transform-configuration)                                                                                                                                     | the project's, key by key                            |
+| `index`                                                          | a list of `ctx.meta` keys, each a key or `{ key, bits }`; `bits` 4 to 32, default 12; see [Search messages by metadata](./search-messages-by-metadata.md)                                   | none                                                 |
+| `timeout`, `memory`, `onStoreFailure`, `ackTimeout`, `retention` | see [Settings](#settings)                                                                                                                                                                   | the project's                                        |
+| `resendFlag`, `retry`, `scriptTimeout`                           | see [Settings](#settings)                                                                                                                                                                   | the project's                                        |
 
 A channel with an MLLP source or destination must have the format `hl7v2`. A channel with a tcp
 source or destination and the format `hl7v2`, said or by default, loads with a warning: tcp sends no
@@ -375,8 +381,8 @@ HL7 ACK, so HL7 v2 with ACKs goes over MLLP.
 
 ### Sources
 
-Exactly one of `file`, `http`, `mllp`, `tcp` or `module`. A `file` or `module` source may add `poll` beside
-it.
+Exactly one of `file`, `http`, `mllp`, `tcp`, `channel` or `module`. A `file` or `module` source may add `poll`
+beside it.
 
 #### Poll schedule
 
@@ -443,6 +449,7 @@ error's code when it has one, rather than as an expression of the wrong shape.
 | `sftp`          | an [SFTP block](#sftp-block)             | none       | read `dir` on an SFTP server; `dir` and `errorDir` are its paths     |
 | `s3`            | an [S3 block](#s3-block)                 | none       | read objects in an S3 bucket; `dir` is the key prefix                |
 | `azblob`        | an [Azure Blob block](#azure-blob-block) | none       | read blobs in an Azure Blob Storage container; `dir` is the prefix   |
+| `batch`         | a [batch block](#batch-block)            | none       | read each file as many messages rather than one                      |
 
 With `s3` or `azblob`, `keepProcessed`, `doneFile`, `errorDir` and `readTries` are refused: an object
 store claims by a marker and moves no file. At most one of `sftp`, `s3` and `azblob`.
@@ -475,6 +482,7 @@ A [listener](#listener), and:
 | `response`       | `ack`, or `{ status, contentType, headers, body }` | 202 with the id |
 | `maxBytes`       | byte size                                          | `10MB`          |
 | `contextHeaders` | a list of header names                             | none            |
+| `batch`          | a [batch block](#batch-block)                      | none            |
 
 Its token is read from `PATHWAYS_HTTP_TOKEN` when `auth` is not set. `response: ack` needs the format
 `hl7v2` and takes POST alone. A fixed `response` has a 2xx `status`, an optional `contentType`,
@@ -556,14 +564,26 @@ Either is framed as messages are. See [Send and receive over TCP](./send-and-rec
 
 Hex goes in quotes, two digits a byte, such as `"0d0a"`: unquoted, YAML reads `10` as a number.
 
+#### Channel source
+
+`channel: {}`: the channel takes in only what other channels hand it, through a
+[channel destination](#channel-destination) or `ctx.route`. See
+[Route messages between channels](./route-between-channels.md).
+
+| Key          | Type                   | Default | Meaning                                                                                                    |
+| ------------ | ---------------------- | ------- | ---------------------------------------------------------------------------------------------------------- |
+| `routed`     | boolean                | `false` | only `ctx.route` feeds this channel, so start looks for no channel destination naming it                   |
+| `maxPending` | a whole number above 0 | `10000` | how many messages may wait for the transform before a hand-off into the channel waits and is tried again   |
+| `maxHops`    | a whole number above 0 | `8`     | how many hand-offs in a row a message may have come through to reach it; past it, `ERR_PATHWAYS_HOP_LIMIT` |
+
 #### Module source
 
 `module: path`, with `options:` any mapping handed to its factory.
 
 ### Destinations
 
-Each entry is exactly one of `file`, `http`, `mllp`, `tcp`, `smtp` or `module`, and may add a [`retry`](#retry)
-block of its own and `dryRun`, beside that key:
+Each entry is exactly one of `file`, `http`, `mllp`, `tcp`, `smtp`, `channel` or `module`, and may add a
+[`retry`](#retry) block of its own, `dryRun`, `name`, `transform` and `format`, beside that key:
 
 ```yaml title="channels/results-out/channel.yaml"
 source:
@@ -576,6 +596,11 @@ destinations:
 | Key      | Type    | Default | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | -------- | ------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `dryRun` | boolean | `false` | transform and record each output, mark its delivery `dry-run`, and never send it: no connector is built, so no TLS file is read and no connection opened, and none of its secrets is read or resolved at start, a provider's (`secret:`) included, so a missing or expired one does not stop the start. Takes an environment reference. When `dryRun` is read from an environment variable, setting that variable to `false` makes the destination send for real, and the audit log does not record that change |
+
+`name` (lowercase letters, digits and hyphens, unique in the channel), `transform` (a module path,
+relative to `channel.yaml`) and `format` (one of the channel formats, the channel's by default) give a
+destination a transform of its own: see
+[Transform or filter for one destination](./transform-and-filter-messages.md#transform-or-filter-for-one-destination).
 
 A `file`, `smtp` or `module` destination may also set `timeout`, a duration (`30s` by default): how long one
 delivery may take in all before it is cut off and retried. See
@@ -678,14 +703,19 @@ A file source's or destination's `azblob:`. The identity is Azure's default chai
 
 #### HTTP destination
 
-| Key            | Type                                                 | Default                  |
-| -------------- | ---------------------------------------------------- | ------------------------ |
-| `url`          | an `https://` URL, or `http://` with `plaintext`     | required                 |
-| `headers`      | a mapping of names to a string or a secret reference | none                     |
-| `tls`          | [client TLS](#tls)                                   | Node.js's built-in roots |
-| `plaintext`    | boolean, only with an `http://` URL                  | `false`                  |
-| `timeout`      | duration                                             | `30s`                    |
-| `resendHeader` | a header name                                        | none                     |
+| Key                 | Type                                                    | Default                  |
+| ------------------- | ------------------------------------------------------- | ------------------------ |
+| `url`               | an `https://` URL, or `http://` with `plaintext`        | required                 |
+| `method`            | `POST`, `PUT`, `PATCH`, `DELETE` or `GET`               | `POST`                   |
+| `query`             | a mapping of names to text, which may hold placeholders | none                     |
+| `headers`           | a mapping of names to a string or a secret reference    | none                     |
+| `tls`               | [client TLS](#tls)                                      | Node.js's built-in roots |
+| `plaintext`         | boolean, only with an `http://` URL                     | `false`                  |
+| `timeout`           | duration                                                | `30s`                    |
+| `resendHeader`      | a header name                                           | none                     |
+| `idempotencyHeader` | a header name                                           | none                     |
+| `allowNetworks`     | a list of addresses or CIDR ranges                      | none                     |
+| `ack`               | `xml`                                                   | none: the status decides |
 
 The URL may not hold a user name or password. A header whose name holds `auth`, `cookie`, `token`,
 `secret`, `password`, `key`, `signature` or `credential` must be a secret reference. `Content-Length`,
@@ -697,11 +727,43 @@ off by a stop. Its value is the number of attempts before, such as `1`. It may n
 headers above, `Content-Type`, or a name `headers` sets. See
 [Delivery and errors](./delivery-and-errors.md#a-resend-after-a-crash-is-flagged).
 
+`method` is how each output is sent; `GET` and `DELETE` send no body, and no `Content-Type`. The
+`url`'s path may hold placeholders, a [`ctx.meta`](./use-the-message-context.md) key in braces
+such as `{mrn}`, and so may each `query` value. Each is filled per message, percent-encoded, so a
+value never changes the scheme, the host or the port; a placeholder in the host, the port or the
+`url`'s own query is refused when the configuration loads. A key the message's metadata lacks, an
+empty value in the path, or a value of `.` or `..` fails that delivery for good, with an error that
+names the key and never the value. Values in a URL reach the server's and any proxy's logs: put
+identifiers there only when the receiver's API asks for them.
+
+`idempotencyHeader` names a header sent on every attempt, its value `<messageId>-<seq>`, the same
+for each attempt of one output, so a receiver can drop a copy it already has. It follows the
+`resendHeader` rules, and may not be the same name.
+
+Every connection is checked against the address it connects to, each time it connects: a host that
+resolves to a loopback (`127.0.0.0/8`, `::1`), link-local (`169.254.0.0/16`, `fe80::/10`, where
+cloud metadata services answer), private (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`,
+`100.64.0.0/10`, `fc00::/7`) or unspecified address is refused, and the delivery retried with the
+code `ADDRESS_REFUSED`, unless `allowNetworks` names its network, such as `10.20.0.0/16` or
+`127.0.0.1`. A name that resolves to some refused addresses and some allowed ones connects to an
+allowed one.
+
 A 2xx is delivered; a 408, 425, 429, 5xx, a network error or no answer within `timeout` is retried,
 waiting longer when a 429 or a 503 asks with `Retry-After`, never more than `retry.max` (5 minutes
 by default); a 3xx is held, never followed, and retried every `retry.max`; a 101 or any other 4xx
 fails the delivery for good. The destination's [`retry`](#retry) block sets the waits and any limit. Any other 1xx is an interim answer: the attempt waits for the final
 answer after it, and is retried when none comes within `timeout` or the connection closes. See [Send and receive over HTTP](./send-and-receive-http.md).
+
+With `ack: xml`, a 2xx answer is read as an HL7 v2 XML acknowledgement and settles the delivery:
+`AA` or `CA` delivered, `AR` or `CR` failed, and `AE` or `CE`, an answer that is not exactly one
+acknowledgement or one that answers another `MSH.10`, retried. `AE` and `AR` settle the other way
+round from an MLLP destination. A message sent as XML the reader refuses fails at once, unsent,
+with the reason `SENT_XML_UNREADABLE`, and one sent as XML without exactly one `MSH` holding one
+`MSH.10` with the reason `SENT_XML_NO_CONTROL_ID`; the control ID check is skipped only for a body that is not
+XML at all. The destination's format must be `hl7v2` or `text`, and its `method` `POST`, `PUT` or
+`PATCH`: `GET` and `DELETE` send no body, so `ack: xml` with either is refused when the
+configuration loads. See
+[Settle by an HL7 v2 XML acknowledgement](./send-and-receive-http.md#settle-by-an-hl7-v2-xml-acknowledgement).
 
 #### MLLP destination
 
@@ -760,6 +822,19 @@ are `{{ messageId }}`, `{{ seq }}`, `{{ channel }}` and `{{ meta.<key> }}`. The 
 always verified, with TLS 1.2 or later. [Send email over SMTP](./send-email-over-smtp.md) says what
 each answer means.
 
+#### Channel destination
+
+`channel: { name, carryMeta }` hands each output to channel `name` as a new message of its own, in
+the same transaction as the delivery's record. That channel's source is [`channel:`](#channel-source).
+
+| Key         | Type                      | Default  | Meaning                                                                      |
+| ----------- | ------------------------- | -------- | ---------------------------------------------------------------------------- |
+| `name`      | a channel's name          | required | the channel the outputs are handed to                                        |
+| `carryMeta` | a list of `ctx.meta` keys | none     | the keys copied from the message to each new one, by name; never all of them |
+
+Start refuses a `name` that is no channel with a `channel:` source, and channel destinations that
+make a loop. See [Route messages between channels](./route-between-channels.md).
+
 #### Module destination
 
 `module: path`, with `options:` any mapping handed to its factory.
@@ -777,6 +852,19 @@ What the HTTP source and the health endpoint take:
 | `tls`       | [server TLS](#tls)                          | required unless `plaintext`                                                         |
 | `plaintext` | boolean                                     | `false`                                                                             |
 | `auth`      | `none`, or `{ bearer: <secret reference> }` | mutual TLS when `tls.ca` is set, otherwise a bearer token from the default variable |
+
+### Batch block
+
+What a file or HTTP source's `batch:` takes. See
+[Read a batch file or body as many messages](./read-batch-files.md).
+
+| Key            | Type                          | Default                 | Meaning                                                                                        |
+| -------------- | ----------------------------- | ----------------------- | ---------------------------------------------------------------------------------------------- |
+| `split`        | `hl7`, `lines` or `delimiter` | required                | how a file or body is cut into messages, on its bytes                                          |
+| `delimiter`    | text, 1 to 64 characters      | required with delimiter | with `split: delimiter`, what each message ends at, as UTF-8                                   |
+| `maxFileSize`  | byte size                     | no limit                | a file source only: fail a larger file whole, with `BATCH_FILE_TOO_LARGE`                      |
+| `onIncomplete` | `hold`, `accept` or `fail`    | `hold`; `fail` for HTTP | with `split: hl7`, what a batch lacking a trailer or with a wrong count gets; HTTP has no hold |
+| `holdFor`      | duration                      | `5m`                    | with `onIncomplete: hold`, how long from its claim a file waits before it is failed            |
 
 ### TLS
 

@@ -73,7 +73,7 @@ async function bench(answer: Answer): Promise<Bench> {
   file: { dir: ../../data/inbox, minAge: 0 }
 transform: ./transform.ts
 destinations:
-  - http: { url: "${lab.url}", plaintext: true }
+  - http: { url: "${lab.url}", plaintext: true, allowNetworks: [127.0.0.1] }
 `,
     "channels/adt/transform.ts": LAB_TRANSFORM,
   });

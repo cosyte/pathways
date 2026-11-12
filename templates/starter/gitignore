@@ -6,3 +6,6 @@
 
 # Installed packages.
 node_modules/
+
+# Secrets for Docker Compose (compose.yaml). .env.example, with none, stays in git.
+/.env

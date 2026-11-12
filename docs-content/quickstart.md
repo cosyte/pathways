@@ -24,6 +24,7 @@ file. It writes:
 
 ```text
 .dockerignore
+.env.example
 .gitignore
 .pathways/dev.key
 Dockerfile
@@ -33,6 +34,7 @@ channels/adt-to-lab/tests/a01.hl7
 channels/adt-to-lab/tests/a08.expected.hl7
 channels/adt-to-lab/tests/a08.hl7
 channels/adt-to-lab/transform.ts
+compose.yaml
 package.json
 pathways.yaml
 ```
@@ -43,6 +45,8 @@ pathways.yaml
   `.gitignore` keeps `.pathways/` out of git, with the database beside it.
 - `Dockerfile` and `.dockerignore` build the project's own image on the Pathways image, with the
   channels inside: see [Deploy the image](./deploy-the-image.md).
+- `compose.yaml` and `.env.example` run the channel on the Pathways image under Docker Compose,
+  beside a PostgreSQL server: see [Run Pathways with Docker Compose](./run-with-docker-compose.md).
 - `channels/adt-to-lab/` is one channel: it reads HL7 v2 files from `data/adt-to-lab/in`, keeps only
   admissions (`ADT^A01`), sets the receiving application to `LAB`, and writes them to
   `data/adt-to-lab/out`.
@@ -131,6 +135,13 @@ to the audit log first.
 ## Next
 
 - [Write a channel](./write-a-channel.md) of your own, with its tests.
+- Run an example project, each on synthetic messages with its tests:
+  [HL7 v2 over MLLP in, HTTP out](./example-mllp-to-http.md),
+  [a file drop to SFTP](./example-file-to-sftp.md), [HL7 v2 to FHIR](./example-hl7-to-fhir.md),
+  [filter, then send to two destinations](./example-filter-and-route.md),
+  [replay after a failure](./example-replay-after-failure.md),
+  [a veterinary lab result to FHIR](./example-vet-lab-to-fhir.md), and
+  [a veterinary lab result as v2 XML over HTTPS](./example-vet-lab-to-v2-xml.md).
 - [Transform and filter messages](./transform-and-filter-messages.md): what a transform can return.
 - [Encrypt stored messages](./encrypt-stored-messages.md): the keys to use outside development.
 - [How delivery and errors work](./delivery-and-errors.md).

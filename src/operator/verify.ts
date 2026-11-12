@@ -6,13 +6,21 @@ import { transformConfigFor } from "../config/transform-config.js";
 import type { Env } from "../connectors/endpoint.js";
 import {
   ChannelWorker,
+  destinationSetups,
   TransformLoadError,
   type TransformOutcome,
 } from "../engine/channel-worker.js";
-import type { FailureSummary, MessageContext } from "../engine/worker-entry.js";
+import { destinationKeys } from "../engine/destination-key.js";
+import type { DestinationSetup, FailureSummary, MessageContext } from "../engine/worker-entry.js";
 import { EXIT } from "../exit.js";
+import { processEnv } from "../env.js";
 import type { MessageStore, MessageSummary } from "../storage/store.js";
-import { describeFailure, expectedName, joinOutputs } from "../testing/run-tests.js";
+import {
+  describeFailure,
+  destinationExpectedName,
+  expectedName,
+  joinOutputs,
+} from "../testing/run-tests.js";
 import type { AuditLog } from "./audit.js";
 import { compareOutputs, type OutputComparison } from "./difference.js";
 
@@ -60,6 +68,12 @@ type Outcome =
 /** One input, by message id or sample file, and its outcome. */
 type Result = ({ readonly message: number } | { readonly sample: string }) & Outcome;
 
+/**
+ * A result as it is gathered: on a channel with destination transforms, for the one destination
+ * named; without, for every destination, which were all recorded the same outputs.
+ */
+type Gathered = Result & { readonly destination?: number };
+
 /** How many stored messages are read and run between two audit writes. */
 const PAGE = 100;
 
@@ -69,7 +83,9 @@ const RECORDED = new Set(["transformed", "filtered"]);
 /**
  * `pathways verify`: runs inputs through the candidate project's transforms, in the same workers the
  * engine uses, and compares each output with the recorded one: the outputs stored for a message, or
- * the `.expected` file beside a sample. Prints, per channel and destination, how many were the same,
+ * the `.expected` file beside a sample. On a channel with destination transforms, each destination
+ * is compared on its own: what its transform gives now with the outputs stored for it, or with its
+ * own sample file, named as `pathways test` names it (a missing one expects a filter). Prints, per channel and destination, how many were the same,
  * different or failed, and for each that was not, where (an HL7 v2 field path, a JSON pointer or a
  * byte offset) or why, never a value. Exits 1 on any difference or failure, 4 when a message named
  * does not exist.
@@ -93,10 +109,12 @@ export async function verifyCommand(
     channel === undefined
       ? context.project.channels
       : context.project.channels.filter((c) => c.name === channel);
-  const runner = new Runner(context.project, context.env ?? process.env);
-  const results = new Map<string, Result[]>(channels.map((c) => [c.name, []]));
+  const env = context.env ?? processEnv();
+  const runner = new Runner(context.project, env);
+  const results = new Map<string, Gathered[]>(channels.map((c) => [c.name, []]));
   let skipped = 0;
   let missing = 0;
+  const notStored = { count: 0 };
   try {
     if (selection.kind === "samples") {
       for (const config of channels) {
@@ -108,7 +126,14 @@ export async function verifyCommand(
       if (store === undefined || audit === undefined) {
         throw new Error("verifying stored messages needs the store and its audit log");
       }
-      const stored = { store, audit, runner, results };
+      const stored = {
+        store,
+        audit,
+        runner,
+        results,
+        root: context.project.root,
+        notStored,
+      };
       if (selection.kind === "ids") {
         const counted = await verifyIds(stored, selection.ids, channel);
         skipped = counted.skipped;
@@ -122,7 +147,11 @@ export async function verifyCommand(
   } finally {
     await runner.stop();
   }
-  return report(context, channels, selection, results, { skipped, missing });
+  return report(context, channels, selection, results, {
+    skipped,
+    missing,
+    notStored: notStored.count,
+  });
 }
 
 /** The channels' workers, each started on first use and stopped at the end. */
@@ -168,9 +197,12 @@ class Runner {
       transformFile: config.transform,
       format: config.format,
       csv: config.csv,
+      hl7v2: config.hl7v2,
+      xml: config.xml,
       timeoutMs: config.settings.timeoutMs,
       memoryMb: config.settings.memoryMb,
       config: resolved.resolved,
+      destinations: destinationSetups(config),
     });
     try {
       await started.start();
@@ -195,19 +227,36 @@ interface Stored {
   readonly store: MessageStore;
   readonly audit: AuditLog;
   readonly runner: Runner;
-  readonly results: Map<string, Result[]>;
+  readonly results: Map<string, Gathered[]>;
+  /** The project's root, which unnamed destinations' keys are read from. */
+  readonly root: string;
+  /** Destinations of a stored message with nothing stored under their key, so not compared. */
+  readonly notStored: { count: number };
 }
 
-/** The outcome of one transform's outputs against the recorded ones. */
+/** The outcome of one transform's outputs against the recorded ones, compared in `format`. */
 function outcomeOf(
   config: ChannelConfig,
   outcome: TransformOutcome,
   recorded: readonly Uint8Array[],
+  format = config.format,
 ): Outcome {
   if (!outcome.ok) return { outcome: "failed", reason: describeFailure(outcome.failure, config) };
-  const compared: OutputComparison = compareOutputs(config.format, outcome.outputs, recorded);
+  const compared: OutputComparison = compareOutputs(format, outcome.outputs, recorded);
   if (compared.same) return { outcome: "same" };
   return { outcome: "different", output: compared.output, where: compared.where };
+}
+
+/**
+ * What one destination's transform gave in a run, as an outcome of its own: its outputs, or its
+ * failure. A failure of the whole run (the channel's transform, a timeout) is every destination's.
+ */
+function destinationOutcome(outcome: TransformOutcome, setup: DestinationSetup): TransformOutcome {
+  if (!outcome.ok) return outcome;
+  /* v8 ignore next 2 -- the worker replies for every destination it was given */
+  const result = outcome.destinations?.[setup.index];
+  if (result === undefined) return { ok: true, outputs: outcome.outputs };
+  return result.ok ? { ok: true, outputs: result.outputs } : { ok: false, failure: result.failure };
 }
 
 /**
@@ -216,7 +265,7 @@ function outcomeOf(
  * have fails without being read.
  */
 async function verifyBatch(stored: Stored, batch: readonly MessageSummary[]): Promise<void> {
-  const { store, audit, runner, results } = stored;
+  const { store, audit, runner, results, root } = stored;
   const known = batch.filter((m) => runner.config(m.channel) !== undefined);
   for (const message of batch) {
     if (runner.config(message.channel) !== undefined) continue;
@@ -233,33 +282,63 @@ async function verifyBatch(stored: Stored, batch: readonly MessageSummary[]): Pr
   );
   for (const message of known) {
     const config = runner.config(message.channel) as ChannelConfig;
-    const [body, recorded] = await Promise.all([
-      store.messageBody(message.id),
-      store.outputs(message.id),
-    ]);
+    const setups = destinationSetups(config);
+    const body = await store.messageBody(message.id);
     const list = listOf(results, message.channel);
     /* v8 ignore next 4 -- the message was listed a moment ago; retention can delete it meanwhile */
     if (body === undefined) {
       list.push({ message: message.id, outcome: "failed", reason: "deleted while verify ran" });
       continue;
     }
-    list.push({
-      message: message.id,
-      // The context of the run that recorded these outputs: generation 0 is the first run, and each
-      // replay or resend adds one. The source facts are not stored, as a replay has none.
-      ...outcomeOf(
-        config,
-        await runner.run(config, body, {
-          messageId: message.id,
-          attempt: message.generation + 1,
-          source: undefined,
-          meta: {},
-        }),
-        recorded,
-      ),
+    // The context of the run that recorded these outputs: generation 0 is the first run, and each
+    // replay or resend adds one. The source facts are not stored, as a replay has none.
+    const outcome = await runner.run(config, body, {
+      messageId: message.id,
+      attempt: message.generation + 1,
+      source: undefined,
+      meta: {},
     });
+    const current = (await store.deliveries(message.id)).filter(
+      (d) => d.generation === message.generation,
+    );
+    if (current.some((d) => d.destinationKey === undefined)) {
+      // Stored before deliveries recorded their destination, so with the same outputs for every
+      // destination. Without destination transforms, those are what the channel's transform gives
+      // and are compared once for all; with them, which destination each was for cannot be told.
+      list.push(
+        setups === undefined
+          ? { message: message.id, ...outcomeOf(config, outcome, await store.outputs(message.id)) }
+          : { message: message.id, outcome: "failed", reason: UNKNOWN_DESTINATION },
+      );
+      continue;
+    }
+    // Each destination against its own stored outputs, found by its key, never another
+    // destination's by its place in the list. With no deliveries at all, the channel's transform
+    // filtered the message, so every destination was stored nothing.
+    const keys = destinationKeys(root, config.destinations);
+    for (const [index, key] of keys.entries()) {
+      if (current.length > 0 && !current.some((d) => d.destinationKey === key)) {
+        stored.notStored.count += 1;
+        continue;
+      }
+      const setup = setups?.[index];
+      list.push({
+        message: message.id,
+        destination: index,
+        ...outcomeOf(
+          config,
+          setup === undefined ? outcome : destinationOutcome(outcome, setup),
+          current.length === 0 ? [] : await store.outputs(message.id, { key }),
+          setup?.format,
+        ),
+      });
+    }
   }
 }
+
+/** Why a stored message cannot be compared destination by destination. */
+const UNKNOWN_DESTINATION =
+  "destination-unknown: its outputs were stored before deliveries recorded their destination; replay it to compare";
 
 /** Verifies a channel's messages stored since `since`, a page at a time. Returns how many skipped. */
 async function verifySince(stored: Stored, channel: string, since: string): Promise<number> {
@@ -316,7 +395,7 @@ async function verifySamples(
   runner: Runner,
   config: ChannelConfig,
   dir: string,
-  results: Map<string, Result[]>,
+  results: Map<string, Gathered[]>,
 ): Promise<void> {
   const folder = join(dir, config.name);
   let names: string[];
@@ -329,7 +408,12 @@ async function verifySamples(
     return;
   }
   const list = listOf(results, config.name);
+  const setups = destinationSetups(config);
   for (const name of names) {
+    if (setups !== undefined) {
+      await verifySampleByDestination(runner, config, setups, folder, name, list);
+      continue;
+    }
     let expected: Uint8Array;
     try {
       expected = new Uint8Array(await readFile(join(folder, expectedName(name))));
@@ -346,13 +430,47 @@ async function verifySamples(
   }
 }
 
+/**
+ * Verifies one sample on a channel with destination transforms: each destination's outputs, joined
+ * as saved, against its own file, `<stem>.expected.<destination name or place from 1>.<ext>`; a
+ * destination with no file expects the sample filtered out.
+ */
+async function verifySampleByDestination(
+  runner: Runner,
+  config: ChannelConfig,
+  setups: readonly DestinationSetup[],
+  folder: string,
+  name: string,
+  list: Gathered[],
+): Promise<void> {
+  const outcome = await runner.run(config, new Uint8Array(await readFile(join(folder, name))));
+  for (const setup of setups) {
+    let expected: Uint8Array[];
+    try {
+      expected = [
+        new Uint8Array(await readFile(join(folder, destinationExpectedName(name, setup)))),
+      ];
+    } catch {
+      expected = [];
+    }
+    const own = destinationOutcome(outcome, setup);
+    const joined: TransformOutcome =
+      own.ok && own.outputs.length > 0 ? { ok: true, outputs: [joinOutputs(own.outputs)] } : own;
+    list.push({
+      sample: name,
+      destination: setup.index,
+      ...outcomeOf(config, joined, expected, setup.format),
+    });
+  }
+}
+
 /** Prints the report and returns the exit code. */
 function report(
   context: VerifyContext,
   channels: readonly ChannelConfig[],
   selection: VerifySelection,
-  results: Map<string, Result[]>,
-  counts: { readonly skipped: number; readonly missing: number },
+  results: Map<string, Gathered[]>,
+  counts: { readonly skipped: number; readonly missing: number; readonly notStored: number },
 ): number {
   const rows: {
     channel: string;
@@ -363,14 +481,22 @@ function report(
     results: Result[];
   }[] = [];
   const lines: string[] = [];
-  const total = [...results.values()].reduce((sum, list) => sum + list.length, 0);
+  // Each input once: a channel holds one result per destination compared.
+  const total = [...results.values()].reduce(
+    (sum, list) =>
+      sum + new Set(list.map((r) => ("message" in r ? `m${r.message}` : `s${r.sample}`))).size,
+    0,
+  );
   lines.push(`Verified ${total} ${noun(selection, total)} ${scope(selection)}.`);
   const unlisted = [...results.keys()].filter(
     (name) => !channels.some((config) => config.name === name),
   );
   for (const config of channels) {
-    const list = listOf(results, config.name);
+    const gathered = listOf(results, config.name);
     for (const destination of config.destinations.keys()) {
+      const list = gathered
+        .filter((result) => result.destination === undefined || result.destination === destination)
+        .map(({ destination: _destination, ...result }) => result);
       const tally = { same: 0, different: 0, failed: 0 };
       for (const result of list) tally[result.outcome] += 1;
       rows.push({ channel: config.name, destination, ...tally, results: list });
@@ -402,6 +528,11 @@ function report(
       `Skipped ${counts.skipped} with no recorded outputs (received, failed or cleared), or of another channel.`,
     );
   }
+  if (counts.notStored > 0) {
+    lines.push(
+      `Not compared: ${counts.notStored} ${counts.notStored === 1 ? "destination" : "destinations"} of a stored message with nothing stored for ${counts.notStored === 1 ? "it" : "them"} (added or renamed since), not-stored.`,
+    );
+  }
   const differs = rows.some((row) => row.different > 0 || row.failed > 0);
   if (context.json) {
     context.out(
@@ -409,6 +540,7 @@ function report(
         channels: rows.filter((row) => row.destination >= 0),
         unknown: rows.filter((row) => row.destination < 0).flatMap((row) => row.results),
         skipped: counts.skipped,
+        ...(counts.notStored === 0 ? {} : { notStored: counts.notStored }),
       })}\n`,
     );
   } else {
@@ -445,7 +577,7 @@ function describe(result: Problem): string {
 }
 
 /** The results of `channel`, made empty the first time. */
-function listOf(results: Map<string, Result[]>, channel: string): Result[] {
+function listOf(results: Map<string, Gathered[]>, channel: string): Gathered[] {
   let list = results.get(channel);
   if (list === undefined) {
     list = [];
