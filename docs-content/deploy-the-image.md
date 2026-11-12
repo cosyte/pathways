@@ -2,7 +2,7 @@
 id: deploy-the-image
 title: Deploy the image
 sidebar_label: Deploy the image
-description: "Build your project's own image on the published Pathways image, pinned by digest, with its channels tested at build time, and ship each change as a new image tag so a rollback is the tag before."
+description: "Build your project's image on the published Pathways image, pinned by digest and tested at build, and ship each change as a tag you can roll back from."
 ---
 
 # Deploy the image

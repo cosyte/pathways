@@ -10,6 +10,7 @@
 // works the same on Linux, macOS and Windows, where there is no SIGSTOP. A hard stop is SIGKILL
 // (TerminateProcess on Windows); SIGTERM is never sent here.
 import { spawn, type ChildProcess } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -124,6 +125,9 @@ async function project(database: TestDatabase, ttl: string, shared?: Project): P
     join(root, "pathways.yaml"),
     "encryption:\n  keys: [{ id: test, file: ./test.key }]\n  current: test\n" +
       `defaults:\n  pollInterval: 50ms\nlease:\n  ttl: ${ttl}\n` +
+      // Each process is a node of its own, as two engines on two hosts are, though two of them
+      // may run from this one project folder here.
+      "node:\n  id: { env: PATHWAYS_NODE_ID }\n" +
       block,
   );
   await writeFile(
@@ -181,6 +185,7 @@ function start(
         ...process.env,
         ...setup.env,
         NODE_NO_WARNINGS: "1",
+        PATHWAYS_NODE_ID: randomBytes(8).toString("hex"),
         ...(options.skewMs === undefined ? {} : { PATHWAYS_SKEW_MS: String(options.skewMs) }),
         ...options.env,
       },
