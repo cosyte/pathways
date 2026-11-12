@@ -107,25 +107,29 @@ one), and not a sandbox: a transform is your own trusted code.
 
 ## What the latest release ships
 
-What follows is in 0.0.2, the version on npm:
+What follows is in 0.0.3, the version on npm:
 
 - **Channels in git.** A channel is a YAML file that wires a source to its destinations. Its
   transform is a TypeScript file that receives the parsed message and returns what to send.
 - **Formats.** HL7 v2, FHIR R4 JSON, X12, and C-CDA arrive parsed, through Cosyte's open-source
-  [`@cosyte/*`](https://github.com/cosyte) libraries. JSON arrives as a value and anything else as
-  text.
-- **Connectors.** MLLP, HTTP, and files in a folder or on an SFTP server, in and out, over TLS by
-  default, with a bearer token or mutual TLS on every endpoint that listens.
+  [`@cosyte/*`](https://github.com/cosyte) libraries. CSV and fixed-width text arrive as a table.
+  JSON arrives as a value and anything else as text.
+- **Connectors.** MLLP, HTTP, TCP with your own framing, and files in a folder, on an SFTP server,
+  or on Amazon S3 and Azure Blob Storage, in and out, and an SMTP destination. Over TLS by default,
+  with a bearer token or mutual TLS on every endpoint that listens, and limits on MLLP connections
+  and message sizes.
 - **Nothing lost.** Every message is stored before it is acknowledged. When a destination is down,
   Pathways retries and keeps that destination's messages in order. A failed message can be replayed
-  once the transform is fixed.
+  once the transform is fixed, and every failed message in a scope at once, counted first and
+  resumable.
 - **Storage.** SQLite with no setup, or PostgreSQL, MySQL or MariaDB, and SQL Server, with every
-  stored message encrypted at rest.
+  stored message encrypted at rest, separate retention clocks, and sealed archives.
 - **Tests.** `pathways test` runs synthetic messages through a channel and compares the output with
   saved files, and `pathways validate` checks a project's configuration without its secrets.
 - **Operations.** An audit log of every operator action; commands to inspect, replay and clear
-  messages, and to pause, stop and reload one channel of a running engine; a health endpoint with
-  liveness and readiness probes; and a signed Docker image.
+  messages, and to pause, stop and reload one channel of a running engine; a bounded drain when the
+  engine is told to stop; a health endpoint with liveness and readiness probes; and a signed Docker
+  image.
 - **Yours to extend.** Your own sources, destinations, hooks, storage and key providers, each a
   TypeScript module named in the YAML.
 - **Security controls.** TLS in transit, encryption at rest, an audit log of operator actions, and no
@@ -136,17 +140,10 @@ What follows is in 0.0.2, the version on npm:
 
 ## In the next release
 
-These are on `main` and land in the next release, not in 0.0.2:
+These are on `main` and land in the next release, not in 0.0.3:
 
-- A TCP source and destination for feeds that are not MLLP, with your own framing.
-  <!-- changesets: tcp-connector -->
-- A CSV format, for delimited and fixed-width text. <!-- changesets: csv-format -->
-- An SMTP destination, and file sources and destinations on Amazon S3 and Azure Blob Storage.
-  <!-- changesets: smtp-destination, object-store-locations -->
-- A counted, resumable replay of every failed message in a scope, a bounded drain when the engine is
-  told to stop, limits on MLLP connections and message sizes, and separate retention clocks with
-  sealed archives.
-  <!-- changesets: bulk-replay, graceful-drain, mllp-options, retention-clocks-and-archive -->
+- The package description on npm no longer says Pathways is not yet out.
+  <!-- changesets: release-status -->
 
 The changelog lists each once it is released.
 
@@ -154,7 +151,7 @@ The changelog lists each once it is released.
 
 ## Status
 
-Early, and released: 0.0.2 is on npm. Each release is published with provenance from this
+Early, and released: 0.0.3 is on npm. Each release is published with provenance from this
 repository's release workflow, with its signed image. Watch or star the repository to follow along.
 
 Pathways is an open engine, MIT licensed and free to self-host. We plan to offer hosted, managed
