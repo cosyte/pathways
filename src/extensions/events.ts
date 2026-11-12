@@ -339,7 +339,8 @@ export type AuditEventAction =
   | "channel-stop"
   | "channel-halt"
   | "channel-reload"
-  | "verify";
+  | "verify"
+  | "bulk-replay";
 
 /**
  * An entry of the audit log, once it is stored: who did what, to which message, and how it ended.

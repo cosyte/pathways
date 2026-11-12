@@ -683,6 +683,11 @@ export interface RequeueRequest {
   readonly failure?: string | undefined;
   /** How many destinations the channel has now. */
   readonly destinations: number;
+  /**
+   * The generation the caller read. When set, storage also refuses with `changed` when the message
+   * was replayed or resent since, so a bulk replay never replays a message twice.
+   */
+  readonly expectedGeneration?: number | undefined;
 }
 
 /**
@@ -799,6 +804,7 @@ export const AUDIT_ACTIONS = [
   "channel-halt",
   "channel-reload",
   "verify",
+  "bulk-replay",
 ] as const;
 
 /**
@@ -2719,7 +2725,7 @@ export class Store implements MessageStore, ContentStore, MetaStore {
    */
   async requeue(messageId: number, request: RequeueRequest, actor: string): Promise<RequeueResult> {
     const at = this.now().toISOString();
-    const { mode, expected, outputs, failure, destinations } = request;
+    const { mode, expected, outputs, failure, destinations, expectedGeneration } = request;
     let status: MessageStatus = "transformed";
     if (failure !== undefined) status = "failed";
     else if (outputs.length === 0) status = "filtered";
@@ -2736,6 +2742,9 @@ export class Store implements MessageStore, ContentStore, MetaStore {
           .where("id", "=", messageId)
           .where("status", "=", expected)
           .where("content_dropped_at", "is", null)
+          .$if(expectedGeneration !== undefined, (q) =>
+            q.where("generation", "=", expectedGeneration as number),
+          )
           .executeTakeFirst();
         const message = await tx
           .selectFrom("messages")

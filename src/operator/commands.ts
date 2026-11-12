@@ -63,6 +63,13 @@ export interface OperatorContext {
   readonly now: () => number;
   /** Where a replayed transform's configuration reads its variables. Defaults to `process.env`. */
   readonly env?: Env;
+  /**
+   * Asks the person at the terminal and resolves with the line typed: a bulk replay asks for its
+   * count. Unset when no one can answer, such as when stdin is not a terminal.
+   */
+  readonly ask?: ((prompt: string) => Promise<string | undefined>) | undefined;
+  /** Stops a bulk replay between two batches. */
+  readonly signal?: AbortSignal | undefined;
 }
 
 /**

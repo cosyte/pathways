@@ -311,7 +311,7 @@ export class MemoryStore implements MessageStore {
   }
 
   requeue(messageId: number, request: RequeueRequest, actor: string): Promise<RequeueResult> {
-    const { mode, expected, outputs, failure, destinations } = request;
+    const { mode, expected, outputs, failure, destinations, expectedGeneration } = request;
     const message = this.messageRows.find((m) => m.id === messageId);
     const refuse = (reason: "not-found" | "changed" | "pending"): Promise<RequeueResult> => {
       const entry = this.audit(actor, {
@@ -325,6 +325,9 @@ export class MemoryStore implements MessageStore {
     };
     if (message === undefined) return refuse("not-found");
     if (message.status !== expected) return refuse("changed");
+    if (expectedGeneration !== undefined && message.generation !== expectedGeneration) {
+      return refuse("changed");
+    }
     const mine = this.deliveryRows.filter((d) => d.messageId === messageId);
     if (mine.some((d) => d.status === "pending")) return refuse("pending");
     const superseded = mine.filter((d) => d.status === "failed");
