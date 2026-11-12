@@ -22,9 +22,9 @@ export interface EngineParticulars {
  * Records that the engine started: first, when the run before it left an `engine-start` and no
  * `engine-stop` of its own node after it, an `unclean-shutdown` entry naming that start's entry
  * (`since`) and its version and node; then the `engine-start` entry itself. A stop is paired with a
- * start by node id, which each process draws afresh, so a late stop from another node (one that lost
- * its lease while the last run took over) hides no crash. Rejects when the audit log cannot be read
- * or written.
+ * start by node id, which no two live engines share, so a late stop from another node (one that
+ * lost its lease while the last run took over) hides no crash. Rejects when the audit log cannot be
+ * read or written.
  *
  * @example
  * ```ts

@@ -97,6 +97,7 @@ health:
 | `health`     | see [Health endpoint](#health-endpoint)                 | no health endpoint              |
 | `probes`     | see [Probe listener](#probe-listener)                   | no probe listener               |
 | `lease`      | see [Engine lease](#engine-lease)                       | a 15s lease, no standby         |
+| `node`       | see [Node](#node)                                       | a kept id, a 5s heartbeat       |
 | `drain`      | see [Drain](#drain)                                     | no delay, a 30s timeout         |
 | `migrations` | see [Migrations](#migrations)                           | no rollback window              |
 | `config`     | see [Transform configuration](#transform-configuration) | none                            |
@@ -254,6 +255,24 @@ The lease one engine per database holds, so a second is refused or waits as a st
 | --------- | ----------------------- | ------- | ----------------------------------------------------------------------------------------------------------- |
 | `ttl`     | duration, at least `1s` | `15s`   | how long the lease lasts unless renewed; the holder renews it every third of this                           |
 | `standby` | boolean                 | `false` | start as a standby, as `pathways start --standby` does; needs a database server, and is refused with SQLite |
+
+### Node
+
+This engine's node: the id it runs under, and how often it writes its heartbeat. See
+[nodes and heartbeats](./check-status-and-health.md#nodes-and-heartbeats).
+
+| Key         | Type                    | Default                                | Meaning                                                                                                                                                     |
+| ----------- | ----------------------- | -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`        | node id                 | generated, kept in `.pathways/node-id` | 1 to 64 letters, digits, dots, hyphens and underscores, starting with a letter or a digit; unique among the engines on the database, or a second is refused |
+| `heartbeat` | duration, at least `1s` | `5s`                                   | how often the engine writes its heartbeat; a node whose last heartbeat is three of these old shows stale                                                    |
+
+```yaml title="pathways.yaml"
+node:
+  id: engine-a
+  heartbeat: 5s
+```
+
+Written as `id: { env: HOSTNAME }`, each container takes its host name as its node id.
 
 ### Drain
 

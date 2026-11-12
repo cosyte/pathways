@@ -54,6 +54,11 @@ const STORE_METHOD_LIST = {
   settle: false,
   unsettled: false,
   requeuedUnsettled: false,
+  joinNode: false,
+  nodeHeartbeat: false,
+  leaveNode: false,
+  nodes: false,
+  forgetNode: false,
 } satisfies Record<keyof MessageStore, boolean>;
 
 const STORE_METHODS = Object.entries(STORE_METHOD_LIST)

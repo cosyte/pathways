@@ -364,8 +364,9 @@ export interface SourceUpEvent extends LifecycleEventBase {
  * `channel-halt` and `channel-reload` (a `pathways channel` command), `verify` (a stored
  * message read by `pathways verify`), `bulk-replay` (a run of `pathways replay --status failed`:
  * its scope, each batch and a summary), `archive` (a sealed archive retention wrote and checked
- * before changing what it holds), `engine-start` and `engine-stop` (`pathways start` began running
- * or began to stop, with the version, the channel count and the node id), and `unclean-shutdown`
+ * before changing what it holds), `node-forget` (a stale node's row removed by
+ * `pathways nodes forget`), `engine-start` and `engine-stop` (`pathways start` began running or
+ * began to stop, with the version, the channel count and the node id), and `unclean-shutdown`
  * (found at a start: the run before it left no `engine-stop`). Kept equal to the audit log's own
  * list by a test.
  *
@@ -393,6 +394,7 @@ export type AuditEventAction =
   | "verify"
   | "bulk-replay"
   | "archive"
+  | "node-forget"
   | "engine-start"
   | "engine-stop"
   | "unclean-shutdown";

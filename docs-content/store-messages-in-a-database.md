@@ -247,7 +247,12 @@ stop every engine and drop the column. A delivery an older Pathways failed has n
 store may set `failedAt` on what `deliveries` returns; without it, a resume takes such a message by
 its own `updatedAt` alone.
 
-Migration `0012-settled` adds a `settled_generation` column to `messages`: the generation whose
+The `nodes` table, migration `0012-nodes`, holds one row per running engine: its node id, host,
+process id, version, role and last heartbeat, by the database's clock (see
+[nodes and heartbeats](./check-status-and-health.md#nodes-and-heartbeats)). It only adds a
+table, and has no rollback step: dropping it, with every engine stopped, loses only who was running.
+
+Migration `0013-settled` adds a `settled_generation` column to `messages`: the generation whose
 [settled event](./add-lifecycle-hooks.md#the-settled-event) was recorded, so it is sent once. It marks
 every message that had ended already as settled, so no event is sent for a message that ended before
 it. It only adds a column that may be null, which an older Pathways never reads, and has no rollback
@@ -341,6 +346,11 @@ the `engine` lease still carries that epoch, judged in the same statement, and o
 `LeaseLostError`. A store that has none of this needs no change, but its engine runs unfenced: a
 second engine on the same store is not refused, and the engine logs a `lease-unsupported` warning
 at start.
+
+To list its engines in `pathways nodes`, a store also implements the five optional node methods,
+`joinNode`, `nodeHeartbeat`, `leaveNode`, `nodes` and `forgetNode`, each judging a row's age by one
+clock, the database's, in the statement that reads or changes it. A store without them needs no
+change: its engines write no node row, and `pathways nodes` says there are none to list.
 
 ## Related
 
