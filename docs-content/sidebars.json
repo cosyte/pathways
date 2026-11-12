@@ -36,6 +36,7 @@
         "set-message-retention",
         "pass-messages-through-without-storing",
         "upgrade-pathways",
+        "stop-and-upgrade-a-node",
         "run-in-docker",
         "deploy-the-image"
       ]

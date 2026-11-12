@@ -38,6 +38,11 @@ import { existsSync, rmSync, writeSync } from "node:fs";
  *   `.claimed/` and linked it from there back where it came from, and has not removed the held name.
  * - `pass-sent-before-answer`: on a channel that stores nothing, every destination accepted a
  *   message and its source has not answered the sender (a file source has not deleted the file).
+ * - `drain-not-ready`: `pathways start`, told to stop, reports draining and has not yet waited
+ *   `drain.notReadyDelay`: its sources still take messages in.
+ * - `drain-sources-closed`: a draining engine closed its listening sources and has not yet ended
+ *   its passes or made its last one.
+ * - `drain-before-release`: a draining engine stopped, and has not yet released its lease.
  */
 export const FAULT_POINTS = [
   "after-store-before-ack",
@@ -49,6 +54,9 @@ export const FAULT_POINTS = [
   "after-claim-flush",
   "mid-move-back",
   "pass-sent-before-answer",
+  "drain-not-ready",
+  "drain-sources-closed",
+  "drain-before-release",
 ] as const;
 
 /** One of {@link FAULT_POINTS}. */
