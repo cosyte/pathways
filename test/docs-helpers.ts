@@ -123,23 +123,30 @@ export function cliAsync(
 /**
  * Starts `pathways start` in `cwd` and returns a way to stop it and read its exit code: SIGTERM, or
  * on Windows, which has no SIGTERM, an immediate end (Node's kill there ends a process whatever the
- * signal).
+ * signal). `err` is what it has written to stderr so far.
  */
 export function startEngine(
   cwd: string,
   env: Readonly<Record<string, string>> = {},
-): { stop: () => Promise<number | null> } {
+): { stop: () => Promise<number | null>; err: () => string } {
   const child = spawn(process.execPath, [BIN, "start"], {
     cwd,
     env: { ...process.env, ...env },
-    stdio: "ignore",
+    stdio: ["ignore", "ignore", "pipe"],
   });
-  const exited = new Promise<number | null>((resolve) => child.once("exit", resolve));
+  let err = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (text: string) => {
+    err += text;
+  });
+  // Closed: exited, and its stderr read to the end.
+  const exited = new Promise<number | null>((resolve) => child.once("close", resolve));
   return {
     stop: async () => {
       child.kill(process.platform === "win32" ? "SIGKILL" : "SIGTERM");
       return exited;
     },
+    err: () => err,
   };
 }
 

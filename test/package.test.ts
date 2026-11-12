@@ -423,87 +423,27 @@ describe("the image's version tag", () => {
   });
 
   const ABSENT = "The version is still not published";
-  const notFound = (s: Step | undefined): string | undefined =>
-    /grep -qiE '([^']+)'/.exec(s?.run ?? "")?.[1];
+  const DECIDE = "Has this version a GitHub release, and no image yet?";
 
   it("is checked for again just before the push, failing closed on an answer it does not know", () => {
     const absent = step(publish, ABSENT);
-    expect(notFound(absent)).toBeDefined();
-    expect(notFound(absent)).toBe(
-      notFound(step(decide, "Has this version a GitHub release, and no image yet?")),
-    );
     expect(absent.run).toContain("exit 1");
     expect(step(platforms, ABSENT)).toEqual(absent);
   });
 
-  // The step's own script, with a stand-in `docker` that gives the registry's answer.
-  describe.skipIf(process.platform === "win32")("the recheck's answers", () => {
-    function recheck(output: string, status: number): { status: number | null; outputs: string } {
-      const dir = mkdtempSync(join(tmpdir(), "pathways-recheck-"));
-      try {
-        const bin = join(dir, "bin");
-        mkdirSync(bin);
-        writeFileSync(
-          join(bin, "docker"),
-          '#!/bin/sh\nprintf \'%s\\n\' "$FAKE_OUT"\nexit "$FAKE_STATUS"\n',
-        );
-        chmodSync(join(bin, "docker"), 0o755);
-        const outputs = join(dir, "outputs");
-        writeFileSync(outputs, "");
-        const result = spawnSync("bash", ["-c", step(publish, ABSENT).run ?? "exit 0"], {
-          env: {
-            ...process.env,
-            PATH: `${bin}:${process.env["PATH"] ?? ""}`,
-            IMAGE: "ghcr.io/cosyte/pathways",
-            VERSION: "0.0.0-example",
-            RUNNER_TEMP: dir,
-            GITHUB_OUTPUT: outputs,
-            FAKE_OUT: output,
-            FAKE_STATUS: String(status),
-          },
-          encoding: "utf8",
-        });
-        return { status: result.status, outputs: readFileSync(outputs, "utf8") };
-      } finally {
-        rmSync(dir, { recursive: true, force: true });
-      }
-    }
-
-    it("publishes on the not-found answer", () => {
-      const answer = recheck("ERROR: ghcr.io/cosyte/pathways:0.0.0-example: not found", 1);
-      expect(answer).toEqual({ status: 0, outputs: "absent=true\n" });
-    });
-
-    it("stands down when the version is there", () => {
-      expect(recheck("Name: ghcr.io/cosyte/pathways:0.0.0-example", 0)).toEqual({
-        status: 0,
-        outputs: "absent=false\n",
-      });
-    });
-
-    it("fails, and publishes nothing, on any other answer", () => {
-      for (const answer of [
-        "ERROR: unexpected status from HEAD request: 503 Service Unavailable",
-        "ERROR: toomanyrequests: retry later",
-        "ERROR: failed to do request: dial tcp: i/o timeout",
-        "",
-      ]) {
-        const result = recheck(answer, 1);
-        expect(result.status, answer).not.toBe(0);
-        expect(result.outputs, answer).not.toContain("absent=true");
-      }
-    });
-  });
-
-  // The tag step's own script, with a stand-in `docker` that holds a registry with the pushed digest
-  // and gives the given answer for the version tag until the step writes it.
-  describe.skipIf(process.platform === "win32")("the look-up just before the tag", () => {
+  // Each of the three look-ups runs as its own script, with a stand-in `docker` that gives the
+  // registry's answer for the version tag, a stand-in `gh` that finds the GitHub release, and, for
+  // the tag step, a registry that holds the pushed digest and has the tag once the step writes it.
+  describe.skipIf(process.platform === "win32")("the registry's answers", () => {
     const INDEX = '{"schemaVersion":2,"manifests":[]}';
     const DIGEST = `sha256:${createHash("sha256").update(INDEX).digest("hex")}`;
+    const VERSION_TAG = "0.0.0-example";
     const FAKE_DOCKER = [
       "#!/bin/sh",
       'echo "$*" >> "$FAKE_DIR/calls"',
       'case "$*" in',
+      "  login*) cat > /dev/null; exit 0 ;;",
+      "  logout*) exit 0 ;;",
       '  *"create --dry-run"*) printf \'%s\' "$FAKE_INDEX"; exit 0 ;;',
       '  *"imagetools create"*) touch "$FAKE_DIR/tagged"; exit 0 ;;',
       "esac",
@@ -513,24 +453,39 @@ describe("the image's version tag", () => {
       "",
     ].join("\n");
 
-    function tagWith(output: string, status: number): { status: number | null; tagged: boolean } {
-      const dir = mkdtempSync(join(tmpdir(), "pathways-tag-"));
+    interface Answer {
+      readonly status: number | null;
+      readonly outputs: string;
+      readonly tagged: boolean;
+    }
+
+    function answer(script: string, image: string, output: string, status: number): Answer {
+      const dir = mkdtempSync(join(tmpdir(), "pathways-registry-"));
       try {
         const bin = join(dir, "bin");
         mkdirSync(bin);
         writeFileSync(join(bin, "docker"), FAKE_DOCKER);
+        writeFileSync(join(bin, "gh"), "#!/bin/sh\nexit 0\n");
         chmodSync(join(bin, "docker"), 0o755);
+        chmodSync(join(bin, "gh"), 0o755);
+        writeFileSync(join(dir, "package.json"), JSON.stringify({ version: VERSION_TAG }));
         writeFileSync(join(dir, "calls"), "");
+        const outputs = join(dir, "outputs");
+        writeFileSync(outputs, "");
         const summary = join(dir, "summary");
         writeFileSync(summary, "");
-        const result = spawnSync("bash", ["-c", step(publish, TAG).run ?? "exit 0"], {
+        const result = spawnSync("bash", ["-c", script], {
+          cwd: dir,
           env: {
             ...process.env,
             PATH: `${bin}:${process.env["PATH"] ?? ""}`,
-            IMAGE: "ghcr.io/cosyte/pathways",
-            VERSION: "0.0.0-example",
+            IMAGE: image,
+            VERSION: VERSION_TAG,
             DIGEST,
+            GH_TOKEN: "stand-in",
+            GITHUB_ACTOR: "stand-in",
             RUNNER_TEMP: dir,
+            GITHUB_OUTPUT: outputs,
             GITHUB_STEP_SUMMARY: summary,
             FAKE_DIR: dir,
             FAKE_INDEX: INDEX,
@@ -540,40 +495,133 @@ describe("the image's version tag", () => {
           encoding: "utf8",
         });
         const calls = readFileSync(join(dir, "calls"), "utf8").split("\n");
-        const tagged = calls.some((c) => c.includes("imagetools create --tag"));
-        return { status: result.status, tagged };
+        return {
+          status: result.status,
+          outputs: readFileSync(outputs, "utf8"),
+          tagged: calls.some((c) => c.includes("imagetools create --tag")),
+        };
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
     }
 
-    it("tags the checked digest when the registry has no such tag", () => {
-      for (const answer of [
-        "ERROR: ghcr.io/cosyte/pathways:0.0.0-example: not found",
-        "ERROR: manifest unknown",
-      ]) {
-        expect(tagWith(answer, 1), answer).toEqual({ status: 0, tagged: true });
-      }
+    // The release looks the tag up on GHCR; the pull request's dry run, on the job's own registry.
+    const IMAGES = [publish.env?.["IMAGE"] ?? "", platforms.env?.["IMAGE"] ?? ""];
+
+    // The registry's own answers for a tag it does not have, each the whole output: the resolver's
+    // not-found for this very tag, and the registry's error codes in the form `code: message`.
+    const missing = (image: string): readonly string[] => [
+      `ERROR: ${image}:${VERSION_TAG}: not found`,
+      "ERROR: manifest unknown",
+      "ERROR: manifest unknown: manifest unknown",
+      "ERROR: name unknown: repository name not known to registry",
+    ];
+    // GHCR's answer while the package does not exist yet.
+    const DENIED = [
+      "ERROR: denied: denied",
+      "ERROR: denied: requested access to the resource is denied",
+    ];
+    // Errors, some of them holding the words of a not-found answer, that are not the registry
+    // saying it does not have this tag.
+    const unknown = (image: string): readonly string[] => [
+      "ERROR: unexpected status from HEAD request: 503 Service Unavailable",
+      "ERROR: toomanyrequests: retry later",
+      "ERROR: failed to do request: dial tcp: i/o timeout",
+      "",
+      `ERROR: ${image}:0.0.1-example: not found`,
+      `ERROR: ${image}:${VERSION_TAG}-rc: not found`,
+      'ERROR: error getting credentials - err: exec: "docker-credential-example": executable file not found in $PATH',
+      "ERROR: failed to authorize: failed to fetch oauth token: 404 page not found",
+      "ERROR: unexpected status from GET request: 502 Bad Gateway: upstream said manifest unknown",
+      "ERROR: failed to resolve: name unknown host in proxy configuration",
+      "ERROR: unexpected status from HEAD request: 403 Forbidden: access denied by policy",
+      `ERROR: ${image}:${VERSION_TAG}: not found\nERROR: failed to do request: dial tcp: i/o timeout`,
+      `WARNING: proxy settings ignored\nERROR: ${image}:${VERSION_TAG}: not found`,
+    ];
+
+    describe("the first look-up, before the build", () => {
+      const script = (): string => step(decide, DECIDE).run ?? "exit 0";
+      const image = publish.env?.["IMAGE"] ?? "";
+
+      it("publishes on each answer that says the tag is not there, and on denied", () => {
+        for (const output of [...missing(image), ...DENIED]) {
+          expect(answer(script(), image, output, 1), output).toMatchObject({
+            status: 0,
+            outputs: `version=${VERSION_TAG}\npublish=true\n`,
+          });
+        }
+      });
+
+      it("stands down when the version is there", () => {
+        expect(answer(script(), image, `Name: ${image}:${VERSION_TAG}`, 0)).toMatchObject({
+          status: 0,
+          outputs: `version=${VERSION_TAG}\npublish=false\n`,
+        });
+      });
+
+      it("fails, and publishes nothing, on any other answer", () => {
+        for (const output of unknown(image)) {
+          const result = answer(script(), image, output, 1);
+          expect(result.status, output).not.toBe(0);
+          expect(result.outputs, output).not.toContain("publish=true");
+        }
+      });
     });
 
-    it("refuses to replace a version tag that exists", () => {
-      const result = tagWith("Name: ghcr.io/cosyte/pathways:0.0.0-example", 0);
-      expect(result.status).not.toBe(0);
-      expect(result.tagged).toBe(false);
+    describe.each(IMAGES)("the recheck after the wait, on %s", (image) => {
+      const script = (): string => step(publish, ABSENT).run ?? "exit 0";
+
+      it("publishes on each answer that says the tag is not there, and on denied", () => {
+        for (const output of [...missing(image), ...DENIED]) {
+          expect(answer(script(), image, output, 1), output).toMatchObject({
+            status: 0,
+            outputs: "absent=true\n",
+          });
+        }
+      });
+
+      it("stands down when the version is there", () => {
+        expect(answer(script(), image, `Name: ${image}:${VERSION_TAG}`, 0)).toMatchObject({
+          status: 0,
+          outputs: "absent=false\n",
+        });
+      });
+
+      it("fails, and publishes nothing, on any other answer", () => {
+        for (const output of unknown(image)) {
+          const result = answer(script(), image, output, 1);
+          expect(result.status, output).not.toBe(0);
+          expect(result.outputs, output).not.toContain("absent=true");
+        }
+      });
     });
 
-    // The package exists by this step, so "denied" no longer means "nothing published yet".
-    it("refuses on a denied answer, and on any other answer it does not know", () => {
-      for (const answer of [
-        "ERROR: denied: denied",
-        "ERROR: unexpected status from HEAD request: 503 Service Unavailable",
-        "ERROR: toomanyrequests: retry later",
-        "",
-      ]) {
-        const result = tagWith(answer, 1);
-        expect(result.status, answer).not.toBe(0);
-        expect(result.tagged, answer).toBe(false);
-      }
+    describe.each(IMAGES)("the look-up just before the tag, on %s", (image) => {
+      const script = (): string => step(publish, TAG).run ?? "exit 0";
+
+      it("tags the checked digest when the registry says it has no such tag", () => {
+        for (const output of missing(image)) {
+          expect(answer(script(), image, output, 1), output).toMatchObject({
+            status: 0,
+            tagged: true,
+          });
+        }
+      });
+
+      it("refuses to replace a version tag that exists", () => {
+        const result = answer(script(), image, `Name: ${image}:${VERSION_TAG}`, 0);
+        expect(result.status).not.toBe(0);
+        expect(result.tagged).toBe(false);
+      });
+
+      // The package exists by this step, so "denied" no longer means "nothing published yet".
+      it("refuses on a denied answer, and on any other answer it does not know", () => {
+        for (const output of [...DENIED, ...unknown(image)]) {
+          const result = answer(script(), image, output, 1);
+          expect(result.status, output).not.toBe(0);
+          expect(result.tagged, output).toBe(false);
+        }
+      });
     });
   });
 });
