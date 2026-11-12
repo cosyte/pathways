@@ -13,6 +13,14 @@ import { NEVER_CONTEXT_HEADERS } from "../config/schema.js";
 import type { JsonValue } from "../transform.js";
 import { ackCharset, defaultAckBuilder, type AckRequest } from "./ack.js";
 import { ADDRESS_REFUSED, type AddressGuard } from "./address-guard.js";
+import {
+  BATCH_CODES,
+  type BatchOptions,
+  once,
+  receivePieces,
+  scanBatch,
+  splitPieces,
+} from "./batch.js";
 import { Endpoint, refuse, refuseText, reply, replyText } from "./endpoint.js";
 import { failureOf, transientError } from "./http-core.js";
 import { hl7MediaType, normalisePath } from "./http-path.js";
@@ -86,7 +94,22 @@ export interface HttpSourceOptions {
    * its id and the problem's code, never its content.
    */
   readonly onUnreadable?: (messageId: number, problem: string) => void;
+  /**
+   * Reads each body as a batch of messages, cut as `split` says, and stores each piece as a message
+   * of its own, under a key of the request's `Idempotency-Key` header, or the body's hash without
+   * one, and the piece's place. Answers with every piece's id. Not with `ack` mode. Default: none.
+   */
+  readonly batch?: BatchOptions | undefined;
 }
+
+/**
+ * The header that names a batch request, so a retry of it stores no piece twice: its value is the
+ * origin of each piece's key. As in the IETF HTTPAPI working group's draft, a string, quoted or not.
+ */
+export const IDEMPOTENCY_KEY_HEADER = "idempotency-key";
+
+/** An `Idempotency-Key` value: 1 to 255 visible ASCII characters, or that quoted. */
+const IDEMPOTENCY_KEY = /^(?:"([\x20\x21\x23-\x5b\x5d-\x7e]{1,255})"|([\x21-\x7e]{1,255}))$/;
 
 const STORE_FAILED = "the message could not be stored; send it again";
 const PASS_DEFERRED = "the message could not be passed on yet; send it again";
@@ -127,6 +150,12 @@ function retryAfter(error: PassFailed): OutgoingHttpHeaders {
 export class HttpSource implements SourceConnector {
   private readonly options: HttpSourceOptions;
   private endpoint: Endpoint | undefined;
+  /**
+   * The last batch request in line for each origin, so requests under one origin are stored one
+   * after another: one sent twice at once stores its pieces once, and a changed body sent beside it
+   * sees the first one's pieces and is refused.
+   */
+  private readonly inLine = new Map<string, Promise<void>>();
 
   /** @param options Where to listen, what to take, how to answer, TLS and the token. */
   constructor(options: HttpSourceOptions) {
@@ -195,6 +224,9 @@ export class HttpSource implements SourceConnector {
     if (body.byteLength === 0) return refused(400);
 
     const source = this.facts(request, pathname);
+    if (this.options.batch !== undefined) {
+      return this.receiveBatch(this.options.batch, request, body, response, sink, source);
+    }
     if (answer.kind === "ack") {
       return this.acknowledge(body, String(mediaType), response, sink, source);
     }
@@ -211,13 +243,101 @@ export class HttpSource implements SourceConnector {
       return;
     }
     if (answer.kind === "id") return reply(response, 202, { id });
-    response.writeHead(answer.status, {
-      "Cache-Control": "no-store",
-      ...(answer.contentType === undefined ? {} : { "Content-Type": answer.contentType }),
-      ...answer.headers,
-      "Content-Length": Buffer.byteLength(answer.body),
+    fixedAnswer(response, answer);
+  }
+
+  /**
+   * Stores a body as a batch: each piece under the key `http:key:<Idempotency-Key>#<hash>#<index>`,
+   * or `http:sha256:<hash>#<index>` without the header, where the hash is the body's, and always
+   * looked up first, so a request sent again stores nothing twice. Requests under one origin are
+   * stored one at a time. Answers 202 with every piece's id, in order, or the fixed answer; 400 for
+   * an `Idempotency-Key` that is not one; 422 for a body with no piece, an incomplete HL7 batch
+   * unless `onIncomplete: accept`, or an `Idempotency-Key` used before for another body, with the
+   * code and nothing stored; 503 when a piece could not be stored, so the sender sends it again
+   * under the same key.
+   */
+  private async receiveBatch(
+    batch: BatchOptions,
+    request: IncomingMessage,
+    body: Buffer,
+    response: ServerResponse,
+    sink: MessageSink,
+    source: Readonly<Record<string, JsonValue>>,
+  ): Promise<void> {
+    const answer = this.options.response ?? { kind: "id" };
+    const refused = (status: number, code?: string): void => {
+      if (code === undefined) refuse(response, status);
+      else reply(response, status, { error: code });
+      this.options.onRefused?.(status);
+    };
+    // Node joins a header sent twice with ", ", which no key holds unquoted: that answers 400.
+    // Node gives a list only for set-cookie; any other header it joins into one string.
+    const header = request.headers[IDEMPOTENCY_KEY_HEADER] as string | undefined;
+    let named: string | undefined;
+    if (header !== undefined) {
+      const match = IDEMPOTENCY_KEY.exec(header);
+      if (match === null) return refused(400);
+      named = match[1] ?? match[2];
+    }
+    const scan = await scanBatch(once(body), batch);
+    if (scan.envelope.length > 0 && batch.onIncomplete !== "accept") {
+      return refused(422, BATCH_CODES.incomplete);
+    }
+    // The body's hash is in every key, so a changed body sent under a key already used never
+    // matches a piece of the first body: it is refused below, or, on a sink that cannot say what
+    // the key holds, stored as a batch of its own. Nothing of either is dropped.
+    const origin = named === undefined ? `http:sha256:${scan.hash}` : `http:key:${named}`;
+    const prefix = named === undefined ? origin : `${origin}#${scan.hash}`;
+    const key = (index: number): string => `${prefix}#${String(index)}`;
+    const warnings = new Set(scan.envelope);
+    const done = await this.oneAtATime(origin);
+    let received;
+    try {
+      if (named !== undefined && (await sink.heldOrigin?.(origin, key(0))) === "other") {
+        return refused(422, BATCH_CODES.keyReused);
+      }
+      received = await receivePieces(splitPieces(once(body), batch, warnings), sink, {
+        key,
+        resumed: true,
+        ...(named === undefined ? {} : { origin }),
+        facts: (index) => ({ ...source, batch: { piece: index, hash: scan.hash } }),
+      });
+    } catch {
+      reply(response, 503, { error: STORE_FAILED });
+      return;
+    } finally {
+      done();
+    }
+    if (received.pieces === 0) return refused(422, BATCH_CODES.empty);
+    await sink.batchDone?.({
+      source: "http",
+      outcome: "stored",
+      pieces: received.pieces,
+      stored: received.stored,
+      failed: received.failed,
+      duplicates: received.duplicates,
+      warnings: [...warnings],
     });
-    response.end(answer.body);
+    if (answer.kind === "fixed") return fixedAnswer(response, answer);
+    reply(response, 202, { ids: received.ids });
+  }
+
+  /**
+   * Waits until no other batch request under `origin` is being stored, then holds the origin until
+   * the function it resolves with is called. On one node this keeps two requests under one key from
+   * both missing each other's pieces; across nodes on one database, the store's own lookup is all
+   * there is.
+   */
+  private async oneAtATime(origin: string): Promise<() => void> {
+    const before = this.inLine.get(origin);
+    let release!: () => void;
+    const mine = new Promise<void>((resolve) => (release = resolve));
+    this.inLine.set(origin, mine);
+    await before;
+    return () => {
+      release();
+      if (this.inLine.get(origin) === mine) this.inLine.delete(origin);
+    };
   }
 
   /**
@@ -289,6 +409,20 @@ export class HttpSource implements SourceConnector {
       headers,
     };
   }
+}
+
+/** Sends a fixed answer, the same for every message: never the message. */
+function fixedAnswer(
+  response: ServerResponse,
+  answer: Extract<HttpSourceResponse, { kind: "fixed" }>,
+): void {
+  response.writeHead(answer.status, {
+    "Cache-Control": "no-store",
+    ...(answer.contentType === undefined ? {} : { "Content-Type": answer.contentType }),
+    ...answer.headers,
+    "Content-Length": Buffer.byteLength(answer.body),
+  });
+  response.end(answer.body);
 }
 
 /** Reads a request body of at most `maxBytes`: the bytes, `too-large`, or undefined if cut short. */

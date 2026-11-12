@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import type { ChannelConfig, ProjectConfig } from "../config/schema.js";
 import { transformConfigFor } from "../config/transform-config.js";
+import { once, splitPieces } from "../connectors/batch.js";
 import type { Env } from "../connectors/endpoint.js";
 import {
   ChannelWorker,
@@ -71,7 +72,8 @@ export function destinationExpectedName(input: string, destination: DestinationS
 
 /**
  * Runs every input in each channel's `tests/` folder through the channel's transform, in the same
- * worker the engine uses, and compares the output with the saved `<name>.expected.<ext>`, byte for
+ * worker the engine uses (for a channel whose source reads batches, each piece of the input, cut as
+ * the source cuts it, and every piece's outputs together), and compares the output with the saved `<name>.expected.<ext>`, byte for
  * byte, whatever the channel's format. A message the transform filters out expects an empty file;
  * several outputs are joined by a newline.
  *
@@ -140,9 +142,13 @@ export async function runChannelTests(
     try {
       for (const input of inputs) {
         const label = `${channel.name}/tests/${input}`;
-        const outcome = await worker.run(new Uint8Array(await readFile(join(testsDir, input))));
-        if (!outcome.ok) {
-          options.out(`FAIL ${label}: ${describeFailure(outcome.failure, channel)}`);
+        const outcome = await runInput(
+          worker,
+          channel,
+          new Uint8Array(await readFile(join(testsDir, input))),
+        );
+        if (typeof outcome === "string") {
+          options.out(`FAIL ${label}: ${outcome}`);
           failed += 1;
           continue;
         }
@@ -274,6 +280,49 @@ async function compareDestinations(comparison: DestinationComparison): Promise<C
     }
   }
   return { passed, failed, updated };
+}
+
+/** What one input came to: every output, and, with destination transforms, each destination's. */
+interface InputResult {
+  readonly outputs: readonly Uint8Array[];
+  readonly destinations?: readonly DestinationResult[] | undefined;
+}
+
+/**
+ * Runs one input through the worker: whole, or, for a channel whose source reads batches, each
+ * piece the source would cut it into, in order, every piece's outputs together (per destination
+ * too: a destination's outputs from every piece, or the first piece it failed on). The outputs, or
+ * what failed in words.
+ */
+async function runInput(
+  worker: ChannelWorker,
+  channel: ChannelConfig,
+  body: Uint8Array,
+): Promise<InputResult | string> {
+  const { source } = channel;
+  const batch = source.kind === "file" || source.kind === "http" ? source.batch : undefined;
+  if (batch === undefined) {
+    const outcome = await worker.run(body);
+    return outcome.ok ? outcome : describeFailure(outcome.failure, channel);
+  }
+  const outputs: Uint8Array[] = [];
+  let destinations: DestinationResult[] | undefined;
+  for await (const piece of splitPieces(once(body), batch)) {
+    const at = `piece ${String(piece.index + 1)}`;
+    if (piece.failure !== undefined) return `${at} could not be read (${piece.failure})`;
+    const outcome = await worker.run(piece.body);
+    if (!outcome.ok) return `${at}: ${describeFailure(outcome.failure, channel)}`;
+    outputs.push(...outcome.outputs);
+    if (outcome.destinations === undefined) continue;
+    destinations = outcome.destinations.map((result, index) => {
+      const before = destinations?.[index];
+      if (before === undefined) return result;
+      if (!before.ok) return before;
+      if (!result.ok) return result;
+      return { ok: true, outputs: [...before.outputs, ...result.outputs] };
+    });
+  }
+  return { outputs, destinations };
 }
 
 async function testInputs(dir: string): Promise<string[] | undefined> {

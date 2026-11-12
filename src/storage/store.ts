@@ -1160,6 +1160,8 @@ export function retentionStore(store: MessageStore): RetentionStore | undefined 
  *   project's transform; written before the content is read.
  * - `archive`: retention wrote and checked a sealed archive of messages it is about to prune or
  *   delete; written before it changes them.
+ * - `batch`: a source read a file or request body as a batch: how many pieces it stored, failed
+ *   and found stored already, and, for a batch failed whole, why. Counts and codes, never a name.
  * - `node-forget`: `pathways nodes forget` removed a stale node's row, or was refused.
  *
  * @example
@@ -1186,6 +1188,7 @@ export const AUDIT_ACTIONS = [
   "verify",
   "bulk-replay",
   "archive",
+  "batch",
   "node-forget",
 ] as const;
 
@@ -1457,6 +1460,13 @@ export interface MessageStore {
   channelStates?(): Promise<Record<string, ChannelRunState>>;
   /** Sets a channel's state; `running` removes its row. Optional, with {@link channelStates}. */
   setChannelState?(channel: string, state: ChannelRunState): Promise<void>;
+  /**
+   * The idempotency key of the channel's first message stored with `duplicateKey`: `null` when it
+   * was stored without one, `undefined` when no message of the channel has the key. A batch source
+   * reads it to tell a batch read again from another batch sent under the same origin. Optional: a
+   * store without it never has a batch refused for that.
+   */
+  heldIdempotencyKey?(channel: string, duplicateKey: string): Promise<string | null | undefined>;
   /** How many messages of a channel stand at each status. The health endpoint reports these. */
   messageCounts(channel: string): Promise<Record<MessageStatus, number>>;
   /** How many deliveries of a channel stand at each status; `dry-run` only when some ran dry. */
@@ -2589,6 +2599,25 @@ export class Store implements MessageStore, ContentStore, MetaStore {
       }
       return { id, duplicateOf };
     });
+  }
+
+  /**
+   * The idempotency key of the channel's first message stored with `duplicateKey`, `null` when it
+   * has none, or `undefined` when no message of the channel has the key.
+   */
+  async heldIdempotencyKey(
+    channel: string,
+    duplicateKey: string,
+  ): Promise<string | null | undefined> {
+    const row = await this.db
+      .selectFrom("messages")
+      .select("idempotency_key")
+      .where("channel", "=", channel)
+      .where("dedup_key", "=", duplicateKey)
+      .orderBy("id")
+      .$call((query) => this.first(query))
+      .executeTakeFirst();
+    return row?.idempotency_key;
   }
 
   /** What is stored about one message, without its body, or `undefined` if there is none. */

@@ -217,6 +217,11 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
   readonly setChannelState?: (channel: string, state: ChannelRunState) => Promise<void>;
   /** Straight through, present only when the store underneath has it. */
   readonly markDryRun?: (deliveryId: number, epoch?: number) => Promise<void>;
+  /** Hashes in and a hash out, no body, so straight through, present only when the store underneath has it. */
+  readonly heldIdempotencyKey?: (
+    channel: string,
+    duplicateKey: string,
+  ) => Promise<string | null | undefined>;
   /** The node methods, straight through, present only when the store underneath has all five. */
   readonly joinNode?: (info: NodeInfo, replace?: NodeReplace) => Promise<NodeJoin>;
   readonly nodeHeartbeat?: (self: NodeSelf, state: NodeState) => Promise<boolean>;
@@ -269,6 +274,9 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
       const hold = inner.holdDeliveries.bind(inner);
       this.holdDeliveries = async (channel, keys, error, epoch) =>
         hold(channel, keys, await codec.storeText(error), epoch);
+    }
+    if (inner.heldIdempotencyKey !== undefined) {
+      this.heldIdempotencyKey = inner.heldIdempotencyKey.bind(inner);
     }
     const nodes = nodeStore(inner);
     if (nodes !== undefined) {

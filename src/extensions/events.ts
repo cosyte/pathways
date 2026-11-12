@@ -345,6 +345,7 @@ export type AuditEventAction =
   | "verify"
   | "bulk-replay"
   | "archive"
+  | "batch"
   | "node-forget";
 
 /**

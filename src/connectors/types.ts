@@ -1,4 +1,19 @@
 import type { JsonValue } from "../transform.js";
+import type { BatchResult } from "./batch.js";
+
+/**
+ * What {@link MessageSink.receivePiece} resolves with: the stored message's id, and whether the
+ * store held it already, so nothing new was stored.
+ *
+ * @example
+ * ```ts
+ * const { id, alreadyStored } = await sink.receivePiece(body, { idempotencyKey, resumed: true });
+ * ```
+ */
+export interface ReceivedPiece {
+  readonly id: number;
+  readonly alreadyStored: boolean;
+}
 
 /**
  * The connector interfaces. Pathways' own connectors implement these, and so can yours: a source
@@ -87,6 +102,28 @@ export interface MessageSink {
    * time it came in, in microseconds since 1970, never given twice), and rejects with a {@link PassFailed} that says whether the sender should send again.
    */
   receive(body: Uint8Array, options?: ReceiveOptions): Promise<number>;
+  /**
+   * As {@link receive}, and also says whether the store held the message already, under its
+   * `idempotencyKey`, so nothing new was stored. The built-in sources call it for each piece of a
+   * batch, to count what the batch came to; the engine's own sink always has it, and a sink a test
+   * builds by hand may leave it out.
+   */
+  receivePiece?(body: Uint8Array, options?: ReceiveOptions): Promise<ReceivedPiece>;
+  /**
+   * Told what a whole batch came to once every piece is stored, or once it was failed whole: counts
+   * and codes, never content. The engine records it in the audit log as a `batch` entry. Optional,
+   * as {@link receivePiece} is.
+   */
+  batchDone?(result: BatchResult): Promise<void>;
+  /**
+   * What the store holds under a batch's `origin`, the `duplicateKey` its first piece was handed
+   * in with: `none` when no message carries it, `same` when the first that does was stored under
+   * `key` (the same batch, read again), and `other` when it was stored under another key (another
+   * batch under the same origin). The HTTP source asks this before it stores a batch sent with an
+   * `Idempotency-Key`, and answers 422 to `other`. The engine's own sink has it when its store has
+   * `heldIdempotencyKey`; a sink without it is never asked.
+   */
+  heldOrigin?(origin: string, key: string): Promise<"none" | "same" | "other">;
   /**
    * Says the source lost what it reads from (a broker, a remote server, a socket it dialled) and
    * cannot take messages in until it is back. Until {@link sourceUp}, the health endpoint shows

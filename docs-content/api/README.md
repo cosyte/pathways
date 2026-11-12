@@ -637,7 +637,7 @@ const line = (entry: AuditEntry): string => `${entry.at} ${entry.actor} ${entry.
 
 ##### action
 
-> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"bulk-replay"` \| `"archive"` \| `"node-forget"`
+> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"bulk-replay"` \| `"archive"` \| `"batch"` \| `"node-forget"`
 
 ##### actor
 
@@ -757,7 +757,7 @@ await store.appendAudit("noah", [{ action: "content-view", channel: "adt", messa
 
 ##### action
 
-> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"bulk-replay"` \| `"archive"` \| `"node-forget"`
+> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"bulk-replay"` \| `"archive"` \| `"batch"` \| `"node-forget"`
 
 ##### channel?
 
@@ -793,7 +793,7 @@ const views = await store.auditEntries({ action: "content-view", since: "2026-11
 
 ##### action?
 
-> `readonly` `optional` **action?**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"bulk-replay"` \| `"archive"` \| `"node-forget"`
+> `readonly` `optional` **action?**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"bulk-replay"` \| `"archive"` \| `"batch"` \| `"node-forget"`
 
 ##### before?
 
@@ -824,6 +824,87 @@ At or after this time (ISO 8601, UTC).
 > `readonly` `optional` **until?**: `string`
 
 Before this time (ISO 8601, UTC).
+
+***
+
+### BatchFacts
+
+Where a message sat in the batch a source's `batch:` cut it from: its place, from 0, and the first
+16 hexadecimal digits of the SHA-256 of the whole file or request body, which every piece of it
+shares.
+
+#### Example
+
+```ts
+const first = (source: FileSourceFacts): boolean => source.batch?.piece === 0;
+```
+
+#### Properties
+
+##### hash
+
+> `readonly` **hash**: `string`
+
+##### piece
+
+> `readonly` **piece**: `number`
+
+***
+
+### BatchResult
+
+What a whole batch came to, which a source hands to the sink's `batchDone`, and the engine
+records in the audit log. Counts and codes only: never a file's name or message text.
+
+#### Properties
+
+##### code?
+
+> `readonly` `optional` **code?**: `string`
+
+Why it was failed: one of BATCH\_CODES.
+
+##### duplicates
+
+> `readonly` **duplicates**: `number`
+
+The pieces the store held already, from an earlier run or an earlier request with the key.
+
+##### failed
+
+> `readonly` **failed**: `number`
+
+The pieces stored as failed, with no content.
+
+##### outcome
+
+> `readonly` **outcome**: `"stored"` \| `"failed"`
+
+`stored` once every piece is stored, or `failed` when the batch was set aside whole.
+
+##### pieces
+
+> `readonly` **pieces**: `number`
+
+The pieces handed to the sink.
+
+##### source
+
+> `readonly` **source**: `"file"` \| `"http"`
+
+The kind of source that read it.
+
+##### stored
+
+> `readonly` **stored**: `number`
+
+The pieces stored as new messages that are not failed.
+
+##### warnings
+
+> `readonly` **warnings**: readonly `string`[]
+
+The envelope's warning codes, such as `BATCH_COUNT_MISMATCH`, each once.
 
 ***
 
@@ -2104,6 +2185,12 @@ const name = (source: FileSourceFacts): string => source.name;
 
 #### Properties
 
+##### batch?
+
+> `readonly` `optional` **batch?**: [`BatchFacts`](#batchfacts)
+
+With `batch:`, where the message sat in the file it was cut from.
+
 ##### kind
 
 > `readonly` **kind**: `"file"`
@@ -2124,7 +2211,7 @@ When the message was stored, as an ISO 8601 time.
 
 > `readonly` **size**: `number`
 
-The body's size in bytes.
+The body's size in bytes: with `batch:`, the piece's.
 
 ***
 
@@ -2267,6 +2354,12 @@ const requestId = (source: HttpSourceFacts): string | undefined => source.header
 ```
 
 #### Properties
+
+##### batch?
+
+> `readonly` `optional` **batch?**: [`BatchFacts`](#batchfacts)
+
+With `batch:`, where the message sat in the request body it was cut from.
 
 ##### headers
 
@@ -2647,7 +2740,7 @@ Received at or after this time (ISO 8601, UTC).
 
 ##### state?
 
-> `readonly` `optional` **state?**: `"delivered"` \| `"received"` \| `"filtered"` \| `"failed"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
+> `readonly` `optional` **state?**: `"failed"` \| `"delivered"` \| `"received"` \| `"filtered"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
 
 ##### until?
 
@@ -2700,6 +2793,49 @@ socket.on("ready", () => sink.sourceUp?.());
 
 #### Methods
 
+##### batchDone()?
+
+> `optional` **batchDone**(`result`): `Promise`\<`void`\>
+
+Told what a whole batch came to once every piece is stored, or once it was failed whole: counts
+and codes, never content. The engine records it in the audit log as a `batch` entry. Optional,
+as [receivePiece](#receivepiece) is.
+
+###### Parameters
+
+###### result
+
+[`BatchResult`](#batchresult)
+
+###### Returns
+
+`Promise`\<`void`\>
+
+##### heldOrigin()?
+
+> `optional` **heldOrigin**(`origin`, `key`): `Promise`\<`"none"` \| `"same"` \| `"other"`\>
+
+What the store holds under a batch's `origin`, the `duplicateKey` its first piece was handed
+in with: `none` when no message carries it, `same` when the first that does was stored under
+`key` (the same batch, read again), and `other` when it was stored under another key (another
+batch under the same origin). The HTTP source asks this before it stores a batch sent with an
+`Idempotency-Key`, and answers 422 to `other`. The engine's own sink has it when its store has
+`heldIdempotencyKey`; a sink without it is never asked.
+
+###### Parameters
+
+###### origin
+
+`string`
+
+###### key
+
+`string`
+
+###### Returns
+
+`Promise`\<`"none"` \| `"same"` \| `"other"`\>
+
 ##### receive()
 
 > **receive**(`body`, `options?`): `Promise`\<`number`\>
@@ -2727,6 +2863,29 @@ time it came in, in microseconds since 1970, never given twice), and rejects wit
 ###### Returns
 
 `Promise`\<`number`\>
+
+##### receivePiece()?
+
+> `optional` **receivePiece**(`body`, `options?`): `Promise`\<[`ReceivedPiece`](#receivedpiece)\>
+
+As [receive](#receive), and also says whether the store held the message already, under its
+`idempotencyKey`, so nothing new was stored. The built-in sources call it for each piece of a
+batch, to count what the batch came to; the engine's own sink always has it, and a sink a test
+builds by hand may leave it out.
+
+###### Parameters
+
+###### body
+
+`Uint8Array`
+
+###### options?
+
+[`ReceiveOptions`](#receiveoptions)
+
+###### Returns
+
+`Promise`\<[`ReceivedPiece`](#receivedpiece)\>
 
 ##### sourceDown()?
 
@@ -3085,6 +3244,29 @@ Removes the row of `node` only while it is stale. Returns whether it did. Option
 ###### Returns
 
 `Promise`\<`boolean`\>
+
+##### heldIdempotencyKey()?
+
+> `optional` **heldIdempotencyKey**(`channel`, `duplicateKey`): `Promise`\<`string` \| `null` \| `undefined`\>
+
+The idempotency key of the channel's first message stored with `duplicateKey`: `null` when it
+was stored without one, `undefined` when no message of the channel has the key. A batch source
+reads it to tell a batch read again from another batch sent under the same origin. Optional: a
+store without it never has a batch refused for that.
+
+###### Parameters
+
+###### channel
+
+`string`
+
+###### duplicateKey
+
+`string`
+
+###### Returns
+
+`Promise`\<`string` \| `null` \| `undefined`\>
 
 ##### holdDeliveries()?
 
@@ -3725,7 +3907,7 @@ The body's size in bytes, or null for a message stored before sizes were kept.
 
 ##### state
 
-> `readonly` **state**: `"delivered"` \| `"received"` \| `"filtered"` \| `"failed"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
+> `readonly` **state**: `"failed"` \| `"delivered"` \| `"received"` \| `"filtered"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
 
 The status and the current deliveries, as an operator sees them.
 
@@ -3803,7 +3985,7 @@ Received at or after this time (ISO 8601, UTC).
 
 ##### state?
 
-> `readonly` `optional` **state?**: `"delivered"` \| `"received"` \| `"filtered"` \| `"failed"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
+> `readonly` `optional` **state?**: `"failed"` \| `"delivered"` \| `"received"` \| `"filtered"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
 
 ##### until?
 
@@ -4578,6 +4760,29 @@ that message's, and nothing new was stored.
 > `readonly` **duplicateOf**: `number` \| `undefined`
 
 The latest earlier message of the channel with the same duplicate key, when there is one.
+
+##### id
+
+> `readonly` **id**: `number`
+
+***
+
+### ReceivedPiece
+
+What [MessageSink.receivePiece](#receivepiece) resolves with: the stored message's id, and whether the
+store held it already, so nothing new was stored.
+
+#### Example
+
+```ts
+const { id, alreadyStored } = await sink.receivePiece(body, { idempotencyKey, resumed: true });
+```
+
+#### Properties
+
+##### alreadyStored
+
+> `readonly` **alreadyStored**: `boolean`
 
 ##### id
 
@@ -5687,7 +5892,7 @@ The body's size in bytes, or null for a message stored before sizes were kept.
 
 ##### state
 
-> `readonly` **state**: `"delivered"` \| `"received"` \| `"filtered"` \| `"failed"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
+> `readonly` **state**: `"failed"` \| `"delivered"` \| `"received"` \| `"filtered"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
 
 The status and the current deliveries, as an operator sees them.
 
@@ -6346,7 +6551,7 @@ const detail: AuditDetail = { status: "transformed", queued: 2 };
 
 ### AuditEventAction
 
-> **AuditEventAction** = `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"bulk-replay"` \| `"archive"` \| `"node-forget"`
+> **AuditEventAction** = `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"bulk-replay"` \| `"archive"` \| `"batch"` \| `"node-forget"`
 
 Every action the audit log records, as an [AuditEvent](#auditevent)'s `action`: `search` (messages
 listed), `view` (one message's details, without content), `content-view`, `replay`, `resend`,

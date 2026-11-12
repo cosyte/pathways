@@ -398,6 +398,7 @@ error's code when it has one, rather than as an expression of the wrong shape.
 | `sftp`          | an [SFTP block](#sftp-block)             | none       | read `dir` on an SFTP server; `dir` and `errorDir` are its paths     |
 | `s3`            | an [S3 block](#s3-block)                 | none       | read objects in an S3 bucket; `dir` is the key prefix                |
 | `azblob`        | an [Azure Blob block](#azure-blob-block) | none       | read blobs in an Azure Blob Storage container; `dir` is the prefix   |
+| `batch`         | a [batch block](#batch-block)            | none       | read each file as many messages rather than one                      |
 
 With `s3` or `azblob`, `keepProcessed`, `doneFile`, `errorDir` and `readTries` are refused: an object
 store claims by a marker and moves no file. At most one of `sftp`, `s3` and `azblob`.
@@ -430,6 +431,7 @@ A [listener](#listener), and:
 | `response`       | `ack`, or `{ status, contentType, headers, body }` | 202 with the id |
 | `maxBytes`       | byte size                                          | `10MB`          |
 | `contextHeaders` | a list of header names                             | none            |
+| `batch`          | a [batch block](#batch-block)                      | none            |
 
 Its token is read from `PATHWAYS_HTTP_TOKEN` when `auth` is not set. `response: ack` needs the format
 `hl7v2` and takes POST alone. A fixed `response` has a 2xx `status`, an optional `contentType`,
@@ -762,6 +764,19 @@ What the HTTP source and the health endpoint take:
 | `tls`       | [server TLS](#tls)                          | required unless `plaintext`                                                         |
 | `plaintext` | boolean                                     | `false`                                                                             |
 | `auth`      | `none`, or `{ bearer: <secret reference> }` | mutual TLS when `tls.ca` is set, otherwise a bearer token from the default variable |
+
+### Batch block
+
+What a file or HTTP source's `batch:` takes. See
+[Read a batch file or body as many messages](./read-batch-files.md).
+
+| Key            | Type                          | Default                 | Meaning                                                                                        |
+| -------------- | ----------------------------- | ----------------------- | ---------------------------------------------------------------------------------------------- |
+| `split`        | `hl7`, `lines` or `delimiter` | required                | how a file or body is cut into messages, on its bytes                                          |
+| `delimiter`    | text, 1 to 64 characters      | required with delimiter | with `split: delimiter`, what each message ends at, as UTF-8                                   |
+| `maxFileSize`  | byte size                     | no limit                | a file source only: fail a larger file whole, with `BATCH_FILE_TOO_LARGE`                      |
+| `onIncomplete` | `hold`, `accept` or `fail`    | `hold`; `fail` for HTTP | with `split: hl7`, what a batch lacking a trailer or with a wrong count gets; HTTP has no hold |
+| `holdFor`      | duration                      | `5m`                    | with `onIncomplete: hold`, how long from its claim a file waits before it is failed            |
 
 ### TLS
 

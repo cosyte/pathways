@@ -198,6 +198,7 @@ function engineSection(bin, quick) {
       transform: channel.transform,
       bodies: [],
       content: channel.content,
+      batch: channel.batch,
     });
     let base;
     try {
@@ -216,6 +217,7 @@ function engineSection(bin, quick) {
         bodies,
         extension: channel.extension,
         content: channel.content,
+        batch: channel.batch,
       });
       try {
         const passMs = timePasses(bin, project);
