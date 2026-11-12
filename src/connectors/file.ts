@@ -110,13 +110,27 @@ function fitted(prefix: string, name: string): string {
   return prefix + kept.reverse().join("");
 }
 
-/** A path from the source folder as one name: `%` as `%25`, then `/` as `%2F`. */
-function encodePath(rel: string): string {
+/**
+ * A path from the source folder as one name: `%` as `%25`, then `/` as `%2F`.
+ *
+ * @example
+ * ```ts
+ * encodePath("sub/100%.hl7"); // "sub%2F100%25.hl7"
+ * ```
+ */
+export function encodePath(rel: string): string {
   return rel.replaceAll("%", "%25").replaceAll("/", "%2F");
 }
 
-/** The path {@link encodePath} wrote. */
-function decodePath(name: string): string {
+/**
+ * The path {@link encodePath} wrote.
+ *
+ * @example
+ * ```ts
+ * decodePath("sub%2F100%25.hl7"); // "sub/100%.hl7"
+ * ```
+ */
+export function decodePath(name: string): string {
   return name.replace(/%(25|2F)/g, (_, code: string) => (code === "25" ? "%" : "/"));
 }
 
@@ -169,8 +183,13 @@ const TEST_SCRIPT = new Script("glob === undefined ? expression.test(path) : mat
  * A test of a path against one {@link PathPattern}; a pattern that runs too long throws. The test is
  * run once here, on an empty path, so the first run on a real one is not also the script's first run
  * in its context, which is slower.
+ *
+ * @example
+ * ```ts
+ * matcher({ glob: "*.hl7" })("a.hl7"); // true
+ * ```
  */
-function matcher(pattern: PathPattern): (rel: string) => boolean {
+export function matcher(pattern: PathPattern): (rel: string) => boolean {
   // Node loads its glob matcher on the first call. Loaded inside a timed run, a slow host could
   // stop the load part way and leave every later glob failing, so it loads here, untimed, on a
   // fixed pattern that costs nothing.

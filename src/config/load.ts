@@ -32,6 +32,7 @@ import {
   DEFAULT_TCP_STALL_TIMEOUT_MS,
   DEFAULT_TCP_TIMEOUT_MS,
   projectSchema,
+  type AzblobConfig,
   type ChannelConfig,
   type ClientTlsFiles,
   type MllpClientTlsFiles,
@@ -52,6 +53,7 @@ import {
   type ProjectConfig,
   type RetryPolicy,
   type SecretProviderConfig,
+  type S3Config,
   type ServerTlsFiles,
   type SftpConfig,
   type Settings,
@@ -616,8 +618,11 @@ function resolveSource(
   // The schema lets exactly one kind through, so a source that is not HTTP is a file source.
   const file = source.file as NonNullable<typeof source.file>;
   const sftp = resolveSftp(file.sftp, dir);
-  // On an SFTP server the folders are the server's own absolute paths, never this machine's.
-  const place = (written: string): string => (sftp === undefined ? resolve(dir, written) : written);
+  const objects = resolveObjectStores(file, dir);
+  // On an SFTP server the folders are the server's own absolute paths, never this machine's, and
+  // in an object store dir is a key prefix.
+  const remote = sftp !== undefined || objects.s3 !== undefined || objects.azblob !== undefined;
+  const place = (written: string): string => (remote ? written : resolve(dir, written));
   return {
     kind: "file",
     dir: place(file.dir),
@@ -636,7 +641,52 @@ function resolveSource(
     errorDir: file.errorDir === undefined ? undefined : place(file.errorDir),
     readTries: file.readTries ?? DEFAULT_READ_TRIES,
     sftp,
+    ...objects,
   };
+}
+
+/** An `s3:` and an `azblob:` block as the YAML wrote them. */
+type ObjectYaml = Pick<NonNullable<DestinationYaml["file"]>, "s3" | "azblob">;
+
+/**
+ * A file block's `s3:` and `azblob:`, resolved, each only when written: the connection string's
+ * file against `dir`.
+ */
+function resolveObjectStores(
+  file: ObjectYaml,
+  dir: string,
+): { s3?: S3Config; azblob?: AzblobConfig } {
+  const { s3, azblob } = file;
+  if (s3 !== undefined) {
+    return {
+      s3: {
+        bucket: s3.bucket,
+        region: s3.region,
+        endpoint: s3.endpoint,
+        pathStyle: s3.pathStyle ?? false,
+        timeoutMs: s3.timeout,
+        singleNode: s3.singleNode ?? false,
+        mode: s3.mode ?? "create",
+      },
+    };
+  }
+  if (azblob !== undefined) {
+    return {
+      azblob: {
+        account: azblob.account,
+        container: azblob.container,
+        endpoint: azblob.endpoint,
+        connectionString:
+          azblob.connectionString === undefined
+            ? undefined
+            : secretSourceOf(azblob.connectionString, dir),
+        plaintext: azblob.plaintext === true,
+        singleNode: azblob.singleNode ?? false,
+        mode: azblob.mode ?? "create",
+      },
+    };
+  }
+  return {};
 }
 
 /** An MLLP block's TLS keys beyond the shared ones, as the YAML wrote them. */
@@ -774,7 +824,9 @@ function resolveConnector(
     // The schema lets exactly one kind through, so a destination that is not HTTP is a file one.
     const file = destination.file as NonNullable<typeof destination.file>;
     const sftp = resolveSftp(file.sftp, dir);
-    return { kind: "file", dir: sftp === undefined ? resolve(dir, file.dir) : file.dir, sftp };
+    const objects = resolveObjectStores(file, dir);
+    const remote = sftp !== undefined || objects.s3 !== undefined || objects.azblob !== undefined;
+    return { kind: "file", dir: remote ? file.dir : resolve(dir, file.dir), sftp, ...objects };
   }
   return {
     kind: "http",

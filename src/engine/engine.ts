@@ -9,11 +9,13 @@ import { ConfigError } from "../config/load.js";
 import {
   DEFAULT_DELIVERY_TIMEOUT_MS,
   DEFAULT_RETRY,
+  type AzblobConfig,
   type ChannelConfig,
   type DestinationConfig,
   type Format,
   type ProjectConfig,
   type RetryPolicy,
+  type S3Config,
   type SftpConfig,
   type TransformConfigBlock,
 } from "../config/schema.js";
@@ -24,8 +26,11 @@ import {
   resolveHeaders,
   type Env,
 } from "../connectors/endpoint.js";
-import { FileDestination, FileSource } from "../connectors/file.js";
+import { AzureContainer } from "../connectors/azblob.js";
+import { type FileFault, FileDestination, FileSource } from "../connectors/file.js";
 import { KnownHosts, pinnedKey } from "../connectors/known-hosts.js";
+import { ObjectDestination, ObjectSource, type ObjectStore } from "../connectors/object-store.js";
+import { S3Bucket } from "../connectors/s3.js";
 import { SftpLocation } from "../connectors/sftp.js";
 import { HttpDestination, HttpSource } from "../connectors/http.js";
 import { RedirectHeld, RetryableError } from "../connectors/http-core.js";
@@ -414,7 +419,39 @@ export async function connectorsFor(
   const { source } = channel;
   let sourceConnector: SourceConnector;
   switch (source.kind) {
-    case "file":
+    case "file": {
+      const said = {
+        onReadError: (error: unknown) => {
+          logger.warn({
+            event: "source-read-failed",
+            channel: channel.name,
+            code: errorCode(error),
+          });
+        },
+        // The reason and a code, never the file's name: a name can carry an identifier.
+        onFileFault: ({ reason, moved, error }: FileFault) => {
+          logger.warn({
+            event: "source-file-set-aside",
+            channel: channel.name,
+            reason,
+            moved,
+            code: errorCode(error),
+          });
+        },
+      };
+      const store = objectStore(source, secretsOf(secrets), `${file}: source.file`);
+      if (store !== undefined) {
+        sourceConnector = new ObjectSource({
+          ...source,
+          ...said,
+          store,
+          prefix: source.dir,
+          channel: channel.name,
+          now,
+          singleNode: (source.s3 ?? source.azblob)?.singleNode === true,
+        });
+        break;
+      }
       sourceConnector = new FileSource({
         ...source,
         channel: channel.name,
@@ -424,25 +461,10 @@ export async function connectorsFor(
           : {
               location: sftpLocation(source.sftp, secretsOf(secrets), `${file}: source.file.sftp`),
             }),
-        onReadError: (error) => {
-          logger.warn({
-            event: "source-read-failed",
-            channel: channel.name,
-            code: errorCode(error),
-          });
-        },
-        // The reason and a code, never the file's name: a name can carry an identifier.
-        onFileFault: ({ reason, moved, error }) => {
-          logger.warn({
-            event: "source-file-set-aside",
-            channel: channel.name,
-            reason,
-            moved,
-            code: errorCode(error),
-          });
-        },
+        ...said,
       });
       break;
+    }
     case "http": {
       const { tls, token } = listenerSecurity(source, secrets, `${file}: source.http`);
       const { response } = source;
@@ -549,7 +571,20 @@ export async function connectorsFor(
       continue;
     }
     switch (destination.kind) {
-      case "file":
+      case "file": {
+        const where = `${file}: destinations.${index}.file`;
+        const store = objectStore(destination, secretsOf(secrets), where);
+        if (store !== undefined) {
+          destinations.push(
+            new ObjectDestination({
+              store,
+              prefix: destination.dir,
+              extension: EXTENSIONS[channel.format],
+              mode: (destination.s3 ?? destination.azblob)?.mode ?? "create",
+            }),
+          );
+          break;
+        }
         destinations.push(
           new FileDestination({
             dir: destination.dir,
@@ -566,6 +601,7 @@ export async function connectorsFor(
           }),
         );
         break;
+      }
       case "http": {
         const where = `${file}: destinations.${index}.http`;
         destinations.push(
@@ -2545,6 +2581,51 @@ function errorName(error: unknown): string {
 function hashed(key: string | undefined): string | undefined {
   return key === undefined ? undefined : createHash("sha256").update(key).digest("hex");
 }
+
+/**
+ * The object store a file block's `s3:` or `azblob:` names, or `undefined` when it names neither.
+ * An Azure connection string is read through `secrets` now; nothing else is secret, and the clients
+ * are made on the first request. `where` names the file block.
+ *
+ * @throws {ConfigError} when the connection string cannot be read.
+ */
+function objectStore(
+  block: { readonly s3?: S3Config | undefined; readonly azblob?: AzblobConfig | undefined },
+  secrets: Secrets,
+  where: string,
+): ObjectStore | undefined {
+  const { s3, azblob } = block;
+  if (s3 !== undefined) {
+    return new S3Bucket({
+      bucket: s3.bucket,
+      region: s3.region,
+      endpoint: s3.endpoint,
+      pathStyle: s3.pathStyle,
+      timeoutMs: s3.timeoutMs,
+    });
+  }
+  if (azblob === undefined) return undefined;
+  const at = `${where}.azblob.connectionString`;
+  const connectionString =
+    azblob.connectionString === undefined ? undefined : secrets.read(azblob.connectionString, at);
+  // TLS unless the block says plaintext: a connection string can name an http endpoint too. The
+  // error names the key, never the string, which holds the account key.
+  if (connectionString !== undefined && !azblob.plaintext && PLAIN_AZURE.test(connectionString)) {
+    throw new ConfigError([
+      `${at}: names an http endpoint, which sends in the clear: set plaintext: true to allow it`,
+    ]);
+  }
+  return new AzureContainer({
+    account: azblob.account,
+    container: azblob.container,
+    endpoint: azblob.endpoint,
+    connectionString,
+  });
+}
+
+/** A connection string that sends in the clear: an http protocol or endpoint, or Azurite's own. */
+const PLAIN_AZURE =
+  /(?:^|;)\s*(?:DefaultEndpointsProtocol\s*=\s*http\s*(?:;|$)|BlobEndpoint\s*=\s*http:|UseDevelopmentStorage\s*=\s*true)/i;
 
 /**
  * The location an `sftp:` block names: its key and passphrase read through `secrets`, and its host
