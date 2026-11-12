@@ -339,7 +339,8 @@ writes wherever you send it, and the engine cannot filter it, so the same rule i
 Safe to log:
 
 - `ctx.messageId`, the id the engine gave the stored message, which `pathways messages show` and
-  `pathways replay` take (`0` under `pathways test`), and `ctx.attempt`.
+  `pathways replay` take (`0` under `pathways test`; on a channel that stores nothing, the pass id),
+  and `ctx.attempt`.
 - The channel's name, and in a destination's transform `ctx.destination`'s `index`, `name` and
   `kind`.
 - Counts and sizes: how many outputs, segments or results, a body's length in bytes.
@@ -360,20 +361,30 @@ Never log:
   release, and it is meant for values like these once it does.
 - An error's own text (`error.message`), from a parser or from your code: it can quote the message.
   Log its `name` and `code`. The engine does the same: a failed transform is logged with its stage,
-  name, code and place, and its text is stored, encrypted, with the message.
+  name, code and place, never its text.
 
 How each way of writing behaves:
 
 - **`ctx.logger`**, which `onStart` receives, takes a code and numbers only. A code that is not
   lower-case words joined by hyphens is logged as `script-log`, and an id that is not a finite
   number, or whose name is not a letter then letters and digits, is dropped. Its lines are
-  `channel-script` events. A transform itself receives no logger.
+  `channel-script` events. A transform itself receives no logger. A code is still words you
+  choose: `testpatient-alpha` is a valid code and is logged as written, and a record number passed
+  as a number (`{ mrn: 12345 }`) is kept. So never build a code or an id from the message.
 - **`console`**, in a transform or a script, writes to the standard output of the process it runs
   in: beside the engine's JSON lines under `pathways start`, and in the command's output under
   `pathways test`, `pathways replay` and `pathways verify`. It is not filtered.
-- **A thrown error** fails the message. Its text is stored, encrypted, with the message: the log,
-  `pathways messages show` and `pathways test` give its stage, name, code and place, never the text.
-  Anyone who reads the database with the keys reads it, so keep it to codes and ids too.
+- **A thrown error** fails the message. The log, `pathways messages show` and `pathways test` give
+  its stage, name, code and place, never its text. Where the text goes depends on the channel:
+  - A channel that stores its messages keeps the text stored with the message, encrypted when the
+    store is encrypted. Anyone who reads the database with the keys reads it.
+  - With `encryption: none`, the text is stored in the clear: anyone who can read the database reads
+    it, with no key.
+  - A channel that stores nothing (`storage.content: none`) keeps no error text at all: the pass is
+    refused, and the log has the stage, name, code and place.
+
+  So an error's message must never carry a value from the message. Build it from codes, field names
+  and `ctx.messageId`, as the sample below does.
 
 ```ts runnable title="channels/results-to-ehr/transform.ts"
 import type { OnStart, Transform } from "@cosyte/pathways";

@@ -1,10 +1,21 @@
+import { randomBytes } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
+import { loadProject } from "../src/config/load.js";
+import { PassFailed, type MessageSink } from "../src/connectors/types.js";
+import { isEncryptedText } from "../src/encryption/envelope.js";
+import { KEY_BYTES, LocalKeyProvider } from "../src/encryption/keys.js";
+import { Engine } from "../src/engine/engine.js";
 import { scriptLogLine } from "../src/engine/worker-entry.js";
+import { openStore } from "../src/storage/open.js";
+import { Store } from "../src/storage/store.js";
 import { fences } from "./docs-helpers.js";
+import { captureLogger, cleanUp, makeProject } from "./helpers.js";
+
+afterEach(cleanUp);
 
 /**
  * What the pages show is safe to log, and the page that says what is safe to log is true.
@@ -362,5 +373,127 @@ describe("What is safe to log from a channel", () => {
       if (m[1] === "logger") continue;
       expect(fields.has(m[1]), `ctx.${m[1] ?? ""}`).toBe(true);
     }
+  });
+});
+
+/** A value of the synthetic data a thrown error quotes, as a careless transform's would. */
+const QUOTED = "TESTPATIENT^ALPHA";
+
+/** Where a thrown error's text ends up in one storage setup: the stored rows' error texts and the log. */
+async function thrownErrorIn(setup: "encrypted" | "none" | "stores-nothing"): Promise<{
+  errors: (string | null)[];
+  log: string;
+  refused: PassFailed | undefined;
+}> {
+  const root = await makeProject({
+    "channels/notes/channel.yaml": [
+      "format: text",
+      ...(setup === "stores-nothing" ? ["storage: { content: none }"] : []),
+      "source:",
+      "  file: { dir: ../../data/in, errorDir: ../../data/error }",
+      "transform: ./transform.ts",
+      "destinations:",
+      "  - file: { dir: ../../data/out }",
+      "",
+    ].join("\n"),
+    "channels/notes/transform.ts":
+      'export default (text: string): string => { throw new Error("cannot route " + text); };\n',
+  });
+  const project = await loadProject(root);
+  const { logger, lines } = captureLogger();
+  // No keys is `encryption: none`: openStore then gives the store unencrypted, as a start does.
+  const keys =
+    setup === "encrypted"
+      ? new LocalKeyProvider([["synthetic", randomBytes(KEY_BYTES)]], "synthetic")
+      : undefined;
+  const store = await openStore(project, { env: {}, logger, keys });
+  let sink: MessageSink | undefined;
+  const engine = new Engine({
+    project,
+    store,
+    logger,
+    connectors: () => ({
+      source: {
+        start: (given: MessageSink) => {
+          sink = given;
+          return Promise.resolve();
+        },
+      },
+      destinations: [{ deliver: () => Promise.resolve() }],
+    }),
+  });
+  let refused: PassFailed | undefined;
+  await engine.start();
+  try {
+    if (sink === undefined) throw new Error("the source was not started");
+    await sink.receive(Buffer.from(QUOTED, "utf8")).catch((error: unknown) => {
+      if (!(error instanceof PassFailed)) throw error;
+      refused = error;
+    });
+    await engine.tick();
+  } finally {
+    await engine.stop();
+    await store.close();
+  }
+  // The database as it is on disk, read under no encryption.
+  const raw = await Store.open(project.databaseFile);
+  try {
+    const rows = await raw.storedContent("messages", 0, 100);
+    return { errors: rows.map((row) => row.error), log: lines.join(""), refused };
+  } finally {
+    await raw.close();
+  }
+}
+
+describe("What is safe to log from a channel: a thrown error, in each storage setup", () => {
+  const text = section(
+    readFileSync(join(docsDir, "logs-and-codes.md"), "utf8"),
+    "What is safe to log from a channel",
+  ).replace(/\s+/gu, " ");
+
+  it("says an error's message must never carry a value from the message", () => {
+    expect(text).toMatch(/must never carry a value from the message/u);
+  });
+
+  it("an encrypted store keeps the text with the message, encrypted, and the log leaves it out", async () => {
+    expect(text).toMatch(/stored with the message, encrypted when the store is encrypted/u);
+    const { errors, log } = await thrownErrorIn("encrypted");
+    expect(errors).toHaveLength(1);
+    expect(isEncryptedText(errors[0] ?? "")).toBe(true);
+    expect(errors[0]).not.toContain("TESTPATIENT");
+    expect(log).not.toContain("TESTPATIENT");
+  });
+
+  it("with encryption none, the text is stored in the clear, for anyone who reads the database", async () => {
+    expect(text).toMatch(/`encryption: none`[^.]*in the clear/u);
+    expect(text).toMatch(/anyone who can read the database reads it/u);
+    const { errors, log } = await thrownErrorIn("none");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain(`cannot route ${QUOTED}`);
+    expect(log).not.toContain("TESTPATIENT");
+  });
+
+  it("a channel that stores nothing keeps no error text at all", async () => {
+    expect(text).toMatch(/stores nothing \(`storage\.content: none`\) keeps no error text/u);
+    const { errors, log, refused } = await thrownErrorIn("stores-nothing");
+    expect(refused).toMatchObject({ permanent: true, code: "TRANSFORM_FAILED" });
+    expect(errors).toEqual([]);
+    expect(log).toContain("pass-transform-failed");
+    expect(log).not.toContain("TESTPATIENT");
+  });
+
+  it("says a ctx.logger code is words the author chooses, so never built from the message", () => {
+    // A valid code is kept as written, and so is a number, whatever it was read from.
+    expect(scriptLogLine("info", "testpatient-alpha", { mrn: 12345 })).toEqual({
+      level: "info",
+      code: "testpatient-alpha",
+      ids: { mrn: 12345 },
+    });
+    expect(text).toMatch(/`testpatient-alpha`/u);
+    expect(text).toMatch(/never build a code or an id from the message/u);
+  });
+
+  it("says ctx.messageId on a channel that stores nothing is the pass id", () => {
+    expect(text).toMatch(/`ctx\.messageId`[^.]*stores nothing, the pass id/u);
   });
 });
