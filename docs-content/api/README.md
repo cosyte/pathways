@@ -3061,6 +3061,24 @@ How many messages of a channel stand at each status. The health endpoint reports
 
 `Promise`\<`Record`\<[`MessageStatus`](#messagestatus), `number`\>\>
 
+##### messageMeta()?
+
+> `optional` **messageMeta**(`id`): `Promise`\<`string` \| `undefined`\>
+
+One message's metadata (`ctx.meta`) as JSON text, through the codec like a body, or `undefined`
+when it has none or it was dropped. Optional: a store without it hands a destination that reads
+metadata none, so a URL placeholder fails its delivery.
+
+###### Parameters
+
+###### id
+
+`number`
+
+###### Returns
+
+`Promise`\<`string` \| `undefined`\>
+
 ##### metaCandidates()?
 
 > `optional` **metaCandidates**(`query`): `Promise`\<[`MetaCandidate`](#metacandidate)[]\>
@@ -3685,6 +3703,13 @@ const name = (message: OutgoingMessage): string => `${message.messageId}-${messa
 > `readonly` **messageId**: `number`
 
 The id of the stored message this came from.
+
+##### meta?
+
+> `readonly` `optional` **meta?**: `Readonly`\<`Record`\<`string`, `string` \| `number` \| `boolean`\>\>
+
+The message's metadata (`ctx.meta`), passed only to a destination that reads it, such as an
+HTTP destination whose URL has placeholders. Undefined otherwise.
 
 ##### resend?
 

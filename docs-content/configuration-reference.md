@@ -585,14 +585,18 @@ A file source's or destination's `azblob:`. The identity is Azure's default chai
 
 #### HTTP destination
 
-| Key            | Type                                                 | Default                  |
-| -------------- | ---------------------------------------------------- | ------------------------ |
-| `url`          | an `https://` URL, or `http://` with `plaintext`     | required                 |
-| `headers`      | a mapping of names to a string or a secret reference | none                     |
-| `tls`          | [client TLS](#tls)                                   | Node.js's built-in roots |
-| `plaintext`    | boolean, only with an `http://` URL                  | `false`                  |
-| `timeout`      | duration                                             | `30s`                    |
-| `resendHeader` | a header name                                        | none                     |
+| Key                 | Type                                                    | Default                  |
+| ------------------- | ------------------------------------------------------- | ------------------------ |
+| `url`               | an `https://` URL, or `http://` with `plaintext`        | required                 |
+| `method`            | `POST`, `PUT`, `PATCH`, `DELETE` or `GET`               | `POST`                   |
+| `query`             | a mapping of names to text, which may hold placeholders | none                     |
+| `headers`           | a mapping of names to a string or a secret reference    | none                     |
+| `tls`               | [client TLS](#tls)                                      | Node.js's built-in roots |
+| `plaintext`         | boolean, only with an `http://` URL                     | `false`                  |
+| `timeout`           | duration                                                | `30s`                    |
+| `resendHeader`      | a header name                                           | none                     |
+| `idempotencyHeader` | a header name                                           | none                     |
+| `allowNetworks`     | a list of addresses or CIDR ranges                      | none                     |
 
 The URL may not hold a user name or password. A header whose name holds `auth`, `cookie`, `token`,
 `secret`, `password`, `key`, `signature` or `credential` must be a secret reference. `Content-Length`,
@@ -603,6 +607,27 @@ The URL may not hold a user name or password. A header whose name holds `auth`, 
 off by a stop. Its value is the number of attempts before, such as `1`. It may not be one of the
 headers above, `Content-Type`, or a name `headers` sets. See
 [Delivery and errors](./delivery-and-errors.md#a-resend-after-a-crash-is-flagged).
+
+`method` is how each output is sent; `GET` and `DELETE` send no body, and no `Content-Type`. The
+`url`'s path may hold placeholders, a [`ctx.meta`](./use-the-message-context.md) key in braces
+such as `{mrn}`, and so may each `query` value. Each is filled per message, percent-encoded, so a
+value never changes the scheme, the host or the port; a placeholder in the host, the port or the
+`url`'s own query is refused when the configuration loads. A key the message's metadata lacks, an
+empty value in the path, or a value of `.` or `..` fails that delivery for good, with an error that
+names the key and never the value. Values in a URL reach the server's and any proxy's logs: put
+identifiers there only when the receiver's API asks for them.
+
+`idempotencyHeader` names a header sent on every attempt, its value `<messageId>-<seq>`, the same
+for each attempt of one output, so a receiver can drop a copy it already has. It follows the
+`resendHeader` rules, and may not be the same name.
+
+Every connection is checked against the address it connects to, each time it connects: a host that
+resolves to a loopback (`127.0.0.0/8`, `::1`), link-local (`169.254.0.0/16`, `fe80::/10`, where
+cloud metadata services answer), private (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`,
+`100.64.0.0/10`, `fc00::/7`) or unspecified address is refused, and the delivery retried with the
+code `ADDRESS_REFUSED`, unless `allowNetworks` names its network, such as `10.20.0.0/16` or
+`127.0.0.1`. A name that resolves to some refused addresses and some allowed ones connects to an
+allowed one.
 
 A 2xx is delivered; a 408, 425, 429, 5xx, a network error or no answer within `timeout` is retried,
 waiting longer when a 429 or a 503 asks with `Retry-After`, never more than `retry.max` (5 minutes

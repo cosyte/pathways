@@ -207,6 +207,10 @@ describe("a delivery's deadline", () => {
         headers: {},
         timeoutMs: 45_000,
         resendHeader: undefined,
+        method: "POST",
+        query: {},
+        idempotencyHeader: undefined,
+        allowNetworks: [],
         ...tls,
       }),
     ).toBe(46_000);

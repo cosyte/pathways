@@ -805,6 +805,7 @@ describe("pathways start with a secret provider", () => {
           "  - http:",
           `      url: "${lab.url}"`,
           "      plaintext: true",
+          "      allowNetworks: [127.0.0.1]",
           "      headers:",
           "        Authorization: { secret: { provider: vault, name: lab/api, field: token } }",
           "",

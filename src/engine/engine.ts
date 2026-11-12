@@ -32,6 +32,7 @@ import { KnownHosts, pinnedKey } from "../connectors/known-hosts.js";
 import { ObjectDestination, ObjectSource, type ObjectStore } from "../connectors/object-store.js";
 import { S3Bucket } from "../connectors/s3.js";
 import { SftpLocation } from "../connectors/sftp.js";
+import { AddressGuard } from "../connectors/address-guard.js";
 import { HttpDestination, HttpSource } from "../connectors/http.js";
 import { RedirectHeld, RetryableError } from "../connectors/http-core.js";
 import { MllpDestination, MllpSource } from "../connectors/mllp.js";
@@ -51,6 +52,7 @@ import {
   type MessageSink,
   type SourceConnector,
 } from "../connectors/types.js";
+import type { MessageMeta } from "../encryption/blind-index.js";
 import {
   customDestination,
   customSource,
@@ -580,6 +582,10 @@ export async function connectorsFor(
             ),
             timeoutMs: destination.timeoutMs,
             resendHeader: destination.resendHeader,
+            method: destination.method,
+            query: destination.query,
+            idempotencyHeader: destination.idempotencyHeader,
+            addressGuard: new AddressGuard(destination.allowNetworks),
             now,
             ...(destination.tls === undefined
               ? {}
@@ -2177,6 +2183,13 @@ export class Engine {
     }
   }
 
+  /** A message's metadata, read back from the store: empty when it has none or the store keeps none. */
+  private async messageMeta(messageId: number): Promise<MessageMeta> {
+    const text = await this.options.store.messageMeta?.(messageId);
+    // Stored by receive() from a MessageMeta: flat values only.
+    return text === undefined ? {} : (JSON.parse(text) as MessageMeta);
+  }
+
   private async deliverEach(channel: RunningChannel, deadline: DeadlineTimer): Promise<void> {
     const { config, connectors } = channel;
     const { store, logger } = this.options;
@@ -2270,6 +2283,13 @@ export class Engine {
           halt.removeEventListener("abort", onHalt);
         };
         try {
+          // Read only for a destination that fills its URL from it: the metadata stays in storage
+          // otherwise. A store that keeps none hands over none, and a placeholder fails the
+          // delivery. Read inside the attempt, so `ended` runs however the read settles.
+          const meta =
+            destination instanceof HttpDestination && destination.usesMeta
+              ? await this.messageMeta(delivery.messageId)
+              : undefined;
           await untilAborted(
             () =>
               destination.deliver({
@@ -2277,6 +2297,7 @@ export class Engine {
                 seq: delivery.seq,
                 body: delivery.body,
                 ...(resend === undefined ? {} : { resend }),
+                ...(meta === undefined ? {} : { meta }),
                 signal,
               }),
             signal,
