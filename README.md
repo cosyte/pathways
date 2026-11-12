@@ -15,15 +15,19 @@
 A code-first healthcare integration engine for Node.js. Channels are YAML files in git, transforms
 are TypeScript functions, and both are tested like any other code.
 
-**Pathways is early.** We are building it in the open, and it is not released yet. The package is not
-on npm, and nothing here is ready to run.
+Pathways is published on npm as [`@cosyte/pathways`](https://www.npmjs.com/package/@cosyte/pathways),
+and a signed container image of each release is at `ghcr.io/cosyte/pathways`. It is early: the
+version is 0.0.x, and a release may still change a key or an API, which its changelog says.
 
 ---
 
 ## Contents
 
+- [Install](#install)
+- [Quickstart](#quickstart)
 - [Why this exists](#why-this-exists)
-- [What we are building](#what-we-are-building)
+- [What the latest release ships](#what-the-latest-release-ships)
+- [In the next release](#in-the-next-release)
 - [Status](#status)
 - [Build from source](#build-from-source)
 - [Layout](#layout)
@@ -32,6 +36,60 @@ on npm, and nothing here is ready to run.
 - [Security](#security)
 - [Contributing](#contributing)
 - [License](#license)
+
+---
+
+## Install
+
+Pathways needs Node.js 24 or later. Start a new project with the starter, which lists the package in
+its own `package.json`:
+
+```bash
+npx @cosyte/pathways init my-project
+cd my-project
+npm install
+```
+
+Or add it to a project you have, as a development dependency so the project pins its version:
+
+```bash
+npm install --save-dev @cosyte/pathways
+npx pathways --version
+```
+
+SQLite works with no setup. For PostgreSQL, MySQL or MariaDB, or SQL Server, install that
+database's driver in the project:
+[Install Pathways](https://github.com/cosyte/pathways/blob/main/docs-content/installation.md) lists
+them.
+
+---
+
+## Quickstart
+
+The starter holds one channel, `adt-to-lab`: it reads HL7 v2 files from `data/adt-to-lab/in`, keeps
+only admissions (`ADT^A01`), sets the receiving application to `LAB`, and writes them to
+`data/adt-to-lab/out`. Its two test messages are synthetic.
+
+In the project `init` wrote, run the channel's tests, then start the engine:
+
+```bash
+npm test
+npm start
+```
+
+`npm test` runs `pathways test`, which sends each test message through the transform and compares
+the output with the `.expected` file beside it. `npm start` runs the channel until you stop it. In a
+second terminal, in the same folder, drop the test messages into the channel's inbox:
+
+```bash
+mkdir -p data/adt-to-lab/in
+cp channels/adt-to-lab/tests/a01.hl7 channels/adt-to-lab/tests/a08.hl7 data/adt-to-lab/in/
+```
+
+Within a few seconds the admission is delivered to `data/adt-to-lab/out/1-1.hl7` and the update is
+filtered out. Stop the engine with Ctrl+C, and `npx pathways status` counts one delivered. The
+[quickstart](https://github.com/cosyte/pathways/blob/main/docs-content/quickstart.md) walks through
+each step and what the engine logs.
 
 ---
 
@@ -47,42 +105,54 @@ one), and not a sandbox: a transform is your own trusted code.
 
 ---
 
-## What we are building
+## What the latest release ships
+
+What follows is in 0.0.2, the version on npm:
 
 - **Channels in git.** A channel is a YAML file that wires a source to its destinations. Its
   transform is a TypeScript file that receives the parsed message and returns what to send.
-- **Formats.** HL7 v2, FHIR, X12, and C-CDA arrive parsed, through Cosyte's open-source
-  [`@cosyte/*`](https://github.com/cosyte) libraries. Anything else passes through as text or JSON.
-- **Connectors.** MLLP, HTTP, TCP with your own framing, and files, in and out.
+- **Formats.** HL7 v2, FHIR R4 JSON, X12, and C-CDA arrive parsed, through Cosyte's open-source
+  [`@cosyte/*`](https://github.com/cosyte) libraries. JSON arrives as a value and anything else as
+  text.
+- **Connectors.** MLLP, HTTP, and files in a folder or on an SFTP server, in and out, over TLS by
+  default, with a bearer token or mutual TLS on every endpoint that listens.
 - **Nothing lost.** Every message is stored before it is acknowledged. When a destination is down,
   Pathways retries and keeps that destination's messages in order. A failed message can be replayed
   once the transform is fixed.
-- **Storage.** SQLite to start with no setup; PostgreSQL, MySQL or MariaDB, and SQL Server for
-  production.
-- **Tests.** `pathways test` will run synthetic messages through a channel and compare the output with
-  saved snapshots.
+- **Storage.** SQLite with no setup, or PostgreSQL, MySQL or MariaDB, and SQL Server, with every
+  stored message encrypted at rest.
+- **Tests.** `pathways test` runs synthetic messages through a channel and compares the output with
+  saved files, and `pathways validate` checks a project's configuration without its secrets.
+- **Operations.** An audit log of every operator action; commands to inspect, replay and clear
+  messages, and to pause, stop and reload one channel of a running engine; a health endpoint with
+  liveness and readiness probes; and a signed Docker image.
+- **Yours to extend.** Your own sources, destinations, hooks, storage and key providers, each a
+  TypeScript module named in the YAML.
 - **Security controls.** TLS in transit, encryption at rest, an audit log of operator actions, and no
   message contents in logs or errors. Compliance is a property of how an organization runs software,
   so we describe the controls Pathways provides rather than claim compliance for it.
 
 ---
 
+## In the next release
+
+These are on `main` and land in the next release, not in 0.0.2:
+
+- A TCP source and destination for feeds that are not MLLP, with your own framing.
+- A CSV format, for delimited and fixed-width text.
+- An SMTP destination, and file sources and destinations on Amazon S3 and Azure Blob Storage.
+- A counted, resumable replay of every failed message in a scope, a bounded drain when the engine is
+  told to stop, limits on MLLP connections and message sizes, and separate retention clocks with
+  sealed archives.
+
+The changelog lists each once it is released.
+
+---
+
 ## Status
 
-Today the repository holds working slices; nothing is released yet:
-
-- Sources and destinations for MLLP, HTTP, TCP, and files, over TLS by default, with a bearer token or
-  mutual TLS on every endpoint that listens.
-- HL7 v2, FHIR R4 JSON, X12, C-CDA, JSON, CSV and fixed-width text, and text, each parsed for a
-  TypeScript transform that runs in its own worker thread.
-- Storage on SQLite, PostgreSQL, MySQL or MariaDB, and SQL Server, with every stored message
-  encrypted at rest.
-- An audit log of every operator action, and the commands to inspect, replay, and clear messages.
-- Your own connectors, hooks, storage, and key providers, loaded from YAML.
-- A health endpoint, a Docker image, and the `pathways init`, `pathways start`, and
-  `pathways test` commands.
-
-Watch or star the repository to follow along.
+Early, and released: 0.0.2 is on npm. Each release is published with provenance from this
+repository's release workflow, with its signed image. Watch or star the repository to follow along.
 
 Pathways is an open engine, MIT licensed and free to self-host. We plan to offer hosted, managed
 Pathways as well. Need an integration built, or hosted and run for you? See our
@@ -92,8 +162,9 @@ Pathways as well. Need an integration built, or hosted and run for you? See our
 
 ## Build from source
 
-Until the first release, the code on `main` runs from a clone. It needs Node.js 24 or later and pnpm
-at the version `packageManager` in `package.json` names:
+To work on Pathways itself, or to run what is on `main` before it is released, build it from a
+clone. It needs Node.js 24 or later and pnpm at the version `packageManager` in `package.json`
+names:
 
 ```bash
 git clone https://github.com/cosyte/pathways.git
@@ -104,9 +175,7 @@ node dist/bin/pathways.mjs --version
 ```
 
 `node dist/bin/pathways.mjs` then stands in for `pathways` in every command the documentation shows.
-[Install Pathways](https://github.com/cosyte/pathways/blob/main/docs-content/installation.md) and the
-[quickstart](https://github.com/cosyte/pathways/blob/main/docs-content/quickstart.md) go on from
-there.
+`AGENTS.md` lists the checks to run before a pull request.
 
 ---
 
