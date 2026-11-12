@@ -76,7 +76,8 @@ health:
   request headers reach a transform stays in the file, where a credential header is refused at load.
   Nor is a channel's `index:` block: which `ctx.meta` keys are stored as searchable tags, and how
   many bits each keeps, stays in the file, where the audit sees it. Nor is an SFTP block's
-  `weakAlgorithms`: turning a SHA-1 algorithm back on stays in the file too.
+  `weakAlgorithms`: turning a SHA-1 algorithm back on stays in the file too. Nor is a `csv` channel's
+  `csv:` block: how its bodies are read and written belongs with its `format`.
 - `pathways validate --print` prints the configuration as `start` reads it, with every setting the
   environment gave and the variable it named; see
   [Command reference](./command-reference.md#pathways-validate). The query string of a URL read
@@ -168,17 +169,17 @@ See [Store messages in a database server](./store-messages-in-a-database.md).
 `retry`, at the top level of its `channel.yaml`; an MLLP source overrides `onStoreFailure`, an MLLP
 destination `ackTimeout`, and any destination `retry`.
 
-| Key                 | Type                  | Default | Meaning                                                                                                                                                      |
-| ------------------- | --------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `timeout`           | duration              | `5s`    | how long one message's transform may run                                                                                                                     |
-| `memory`            | memory size           | `256MB` | the memory cap of a channel's transform worker                                                                                                               |
-| `onStoreFailure`    | `close`, `AE` or `AR` | `close` | what an MLLP source answers when a message cannot be stored                                                                                                  |
-| `ackTimeout`        | duration              | `10s`   | how long an MLLP destination waits to connect, then for each ACK                                                                                             |
-| `retention`         | duration              | `30d`   | how long a done message is kept after its last activity                                                                                                      |
-| `resendFlag`        | boolean               | `true`  | write a marker before each send, so a resend after a crash is flagged; see [Delivery and errors](./delivery-and-errors.md#a-resend-after-a-crash-is-flagged) |
-| `pollInterval`      | duration              | `1s`    | how often the engine looks for new work, and polls a source that sets no [`poll`](#poll-schedule); project only                                              |
-| `retentionInterval` | duration              | `1h`    | how often a running engine runs retention; project only                                                                                                      |
-| `retry`             | see [Retry](#retry)   | below   | how a failed delivery is retried                                                                                                                             |
+| Key                 | Type                  | Default | Meaning                                                                                                                                                                                                        |
+| ------------------- | --------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `timeout`           | duration              | `5s`    | how long one message's transform may run                                                                                                                                                                       |
+| `memory`            | memory size           | `256MB` | the memory cap of a channel's transform worker                                                                                                                                                                 |
+| `onStoreFailure`    | `close`, `AE` or `AR` | `close` | what an MLLP source answers when a message cannot be stored                                                                                                                                                    |
+| `ackTimeout`        | duration              | `10s`   | how long an MLLP destination waits to connect, then for each ACK                                                                                                                                               |
+| `retention`         | duration, or a block  | `30d`   | how long a done message is kept after its last activity, or `{ content, metadata, failed }` with `archive` and `audit` in the project; see [Set message retention](./set-message-retention.md#separate-clocks) |
+| `resendFlag`        | boolean               | `true`  | write a marker before each send, so a resend after a crash is flagged; see [Delivery and errors](./delivery-and-errors.md#a-resend-after-a-crash-is-flagged)                                                   |
+| `pollInterval`      | duration              | `1s`    | how often the engine looks for new work, and polls a source that sets no [`poll`](#poll-schedule); project only                                                                                                |
+| `retentionInterval` | duration              | `1h`    | how often a running engine runs retention; project only                                                                                                                                                        |
+| `retry`             | see [Retry](#retry)   | below   | how a failed delivery is retried                                                                                                                                                                               |
 
 #### Retry
 
@@ -277,7 +278,8 @@ by key. See [Use the message context](./use-the-message-context.md).
 | Key                                                              | Type                                                                                                                                                      | Default                          |
 | ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- |
 | `name`                                                           | lowercase letters, digits and hyphens                                                                                                                     | the folder's name; must match it |
-| `format`                                                         | `hl7v2`, `fhir`, `x12`, `ccda`, `json` or `text`                                                                                                          | `hl7v2`                          |
+| `format`                                                         | `hl7v2`, `fhir`, `x12`, `ccda`, `json`, `text` or `csv`                                                                                                   | `hl7v2`                          |
+| `csv`                                                            | how a `csv` channel reads and writes; see [Read delimited and fixed-width text](./work-with-formats.md#read-delimited-and-fixed-width-text)               | comma-delimited, with a header   |
 | `source`                                                         | exactly one [source](#sources)                                                                                                                            | required                         |
 | `transform`                                                      | path to the transform module                                                                                                                              | none: messages pass through      |
 | `destinations`                                                   | a list of at least one [destination](#destinations)                                                                                                       | required                         |
@@ -288,11 +290,13 @@ by key. See [Use the message context](./use-the-message-context.md).
 | `timeout`, `memory`, `onStoreFailure`, `ackTimeout`, `retention` | see [Settings](#settings)                                                                                                                                 | the project's                    |
 | `resendFlag`, `retry`                                            | see [Settings](#settings)                                                                                                                                 | the project's                    |
 
-A channel with an MLLP source or destination must have the format `hl7v2`.
+A channel with an MLLP source or destination must have the format `hl7v2`. A channel with a tcp
+source or destination and the format `hl7v2`, said or by default, loads with a warning: tcp sends no
+HL7 ACK, so HL7 v2 with ACKs goes over MLLP.
 
 ### Sources
 
-Exactly one of `file`, `http`, `mllp` or `module`. A `file` or `module` source may add `poll` beside
+Exactly one of `file`, `http`, `mllp`, `tcp` or `module`. A `file` or `module` source may add `poll` beside
 it.
 
 #### Poll schedule
@@ -340,25 +344,30 @@ error's code when it has one, rather than as an expression of the wrong shape.
 
 #### File source
 
-| Key             | Type                           | Default    | Meaning                                                              |
-| --------------- | ------------------------------ | ---------- | -------------------------------------------------------------------- |
-| `dir`           | path                           | required   | the folder to read; created if missing                               |
-| `minAge`        | duration                       | `1s`       | how long a file must sit unchanged before it is read                 |
-| `keepProcessed` | boolean                        | `false`    | move each stored file into `processed/` instead of deleting it       |
-| `include`       | a list of globs or `{ regex }` | every file | take only a file whose path from `dir` matches one                   |
-| `exclude`       | a list of globs or `{ regex }` | none       | leave a file whose path from `dir` matches one                       |
-| `recursive`     | boolean                        | `false`    | read the subfolders too, never `.claimed`, `processed` or `errorDir` |
-| `ignoreDot`     | boolean                        | `true`     | leave files and folders whose name starts with a dot                 |
-| `minSize`       | byte size, or `0`              | `1B`       | leave a smaller file; by default an empty file is left               |
-| `maxSize`       | byte size                      | no limit   | set a larger file aside: into `errorDir`, or left where it is        |
-| `maxPerPoll`    | a whole number, 1 or more      | no limit   | the most files claimed in one pass                                   |
-| `sortBy`        | `name` or `mtime`              | `name`     | the order files are taken in                                         |
-| `stable`        | boolean                        | `false`    | take a file only once two passes in a row find it unchanged          |
-| `doneFile`      | a suffix, such as `.done`      | none       | take a file only once its marker is there, then delete the marker    |
-| `errorDir`      | path                           | none       | where a file set aside goes, under its path from `dir`               |
-| `readTries`     | a whole number, 1 or more      | `3`        | passes in a row a file fails to open before it goes into `errorDir`  |
-| `sftp`          | an [SFTP block](#sftp-block)   | none       | read `dir` on an SFTP server; `dir` and `errorDir` are its paths     |
-| `batch`         | a [batch block](#batch-block)  | none       | read each file as many messages rather than one                      |
+| Key             | Type                                     | Default    | Meaning                                                              |
+| --------------- | ---------------------------------------- | ---------- | -------------------------------------------------------------------- |
+| `dir`           | path                                     | required   | the folder to read; created if missing                               |
+| `minAge`        | duration                                 | `1s`       | how long a file must sit unchanged before it is read                 |
+| `keepProcessed` | boolean                                  | `false`    | move each stored file into `processed/` instead of deleting it       |
+| `include`       | a list of globs or `{ regex }`           | every file | take only a file whose path from `dir` matches one                   |
+| `exclude`       | a list of globs or `{ regex }`           | none       | leave a file whose path from `dir` matches one                       |
+| `recursive`     | boolean                                  | `false`    | read the subfolders too, never `.claimed`, `processed` or `errorDir` |
+| `ignoreDot`     | boolean                                  | `true`     | leave files and folders whose name starts with a dot                 |
+| `minSize`       | byte size, or `0`                        | `1B`       | leave a smaller file; by default an empty file is left               |
+| `maxSize`       | byte size                                | no limit   | set a larger file aside: into `errorDir`, or left where it is        |
+| `maxPerPoll`    | a whole number, 1 or more                | no limit   | the most files claimed in one pass                                   |
+| `sortBy`        | `name` or `mtime`                        | `name`     | the order files are taken in                                         |
+| `stable`        | boolean                                  | `false`    | take a file only once two passes in a row find it unchanged          |
+| `doneFile`      | a suffix, such as `.done`                | none       | take a file only once its marker is there, then delete the marker    |
+| `errorDir`      | path                                     | none       | where a file set aside goes, under its path from `dir`               |
+| `readTries`     | a whole number, 1 or more                | `3`        | passes in a row a file fails to open before it goes into `errorDir`  |
+| `sftp`          | an [SFTP block](#sftp-block)             | none       | read `dir` on an SFTP server; `dir` and `errorDir` are its paths     |
+| `s3`            | an [S3 block](#s3-block)                 | none       | read objects in an S3 bucket; `dir` is the key prefix                |
+| `azblob`        | an [Azure Blob block](#azure-blob-block) | none       | read blobs in an Azure Blob Storage container; `dir` is the prefix   |
+| `batch`         | a [batch block](#batch-block)            | none       | read each file as many messages rather than one                      |
+
+With `s3` or `azblob`, `keepProcessed`, `doneFile`, `errorDir` and `readTries` are refused: an object
+store claims by a marker and moves no file. At most one of `sftp`, `s3` and `azblob`.
 
 A path from `dir` is written with `/` on every system. A glob is read as Node.js's
 `path.matchesGlob` reads it, and its `*` never matches a leading dot. A `regex` is at most 256
@@ -405,10 +414,56 @@ an API key header included.
 | ---------------- | --------------------- | --------------------------- |
 | `port`           | 1 to 65,535           | required                    |
 | `host`           | an address            | `127.0.0.1`                 |
-| `tls`            | [server TLS](#tls)    | required unless `plaintext` |
+| `tls`            | [MLLP TLS](#tls)      | required unless `plaintext` |
 | `plaintext`      | boolean               | `false`                     |
 | `onStoreFailure` | `close`, `AE` or `AR` | the channel's               |
 | `ackBuilder`     | path to a module      | the default ACK             |
+| `maxConnections` | 1 to 100,000          | `100`                       |
+| `receiveTimeout` | duration              | no limit                    |
+| `maxMessageSize` | size                  | `4MB`                       |
+| `keepOpen`       | boolean               | `true`                      |
+
+A connection over `maxConnections` is closed at accept. `receiveTimeout` closes a connection that goes
+that long without a whole message, a part-sent one included. A message over `maxMessageSize` closes
+the connection and is not stored. `keepOpen: false` closes each connection once its messages are
+answered. See [Bound connections and messages](./send-and-receive-mllp.md#bound-connections-and-messages).
+
+#### TCP source
+
+| Key              | Type                             | Default                     |
+| ---------------- | -------------------------------- | --------------------------- |
+| `port`           | 1 to 65,535                      | required                    |
+| `host`           | an address                       | `127.0.0.1`                 |
+| `tls`            | [server TLS](#tls)               | required unless `plaintext` |
+| `plaintext`      | boolean                          | `false`                     |
+| `framing`        | a [TCP framing](#tcp-framing)    | required                    |
+| `maxConnections` | 1 to 100,000                     | `100`                       |
+| `maxMessageSize` | byte size                        | `10MB`; required with `raw` |
+| `idleTimeout`    | duration                         | `5m`                        |
+| `stallTimeout`   | duration                         | `30s`                       |
+| `reply`          | `{ hex }` or `{ builder: path }` | none: no reply is sent      |
+
+A connection over `maxConnections` is closed at accept, before any byte is read. A frame longer than
+`maxMessageSize`, or one that stalls for `stallTimeout`, closes the connection once the messages
+before it are stored and answered; the frame is never stored. A sender that closes or resets still
+has every whole frame it sent stored. A connection that
+begins no frame for `idleTimeout` is closed. An empty frame is skipped. `reply.hex` is the same reply
+for every message, at most 4,096 bytes in hex; `reply.builder` is a module whose default export, a
+[`TcpReplyBuilder`](./api/README.md#tcpreplybuilder), builds each one from the stored message's id.
+Either is framed as messages are. See [Send and receive over TCP](./send-and-receive-tcp.md).
+
+#### TCP framing
+
+`framing` names exactly one of:
+
+| Framing                                          | A message is                                                                                                                                               |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `{ raw: true }`                                  | every byte on a connection until the sender closes its side; one per connection                                                                            |
+| `{ delimiter: "0a" }`                            | the bytes before the delimiter, 1 to 16 bytes in hex                                                                                                       |
+| `{ lengthPrefix: { bytes, endian, inclusive } }` | the bytes after a length of `bytes` 1, 2 or 4, `endian` `big` (default) or `little`, the length counting the prefix too when `inclusive` (default `false`) |
+| `{ startEnd: { start: "02", end: "03" } }`       | the bytes between the start and the end bytes, each 1 to 16 bytes in hex                                                                                   |
+
+Hex goes in quotes, two digits a byte, such as `"0d0a"`: unquoted, YAML reads `10` as a number.
 
 #### Module source
 
@@ -416,7 +471,7 @@ an API key header included.
 
 ### Destinations
 
-Each entry is exactly one of `file`, `http`, `mllp` or `module`, and may add a [`retry`](#retry)
+Each entry is exactly one of `file`, `http`, `mllp`, `tcp` or `module`, and may add a [`retry`](#retry)
 block of its own and `dryRun`, beside that key:
 
 ```yaml title="channels/results-out/channel.yaml"
@@ -446,14 +501,15 @@ At the deadline the engine stops waiting, aborts the `signal` it handed the dest
 the attempt as failed with the code `DELIVERY_TIMEOUT`: it is retried by the destination's
 [`retry`](#retry) settings, as any other failure.
 
-| Destination | Deadline                                                                |
-| ----------- | ----------------------------------------------------------------------- |
-| `http`      | its `timeout` and one second                                            |
-| `mllp`      | twice its `ackTimeout` (one to connect, one for the ACK) and one second |
-| `file`      | its `timeout`, `30s` by default                                         |
-| `module`    | its `timeout`, `30s` by default                                         |
+| Destination | Deadline                                                                            |
+| ----------- | ----------------------------------------------------------------------------------- |
+| `http`      | its `timeout` and one second                                                        |
+| `mllp`      | twice its `ackTimeout` (one to connect, one for the ACK) and one second             |
+| `tcp`       | twice its `timeout` (one to connect, one for the send and its reply) and one second |
+| `file`      | its `timeout`, `30s` by default                                                     |
+| `module`    | its `timeout`, `30s` by default                                                     |
 
-The second of grace lets an HTTP or MLLP destination's own timeout, with its own code, come first.
+The second of grace lets an HTTP, MLLP or tcp destination's own timeout, with its own code, come first.
 A deadline longer than 24 days (the longest one Node timer holds) is kept in full: the engine waits
 24 days at a time until it is due, so a `timeout: 30d` cuts an attempt off at 30 days, never sooner.
 A receiver may have the message when an attempt is cut off, and a destination that does not honour
@@ -490,6 +546,44 @@ key is always checked.
 
 [Read and write over SFTP](./read-and-write-files.md#read-and-write-over-sftp) says what each does.
 
+With an [S3 block](#s3-block) or an [Azure Blob block](#azure-blob-block), a file destination
+writes each output as an object under the prefix `dir`.
+
+#### S3 block
+
+A file source's or destination's `s3:`. Credentials come from the AWS SDK's default chain, never
+the YAML.
+
+| Key          | Type                                             | Default                 |
+| ------------ | ------------------------------------------------ | ----------------------- |
+| `bucket`     | an S3 bucket name                                | required                |
+| `region`     | a region, such as `us-east-1`                    | the AWS SDK's own chain |
+| `endpoint`   | an `https://` URL, or `http://` with `plaintext` | Amazon's                |
+| `plaintext`  | boolean, only with an `http://` endpoint         | `false`                 |
+| `pathStyle`  | boolean                                          | `false`                 |
+| `timeout`    | duration, for one request                        | `30s`                   |
+| `singleNode` | boolean, a source only                           | `false`                 |
+| `mode`       | `create` or `overwrite`, a destination only      | `create`                |
+
+[Read and write Amazon S3](./read-and-write-amazon-s3.md) says what each does.
+
+#### Azure Blob block
+
+A file source's or destination's `azblob:`. The identity is Azure's default chain unless
+`connectionString` is set.
+
+| Key                | Type                                             | Default                                   |
+| ------------------ | ------------------------------------------------ | ----------------------------------------- |
+| `account`          | a storage account name                           | required                                  |
+| `container`        | a container name                                 | required                                  |
+| `endpoint`         | an `https://` URL, or `http://` with `plaintext` | `https://<account>.blob.core.windows.net` |
+| `connectionString` | a [secret](#secrets): a connection string        | none                                      |
+| `plaintext`        | boolean: allow an `http://` endpoint             | `false`                                   |
+| `singleNode`       | boolean, a source only                           | `false`                                   |
+| `mode`             | `create` or `overwrite`, a destination only      | `create`                                  |
+
+[Read and write Azure Blob Storage](./read-and-write-azure-blob-storage.md) says what each does.
+
 #### HTTP destination
 
 | Key            | Type                                                 | Default                  |
@@ -519,13 +613,33 @@ answer after it, and is retried when none comes within `timeout` or the connecti
 
 #### MLLP destination
 
-| Key          | Type               | Default                                                         |
-| ------------ | ------------------ | --------------------------------------------------------------- |
-| `host`       | an address         | required                                                        |
-| `port`       | 1 to 65,535        | required                                                        |
-| `tls`        | [client TLS](#tls) | required unless `plaintext`; `{}` uses Node.js's built-in roots |
-| `plaintext`  | boolean            | `false`                                                         |
-| `ackTimeout` | duration           | the channel's                                                   |
+| Key          | Type             | Default                                                         |
+| ------------ | ---------------- | --------------------------------------------------------------- |
+| `host`       | an address       | required                                                        |
+| `port`       | 1 to 65,535      | required                                                        |
+| `tls`        | [MLLP TLS](#tls) | required unless `plaintext`; `{}` uses Node.js's built-in roots |
+| `plaintext`  | boolean          | `false`                                                         |
+| `ackTimeout` | duration         | the channel's                                                   |
+
+#### TCP destination
+
+| Key              | Type                          | Default                                                         |
+| ---------------- | ----------------------------- | --------------------------------------------------------------- |
+| `host`           | an address                    | required                                                        |
+| `port`           | 1 to 65,535                   | required                                                        |
+| `tls`            | [client TLS](#tls)            | required unless `plaintext`; `{}` uses Node.js's built-in roots |
+| `plaintext`      | boolean                       | `false`                                                         |
+| `framing`        | a [TCP framing](#tcp-framing) | required                                                        |
+| `maxMessageSize` | byte size                     | `10MB`; required with `raw` and `expectReply`                   |
+| `timeout`        | duration                      | `10s`                                                           |
+| `expectReply`    | boolean                       | `false`                                                         |
+| `replyCheck`     | path to a module              | none: any reply means delivered; needs `expectReply: true`      |
+
+Each output goes as one frame on a connection of its own. Without `expectReply`, it is delivered once
+it is written; with it, the destination reads one framed reply, at most `maxMessageSize`, within
+`timeout`. `replyCheck` is a module whose default export, a
+[`TcpReplyCheck`](./api/README.md#tcpreplycheck), answers `delivered`, `retry` or `rejected`. An
+output the framing cannot carry fails for good.
 
 #### Module destination
 
@@ -566,6 +680,19 @@ What a file or HTTP source's `batch:` takes. See
 | client TLS | `ca` to trust in place of Node.js's built-in roots; `cert` and `key`, together, to present a client certificate |
 
 `tls` and `plaintext: true` cannot both be set.
+
+An MLLP source's `tls` is the server block, and an MLLP destination's the client block, each with
+these keys too:
+
+| Key          | Type                         | Default                            |
+| ------------ | ---------------------------- | ---------------------------------- |
+| `minVersion` | `TLSv1.2` or `TLSv1.3`       | `TLSv1.2`                          |
+| `profile`    | `bcp195` or `atna`           | `bcp195`, unless `ciphers` is set  |
+| `ciphers`    | an OpenSSL cipher list       | none; cannot be set with `profile` |
+| `pfx`        | path to a PKCS#12 file       | none; in place of `cert` and `key` |
+| `passphrase` | [secret reference](#secrets) | none; goes with `pfx`              |
+
+See [Choose the TLS version and cipher suites](./send-and-receive-mllp.md#choose-the-tls-version-and-cipher-suites).
 
 ### Secrets
 

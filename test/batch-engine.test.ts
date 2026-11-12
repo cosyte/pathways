@@ -232,6 +232,11 @@ describe("The batch setting", () => {
     );
     expect(await load("{ split: hl7, onIncomplete: hold }", "http")).toMatch(/onIncomplete/);
     expect(await load("{ split: hl7, maxFileSize: 1MB }", "http")).toMatch(/maxFileSize/);
+    const root = await makeProject({
+      "channels/a/channel.yaml":
+        "format: text\nsource:\n  file:\n    dir: inbox\n    s3: { bucket: synthetic-bucket }\n    batch: { split: lines }\ndestinations:\n  - file: { dir: ../../out }\n",
+    });
+    await expect(loadProject(root)).rejects.toThrow(/batch: goes with a folder or sftp/);
   });
 });
 

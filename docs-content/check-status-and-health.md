@@ -88,6 +88,11 @@ connection (a broker, a remote server or a socket it dialled), until it says it 
 channel `retrying`, and the answer stays 200, because restarting the engine would not bring the
 destination back. Point a restart policy at the status code, and an alert at the channels.
 
+A channel whose source is MLLP or tcp also has `connections`, with `refused`: how many connections the
+source closed at accept since the engine started, because it already held its `maxConnections`. A
+count only, never who connected. A rising count means senders are being turned away: raise the cap, or
+find the sender that opens connections and leaves them.
+
 Each channel's `state` is `running`, or `paused` or `stopped` when an operator set it so with
 `pathways channel` (see [pause, stop and reload a channel](./pause-stop-and-reload-a-channel.md)).
 Neither is a fault: the answer stays 200, and the source of a paused channel shows `up`.

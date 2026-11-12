@@ -15,6 +15,8 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { copyDrivers, driverNames, main, storeEntries } from "../../scripts/copy-drivers.js";
+import { AZURE_PACKAGES } from "../../src/connectors/azblob.js";
+import { S3_PACKAGE } from "../../src/connectors/s3.js";
 import { SFTP_PACKAGE } from "../../src/connectors/sftp.js";
 import { DRIVER_PACKAGES } from "../../src/storage/dialects.js";
 
@@ -156,12 +158,19 @@ describe.skipIf(process.platform === "win32")("copy-drivers", () => {
     expect(empty.stderr).toContain("ENOENT");
   });
 
-  it("copies exactly this package's peers: the drivers dialects.ts imports, and the SFTP client", async () => {
-    const drivers = [...Object.values(DRIVER_PACKAGES).flat(), SFTP_PACKAGE].sort();
+  it("copies exactly this package's peers: the drivers dialects.ts imports, and the SFTP and object store clients", async () => {
+    const drivers = [
+      ...Object.values(DRIVER_PACKAGES).flat(),
+      SFTP_PACKAGE,
+      S3_PACKAGE,
+      ...AZURE_PACKAGES,
+    ].sort();
     expect(await driverNames(process.cwd())).toEqual(drivers);
     const entries = await storeEntries(join(process.cwd(), "node_modules"), drivers);
     for (const name of drivers) {
-      expect([...entries].some((entry) => entry.startsWith(`${name}@`))).toBe(true);
+      // pnpm names a scoped package's entry with a + for its /.
+      const entry = `${name.replace("/", "+")}@`;
+      expect([...entries].some((found) => found.startsWith(entry))).toBe(true);
     }
   });
 });

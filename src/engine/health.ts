@@ -36,6 +36,11 @@ export interface ChannelHealth {
    * `dry-run` is there only when a destination ran dry.
    */
   readonly deliveries?: DeliveryTally;
+  /**
+   * An MLLP or tcp source's connections: `refused` counts those closed at accept because the source
+   * already held `maxConnections`, since the engine started. Absent for any other source.
+   */
+  readonly connections?: { readonly refused: number };
 }
 
 /**
