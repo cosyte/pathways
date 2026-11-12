@@ -10,7 +10,13 @@ import {
   type MllpSourceOptions,
 } from "../src/connectors/mllp.js";
 import type { MessageSink, ReceiveOptions } from "../src/connectors/types.js";
-import { ADT_A01, ADT_A08, SECOND_HEADER_BEHIND } from "./helpers.js";
+import {
+  ADT_A01,
+  ADT_A08,
+  joinedResults,
+  SECOND_HEADER_BEHIND,
+  SECOND_HEADER_JOINED,
+} from "./helpers.js";
 import { errOf, exchange, msaOf, OPENSSL, TLS_TESTS } from "./mllp-helpers.js";
 import { makeCertificates, removeCertificates, type Certificates } from "./net-helpers.js";
 
@@ -66,6 +72,11 @@ async function startSource(
 }
 
 const MSG = (n: number): string => ADT_A01.replace("MSG00001", `MSG0000${n}`);
+
+/** Whether a body holds an MLLP start or end byte, which the frame reader acts on. */
+function framed(body: string): boolean {
+  return body.includes("\u000b") || body.includes("\u001c");
+}
 
 describe("MllpSource", () => {
   it("stores each message before it answers AA, echoing the message's control ID", async () => {
@@ -229,7 +240,7 @@ describe("MllpSource", () => {
     },
   );
 
-  it.each(SECOND_HEADER_BEHIND)(
+  it.each([...SECOND_HEADER_BEHIND, ...SECOND_HEADER_JOINED.filter(([, body]) => !framed(body))])(
     "refuses a frame holding a second message whose header stands behind %s, answering AR",
     async (_, message) => {
       const { sink, received } = recordingSink();
@@ -248,6 +259,47 @@ describe("MllpSource", () => {
         message: 1,
         problem: "MULTIPLE_MESSAGES",
       });
+    },
+  );
+
+  // A VT or an FS inside a frame never reaches the parser here: the frame reader ends the frame at
+  // an FS and starts a new one at a VT. So two results joined by them with no line break reach the
+  // sink apart, or not at all, and never as one body holding both patients.
+  it.each([
+    ["an FS", "\u001c", [["MSG00001", undefined]], []],
+    ["a VT", "\u000b", [["MSG00002", "inbound: MLLP_TRAILING_BYTES"]], ["AE"]],
+    [
+      "an FS and a VT",
+      "\u001c\u000b",
+      [
+        ["MSG00001", undefined],
+        ["MSG00002", undefined],
+      ],
+      ["AA", "AA"],
+    ],
+  ] as const)(
+    "never stores two results joined by %s with no line break as one body",
+    async (_, joiner, stored, codes) => {
+      const { sink, received } = recordingSink();
+      const { port } = await startSource(sink);
+      // Framed by hand: the client refuses to frame a body holding VT or FS, and a sender need not.
+      const frame = Buffer.concat([
+        Buffer.from([0x0b]),
+        Buffer.from(joinedResults(joiner), "latin1"),
+        Buffer.from([0x1c, 0x0d]),
+      ]);
+      const { replies } = await exchange(port, [frame], { replies: codes.length });
+
+      expect(
+        received.map(({ body, options }) => [
+          body.includes("MSG00002") ? "MSG00002" : "MSG00001",
+          options?.failure,
+        ]),
+      ).toEqual(stored);
+      for (const { body } of received) {
+        expect(body.includes("TEST000001") && body.includes("TEST000002")).toBe(false);
+      }
+      expect(replies.map((reply) => msaOf(reply)[0])).toEqual(codes);
     },
   );
 

@@ -72,7 +72,9 @@ On an `hl7v2` channel a body that holds a second message (see
 is never told such a body was taken. Before this release it was answered 202 (or the fixed
 response), though the engine stored it as failed and a replay failed again; a sender that read every
 2xx as taken now sees the refusal. With `response: ack` it is answered `AE` at 200, as before. The
-engine logs `http-unreadable` with the message id and the code.
+engine logs `http-unreadable` with the message id and the code. With `batch:` the answer is for the
+whole batch, and stays 202 with every piece's id (or the fixed response) when a piece is stored as
+failed, such as one that holds a second message: the `batch` log line counts it in `failed`.
 
 On a channel that stores nothing (`storage.content: none`), 202 means every destination accepted the
 message, and its `id` is the message's pass id, which no command can look up. A destination that failed in a way that may pass

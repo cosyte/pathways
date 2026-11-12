@@ -218,8 +218,8 @@ a tcp destination's framing cannot carry.
 When an MLLP source stores a message as failed, the reason is one of `@cosyte/hl7`'s parse codes (such
 as `NO_MSH_SEGMENT`), `NO_CONTROL_ID`, `MULTIPLE_MESSAGES` or `MLLP_TRAILING_BYTES`. An ACK builder
 receives it as `problem`. `MULTIPLE_MESSAGES` means the frame held a second message header (`MSH`,
-`FHS` or `BHS`, in any case, behind any bytes in front of the id that are not printable ASCII): a
-frame is one message. On an `hl7v2` channel the engine stores a body from any other source that holds
+`FHS` or `BHS`, in any case, behind or inside the id any bytes that are not printable ASCII, or a
+whole header such as `MSH|^~\&|` anywhere on a line): a frame is one message. On an `hl7v2` channel the engine stores a body from any other source that holds
 one as failed with `inbound: MULTIPLE_MESSAGES` too, and an HTTP source answers it 422.
 `MULTIPLE_PATIENTS` is the transform worker's code for a message holding a second PID where the
 structure HL7 publishes for its type allows one; see [Work with formats](./work-with-formats.md).

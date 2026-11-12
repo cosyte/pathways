@@ -20,6 +20,7 @@ import {
   LAB_TRANSFORM,
   makeProject,
   SECOND_HEADER_BEHIND,
+  SECOND_HEADER_JOINED,
   type LogEvent,
 } from "./helpers.js";
 import {
@@ -252,7 +253,7 @@ describe("an HTTP channel in the engine", () => {
     );
   });
 
-  it.each(SECOND_HEADER_BEHIND)(
+  it.each([...SECOND_HEADER_BEHIND, ...SECOND_HEADER_JOINED])(
     "answers 422 to a body whose second header stands behind %s, storing it as failed",
     async (_, text) => {
       const { engine, store, lab, port, events, lines } = await setUp(200);

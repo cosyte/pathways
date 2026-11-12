@@ -40,8 +40,10 @@ A message that does not parse is marked failed with the parser's stable code, su
 `NO_MSH_SEGMENT` or `X12_NO_ISA_HEADER`, and the transform never sees it.
 
 An HL7 v2 body is one message. A body that holds a second message (a later `MSH`, `FHS` or `BHS`
-segment, in any case, after any line ending, and behind any bytes in front of its id that are not
-printable ASCII, such as a space, a tab, a NUL, a form feed or a byte order mark) is stored as failed with
+segment, in any case, after any line ending, behind or inside its id any bytes that are not
+printable ASCII, such as a space, a tab, a NUL, a form feed or a byte order mark, and after a VT or
+an FS with no line break, which the parser removes; or a whole header such as `MSH|^~\&|` anywhere
+on a line, joined to the first message's last segment or behind a printable byte) is stored as failed with
 `inbound: MULTIPLE_MESSAGES` as it arrives, from any source, and never reaches the transform or a
 destination; on a channel that stores nothing it is counted as unreadable. The transform worker
 refuses such a body with `MULTIPLE_MESSAGES` too, so a replay of one stored before this check does
@@ -50,6 +52,16 @@ destination or `ctx.route`, is held to the same rule before the target stores it
 refused with `MULTIPLE_MESSAGES`, and the source's delivery, or the message whose transform routed
 it, fails. Split a file of several messages into one file per message before you
 drop it in.
+
+The check reads a body as `@cosyte/hl7` does: the parser removes VT and FS wherever they stand and
+joins what follows to the line, keeps any other byte, and reads a segment id up to its field
+separator. A line whose id, with bytes that are not printable ASCII passed over, is `MSH`, `FHS` or
+`BHS` followed by a separator, or ending its line, is a header. A line the parser cannot name, such as `-MSH|x` or
+`M-SH|x`, is read as before, as an unknown segment, so a message with a stray line still parses;
+the second message is refused when its whole header is there, as a sender's second message always
+has one. A field that quotes a header escapes it (`\F\` for the field separator), as any field text
+must: a header's encoding characters hold the escape character once, so unescaped they are an escape
+that never ends.
 
 A message with more than one PID segment is refused by the transform worker with
 `MULTIPLE_PATIENTS`, and stored as failed, when the structure HL7 publishes for its type
