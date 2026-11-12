@@ -8,6 +8,7 @@ import {
   FORMATS,
   type CsvSettings,
   type Hl7v2Settings,
+  type XmlSettings,
 } from "../engine/worker-entry.js";
 import { LIFECYCLE_EVENTS, type LifecycleEventType } from "../extensions/events.js";
 import type { JsonValue } from "../transform.js";
@@ -3137,6 +3138,41 @@ const hl7v2Block = z
   })
   .meta({ description: "How an hl7v2 channel reads and writes its bodies: assumeCharset." });
 
+/** An `xml` channel's `xml:` block: the caps a body is read under. */
+const xmlBlock = z
+  .strictObject({
+    maxBytes: z
+      .number()
+      .int()
+      .min(1)
+      .meta({
+        description:
+          "The largest body read, in bytes; a larger one fails with INPUT_SIZE_LIMIT_EXCEEDED. Default: 10485760 (10 MiB).",
+      })
+      .optional(),
+    maxDepth: z
+      .number()
+      .int()
+      .min(1)
+      .meta({
+        description:
+          "How deep elements may nest, the root counting as 1; deeper fails with ELEMENT_DEPTH_LIMIT_EXCEEDED. Default: 1000.",
+      })
+      .optional(),
+    maxElements: z
+      .number()
+      .int()
+      .min(1)
+      .meta({
+        description:
+          "How many elements a body may hold; more fails with NODE_COUNT_LIMIT_EXCEEDED. Default: 1000000.",
+      })
+      .optional(),
+  })
+  .meta({
+    description: "How an xml channel reads its bodies: maxBytes, maxDepth and maxElements.",
+  });
+
 /** `channels/<name>/channel.yaml`. */
 export const channelSchema = restate(
   z
@@ -3156,11 +3192,12 @@ export const channelSchema = restate(
         .enum(FORMATS)
         .meta({
           description:
-            "What the transform receives: hl7v2 (the default), fhir, x12, ccda, json, text, the body unparsed, or csv, a table of rows. MLLP needs hl7v2.",
+            "What the transform receives: hl7v2 (the default), fhir, x12, ccda, json, text, the body unparsed, csv, a table of rows, or xml, a parsed XML document. MLLP needs hl7v2.",
         })
         .optional(),
       csv: csvBlock.optional(),
       hl7v2: hl7v2Block.optional(),
+      xml: xmlBlock.optional(),
       source,
       transform: path
         .meta({
@@ -3250,6 +3287,13 @@ export const channelSchema = restate(
           code: "custom",
           path: ["csv"],
           message: "a csv: block needs format: csv",
+        });
+      }
+      if (channel.xml !== undefined && channel.format !== "xml") {
+        ctx.addIssue({
+          code: "custom",
+          path: ["xml"],
+          message: "an xml: block needs format: xml",
         });
       }
       if (channel.hl7v2 !== undefined && (channel.format ?? "hl7v2") !== "hl7v2") {
@@ -4229,6 +4273,8 @@ export interface ChannelConfig {
   readonly csv?: CsvSettings | undefined;
   /** An `hl7v2` channel's `hl7v2:` block, as written; unset for another format or no block. */
   readonly hl7v2?: Hl7v2Settings | undefined;
+  /** An `xml` channel's `xml:` block, as written; unset for another format or no block. */
+  readonly xml?: XmlSettings | undefined;
   readonly source: FileSource | HttpSource | MllpSource | TcpSource | ModuleConnector;
   /** The transform module, or `undefined` to pass each message through unchanged. */
   readonly transform: string | undefined;

@@ -44,6 +44,7 @@ const SAMPLES: Record<Format, string> = {
   json: '{ "status": "ok", "tries": [1, 2] }',
   text: "plain",
   csv: "code,name\r\nTEST-001,Example\r\n",
+  xml: "<order id='TEST-ORDER-001'/>",
 };
 
 async function failureOf(promise: Promise<unknown>, transformFile?: string) {
@@ -85,7 +86,7 @@ async function roundTrip(format: WorkerFormat, body: string): Promise<string> {
 
 describe("the format registry", () => {
   it("is where the formats, their extensions and their content types are read from", () => {
-    expect(FORMATS).toEqual(["hl7v2", "fhir", "x12", "ccda", "json", "text", "csv"]);
+    expect(FORMATS).toEqual(["hl7v2", "fhir", "x12", "ccda", "json", "text", "csv", "xml"]);
     expect(FORMATS).toEqual(Object.keys(FORMAT_REGISTRY));
     expect(formatTable("extension")).toEqual(
       Object.fromEntries(FORMATS.map((format) => [format, FORMAT_REGISTRY[format].extension])),
