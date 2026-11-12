@@ -40,6 +40,11 @@ destinations:
 
 A channel that has stored messages but is no longer in the project keeps the project's period.
 
+These periods are how long Pathways keeps its own copies, for tracing and replaying messages. None of
+them is set to meet a records law, and Pathways takes no default from one: ask whoever decides your
+records policy which period applies before you set one here, and keep archives or backups as that
+policy says ([Pathways is not the system of record](./retention-and-archives.md#pathways-is-not-the-system-of-record)).
+
 ## When it runs
 
 A running engine (`pathways start`) runs retention once it has made its first pass, then every
@@ -65,7 +70,7 @@ A dry run deletes nothing and is not audited.
 
 `retention: 30d` is shorthand for one clock, the metadata clock: how long a done message's row is
 kept. Written out as a block, `retention:` sets up to three clocks, each counted from a message's
-last activity:
+last activity ([why three](./retention-and-archives.md#three-clocks)):
 
 ```yaml title="pathways.yaml"
 encryption:
@@ -139,44 +144,15 @@ defaults:
 An archive is sealed under your encryption keys, so `archive` with `encryption: none` is refused
 when the project loads. `archive` and `audit` are set in `pathways.yaml` only.
 
-Retention works a batch of at most 500 messages at a time, and fewer when an archive reaches 256 MiB.
-For each batch, in this order:
+Retention writes each batch to an archive file under `archive/<channel>/`, checks it, and records it
+in the audit log before it changes any message in it, so a message is never changed without its
+archive. A stop part way can leave the same message in two archives.
+[Archive before delete](./retention-and-archives.md#archive-before-delete) gives the steps, and
+[what an archive holds](./retention-and-archives.md#what-an-archive-holds) its format.
 
-1. It reads every message of the batch as it stands, decrypted: every column of its row and of each
-   of its deliveries, of every generation, so nothing a step empties or deletes is left out.
-2. It writes them to a new file under `archive/<channel>/`, ending in `.partial`, readable by its
-   own user alone, and flushes the file to disk.
-3. It renames the file to its name, ending in `.pwa`, and flushes the folder.
-4. It reads the file back, opens it and checks its trailer and that it holds the messages it wrote.
-5. It writes an `archive` entry to the audit log, with the step and the number of messages.
-6. Only then does it drop the content of, or delete, those messages, in one transaction.
-
-A stop at any point leaves either no archive and nothing changed, or an archive and nothing changed,
-or both done: a message is never changed without its archive. A stop between steps 5 and 6 leaves
-the messages in place, and the next run archives them again, so the same message can be in two
-archives. When an archive cannot be written, flushed, read back, checked or audited, what was
-written is removed, nothing more of that channel is changed in that run, and the engine logs
-`retention-skipped` with the channel and the code (`pathways retention` prints it and exits 1). The
-next run tries again.
-
-An archive file is NDJSON, compressed with gzip and then encrypted with the envelope that encrypts
-stored messages, under a fresh data key for each file:
-
-- the first line is a header: `format` (`pathways-archive`), `version` (1), `channel`, `keyId` (the
-  master key it is sealed under), `created`, the retention `step` (`content`, `metadata` or
-  `failed`), and `mac`, the trailer's key, wrapped under that master key;
-- each line after it is one message: its id, channel, status, times, size, generation, duplicate
-  and idempotency keys, whether it held its key's claim (`idempotencyClaim`, absent from an archive
-  written before Pathways kept claims), content hash, error text, `ctx.meta`, and its body in base64; `outputs`,
-  the current generation's outputs in order; and `deliveries`, every delivery of every generation
-  with its status, attempts, times, error text and body in base64;
-- the last line is the trailer: the `count` of messages and an HMAC-SHA-256 over the header and every
-  message line.
-
-The index tags over `ctx.meta` are not in an archive: they are worked out from `ctx.meta` under your
-keys, so the archived `ctx.meta` gives them back. A message whose content was dropped after delivery
-(`storage.content: dropAfterDelivery`) lost its bodies, error texts and `ctx.meta` at delivery,
-before retention reached it, so its archive holds what its row still has.
+When an archive cannot be written, flushed, read back, checked or audited, what was written is
+removed, nothing more of that channel is changed in that run, and the engine logs `retention-skipped`
+with the channel and the code (`pathways retention` prints it and exits 1). The next run tries again.
 
 `dir` takes an environment reference too, such as `dir: { env: PATHWAYS_ARCHIVE_DIR }`, read when
 the project loads.
@@ -254,7 +230,7 @@ The engine logs `content-dropped` with the channel, the message and the delivery
 received under `keep` and delivered after you switch to `dropAfterDelivery` is dropped too, without
 a hash. A custom store needs `markDeliveredAndDropContent` for this; `pathways start` refuses a
 channel that asks for it on a store without it. What each database still holds after the delete is
-on [Store messages in a database server](./store-messages-in-a-database.md#what-a-database-keeps-after-a-delete).
+on [How storage and encryption work](./storage-and-encryption.md#what-a-database-keeps-after-a-delete).
 
 To store no message at all, a channel sets `storage.content: none`: see [Pass messages through
 without storing them](./pass-messages-through-without-storing.md).
@@ -269,22 +245,11 @@ without storing them](./pass-messages-through-without-storing.md).
 
 On SQLite, a deleted message's bytes are overwritten with zeros in the file; on a server they can
 stay for a while, as [what a database keeps after a
-delete](./store-messages-in-a-database.md#what-a-database-keeps-after-a-delete) says. The period your
+delete](./storage-and-encryption.md#what-a-database-keeps-after-a-delete) says. The period your
 policy needs, and what happens to backups and output folders, are yours to decide.
-
-## Pathways is not the system of record
-
-Pathways moves messages between systems; it does not keep the legal record of a patient's care. The
-periods set here are how long Pathways keeps its own copies, for tracing and replaying messages, and
-none of them is set to meet a records law.
-
-For context only: how long records must be kept is set by federal and state law, by contracts, and by
-your own policy, and it differs by state and by the kind of record. Those periods apply to the
-systems that hold the record, such as an EHR, and to documents such as your policies. Pathways takes
-no default from them. Ask whoever decides your records policy which period applies before you set
-one here, and keep archives or backups as that policy says.
 
 ## Related
 
+- [How retention and archives work](./retention-and-archives.md).
 - [The security model](./security-model.md).
 - [Configuration reference](./configuration-reference.md#settings).
