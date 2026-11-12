@@ -905,6 +905,7 @@ export class Engine {
           channel: config.name,
           transformFile: config.transform,
           format: config.format,
+          csv: config.csv,
           timeoutMs: config.settings.timeoutMs,
           memoryMb: config.settings.memoryMb,
           // Read here, in the engine's process, so a worker never sees the environment.
@@ -1700,6 +1701,7 @@ export class Engine {
       channel: name,
       transformFile: next.transform,
       format: next.format,
+      csv: next.csv,
       timeoutMs: next.settings.timeoutMs,
       memoryMb: next.settings.memoryMb,
       config,

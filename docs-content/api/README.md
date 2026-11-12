@@ -526,7 +526,7 @@ Where to read credentials and other settings from: `process.env` when the engine
 
 ##### format
 
-> `readonly` **format**: `"hl7v2"` \| `"json"` \| `"fhir"` \| `"x12"` \| `"ccda"` \| `"text"`
+> `readonly` **format**: `"hl7v2"` \| `"json"` \| `"fhir"` \| `"x12"` \| `"ccda"` \| `"text"` \| `"csv"`
 
 ##### logger
 
@@ -606,6 +606,112 @@ rows of a message whose content was dropped: they hold none.
 ###### Returns
 
 `Promise`\<[`StoredContent`](#storedcontent-1)[]\>
+
+***
+
+### CsvColumn
+
+One column of a fixed-width `csv` channel: its name, the position of its first character counting
+from 1, and how many characters it holds, all counted in decoded characters (code points).
+
+#### Example
+
+```ts
+const column: CsvColumn = { name: "code", start: 1, length: 8 };
+```
+
+#### Properties
+
+##### length
+
+> `readonly` **length**: `number`
+
+##### name
+
+> `readonly` **name**: `string`
+
+##### start
+
+> `readonly` **start**: `number`
+
+***
+
+### CsvSettings
+
+How a `csv` channel reads and writes its bodies, from the channel's `csv:` block. Every key is
+optional; see CSV\_DEFAULTS for what an unset key means. With `columns`, the channel reads
+fixed-width lines rather than delimited ones, and `delimiter`, `quote`, `escape`, `header` and
+`escapeFormulas` do not apply.
+
+#### Example
+
+```ts
+const settings: CsvSettings = { delimiter: "|", header: true, newline: "lf" };
+```
+
+#### Properties
+
+##### columns?
+
+> `readonly` `optional` **columns?**: readonly [`CsvColumn`](#csvcolumn)[]
+
+The columns of a fixed-width body. Unset for a delimited one.
+
+##### delimiter?
+
+> `readonly` `optional` **delimiter?**: `string`
+
+The one character between cells. Default `,`.
+
+##### encoding?
+
+> `readonly` `optional` **encoding?**: `"utf-8"` \| `"latin1"`
+
+How the body's bytes are read and written: `utf-8` (strict, the default) or `latin1`.
+
+##### escape?
+
+> `readonly` `optional` **escape?**: `string`
+
+The one character that escapes a quote inside a quoted cell. Default: the quote, doubled.
+
+##### escapeFormulas?
+
+> `readonly` `optional` **escapeFormulas?**: `boolean`
+
+Whether a cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return is written with a
+leading `'`, quoted, so a spreadsheet does not run it as a formula. Default `false`.
+
+##### header?
+
+> `readonly` `optional` **header?**: `boolean`
+
+Whether the first line names the columns. Default `true`.
+
+##### maxRowLength?
+
+> `readonly` `optional` **maxRowLength?**: `number`
+
+The longest line read, in decoded characters. Default 1,048,576.
+
+##### newline?
+
+> `readonly` `optional` **newline?**: `"crlf"` \| `"lf"` \| `"cr"`
+
+The line ending written after a line a transform changed or added. Default: the first one the
+body used, or `crlf` when it has none. Lines are read on CRLF, LF and a bare CR alike.
+
+##### pad?
+
+> `readonly` `optional` **pad?**: `boolean`
+
+Whether a short line is padded (with empty cells, or spaces) rather than refused. Default `false`.
+
+##### quote?
+
+> `readonly` `optional` **quote?**: `string`
+
+The one character a cell is quoted with. Default `"`.
 
 ***
 
@@ -5110,6 +5216,39 @@ const table: ContentTable = "deliveries";
 
 ***
 
+### CsvRecord
+
+> **CsvRecord** = `Record`\<`string`, `string`\>
+
+One row of a `csv` table read with a header, or of a fixed-width one: its cells by column name, on
+an object with no prototype, so a column named `__proto__` or `constructor` is a cell like any
+other.
+
+#### Example
+
+```ts
+const row: CsvRecord = Object.assign(Object.create(null), { code: "TEST-001" });
+```
+
+***
+
+### CsvTable
+
+> **CsvTable** = \{ `header`: `string`[]; `rows`: [`CsvRecord`](#csvrecord)[]; \} \| \{ `header`: `null`; `rows`: `string`[][]; \}
+
+What a `csv` channel's transform receives, and may return: the header and the rows. With a header
+(and in fixed-width mode, where the header is the column names), each row is a [CsvRecord](#csvrecord);
+without one, `header` is `null` and each row is an array of cells. A transform may change it in
+place or build a new one; rows it leaves untouched are written back byte for byte.
+
+#### Example
+
+```ts
+const table: CsvTable = { header: null, rows: [["TEST-001", "Example"]] };
+```
+
+***
+
 ### DeliveryCounts
 
 > **DeliveryCounts** = `Readonly`\<`Record`\<`Exclude`\<[`DeliveryStatus`](#deliverystatus), `"dry-run"`\>, `number`\>\> & `object`
@@ -5291,7 +5430,8 @@ A channel's message format, and so what its transform receives:
 - `x12`: an X12 interchange, parsed with `@cosyte/x12`;
 - `ccda`: a C-CDA document, parsed with `@cosyte/ccda`;
 - `json`: any JSON, as `JSON.parse` reads it;
-- `text`: the body as a string, unparsed.
+- `text`: the body as a string, unparsed;
+- `csv`: delimited or fixed-width lines, as a table of rows.
 
 #### Example
 
@@ -5579,7 +5719,8 @@ const done = (status: MessageStatus): boolean => status === "transformed" || sta
 The message each format hands a transform, by the `format` a channel declares, read from the
 format registry: `hl7v2` an [Hl7Message](#hl7message), `fhir` a [FhirResource](#fhirresource), `x12` an
 [X12Interchange](#x12interchange), `ccda` a [CcdaDocument](#ccdadocument), `json` a [JsonValue](#jsonvalue) (a string a
-`json` transform returns is sent as it is, not JSON-quoted), and `text` the body as a string.
+`json` transform returns is sent as it is, not JSON-quoted), `text` the body as a string, and
+`csv` a `CsvTable`.
 
 #### Example
 

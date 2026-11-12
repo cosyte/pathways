@@ -76,7 +76,8 @@ health:
   request headers reach a transform stays in the file, where a credential header is refused at load.
   Nor is a channel's `index:` block: which `ctx.meta` keys are stored as searchable tags, and how
   many bits each keeps, stays in the file, where the audit sees it. Nor is an SFTP block's
-  `weakAlgorithms`: turning a SHA-1 algorithm back on stays in the file too.
+  `weakAlgorithms`: turning a SHA-1 algorithm back on stays in the file too. Nor is a `csv` channel's
+  `csv:` block: how its bodies are read and written belongs with its `format`.
 - `pathways validate --print` prints the configuration as `start` reads it, with every setting the
   environment gave and the variable it named; see
   [Command reference](./command-reference.md#pathways-validate). The query string of a URL read
@@ -277,7 +278,8 @@ by key. See [Use the message context](./use-the-message-context.md).
 | Key                                                              | Type                                                                                                                                                      | Default                          |
 | ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- |
 | `name`                                                           | lowercase letters, digits and hyphens                                                                                                                     | the folder's name; must match it |
-| `format`                                                         | `hl7v2`, `fhir`, `x12`, `ccda`, `json` or `text`                                                                                                          | `hl7v2`                          |
+| `format`                                                         | `hl7v2`, `fhir`, `x12`, `ccda`, `json`, `text` or `csv`                                                                                                   | `hl7v2`                          |
+| `csv`                                                            | how a `csv` channel reads and writes; see [Read delimited and fixed-width text](./work-with-formats.md#read-delimited-and-fixed-width-text)               | comma-delimited, with a header   |
 | `source`                                                         | exactly one [source](#sources)                                                                                                                            | required                         |
 | `transform`                                                      | path to the transform module                                                                                                                              | none: messages pass through      |
 | `destinations`                                                   | a list of at least one [destination](#destinations)                                                                                                       | required                         |
