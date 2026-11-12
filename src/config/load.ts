@@ -19,6 +19,7 @@ import {
   DEFAULT_HOST,
   DEFAULT_HTTP_TIMEOUT_MS,
   DEFAULT_HTTP_TOKEN_ENV,
+  DEFAULT_DRAIN_TIMEOUT_MS,
   DEFAULT_LEASE_TTL_MS,
   DEFAULT_DELIVERY_TIMEOUT_MS,
   DEFAULT_MAX_BYTES,
@@ -408,6 +409,10 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
     probes,
     lease,
     migrations: { rollbackWindowMs: project.migrations?.rollbackWindow ?? 0 },
+    drain: {
+      notReadyDelayMs: project.drain?.notReadyDelay ?? 0,
+      timeoutMs: project.drain?.timeout ?? DEFAULT_DRAIN_TIMEOUT_MS,
+    },
     encryption,
     config: (project.config ?? {}) as TransformConfigBlock,
     secrets,
@@ -589,6 +594,7 @@ function resolveSource(
       ackBuilder: mllp.ackBuilder === undefined ? undefined : resolve(dir, mllp.ackBuilder),
       ...(mllp.maxConnections === undefined ? {} : { maxConnections: mllp.maxConnections }),
       ...(mllp.receiveTimeout === undefined ? {} : { receiveTimeoutMs: mllp.receiveTimeout }),
+      ...(mllp.maxConnectionAge === undefined ? {} : { maxConnectionAgeMs: mllp.maxConnectionAge }),
       ...(mllp.maxMessageSize === undefined ? {} : { maxMessageSize: mllp.maxMessageSize }),
       ...(mllp.keepOpen === undefined ? {} : { keepOpen: mllp.keepOpen }),
     };
