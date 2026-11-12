@@ -100,6 +100,7 @@ source:
     host: 0.0.0.0
     tls: { cert: ./certs/server.pem, key: ./certs/server.key, ca: ./certs/ca.pem }
     framing: { lengthPrefix: { bytes: 2, endian: little, inclusive: true } }
+    maxConnections: 8
     maxMessageSize: 64KB
     idleTimeout: 1m
     stallTimeout: 5s
@@ -137,6 +138,7 @@ destinations:
       },
       plaintext: false,
       framing: { kind: "lengthPrefix", size: 2, endian: "little", inclusive: true },
+      maxConnections: 8,
       maxMessageSize: 65_536,
       idleTimeoutMs: 60_000,
       stallTimeoutMs: 5_000,
@@ -336,6 +338,10 @@ describe("the JSON Schema of a tcp block", () => {
       channel(
         'tcp: { port: 1, plaintext: true, framing: { delimiter: "0a" }, reply: { hex: "06" } }',
       ),
+      channel('tcp: { port: 1, plaintext: true, framing: { delimiter: "0a" }, maxConnections: 1 }'),
+      channel(
+        'tcp: { port: 1, plaintext: true, framing: { delimiter: "0a" }, maxConnections: 100000 }',
+      ),
       channel(
         "file: { dir: ./in }",
         "tcp: { host: h, port: 1, tls: {}, framing: { lengthPrefix: { bytes: 4 } }, expectReply: true }",
@@ -347,6 +353,10 @@ describe("the JSON Schema of a tcp block", () => {
       channel("tcp: { port: 1, plaintext: true, framing: {} }"),
       channel('tcp: { port: 1, plaintext: true, framing: { raw: true, delimiter: "0a" } }'),
       channel('tcp: { port: 1, framing: { delimiter: "0a" } }'),
+      channel('tcp: { port: 1, plaintext: true, framing: { delimiter: "0a" }, maxConnections: 0 }'),
+      channel(
+        'tcp: { port: 1, plaintext: true, framing: { delimiter: "0a" }, maxConnections: 100001 }',
+      ),
       channel(
         'tcp: { port: 1, plaintext: true, framing: { delimiter: "0a" }, reply: { hex: "06", builder: ./r.ts } }',
       ),
@@ -459,6 +469,8 @@ destinations:
       });
     });
     expect(reply).toBe("OK 1\n");
+    // The source's connection cap counts on health, as an mllp source's does.
+    expect((await engine.health()).channels["orders"]?.connections).toEqual({ refused: 0 });
     await engine.tick();
     for (let tries = 0; answered.length === 0 && tries < 50; tries += 1) await sleep(20);
 

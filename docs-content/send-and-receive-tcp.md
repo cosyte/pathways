@@ -67,11 +67,13 @@ one at a time, in order.
 
 | What happens                                             | What the source does                                                                                 |
 | -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| more than `maxConnections` (`100`) at once               | closes the new connection at accept, logs `tcp-connection-refused`, and counts it on health          |
 | a frame longer than `maxMessageSize` (`10MB` by default) | closes the connection once the messages before it are stored and answered; the frame is never stored |
 | a length prefix that declares more than `maxMessageSize` | the same, before a byte of the message is read                                                       |
 | a frame begun, then no byte for `stallTimeout` (`30s`)   | the same; the part is dropped                                                                        |
 | no frame begun for `idleTimeout` (`5m`)                  | closes the connection                                                                                |
 | the sender closes or resets mid-frame                    | drops the part, and logs `tcp-partial-frame` with its length                                         |
+| the sender closes or resets after whole frames           | stores every whole frame it sent; a reply has nowhere to go, so none is written                      |
 | an empty frame                                           | skips it: nothing is stored or answered                                                              |
 
 Raw framing has no end marker, so `maxMessageSize` is required with it: a connection that sends more
@@ -97,7 +99,9 @@ message, under the channel's transform time limit. When a message cannot be stor
 and the connection closes, so the sender sends again. When the builder throws, runs out of time, or
 returns a reply its framing cannot carry, the source logs `tcp-reply-failed` or
 `tcp-reply-unsendable` and closes the connection without a reply: the message is already stored, so
-a sender that sends it again stores it twice.
+a sender that sends it again stores it twice. In either case the whole frames queued behind it on
+that connection are not stored, and `tcp-frames-dropped` counts them at warn, as it counts a frame
+that arrives while the source stops or the connection closes: the sender has to send them again.
 
 With raw framing the sender closes its side to end the message, and the source sends the reply on
 its own side before it closes.
@@ -124,7 +128,8 @@ wrong output. `tls: {}` verifies the receiver against Node.js's built-in roots, 
 your own CA, and `tls.cert` with `tls.key` present a client certificate. `timeout` (10 seconds by
 default) is how long to wait to connect, and then for the send and its reply.
 
-Without `expectReply`, an output is delivered once it is written. With `expectReply: true`, the
+Without `expectReply`, an output is delivered once it is written: the operating system has taken
+the bytes, which says nothing of whether the receiver read them. With `expectReply: true`, the
 destination reads one framed reply, at most `maxMessageSize`, and any reply means delivered unless a
 reply check says otherwise:
 

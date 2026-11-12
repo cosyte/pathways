@@ -5,7 +5,12 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import { encodeFrame, type Framing } from "../src/connectors/tcp-framing.js";
-import { TcpSource, type TcpEvent, type TcpSourceOptions } from "../src/connectors/tcp.js";
+import {
+  DEFAULT_TCP_MAX_CONNECTIONS,
+  TcpSource,
+  type TcpEvent,
+  type TcpSourceOptions,
+} from "../src/connectors/tcp.js";
 import type { MessageSink, ReceiveOptions } from "../src/connectors/types.js";
 import { OPENSSL, TLS_TESTS } from "./mllp-helpers.js";
 import { makeCertificates, removeCertificates, type Certificates } from "./net-helpers.js";
@@ -243,6 +248,19 @@ describe.each(FRAMED)("TcpSource with $name framing, over real sockets", ({ fram
     ]);
   });
 
+  it("stores every whole frame that came before the sender reset, however slow the store", async () => {
+    const { sink, received } = recordingSink(() => sleep(200));
+    const { port, events } = await startSource(sink, { framing });
+    await talk(port, [Buffer.concat([1, 2, 3].map((n) => frame(ORDER(n)))), 50], { reset: true });
+    await until(() => received.length === 3, 5_000);
+    expect(received.map((r) => r.body)).toEqual([ORDER(1), ORDER(2), ORDER(3)]);
+    expect(named(events, "tcp-connection-error")).toEqual([
+      { level: "info", event: "tcp-connection-error", code: "ECONNRESET" },
+    ]);
+    expect(named(events, "tcp-frames-dropped")).toEqual([]);
+    expect(named(events, "tcp-partial-frame")).toEqual([]);
+  });
+
   it("answers each stored message with the reply, framed as messages are", async () => {
     const { sink, received } = recordingSink();
     const { port } = await startSource(sink, { framing, reply: text("ACK") });
@@ -407,6 +425,10 @@ describe("TcpSource", () => {
     expect(named(events, "tcp-store-failed")).toEqual([
       { level: "warn", event: "tcp-store-failed", name: "Error", code: undefined },
     ]);
+    // The second message was whole but never stored: the log counts it, so the loss is seen.
+    expect(named(events, "tcp-frames-dropped")).toEqual([
+      { level: "warn", event: "tcp-frames-dropped", count: 1 },
+    ]);
     expect(JSON.stringify(events)).not.toContain("synthetic");
   });
 
@@ -534,6 +556,65 @@ describe("TcpSource", () => {
     expect(result.closed).toBe(true);
     expect(received.map((r) => r.body)).toEqual([ORDER(1)]);
     expect(named(events, "tcp-bad-length")).toEqual([{ level: "warn", event: "tcp-bad-length" }]);
+  });
+
+  it("stores and answers nothing more once the reply builder fails, counting what it dropped", async () => {
+    const { sink, received } = recordingSink();
+    const { port, events } = await startSource(sink, {
+      reply: () => {
+        throw new Error("synthetic builder failure");
+      },
+    });
+    await talk(port, [text(`${ORDER(1)}\n${ORDER(2)}\n${ORDER(3)}\n`)]);
+    expect(received.map((r) => r.body)).toEqual([ORDER(1)]);
+    expect(named(events, "tcp-frames-dropped")).toEqual([
+      { level: "warn", event: "tcp-frames-dropped", count: 2 },
+    ]);
+  });
+
+  it("stores and answers nothing more after a peer reset, sending no reply, the store finished", async () => {
+    const { sink, received } = recordingSink(() => sleep(150));
+    let built = 0;
+    const { port, events } = await startSource(sink, {
+      reply: () => {
+        built += 1;
+        return "ACK";
+      },
+    });
+    const result = await talk(port, [text(`${ORDER(1)}\n${ORDER(2)}\n`), 50], { reset: true });
+    await until(() => received.length === 2 && built === 2, 5_000);
+    expect(result.received).toEqual(Buffer.alloc(0));
+    expect(named(events, "tcp-frames-dropped")).toEqual([]);
+  });
+
+  it("closes a connection over maxConnections at accept, counts it, and takes one again once there is room", async () => {
+    const { sink, received } = recordingSink();
+    const { source, port, events } = await startSource(sink, { maxConnections: 2 });
+    expect(source.refusedConnections).toBe(0);
+    const held = [netConnect({ host: "127.0.0.1", port }), netConnect({ host: "127.0.0.1", port })];
+    for (const socket of held) socket.on("error", () => undefined);
+    await Promise.all(
+      held.map((socket) => new Promise((resolve) => socket.once("connect", resolve))),
+    );
+    await sleep(50);
+    const refused = await talk(port, [text(`${ORDER(1)}\n`)]);
+    expect(refused.closed).toBe(true);
+    expect(received).toEqual([]);
+    expect(source.refusedConnections).toBe(1);
+    expect(named(events, "tcp-connection-refused")).toEqual([
+      { level: "warn", event: "tcp-connection-refused", maxConnections: 2 },
+    ]);
+    const first = held[0] as Socket;
+    first.destroy();
+    // The source sees the close a moment later, and frees the slot.
+    await sleep(200);
+    await talk(port, [text(`${ORDER(2)}\n`)], { waitMs: 300 });
+    expect(received.map((r) => r.body)).toEqual([ORDER(2)]);
+    for (const socket of held) socket.destroy();
+  });
+
+  it("holds 100 connections at most when maxConnections is not set", () => {
+    expect(DEFAULT_TCP_MAX_CONNECTIONS).toBe(100);
   });
 
   it("writes no reply on a connection the sender reset while the message was stored", async () => {

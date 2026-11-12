@@ -428,13 +428,16 @@ answered. See [Bound connections and messages](./send-and-receive-mllp.md#bound-
 | `tls`            | [server TLS](#tls)               | required unless `plaintext` |
 | `plaintext`      | boolean                          | `false`                     |
 | `framing`        | a [TCP framing](#tcp-framing)    | required                    |
+| `maxConnections` | 1 to 100,000                     | `100`                       |
 | `maxMessageSize` | byte size                        | `10MB`; required with `raw` |
 | `idleTimeout`    | duration                         | `5m`                        |
 | `stallTimeout`   | duration                         | `30s`                       |
 | `reply`          | `{ hex }` or `{ builder: path }` | none: no reply is sent      |
 
-A frame longer than `maxMessageSize`, or one that stalls for `stallTimeout`, closes the connection
-once the messages before it are stored and answered; the frame is never stored. A connection that
+A connection over `maxConnections` is closed at accept, before any byte is read. A frame longer than
+`maxMessageSize`, or one that stalls for `stallTimeout`, closes the connection once the messages
+before it are stored and answered; the frame is never stored. A sender that closes or resets still
+has every whole frame it sent stored. A connection that
 begins no frame for `idleTimeout` is closed. An empty frame is skipped. `reply.hex` is the same reply
 for every message, at most 4,096 bytes in hex; `reply.builder` is a module whose default export, a
 [`TcpReplyBuilder`](./api/README.md#tcpreplybuilder), builds each one from the stored message's id.

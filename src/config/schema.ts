@@ -1238,6 +1238,7 @@ const tcpSource = restate(
       tls: serverTls.optional(),
       plaintext,
       framing: tcpFraming,
+      maxConnections: maxConnections.optional(),
       maxMessageSize: tcpMaxMessageSize(
         "The most bytes one message may hold: a size such as 64KB or 1MB, or a number of bytes. A longer frame closes the connection, unstored. Default 10MB; required with raw framing.",
       ).optional(),
@@ -2975,6 +2976,8 @@ export interface TcpSource {
   readonly tls: ServerTlsFiles | undefined;
   readonly plaintext: boolean;
   readonly framing: TcpFraming;
+  /** The most connections held at once, or `undefined` for the source's default (100). */
+  readonly maxConnections?: number | undefined;
   readonly maxMessageSize: number;
   readonly idleTimeoutMs: number;
   readonly stallTimeoutMs: number;

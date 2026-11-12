@@ -543,6 +543,7 @@ function resolveSource(
       tls: tcp.tls === undefined ? undefined : resolveServerTls(tcp.tls, dir),
       plaintext: tcp.plaintext === true,
       framing: resolveFraming(tcp.framing),
+      ...(tcp.maxConnections === undefined ? {} : { maxConnections: tcp.maxConnections }),
       maxMessageSize: tcp.maxMessageSize ?? DEFAULT_MAX_BYTES,
       idleTimeoutMs: tcp.idleTimeout ?? DEFAULT_TCP_IDLE_TIMEOUT_MS,
       stallTimeoutMs: tcp.stallTimeout ?? DEFAULT_TCP_STALL_TIMEOUT_MS,

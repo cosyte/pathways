@@ -476,6 +476,7 @@ export async function connectorsFor(
             ? undefined
             : loadServerTls(source.tls, `${file}: source.tcp.tls`),
         framing: framingOf(source.framing),
+        maxConnections: source.maxConnections,
         maxMessageSize: source.maxMessageSize,
         idleTimeoutMs: source.idleTimeoutMs,
         stallTimeoutMs: source.stallTimeoutMs,
@@ -1369,12 +1370,12 @@ export class Engine {
   }
 
   /**
-   * How many connections a channel's MLLP source closed at accept for being over its cap, for the
-   * health body; nothing for any other source. A count only, never who connected.
+   * How many connections a channel's MLLP or tcp source closed at accept for being over its cap, for
+   * the health body; nothing for any other source. A count only, never who connected.
    */
   private connectionCounts(name: string): Pick<ChannelHealth, "connections"> {
     const source = this.channels.find((channel) => channel.config.name === name)?.connectors.source;
-    return source instanceof MllpSource
+    return source instanceof MllpSource || source instanceof TcpSource
       ? { connections: { refused: source.refusedConnections } }
       : {};
   }

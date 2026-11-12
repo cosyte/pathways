@@ -113,6 +113,9 @@ export interface TcpEvent {
   readonly [field: string]: string | number | boolean | null | undefined;
 }
 
+/** The most connections a tcp source holds at once when its block sets no `maxConnections`. */
+export const DEFAULT_TCP_MAX_CONNECTIONS = 100;
+
 /** Options for a {@link TcpSource}. */
 export interface TcpSourceOptions {
   readonly host: string;
@@ -124,6 +127,12 @@ export interface TcpSourceOptions {
    */
   readonly tls: ServerTlsMaterial | undefined;
   readonly framing: Framing;
+  /**
+   * The most connections held at once; one that arrives over it is closed at accept, before any byte
+   * is read, and counted in {@link TcpSource.refusedConnections}. Defaults to
+   * {@link DEFAULT_TCP_MAX_CONNECTIONS}.
+   */
+  readonly maxConnections?: number | undefined;
   /** The most bytes one message may hold. A longer frame closes the connection, unstored. */
   readonly maxMessageSize: number;
   /** How long a connection may go with no frame begun before it is closed, in milliseconds. */
@@ -146,9 +155,12 @@ interface Connection {
   tail: Promise<void>;
   /** How many messages are waiting or being handled. */
   busy: number;
-  /** Set once the connection takes no more frames: it closes when those before are handled. */
+  /**
+   * Set once the connection takes no more frames: it closes when those before are handled. A peer
+   * that closes or resets sets it too, and the whole frames already queued are still stored.
+   */
   closing: boolean;
-  /** Set once nothing more is stored or answered on it. */
+  /** Set once the source itself gives up on the connection: nothing more is stored or answered. */
   dead: boolean;
   timer: NodeJS.Timeout | undefined;
 }
@@ -162,7 +174,12 @@ interface Connection {
  * - an empty frame: skipped, neither stored nor answered;
  * - a frame longer than `maxMessageSize`, an unreadable length prefix, or a frame that stalls: the
  *   connection closes once the messages before it are stored and answered, the frame unstored;
- * - a connection that closes or idles out mid-frame: the part frame is dropped.
+ * - a connection that closes or idles out mid-frame: the part frame is dropped;
+ * - a sender that closes or resets: every whole frame that came before is still stored, and a reply
+ *   is written only while the connection is open;
+ * - a whole frame that cannot be stored (the source is stopping, the connection is closing, or a
+ *   store or reply failure closed it): `tcp-frames-dropped` counts it at warn;
+ * - a connection over `maxConnections`: closed at accept, before any byte is read.
  *
  * Raw framing reads one message per connection, all the bytes until the sender closes its side;
  * the reply, when set, is sent before the source closes its own. Messages on one connection are
@@ -191,10 +208,19 @@ export class TcpSource implements SourceConnector {
   private readonly sockets = new Set<Socket>();
   private readonly pending = new Set<Promise<void>>();
   private stopping = false;
+  private refused = 0;
 
   /** @param options Where to listen, TLS, framing, limits and the reply. */
   constructor(options: TcpSourceOptions) {
     this.options = options;
+  }
+
+  /**
+   * How many connections this source has closed at accept because it already held
+   * `maxConnections`, since it was made. A count only: never who connected.
+   */
+  get refusedConnections(): number {
+    return this.refused;
   }
 
   /** The port the source listens on, or undefined when it is not listening. */
@@ -219,6 +245,14 @@ export class TcpSource implements SourceConnector {
     });
     server.on("tlsClientError", (error: unknown) => {
       this.report("warn", "tcp-tls-refused", { code: codeOf(error) });
+    });
+    // Node closes a connection over the cap before it is read, and says so here.
+    const maxConnections = this.options.maxConnections ?? DEFAULT_TCP_MAX_CONNECTIONS;
+    server.maxConnections = maxConnections;
+    server.on("drop", () => {
+      this.refused += 1;
+      // The cap only: who connected stays out of the log.
+      this.report("warn", "tcp-connection-refused", { maxConnections });
     });
     this.stopping = false;
     await new Promise<void>((resolve, reject) => {
@@ -296,10 +330,11 @@ export class TcpSource implements SourceConnector {
     socket.on("close", () => {
       clearTimeout(connection.timer);
       this.connections.delete(connection);
-      connection.dead = true;
       // Ended cleanly, the decoder has handed over what it held; otherwise a frame was cut off.
       const cut = connection.decoder.pending;
       if (cut > 0 && !connection.closing) this.report("warn", "tcp-partial-frame", { bytes: cut });
+      // The whole frames queued are still stored: only their replies have nowhere to go.
+      connection.closing = true;
     });
   }
 
@@ -309,10 +344,11 @@ export class TcpSource implements SourceConnector {
     connection: Connection,
     events: readonly ReturnType<FrameDecoder["push"]>[number][],
   ): void {
+    let dropped = 0;
     for (const event of events) {
       switch (event.type) {
         case "frame":
-          this.queue(sink, connection, event.body);
+          if (!this.queue(sink, connection, event.body)) dropped += 1;
           break;
         case "empty":
           this.report("info", "tcp-empty-frame", {});
@@ -330,10 +366,12 @@ export class TcpSource implements SourceConnector {
           break;
       }
     }
+    if (dropped > 0) this.report("warn", "tcp-frames-dropped", { count: dropped });
   }
 
-  private queue(sink: MessageSink, connection: Connection, body: Buffer): void {
-    if (this.stopping || connection.closing) return;
+  /** Queues one whole frame to be stored; false when the connection or the source takes no more. */
+  private queue(sink: MessageSink, connection: Connection, body: Buffer): boolean {
+    if (this.stopping || connection.closing) return false;
     connection.busy += 1;
     const task = connection.tail.then(() => this.handle(sink, connection, body));
     connection.tail = task;
@@ -343,6 +381,7 @@ export class TcpSource implements SourceConnector {
       connection.busy -= 1;
       this.arm(connection);
     });
+    return true;
   }
 
   /** Stores one message and answers it. Never rejects: whatever goes wrong is reported. */
@@ -353,7 +392,7 @@ export class TcpSource implements SourceConnector {
       messageId = await sink.receive(body, { source: connection.facts });
     } catch (error) {
       this.report("warn", "tcp-store-failed", describeError(error));
-      this.shut(connection);
+      this.giveUp(connection);
       return;
     }
     const { reply, framing } = this.options;
@@ -369,7 +408,7 @@ export class TcpSource implements SourceConnector {
         message: messageId,
         name: describeError(error).name,
       });
-      this.shut(connection);
+      this.giveUp(connection);
       return;
     }
     let frame: Buffer;
@@ -381,7 +420,7 @@ export class TcpSource implements SourceConnector {
         message: messageId,
         code: (error as TcpFramingError).code,
       });
-      this.shut(connection);
+      this.giveUp(connection);
       return;
     }
     if (!connection.socket.destroyed) connection.socket.write(frame);
@@ -419,6 +458,16 @@ export class TcpSource implements SourceConnector {
     clearTimeout(connection.timer);
     // Ends the write side once the reply is written, without waiting on a peer that never closes.
     void connection.tail.then(() => connection.socket.destroySoon());
+  }
+
+  /**
+   * Closes the connection at once from inside the message being handled, after a store or reply
+   * failure, and counts the whole frames queued behind it, which are not stored.
+   */
+  private giveUp(connection: Connection): void {
+    const dropped = connection.busy - 1;
+    if (dropped > 0) this.report("warn", "tcp-frames-dropped", { count: dropped });
+    this.shut(connection);
   }
 
   /** Closes the connection at once: nothing more on it is stored or answered. */
