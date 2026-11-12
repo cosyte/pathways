@@ -11,6 +11,6 @@
     "test": "pathways test"
   },
   "devDependencies": {
-    "@cosyte/pathways": "^0.0.3"
+    "@cosyte/pathways": "^0.0.4"
   }
 }

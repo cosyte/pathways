@@ -149,7 +149,7 @@ Its messages are synthetic, made by `@cosyte/synth`, and are on GitHub with the 
     "@cosyte/hl7": "^0.1.14"
   },
   "devDependencies": {
-    "@cosyte/pathways": "^0.0.3"
+    "@cosyte/pathways": "^0.0.4"
   }
 }
 ```

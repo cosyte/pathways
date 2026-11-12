@@ -1,6 +1,6 @@
 {
   "name": "@cosyte/pathways",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "A code-first healthcare integration engine for Node.js: channels in YAML, transforms in TypeScript.",
   "keywords": [
     "healthcare",

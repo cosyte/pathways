@@ -148,7 +148,7 @@ Its messages are synthetic, made by `@cosyte/synth`, and are on GitHub with the 
     "@cosyte/transform": "^0.2.4"
   },
   "devDependencies": {
-    "@cosyte/pathways": "^0.0.3"
+    "@cosyte/pathways": "^0.0.4"
   }
 }
 ```
