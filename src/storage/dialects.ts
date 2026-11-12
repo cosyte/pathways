@@ -9,6 +9,8 @@ import {
   PostgresDialect,
   SqliteDialect,
   type Dialect,
+  type MysqlPool,
+  type MysqlPoolConnection,
   type SqliteDatabase as KyselySqliteDatabase,
   type SqliteStatement,
 } from "kysely";
@@ -24,6 +26,11 @@ import { clientTlsOptions, loadClientTls } from "../connectors/tls.js";
 
 type Pg = typeof PgModule;
 type Mysql2 = typeof Mysql2Module;
+/** What mysql2 calls back with when a statement is done. */
+type Mysql2Callback = (
+  error: Mysql2Module.QueryError | null,
+  result: Mysql2Module.QueryResult,
+) => void;
 type Tedious = typeof TediousModule;
 type Tarn = typeof TarnModule;
 
@@ -262,8 +269,83 @@ function mysqlDialect(
     maxIdle: storage.pool.max,
     idleTimeout: storage.pool.idleTimeoutMs,
     connectTimeout: storage.connectTimeoutMs,
+    maxPreparedStatements: MYSQL_STATEMENTS_KEPT,
   });
-  return new MysqlDialect({ pool });
+  return new MysqlDialect({ pool: serverBinds(pool) });
+}
+
+/**
+ * How many prepared statements each MySQL or MariaDB connection keeps, the most recently used; one
+ * let go is closed on the server. The server caps prepared statements across all its connections
+ * (`max_prepared_stmt_count`, 16,382 by default), so this many for every connection Pathways opens
+ * to it must fit under that cap: 1,280 for one engine at the default pool of 10.
+ *
+ * @example
+ * ```ts
+ * const needed = MYSQL_STATEMENTS_KEPT * project.storage.pool.max; // 1,280 at the default pool
+ * ```
+ */
+export const MYSQL_STATEMENTS_KEPT = 128;
+
+/**
+ * A mysql2 pool whose connections send each statement's values to the server apart from its text,
+ * as a prepared statement the server binds (mysql2's `execute`), never written into the text on the
+ * client (mysql2's `query`, which Kysely's MySQL driver calls). mysql2 escapes a value for the
+ * server's default `sql_mode`: under `NO_BACKSLASH_ESCAPES` that escaping is wrong, so a backslash
+ * in a value is stored doubled and a quote ends the string, so what follows can run as SQL.
+ * A bound value is never parsed as SQL, whatever the mode. A statement with no values (Kysely's
+ * `begin`, `commit` and savepoints, which MySQL cannot prepare, among them) runs as it is.
+ *
+ * @example
+ * ```ts
+ * const dialect = new MysqlDialect({ pool: serverBinds(mysql2.createPool(options)) });
+ * ```
+ */
+export function serverBinds(pool: Mysql2Module.Pool): MysqlPool {
+  // One wrapper per connection, so Kysely, which keeps its own state per connection it is handed,
+  // finds the same one each time the pool hands that connection out again.
+  const wrappers = new WeakMap<Mysql2Module.PoolConnection, MysqlPoolConnection>();
+  const wrap = (connection: Mysql2Module.PoolConnection): MysqlPoolConnection => {
+    let wrapper = wrappers.get(connection);
+    if (wrapper === undefined) {
+      wrapper = {
+        get config() {
+          return connection.config;
+        },
+        get threadId() {
+          return connection.threadId;
+        },
+        connect: (callback) => {
+          connection.connect(callback);
+        },
+        destroy: () => {
+          connection.destroy();
+        },
+        release: () => {
+          connection.release();
+        },
+        query: (text, parameters: Mysql2Module.ExecuteValues[], callback) => {
+          const done = callback as Mysql2Callback | undefined;
+          return parameters.length === 0
+            ? connection.query(text, parameters, done)
+            : connection.execute(text, parameters, done);
+        },
+      };
+      wrappers.set(connection, wrapper);
+    }
+    return wrapper;
+  };
+  return {
+    getConnection: (callback) => {
+      pool.getConnection((error, connection) => {
+        if (error === null) callback(null, wrap(connection));
+        else callback(error, connection);
+      });
+    },
+    end: (callback) => {
+      pool.end(callback);
+    },
+  };
 }
 
 function sqlServerDialect(
