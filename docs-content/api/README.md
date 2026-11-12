@@ -309,12 +309,11 @@ The output it carried, in base64; `null` once its message's content was dropped.
 
 > `readonly` **destination**: `number`
 
-##### destinationKey?
+##### destinationKey
 
-> `readonly` `optional` **destinationKey?**: `string` \| `null`
+> `readonly` **destinationKey**: `string` \| `null`
 
-The key of the destination it was made for; null when it records none. Absent from an archive
-written before deliveries recorded one.
+The key of the destination it was made for; null when it records none.
 
 ##### error
 
