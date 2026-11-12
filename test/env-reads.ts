@@ -113,7 +113,9 @@ export function scanEnvReads(sources: readonly Source[]): EnvReads {
     const objects = new Set(["env"]);
     for (const match of code.matchAll(TYPED)) objects.add(match[1] ?? "env");
     for (const match of code.matchAll(ALIAS)) objects.add(match[1] ?? "env");
-    const alternatives = [...objects].map((name) => name.replace(/\$/g, "\\$")).join("|");
+    const alternatives = [...objects]
+      .map((name) => name.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&"))
+      .join("|");
     // An environment object, its last name captured: `env`, `#env`, `process.env`, `vars`. Not
     // inside a string: `"env.example"` and `".env.example"` are file names, not reads.
     const object = `(?<![\\w$"'\`])(?<![^\\w$)\\]?]\\.)#?(${alternatives})(?![\\w$])`;

@@ -74,6 +74,13 @@ describe("scanEnvReads", () => {
     });
   });
 
+  it("follows an alias whose name has a dollar sign in it", () => {
+    expect(scan("const $env = process.env;\n$env.PATHWAYS_A;\n$env[key];\n")).toEqual({
+      names: ["PATHWAYS_A"],
+      unresolved: [{ path: "src/new.ts", line: 3, read: "$env[key]" }],
+    });
+  });
+
   it("names a variable tested with in, and refuses a walk over every name", () => {
     expect(scan('"PATHWAYS_A" in process.env;\n')).toEqual({
       names: ["PATHWAYS_A"],
