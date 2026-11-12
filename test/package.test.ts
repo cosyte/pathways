@@ -157,7 +157,7 @@ describe("the release workflow", () => {
 
   it("has the scripts the shared pipeline runs", () => {
     expect(pkg.scripts["version"]).toBe(
-      "changeset version && tsx scripts/sync-version.ts && tsx scripts/example-pages.ts && cosyte-process format && cosyte-docs-reference",
+      "changeset version && tsx scripts/sync-version.ts && tsx scripts/sync-next-release.ts && tsx scripts/example-pages.ts && cosyte-process format && cosyte-docs-reference",
     );
     expect(pkg.scripts["pack:docs"]).toBe("cosyte-process pack-docs");
     expect(pkg.scripts["release"]).toBe("changeset publish");
@@ -172,6 +172,16 @@ describe("the release workflow", () => {
     const reference = steps.indexOf("cosyte-docs-reference");
     expect(sync, "the version script must sync src/version.ts").toBeGreaterThan(-1);
     expect(reference, "the version script must regenerate docs-content/api/").toBeGreaterThan(sync);
+  });
+
+  // `changeset version` consumes the changesets that README "In the next release" bullets name, and
+  // test/release-status.test.ts fails a README that keeps a bullet for a consumed one, so the step
+  // that drops them runs after the bump and before the format pass.
+  it("drops the released README bullets after the version bump", () => {
+    const steps = (pkg.scripts["version"] ?? "").split(" && ");
+    const readme = steps.indexOf("tsx scripts/sync-next-release.ts");
+    expect(readme).toBeGreaterThan(steps.indexOf("changeset version"));
+    expect(readme).toBeLessThan(steps.indexOf("cosyte-process format"));
   });
 
   // Each example under examples/ asks for ^<this version> of the package, and its page shows its
