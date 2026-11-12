@@ -1,11 +1,13 @@
 /**
  * The `.env.example` files and the Docker Compose example, held to the code.
  *
- * - The repository's `.env.example`, the Compose example's, and the starter's list exactly the
- *   environment variables Pathways reads by a fixed name, `ENGINE_VARIABLES` in src/env.ts, each
- *   under a comment of its own, with a placeholder in place of any secret. src/env.ts is the only
- *   file in src/ that reads the environment (the lint rule test/env-access.test.ts checks holds the
- *   rest to it), so a new variable is a new entry there, and an entry no file lists fails here.
+ * - The repository's `.env.example`, the Compose example's, and the starter's are compared both ways
+ *   with `ENGINE_VARIABLES`, the list src/env.ts exports of the variables Pathways reads by a fixed
+ *   name: each lists every entry, under a comment of its own with a placeholder in place of any
+ *   secret, and no other variable but the example's Compose variables. What keeps that list whole is
+ *   elsewhere: the type checker (test/env-types.ts) and the lint rule (test/env-access.test.ts)
+ *   refuse the listed ways of reading a fixed-name variable outside it, and any other route is
+ *   caught by review, not by a check.
  * - The Compose example lists every variable its `compose.yaml` and its configuration name.
  * - The starter carries the same `compose.yaml` and `.env.example` as the example, and the example's
  *   channel is the starter's.

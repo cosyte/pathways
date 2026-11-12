@@ -14,8 +14,8 @@ holds:
 
 - `compose.yaml`: the two services, each with a health check, and a named volume for each of the
   database and the message folders.
-- `.env.example`: every variable the example and the engine read, each with a comment and no real
-  secret.
+- `.env.example`: the variables the example's `compose.yaml` uses and the ones Pathways reads by a
+  fixed name, each with a comment and no real secret.
 - `channels/adt-to-lab/`: the starter's channel, which reads HL7 v2 files from
   `data/adt-to-lab/in`, keeps only admissions (`ADT^A01`), sets the receiving application to `LAB`,
   and writes them to `data/adt-to-lab/out`. Its tests hold synthetic messages only.
@@ -43,9 +43,14 @@ Then give the three variables at the top a value:
 - `PATHWAYS_KEY`, the master key that wraps each stored message's data key: `openssl rand -base64 32`.
   Keep a copy in your secret store; without it the stored messages cannot be read.
 
-Compose refuses to start while any of the three is empty, and names it. Every other variable in the
-file is one Pathways reads by name, commented out. Compose hands every variable in `.env` to the
-engine, so a channel's `{ env: NAME }` settings go there too.
+Compose refuses to start while any of the three is empty, and names it. The other variables in the
+file are the ones Pathways reads by a fixed name, commented out. Compose hands every variable in
+`.env` to the engine, so a channel's `{ env: NAME }` settings go there too.
+
+How that list is kept: Pathways' source exports `ENGINE_VARIABLES`, the variables it reads by a
+fixed name, and a test compares each `.env.example` with it both ways. The type checker and lint
+refuse the listed ways for the source to read a fixed-name variable outside that list; any other
+route is caught by review, not by a check.
 
 Until `ghcr.io/cosyte/pathways` is public, pulling it can fail with an authentication error
 (`unauthorized` or `denied`): sign in first with `docker login ghcr.io`, or build the image
