@@ -6,6 +6,8 @@
  * test/env-access-cases.ts holds those cases; here the types refuse it whatever it is called.
  */
 
+import type { SecretSource } from "../src/config/schema.js";
+import { readEnv } from "../src/connectors/endpoint.js";
 import {
   configuredName,
   configuredVariable,
@@ -14,10 +16,12 @@ import {
   type Env,
   processEnv,
 } from "../src/env.js";
+import { readEnvSecret } from "../src/secrets/provider.js";
+import { secretsOf } from "../src/secrets/resolve.js";
 
 /** The reviewers' cases, each refused by the type checker. */
 export function refused(env: Env, io: { readonly env: Env }): readonly unknown[] {
-  // @ts-expect-error A name cannot be read from the process's environment where it is called.
+  // @ts-expect-error Reading a name from the process's environment where it is called.
   const direct: unknown = processEnv().PATHWAYS_NEW;
   // @ts-expect-error Nor by a bracket.
   const index: unknown = processEnv()["PATHWAYS_NEW"];
@@ -38,7 +42,7 @@ export function refused(env: Env, io: { readonly env: Env }): readonly unknown[]
   const spread = { ...processEnv() };
   // @ts-expect-error A copy holds no name that can be read.
   const copied: unknown = spread.PATHWAYS_NEW;
-  // @ts-expect-error A handed-in environment cannot be read by name.
+  // @ts-expect-error Reading a handed-in environment by name.
   const handed: unknown = env.PATHWAYS_NEW;
   // @ts-expect-error Nor by a bracket.
   const bracket: unknown = env["PATHWAYS_NEW"];
@@ -71,11 +75,49 @@ export function refused(env: Env, io: { readonly env: Env }): readonly unknown[]
   ];
 }
 
+/**
+ * A fixed name handed to the secrets API, the path the engine's own defaults take: a secret source's
+ * `env`, readEnv's name, a listener's default token variable and the env provider's request each
+ * take a name in ENGINE_VARIABLES or one configuredName made.
+ */
+export function refusedSecrets(env: Env): readonly unknown[] {
+  // @ts-expect-error readEnv takes a listed name or a configured one, not a literal.
+  const readEnvLiteral = readEnv(env, "PATHWAYS_NEW", "w");
+  const NEW_ENV = "PATHWAYS_NEW";
+  // @ts-expect-error Nor a constant holding an unlisted name.
+  const readEnvConst = readEnv(env, NEW_ENV, "w");
+  const DEFAULT_NEW_ENV = "PATHWAYS_NEW";
+  // @ts-expect-error A secret source's variable is a listed name or a configured one.
+  const secretsReadConst = secretsOf(env).read({ env: DEFAULT_NEW_ENV }, "w");
+  const name: string = "PATHWAYS_NEW";
+  // @ts-expect-error Nor a plain string.
+  const secretsReadLiteralVar = secretsOf(env).read({ env: name }, "w");
+  function auth(defaultTokenEnv: string): SecretSource {
+    // @ts-expect-error A default token's variable passed on as a plain string is not one.
+    return { env: defaultTokenEnv };
+  }
+  // @ts-expect-error The env provider's request names a listed or a configured variable.
+  const readEnvSecretLit = readEnvSecret(env, { name: "PATHWAYS_NEW" });
+  return [
+    readEnvLiteral,
+    readEnvConst,
+    secretsReadConst,
+    secretsReadLiteralVar,
+    auth("PATHWAYS_METRICS_TOKEN"),
+    readEnvSecretLit,
+  ];
+}
+
 /** What src/ does, which the types allow. */
 export function allowed(env: Env, name: string): readonly unknown[] {
   return [
     engineVariable("XDG_RUNTIME_DIR", env),
     engineVariable("XDG_RUNTIME_DIR"),
     configuredVariable(env, configuredName(name)),
+    readEnv(env, "PATHWAYS_HTTP_TOKEN", "w"),
+    readEnv(env, configuredName(name), "w"),
+    secretsOf(env).read({ env: "PATHWAYS_HEALTH_TOKEN" }, "w"),
+    secretsOf(env).read({ env: configuredName(name) }, "w"),
+    readEnvSecret(env, { name: configuredName(name) }),
   ];
 }

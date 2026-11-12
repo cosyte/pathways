@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 import { normalisePath } from "../connectors/http-path.js";
-import type { EngineVariable } from "../env.js";
+import type { EngineVariable, VariableName } from "../env.js";
 import { unknownPlaceholders } from "../connectors/smtp-template.js";
 import { FORMATS, type CsvSettings } from "../engine/worker-entry.js";
 import { LIFECYCLE_EVENTS, type LifecycleEventType } from "../extensions/events.js";
@@ -3765,15 +3765,16 @@ export interface SecretReference {
 
 /**
  * Where a secret is read at start, as the YAML wrote it: an environment variable, a file (an absolute
- * path), or a provider's secret.
+ * path), or a provider's secret. The variable is one of ENGINE_VARIABLES or a name configuration
+ * gave (configuredName), so a fixed name not on the list is a type error.
  *
  * @example
  * ```ts
- * const token: SecretSource = { env: "LAB_TOKEN" };
+ * const token: SecretSource = { env: "PATHWAYS_HTTP_TOKEN" };
  * ```
  */
 export type SecretSource =
-  { readonly env: string } | { readonly file: string } | { readonly secret: SecretReference };
+  { readonly env: VariableName } | { readonly file: string } | { readonly secret: SecretReference };
 
 /** A header an HTTP client or source sends: written in the YAML, or a secret read at start. */
 export type HeaderValue = { readonly value: string } | SecretSource;

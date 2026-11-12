@@ -27,6 +27,7 @@ import {
 import { resolveSecrets, Secrets, secretsOf } from "../src/secrets/resolve.js";
 import { secretUses } from "../src/secrets/sources.js";
 import { dialectFor } from "../src/storage/dialects.js";
+import { configuredName } from "../src/env.js";
 import { serverStorage } from "./databases.js";
 import {
   ADT_A01,
@@ -236,7 +237,7 @@ describe("the one resolver", () => {
   it("reads env and file references as the built-in providers, naming file and key on failure", async () => {
     const root = await makeProject({ "token.txt": "synthetic-file-token\r\n", "empty.txt": "\n" });
     const secrets = new Secrets({ SYNTH_A: "synthetic-env-token" });
-    expect(secrets.read({ env: "SYNTH_A" }, "f: k")).toBe("synthetic-env-token");
+    expect(secrets.read({ env: configuredName("SYNTH_A") }, "f: k")).toBe("synthetic-env-token");
     expect(secrets.read({ file: join(root, "token.txt") }, "f: k")).toBe("synthetic-file-token");
     expect(
       secrets.read(
@@ -252,7 +253,7 @@ describe("the one resolver", () => {
       }
       return [];
     };
-    expect(problem(() => secrets.read({ env: "SYNTH_B" }, "f: k"))).toEqual([
+    expect(problem(() => secrets.read({ env: configuredName("SYNTH_B") }, "f: k"))).toEqual([
       "f: k: the environment variable SYNTH_B is not set",
     ]);
     expect(problem(() => secrets.read({ file: join(root, "absent.txt") }, "f: k"))).toEqual([
@@ -327,12 +328,17 @@ describe("the one resolver", () => {
   });
 
   it("is what readEnv and every Env-taking reader go through", () => {
-    expect(readEnv({ SYNTH_A: "synthetic-a" }, "SYNTH_A", "f: k")).toBe("synthetic-a");
+    expect(readEnv({ SYNTH_A: "synthetic-a" }, configuredName("SYNTH_A"), "f: k")).toBe(
+      "synthetic-a",
+    );
     const secrets = new Secrets({ SYNTH_A: "synthetic-a" });
     expect(secretsOf(secrets)).toBe(secrets);
     expect(secretsOf({ SYNTH_A: "synthetic-a" }).env).toEqual({ SYNTH_A: "synthetic-a" });
     expect(
-      readEnvSecret({ SYNTH_A: '{"a":"synthetic-a"}' }, { name: "SYNTH_A", field: "a" }),
+      readEnvSecret(
+        { SYNTH_A: '{"a":"synthetic-a"}' },
+        { name: configuredName("SYNTH_A"), field: "a" },
+      ),
     ).toEqual({ value: "synthetic-a", version: "latest" });
     expect(pickField("synthetic-a", undefined, "n")).toBe("synthetic-a");
     expect(() => pickField("[1]", "a", "n")).toThrow(SecretError);

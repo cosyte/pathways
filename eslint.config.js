@@ -1,13 +1,14 @@
 import cosyte from "@cosyte/eslint-config";
 
-// src/env.ts is the one file in src/ that reads the process's environment: it lists every variable
-// Pathways reads by a fixed name, which test/env-example.test.ts holds the .env.example files to,
-// and reads a name configuration gives through one function. Everywhere else in src/ these rules
-// refuse the ways to reach the environment around it, and test/env-access.test.ts lints each way a
-// reviewer found against them. An environment object handed along (`io.env`, a context's `env`)
+// src/env.ts is the one file in src/ meant to read the process's environment: it exports
+// ENGINE_VARIABLES, the variables Pathways reads by a fixed name, which test/env-example.test.ts
+// compares both ways with the .env.example files, and reads a name configuration gives through one
+// function. Everywhere else in src/ these rules refuse the listed ways to reach the environment
+// around it, and test/env-access.test.ts lints each listed way against them. Any other route is
+// caught by review, not by a check. An environment object handed along (`io.env`, a context's `env`)
 // may be passed on, but not read, spread or listed outside src/env.ts. The types hold most of this
 // too (src/env.ts makes Env opaque, and test/env-types.ts checks it); these rules also cover
-// `process` itself, which the types cannot, and a fixed name written where configuration gives one.
+// `process` itself, which the types do not, and a fixed name written where configuration gives one.
 const ENV_ONLY_IN_ENV_TS =
   "Read the environment through src/env.ts (engineVariable or configuredVariable).";
 

@@ -7,7 +7,7 @@ import type { z } from "zod";
 import { normalisePath } from "../connectors/http-path.js";
 import { alikeDestinations } from "../engine/destination-key.js";
 import { secretSourceOf, secretUses, type SecretSourceYaml } from "../secrets/sources.js";
-import { type Env, processEnv } from "../env.js";
+import { type Env, processEnv, type VariableName } from "../env.js";
 import { referencesIn, resolvingEnv, variableAt, type EnvReference } from "./env-ref.js";
 import { DEFAULT_INDEX_BITS, isLowEntropyKey } from "./meta-index.js";
 import {
@@ -955,7 +955,7 @@ function resolveHttpClient(http: Omit<HttpClientYaml, "timeout">, dir: string): 
 function resolveListener(
   listener: ListenerYaml,
   dir: string,
-  defaultTokenEnv: string,
+  defaultTokenEnv: VariableName,
 ): ListenerConfig {
   const { tls } = listener;
   let auth: EndpointAuth;

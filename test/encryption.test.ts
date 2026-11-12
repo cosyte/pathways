@@ -26,6 +26,7 @@ import {
   readMasterKeys,
   type KeyProvider,
 } from "../src/encryption/keys.js";
+import { configuredName } from "../src/env.js";
 import { ADT_A01, cleanUp, makeProject } from "./helpers.js";
 
 afterEach(cleanUp);
@@ -299,7 +300,7 @@ describe("master keys from files and environment variables", () => {
         kind: "keys",
         keys: [
           { id: "old", file: join(root, "keys/old.key") },
-          { id: "new", env: "PATHWAYS_SYNTHETIC_KEY" },
+          { id: "new", env: configuredName("PATHWAYS_SYNTHETIC_KEY") },
         ],
         current: "new",
       },
@@ -320,11 +321,11 @@ describe("master keys from files and environment variables", () => {
           {
             kind: "keys",
             keys: [
-              { id: "a", env: "PATHWAYS_KEY_A" },
-              { id: "b", env: "PATHWAYS_KEY_B" },
+              { id: "a", env: configuredName("PATHWAYS_KEY_A") },
+              { id: "b", env: configuredName("PATHWAYS_KEY_B") },
               { id: "c", file: join(root, "keys/SYNTHETIC-SECRET-missing.key") },
               { id: "d", file: join(root, "keys/bad.key") },
-              { id: "e", env: "PATHWAYS_KEY_E" },
+              { id: "e", env: configuredName("PATHWAYS_KEY_E") },
             ],
             current: "a",
           },
@@ -353,7 +354,7 @@ describe("master keys from files and environment variables", () => {
     );
     expect(keysToStart({ kind: "none" }, {})).toBeUndefined();
     const keys = keysToStart(
-      { kind: "keys", keys: [{ id: "k", env: "K" }], current: "k" },
+      { kind: "keys", keys: [{ id: "k", env: configuredName("K") }], current: "k" },
       { K: generateKey() },
     );
     expect(keys?.currentKeyId).toBe("k");

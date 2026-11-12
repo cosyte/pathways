@@ -131,13 +131,17 @@ describe("src/env.ts", () => {
   });
 
   it("makes a configured name only where configuration gives one", () => {
-    // configuredVariable takes only what configuredName makes, and the lint rule refuses a literal
-    // passed to it, so these four calls are every name src/ reads that it does not list.
+    // A secret's variable and configuredVariable take a listed name or what configuredName makes,
+    // and the lint rule refuses a literal passed to configuredName, so a name src/ reads that
+    // ENGINE_VARIABLES does not hold goes through one of these calls, each where configuration
+    // gives the name. A new one fails here until it is reviewed and listed.
     expect(configuredNameCalls()).toEqual([
       "src/cli.ts: configuredName(reference.variable)",
       "src/config/env-ref.ts: configuredName(reference.env)",
       "src/config/transform-config.ts: configuredName(reference.name)",
       "src/secrets/provider.ts: configuredName(ref.name)",
+      "src/secrets/resolve.ts: configuredName(reference.name)",
+      "src/secrets/sources.ts: configuredName(source.env)",
     ]);
   });
 

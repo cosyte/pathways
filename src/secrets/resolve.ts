@@ -1,7 +1,7 @@
 import type { Logger } from "pino";
 
 import { ConfigError } from "../config/load.js";
-import { type Env, extensionEnv } from "../env.js";
+import { configuredName, type Env, extensionEnv } from "../env.js";
 import type { ProjectConfig, SecretReference, SecretSource } from "../config/schema.js";
 import { customSecretProvider } from "../extensions/build.js";
 import { withTimeout } from "../extensions/load.js";
@@ -163,7 +163,9 @@ export class Secrets {
  */
 export function readBuiltIn(env: Env, reference: SecretReference): ResolvedSecret {
   const ref = requestOf(reference);
-  return reference.provider === "env" ? readEnvSecret(env, ref) : readFileSecret(ref);
+  return reference.provider === "env"
+    ? readEnvSecret(env, { ...ref, name: configuredName(reference.name) })
+    : readFileSecret(ref);
 }
 
 /** What a provider is asked: the reference without its provider's name. */

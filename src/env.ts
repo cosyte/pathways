@@ -1,18 +1,19 @@
-// The one place in src/ that touches the process's environment. Two things hold every other file to
-// it. The types: an Env is opaque, so no name can be read from one by `.NAME`, `["NAME"]`, a
-// destructure or a copy anywhere else; engineVariable takes only a name in ENGINE_VARIABLES; and
-// configuredVariable takes only a ConfiguredVariableName, which configuredName makes at the four
-// places a name comes from configuration (test/env-access.test.ts lists them). test/env-types.ts
-// holds the type checker to that. And the lint rule in eslint.config.js, for what the types cannot
-// see: `process.env` and every other way to the process's own environment, processEnv() anywhere but
-// bound to an `env`, and a fixed name written where configuration gives one. So every variable
-// Pathways reads by a fixed name is in ENGINE_VARIABLES, which test/env-example.test.ts holds the
-// three .env.example files to.
+// The one place in src/ meant to touch the process's environment. Two checks refuse the listed ways
+// of reading a variable around it. The types: an Env is opaque, so the type checker refuses `.NAME`,
+// `["NAME"]`, a destructure or a copy of one elsewhere; engineVariable takes only a name in
+// ENGINE_VARIABLES; and a secret's variable (configuredVariable, a SecretSource's `env`, readEnv,
+// the env provider's request) is a VariableName: a listed name, or a ConfiguredVariableName, which
+// configuredName makes where a name comes from configuration (test/env-access.test.ts lists those
+// calls). test/env-types.ts holds the type checker to each case. And the lint rule in
+// eslint.config.js refuses `process.env` and the other listed ways to the process's own environment,
+// processEnv() anywhere but bound to an `env`, and a literal where configuration gives a name. Any
+// other route is caught by review, not by a check. test/env-example.test.ts compares the three
+// .env.example files both ways with ENGINE_VARIABLES.
 
 /**
  * The environment Pathways reads: `process.env`, or a stand-in in tests. Any object is one, so a
- * caller hands in a plain record, but no name can be read from it here: only {@link engineVariable}
- * and {@link configuredVariable} read it.
+ * caller hands in a plain record, and the type checker refuses reading a name from it outside this
+ * file: {@link engineVariable} and {@link configuredVariable} read it.
  */
 export type Env = object;
 
@@ -49,6 +50,13 @@ export const ENGINE_VARIABLES = [
 
 /** One of {@link ENGINE_VARIABLES}. */
 export type EngineVariable = (typeof ENGINE_VARIABLES)[number];
+
+/**
+ * A variable's name wherever a secret is read from the environment: one of
+ * {@link ENGINE_VARIABLES}, such as a default a configuration falls back to, or a name configuration
+ * gave, made by {@link configuredName}. A plain string is neither.
+ */
+export type VariableName = EngineVariable | ConfiguredVariableName;
 
 /**
  * The process's own environment, for a caller that takes an {@link Env} and was given none.
@@ -106,14 +114,15 @@ export function engineVariable(name: EngineVariable, env: Env = processEnv()): s
 
 /**
  * The variable `name` from `env`, where the name comes from configuration: a `{ env: NAME }`
- * reference, a transform's config or the `env` secret provider. A name Pathways itself knows is read
- * with {@link engineVariable} instead.
+ * reference, a transform's config or the `env` secret provider, which also reads the listed defaults
+ * a configuration falls back to. A name Pathways itself reads elsewhere is read with
+ * {@link engineVariable} instead.
  *
  * @example
  * ```ts
  * configuredVariable(env, configuredName(reference.env));
  * ```
  */
-export function configuredVariable(env: Env, name: ConfiguredVariableName): string | undefined {
+export function configuredVariable(env: Env, name: VariableName): string | undefined {
   return (env as Variables)[name];
 }

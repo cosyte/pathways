@@ -32,6 +32,7 @@ import { Secrets } from "../src/secrets/resolve.js";
 import { secretUses } from "../src/secrets/sources.js";
 import { Engine } from "../src/engine/engine.js";
 import { Store } from "../src/storage/store.js";
+import { configuredName } from "../src/env.js";
 import { ADT_A01, captureLogger, cleanUp, LAB_TRANSFORM, makeProject } from "./helpers.js";
 import { exchange, msaOf, OPENSSL, TLS_TESTS } from "./mllp-helpers.js";
 import {
@@ -457,7 +458,7 @@ describe.skipIf(!OPENSSL)(`an MLLP source's TLS settings ${TLS_TESTS}`, () => {
         key: undefined,
         ca: undefined,
         pfx: pfxFile,
-        passphrase: { env: "MLLP_PFX_PASSPHRASE" },
+        passphrase: { env: configuredName("MLLP_PFX_PASSPHRASE") },
       },
       secrets,
       where,
@@ -475,7 +476,7 @@ describe.skipIf(!OPENSSL)(`an MLLP source's TLS settings ${TLS_TESTS}`, () => {
       key: undefined,
       ca: undefined,
       pfx: pfxFile,
-      passphrase: { env: "MLLP_PFX_PASSPHRASE" },
+      passphrase: { env: configuredName("MLLP_PFX_PASSPHRASE") },
     };
     let thrown: unknown;
     try {
@@ -579,7 +580,7 @@ describe.skipIf(!OPENSSL)(`an MLLP source's TLS settings ${TLS_TESTS}`, () => {
           cert: undefined,
           key: undefined,
           pfx: clientPfx,
-          passphrase: { env: "MLLP_PFX_PASSPHRASE" },
+          passphrase: { env: configuredName("MLLP_PFX_PASSPHRASE") },
         },
         secrets,
         "channels/adt/channel.yaml: destinations.0.mllp.tls",

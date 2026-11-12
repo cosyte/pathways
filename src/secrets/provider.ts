@@ -1,6 +1,6 @@
 import { closeSync, fstatSync, openSync, readFileSync } from "node:fs";
 
-import { configuredName, configuredVariable, type Env } from "../env.js";
+import { configuredName, configuredVariable, type Env, type VariableName } from "../env.js";
 
 // The secret provider interface, and the two providers every project has: env and file. Nothing a
 // provider returns is ever written to a log or an error; errors here carry the secret's name and a
@@ -182,19 +182,25 @@ function noVersion(ref: SecretRef, what: string): void {
 }
 
 /**
+ * What the built-in `env` provider is asked: a {@link SecretRef} whose name is one of
+ * ENGINE_VARIABLES or a name configuration gave (configuredName).
+ */
+export type EnvSecretRef = Omit<SecretRef, "name"> & { readonly name: VariableName };
+
+/**
  * The built-in `env` provider, read now: the variable `ref.name`, or one field of the JSON object it
  * holds. Unset and empty are the same.
  *
  * @throws {SecretError} naming the variable, never its value.
  * @example
  * ```ts
- * readEnvSecret(process.env, { name: "LAB_TOKEN" }).value;
+ * readEnvSecret(env, { name: "PATHWAYS_HTTP_TOKEN" }).value;
  * ```
  */
-export function readEnvSecret(env: Env, ref: SecretRef): ResolvedSecret {
+export function readEnvSecret(env: Env, ref: EnvSecretRef): ResolvedSecret {
   const what = `the environment variable ${ref.name}`;
   noVersion(ref, what);
-  const value = configuredVariable(env, configuredName(ref.name));
+  const value = configuredVariable(env, ref.name);
   if (value === undefined || value === "") {
     throw new SecretError("ERR_PATHWAYS_SECRET_NOT_FOUND", ref.name, `${what} is not set`);
   }
@@ -263,7 +269,10 @@ const SECRET_FILE_LIMIT = 1024 * 1024;
  * ```
  */
 export function envSecretProvider(env: Env): SecretProvider {
-  return { resolve: (ref) => new Promise((done) => done(readEnvSecret(env, ref))) };
+  return {
+    resolve: (ref) =>
+      new Promise((done) => done(readEnvSecret(env, { ...ref, name: configuredName(ref.name) }))),
+  };
 }
 
 /**
