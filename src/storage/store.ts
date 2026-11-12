@@ -2933,9 +2933,8 @@ export class Store implements MessageStore, ContentStore, MetaStore {
     const row = (claim: string | null): MessageInsert => ({
       channel,
       received_at: at,
-      // A message a source could not read, such as a batch piece, is kept with an empty body, which
-      // goes in as each database takes one: see EMPTY_BODY.
-      body: body.byteLength === 0 ? EMPTY_BODY[this.kind] : blob(body),
+      // A message a source could not read, such as a batch piece, is kept with an empty body.
+      body: this.bodyValue(body),
       status: failure === undefined ? "received" : "failed",
       error: failure ?? null,
       updated_at: at,
@@ -3395,10 +3394,10 @@ export class Store implements MessageStore, ContentStore, MetaStore {
           const { channel, body, options } = handOff;
           const at = this.now().toISOString();
           const key = options.idempotencyKey;
-          const row = (claim: string | null): Insertable<MessagesTable> => ({
+          const row = (claim: string | null): MessageInsert => ({
             channel,
             received_at: at,
-            body: blob(body),
+            body: this.bodyValue(body),
             status: "received",
             error: null,
             updated_at: at,
@@ -4090,19 +4089,19 @@ export class Store implements MessageStore, ContentStore, MetaStore {
     current: StoredContent,
     next: { readonly body: Uint8Array; readonly error: string | null },
   ): Promise<boolean> {
-    const body = blob(current.body);
+    const body = current.body;
     const result =
       current.table === "messages"
         ? await this.db
             .updateTable("messages")
-            .set({ body: blob(next.body), error: next.error })
+            .set({ body: this.bodyValue(next.body), error: next.error })
             .where("id", "=", current.id)
             .where(sql<boolean>`${this.same("body", body)}`)
             .where(sql<boolean>`${this.same("error", current.error)}`)
             .executeTakeFirst()
         : await this.db
             .updateTable("deliveries")
-            .set({ body: blob(next.body), last_error: next.error })
+            .set({ body: this.bodyValue(next.body), last_error: next.error })
             .where("id", "=", current.id)
             .where(sql<boolean>`${this.same("body", body)}`)
             .where(sql<boolean>`${this.same("last_error", current.error)}`)
@@ -4690,11 +4689,7 @@ export class Store implements MessageStore, ContentStore, MetaStore {
             channel: message.channel,
             destination,
             seq: -1,
-            // An empty value goes in as each database takes one: see EMPTY_BODY.
-            body:
-              outcome.emptyBody === undefined || outcome.emptyBody.byteLength === 0
-                ? EMPTY_BODY[this.kind]
-                : blob(outcome.emptyBody),
+            body: this.bodyValue(outcome.emptyBody ?? EMPTY),
             status: "failure" in outcome ? "failed" : "filtered",
             attempts: 0,
             next_attempt_at: 0,
@@ -4715,7 +4710,7 @@ export class Store implements MessageStore, ContentStore, MetaStore {
             channel: message.channel,
             destination,
             seq,
-            body: blob(body),
+            body: this.bodyValue(body),
             status: "pending",
             attempts: 0,
             // Due at once, whatever the reader's clock: only a retry sets a time in the future.
@@ -4881,12 +4876,21 @@ export class Store implements MessageStore, ContentStore, MetaStore {
    * A condition that `column` holds exactly `value`, or is null when `value` is. On SQL Server and
    * MySQL it also compares lengths, since their `=` pads the shorter value.
    */
-  private same(column: string, value: Uint8Array | string | null): RawBuilder<boolean> {
+  private same(column: string, given: Uint8Array | string | null): RawBuilder<boolean> {
     const ref = sql.ref(column);
-    if (value === null) return sql<boolean>`${ref} is null`;
+    if (given === null) return sql<boolean>`${ref} is null`;
+    const value = typeof given === "string" ? given : this.bodyValue(given);
     if (this.kind !== "sqlserver" && this.kind !== "mysql") return sql<boolean>`${ref} = ${value}`;
     const length = sql.raw(this.kind === "sqlserver" ? "datalength" : "octet_length");
     return sql<boolean>`(${ref} = ${value} and ${length}(${ref}) = ${length}(${value}))`;
+  }
+
+  /**
+   * A body or output as this database takes it, for every write of one and every comparison with
+   * one: an empty one is {@link EMPTY_BODY}, any other is bound as a {@link blob}.
+   */
+  private bodyValue(body: Uint8Array): Buffer | RawBuilder<Uint8Array> {
+    return body.byteLength === 0 ? EMPTY_BODY[this.kind] : blob(body);
   }
 
   /**
@@ -4953,7 +4957,7 @@ const EMPTY = Buffer.alloc(0);
  * bound empty buffer with a maximum length of 0, which the server refuses, and the refusal ends the
  * transaction.
  */
-const EMPTY_BODY: Readonly<Record<StorageKind, Uint8Array | RawBuilder<Uint8Array>>> = {
+const EMPTY_BODY: Readonly<Record<StorageKind, Buffer | RawBuilder<Uint8Array>>> = {
   sqlite: EMPTY,
   postgres: EMPTY,
   mysql: EMPTY,
