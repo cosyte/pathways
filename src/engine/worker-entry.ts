@@ -68,14 +68,53 @@ export interface TransformRequest extends MessageContext {
   readonly body: Uint8Array;
 }
 
-/** The worker's reply to one request. */
+/**
+ * What one destination's transform gave for one message: its outputs (none filters the destination
+ * for that message), or why it failed. A failure here fails that destination's delivery only.
+ */
+export type DestinationReply =
+  | { readonly ok: true; readonly outputs: readonly Uint8Array[] }
+  | { readonly ok: false; readonly failure: FailureSummary };
+
+/**
+ * The worker's reply to one request. On a channel with destination transforms, `destinations`
+ * holds one entry per destination, in order: its reply, or `null` for a destination without a
+ * transform, which sends the channel's `outputs` as they are.
+ */
 export type TransformReply =
-  | { readonly id: number; readonly ok: true; readonly outputs: readonly Uint8Array[] }
+  | {
+      readonly id: number;
+      readonly ok: true;
+      readonly outputs: readonly Uint8Array[];
+      readonly destinations?: readonly (DestinationReply | null)[];
+    }
   | { readonly id: number; readonly ok: false; readonly failure: FailureSummary };
 
-/** The worker's first message: ready, or the transform could not be loaded. */
+/**
+ * The worker's first message: ready, or a transform could not be loaded. `destination` is the index
+ * of the destination whose transform failed to load, absent for the channel's own.
+ */
 export type WorkerHello =
-  { readonly hello: "ready" } | { readonly hello: "load-failed"; readonly failure: FailureSummary };
+  | { readonly hello: "ready" }
+  | {
+      readonly hello: "load-failed";
+      readonly failure: FailureSummary;
+      readonly destination?: number;
+    };
+
+/**
+ * One destination as its transform sees it: where it is in the channel's list, its `name:` when the
+ * block sets one, its kind, the format it sends (what its transform's return is written in), and its
+ * transform module.
+ */
+export interface DestinationSetup {
+  readonly index: number;
+  readonly name: string | undefined;
+  readonly kind: string;
+  readonly format: WorkerFormat;
+  /** The destination's transform module, or `undefined` for none: it sends the channel's outputs. */
+  readonly transformFile: string | undefined;
+}
 
 /** What the engine hands a new worker. */
 export interface WorkerSetup {
@@ -88,6 +127,11 @@ export interface WorkerSetup {
    * values, frozen once here and shared by every message's context.
    */
   readonly config: Readonly<Record<string, unknown>>;
+  /**
+   * The channel's destinations, set only when one of them has a transform: each destination's
+   * transform then runs after the channel's, once per channel output, in the same request.
+   */
+  readonly destinations?: readonly DestinationSetup[] | undefined;
   /** How the channel's format reads and writes its bodies, from the channel's own block. */
   readonly formatSettings?: FormatSettings;
 }
@@ -1330,7 +1374,10 @@ export function buildContext(
 /**
  * Runs one message through `transform`: parse, call with its context, serialize. `null` or
  * `undefined` filters the message out; an array sends several. Without a context, the transform
- * gets that of a message that is not stored, with no configuration.
+ * gets that of a message that is not stored, with no configuration. `settings` is how the channel's
+ * own block reads and writes its format's bodies (a `csv` channel's `csv:`). The outputs are
+ * written in `outFormat`, the format read by default: a destination's transform reads the channel's
+ * format and writes its destination's.
  *
  * @example
  * ```ts
@@ -1343,6 +1390,7 @@ export async function runTransform(
   body: Uint8Array,
   ctx: unknown = buildContext(UNSTORED, {}),
   settings: FormatSettings = {},
+  outFormat: WorkerFormat = format,
 ): Promise<Uint8Array[]> {
   let message: unknown;
   try {
@@ -1359,9 +1407,127 @@ export async function runTransform(
   if (result === null || result === undefined) return [];
   const outputs: unknown[] = Array.isArray(result) ? result : [result];
   try {
-    return await Promise.all(outputs.map((output) => encode(format, output, settings)));
+    return await Promise.all(outputs.map((output) => encode(outFormat, output, settings)));
   } catch (error) {
     throw new StageError("output", error);
+  }
+}
+
+/**
+ * The context a destination's transform receives: the channel's, with `destination` beside it.
+ *
+ * @example
+ * ```ts
+ * const ctx = destinationContext(buildContext(UNSTORED, {}), { index: 0, name: "lab", kind: "file", format: "hl7v2", transformFile: undefined });
+ * ctx.destination; // { index: 0, name: "lab", kind: "file" }
+ * ```
+ */
+export function destinationContext(
+  ctx: object,
+  destination: DestinationSetup,
+): Readonly<Record<string, unknown>> {
+  return freezeDeep({
+    ...ctx,
+    destination: { index: destination.index, name: destination.name, kind: destination.kind },
+  });
+}
+
+/** A destination's setup with its transform loaded. */
+export interface LoadedDestination {
+  readonly setup: DestinationSetup;
+  readonly transform: TransformFunction | undefined;
+}
+
+/**
+ * Runs one message through the channel's transform and then each destination's transform, once per
+ * channel output, in order: a destination's outputs are what its transform returned for each
+ * channel output, joined in order, and none filters that destination for the message. Each
+ * destination transform reads the channel output parsed in the channel's format, and what it returns
+ * is written in its destination's format. A destination transform that throws, or whose output cannot be read or written, fails that
+ * destination only: the others go on. A destination without a transform sends the channel's
+ * outputs, and its entry is `null`. A failure of the channel's own transform rejects, as
+ * {@link runTransform} does. `settings` is the channel's, as {@link runTransform} takes it.
+ *
+ * @example
+ * ```ts
+ * const { outputs, destinations } = await runDestinations(transform, "text", body, ctx, loaded);
+ * ```
+ */
+export async function runDestinations(
+  transform: TransformFunction,
+  format: WorkerFormat,
+  body: Uint8Array,
+  ctx: object,
+  destinations: readonly LoadedDestination[],
+  settings: FormatSettings = {},
+): Promise<{ outputs: Uint8Array[]; destinations: (DestinationReply | null)[] }> {
+  const outputs = await runTransform(transform, format, body, ctx, settings);
+  const replies: (DestinationReply | null)[] = [];
+  for (const { setup, transform: own } of destinations) {
+    if (own === undefined) {
+      replies.push(null);
+      continue;
+    }
+    const context = destinationContext(ctx, setup);
+    try {
+      const sent: Uint8Array[] = [];
+      for (const output of outputs) {
+        sent.push(...(await runTransform(own, format, output, context, settings, setup.format)));
+      }
+      replies.push({ ok: true, outputs: sent });
+    } catch (error) {
+      replies.push({ ok: false, failure: summarize(error, setup.transformFile) });
+    }
+  }
+  return { outputs, destinations: replies };
+}
+
+/**
+ * Loads each destination's transform, in order. A module that fails to load rejects with a
+ * {@link DestinationLoadError} naming the destination.
+ *
+ * @example
+ * ```ts
+ * const loaded = await loadDestinations(setup.destinations ?? []);
+ * ```
+ */
+export async function loadDestinations(
+  destinations: readonly DestinationSetup[],
+): Promise<LoadedDestination[]> {
+  const loaded: LoadedDestination[] = [];
+  for (const setup of destinations) {
+    if (setup.transformFile === undefined) {
+      loaded.push({ setup, transform: undefined });
+      continue;
+    }
+    try {
+      loaded.push({ setup, transform: await loadTransform(setup.transformFile) });
+    } catch (error) {
+      throw new DestinationLoadError(setup, error);
+    }
+  }
+  return loaded;
+}
+
+/**
+ * A destination's transform could not be loaded: which one, and why.
+ *
+ * @example
+ * ```ts
+ * if (error instanceof DestinationLoadError) console.error(error.destination.index);
+ * ```
+ */
+export class DestinationLoadError extends Error {
+  readonly destination: DestinationSetup;
+
+  /**
+   * @param destination The destination whose transform it was.
+   * @param cause What {@link loadTransform} threw: a load failure.
+   */
+  constructor(destination: DestinationSetup, cause: unknown) {
+    super("a destination transform failed to load", { cause });
+    this.name = "DestinationLoadError";
+    this.destination = destination;
   }
 }
 
@@ -1490,43 +1656,75 @@ export function transferable(outputs: readonly Uint8Array[]): ArrayBuffer[] {
 if (!isMainThread && parentPort !== null && isWorkerSetup(workerData)) {
   const port = parentPort;
   const setup = workerData;
-  const parser = loadFormat(setup.format).catch((error: unknown) => {
+  // The channel's format, and each destination's, loaded before the first message.
+  const formats = new Set([setup.format, ...(setup.destinations ?? []).map((d) => d.format)]);
+  const parser = Promise.all([...formats].map(loadFormat)).catch((error: unknown) => {
     throw new StageError("load", error);
   });
   // Frozen once: every message's context shares it.
   const config = freezeDeep(setup.config);
   const formatSettings = freezeDeep(setup.formatSettings ?? {});
-  Promise.all([loadTransform(setup.transformFile), parser]).then(
-    ([transform]) => {
-      port.on("message", (request: TransformRequest) => {
-        runTransform(
-          transform,
-          setup.format,
-          request.body,
-          buildContext(request, config),
-          formatSettings,
-        ).then(
-          (outputs) =>
-            port.postMessage(
-              { id: request.id, ok: true, outputs } satisfies TransformReply,
-              transferable(outputs),
-            ),
-          (error: unknown) =>
-            port.postMessage({
-              id: request.id,
-              ok: false,
-              failure: summarize(error, setup.transformFile),
-            } satisfies TransformReply),
+  Promise.all([loadTransform(setup.transformFile), parser])
+    .then(async ([transform]) => ({
+      transform,
+      destinations:
+        setup.destinations === undefined ? undefined : await loadDestinations(setup.destinations),
+    }))
+    .then(
+      ({ transform, destinations }) => {
+        port.on("message", (request: TransformRequest) => {
+          const ctx = buildContext(request, config);
+          const run: Promise<{
+            outputs: Uint8Array[];
+            destinations?: (DestinationReply | null)[];
+          }> =
+            destinations === undefined
+              ? runTransform(transform, setup.format, request.body, ctx, formatSettings).then(
+                  (outputs) => ({ outputs }),
+                )
+              : runDestinations(
+                  transform,
+                  setup.format,
+                  request.body,
+                  ctx,
+                  destinations,
+                  formatSettings,
+                );
+          run.then(
+            (result) =>
+              port.postMessage(
+                { id: request.id, ok: true, ...result } satisfies TransformReply,
+                transferable([
+                  ...result.outputs,
+                  ...(result.destinations ?? []).flatMap((reply) =>
+                    reply?.ok === true ? reply.outputs : [],
+                  ),
+                ]),
+              ),
+            (error: unknown) =>
+              port.postMessage({
+                id: request.id,
+                ok: false,
+                failure: summarize(error, setup.transformFile),
+              } satisfies TransformReply),
+          );
+        });
+        port.postMessage({ hello: "ready" } satisfies WorkerHello);
+      },
+      (error: unknown) => {
+        port.postMessage(
+          (error instanceof DestinationLoadError
+            ? {
+                hello: "load-failed",
+                failure: summarize(error.cause, error.destination.transformFile),
+                destination: error.destination.index,
+              }
+            : {
+                hello: "load-failed",
+                failure: summarize(error, setup.transformFile),
+              }) satisfies WorkerHello,
         );
-      });
-      port.postMessage({ hello: "ready" } satisfies WorkerHello);
-    },
-    (error: unknown) => {
-      port.postMessage({
-        hello: "load-failed",
-        failure: summarize(error, setup.transformFile),
-      } satisfies WorkerHello);
-    },
-  );
+      },
+    );
 }
 /* v8 ignore stop */

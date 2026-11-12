@@ -10,6 +10,7 @@ import { EncryptedStore, UnencryptedStore } from "../src/encryption/encrypted-st
 import { decryptWithKeyId } from "../src/encryption/envelope.js";
 import { decodeKey, generateKey, LocalKeyProvider } from "../src/encryption/keys.js";
 import type { RekeyCounts } from "../src/encryption/rekey.js";
+import { destinationKeys } from "../src/engine/destination-key.js";
 import { Store } from "../src/storage/store.js";
 import { freshBench } from "./extension-helpers.js";
 import {
@@ -203,11 +204,13 @@ describe("pathways rekey", () => {
 
   /** Two messages, one transformed into a delivery and one failed with an error: 4 values. */
   async function fillUnder(root: string, id: string | undefined): Promise<void> {
-    const raw = await Store.open((await loadProject(root)).databaseFile);
+    const project = await loadProject(root);
+    const raw = await Store.open(project.databaseFile);
     const store =
       id === undefined ? new UnencryptedStore(raw) : new EncryptedStore(raw, await keyOf(root, id));
     const { id: first } = await store.receive("adt", Buffer.from(ADT_A01));
-    await store.completeTransform(first, [Buffer.from("out")], 1);
+    const keys = destinationKeys(project.root, project.channels[0]?.destinations ?? []);
+    await store.completeTransform(first, [Buffer.from("out")], 1, undefined, keys);
     const { id: second } = await store.receive("adt", Buffer.from(ADT_A01));
     await store.failTransform(second, `transform: Error: ${ADT_A01}`);
     await store.close();

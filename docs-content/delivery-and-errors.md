@@ -135,7 +135,10 @@ output: sending the same message again cannot help.
 An HTTP redirect (a 3xx) is neither: it is never followed, since following one could send a message to
 a host nobody configured. The delivery is held, tried again every 5 minutes with later outputs behind
 it, and reported as `delivery-redirected`, naming the host the redirect points to, until someone fixes
-the destination's URL.
+the destination's URL. A destination without a `name` is known by its URL, so once the URL changes,
+what was queued for it waits for the old one: give each destination a `name` when you add it, and it
+keeps its queue when its URL changes
+([how a destination is known](./transform-and-filter-messages.md#transform-or-filter-for-one-destination)).
 
 Retrying forever, in order, is the choice that loses nothing and reorders nothing. Its cost is that a
 destination that is down for a day holds a day of messages, and an operator has to see that; the

@@ -73,15 +73,23 @@ import {
   channelStateStore,
   type AuditAction,
   type ChannelRunState,
+  type DestinationOutcome,
   type MessageStore,
   type ReceivedMessage,
 } from "../storage/store.js";
 import type { SourceFacts } from "../transform.js";
-import { ChannelWorker, TransformLoadError, type TransformOutcome } from "./channel-worker.js";
+import {
+  ChannelWorker,
+  destinationSetups,
+  TransformLoadError,
+  type DestinationResult,
+  type TransformOutcome,
+} from "./channel-worker.js";
 import type { EngineFence } from "./lease.js";
 import { channelStatus, type ChannelHealth, type EngineHealth, type PassCounts } from "./health.js";
 import { formatTable, type FailureSummary } from "./worker-entry.js";
 import { DeadlineTimer } from "./deadline.js";
+import { destinationKeys } from "./destination-key.js";
 import { nextPollAt, pollOf } from "./schedule.js";
 import { copyFacts, keepFacts, sourceFacts } from "./source-facts.js";
 
@@ -336,6 +344,34 @@ export function storedFailure(failure: FailureSummary): string {
   return `${failure.kind}: ${failure.name}${code}${where}: ${failure.detail}`;
 }
 
+/**
+ * What each destination gets from a transform's outcome, as storage records it, on a channel with
+ * destination transforms; `undefined` on one without, or when the channel's transform filtered the
+ * message, which then has no deliveries at all.
+ *
+ * @example
+ * ```ts
+ * const byDestination = destinationOutcomes(outcome);
+ * ```
+ */
+export function destinationOutcomes(
+  outcome: Extract<TransformOutcome, { ok: true }>,
+): DestinationOutcome[] | undefined {
+  if (outcome.destinations === undefined || outcome.outputs.length === 0) return undefined;
+  return outcome.destinations.map((result) =>
+    result.ok ? { outputs: result.outputs } : { failure: storedFailure(result.failure) },
+  );
+}
+
+/** Frees every output of an outcome once stored, each buffer once. */
+function releaseOutputs(outcome: Extract<TransformOutcome, { ok: true }>): void {
+  const all = new Set(outcome.outputs);
+  for (const result of outcome.destinations ?? []) {
+    if (result.ok) for (const output of result.outputs) all.add(output);
+  }
+  for (const output of all) release(output);
+}
+
 /** A channel's connectors. */
 export interface ChannelConnectors {
   readonly source: SourceConnector;
@@ -585,7 +621,7 @@ export async function connectorsFor(
         destinations.push(
           new FileDestination({
             dir: destination.dir,
-            extension: EXTENSIONS[channel.format],
+            extension: EXTENSIONS[destination.format ?? channel.format],
             ...(destination.sftp === undefined
               ? {}
               : {
@@ -605,7 +641,7 @@ export async function connectorsFor(
           new HttpDestination({
             url: destination.url,
             headers: resolveHeaders(
-              { "Content-Type": CONTENT_TYPES[channel.format] },
+              { "Content-Type": CONTENT_TYPES[destination.format ?? channel.format] },
               destination.headers,
               secrets,
               where,
@@ -789,6 +825,13 @@ export interface EngineOptions {
 interface RunningChannel {
   /** Replaced by a reload, between messages. */
   config: ChannelConfig;
+  /**
+   * Each destination's key, in order, which its deliveries record: a reload keeps the destinations,
+   * so it keeps these.
+   */
+  readonly keys: readonly string[];
+  /** Whether the deliveries no destination was made for were held, at the first delivery pass. */
+  held: boolean;
   /** Replaced by a reload, between messages. */
   worker: ChannelWorker;
   readonly connectors: ChannelConnectors;
@@ -1054,6 +1097,7 @@ export class Engine {
           memoryMb: config.settings.memoryMb,
           // Read here, in the engine's process, so a worker never sees the environment.
           config: resolveTransformConfig(project.config, config, env),
+          destinations: destinationSetups(config),
         });
         const hooks = await HookSet.open(config.hooks, {
           file: `channels/${config.name}/channel.yaml`,
@@ -1102,6 +1146,8 @@ export class Engine {
           reloads: Promise.resolve(),
           facts: new Map(),
           receiving: new Set(),
+          keys: destinationKeys(project.root, config.destinations),
+          held: false,
           passing: Promise.resolve(),
           passes: { accepted: 0, filtered: 0, unreadable: 0, rejected: 0, deferred: 0 },
         };
@@ -1984,6 +2030,7 @@ export class Engine {
       timeoutMs: next.settings.timeoutMs,
       memoryMb: next.settings.memoryMb,
       config,
+      destinations: destinationSetups(next),
     });
     try {
       // A fresh worker, so the transform's module and every module it imports are read anew.
@@ -2289,7 +2336,8 @@ export class Engine {
 
   /**
    * The work of one {@link passThrough}, once the passes before it are done: resolves with how many
-   * outputs every destination accepted, 0 when the transform filtered the message. Once the pass
+   * outputs every destination accepted (on a channel with destination transforms, the most any one
+   * was sent), 0 when the transform, or every destination's own, filtered the message. Once the pass
    * runs out of time, sends nothing more and resolves with 0, unheard: the sender was answered.
    */
   private async passOne(
@@ -2322,13 +2370,37 @@ export class Engine {
       });
       throw new PassFailed("TRANSFORM_FAILED", true);
     }
+    // The channel's transform filtered it: no destination transform has anything to read.
+    if (outcome.outputs.length === 0) return 0;
     let rejected = false;
+    let failed = false;
+    let most = 0;
     for (const [index, destination] of connectors.destinations.entries()) {
+      // On a channel with destination transforms, each destination is sent what its own made.
+      const own = outcome.destinations?.[index];
+      const outputs = own === undefined ? outcome.outputs : own.ok ? own.outputs : [];
+      most = Math.max(most, outputs.length);
       if (runsDry(config, index, this.options.dryRun === true)) {
         logger.info({ event: "dry-run", channel: config.name, destination: index, pass });
         continue;
       }
-      for (const [seq, output] of outcome.outputs.entries()) {
+      if (own !== undefined && !own.ok) {
+        // Its text can quote the message, so only where and what is logged; the others go on.
+        const { kind, name, code, where } = own.failure;
+        logger.warn({
+          event: "pass-transform-failed",
+          channel: config.name,
+          pass,
+          destination: index,
+          kind,
+          name,
+          code,
+          where,
+        });
+        failed = true;
+        continue;
+      }
+      for (const [seq, output] of outputs.entries()) {
         if (expired.aborted) return 0;
         if (!(await this.passSend(channel, destination, index, pass, seq, output, expired))) {
           // Rejected: sending it again will not help, and the other destinations are still sent it.
@@ -2338,7 +2410,9 @@ export class Engine {
       }
     }
     if (rejected) throw new PassFailed("DESTINATION_REJECTED", true);
-    return outcome.outputs.length;
+    // A destination's transform failed: running it again on the same message will not help.
+    if (failed) throw new PassFailed("TRANSFORM_FAILED", true);
+    return most;
   }
 
   /**
@@ -2481,14 +2555,23 @@ export class Engine {
       });
       if (outcome.ok) {
         faultPoint("after-transform-before-complete");
+        const byDestination = destinationOutcomes(outcome);
         await store.completeTransform(
           next.id,
-          outcome.outputs,
+          byDestination === undefined ? outcome.outputs : { byDestination },
           config.destinations.length,
-          ...this.epoch(),
+          this.options.fence?.epoch,
+          channel.keys,
         );
-        if (owned) for (const output of outcome.outputs) release(output);
-        const outputs = outcome.outputs.length;
+        if (owned) releaseOutputs(outcome);
+        if (outcome.destinations !== undefined && byDestination !== undefined) {
+          this.reportDestinations(config.name, next.id, outcome.destinations);
+        }
+        // Filtered when every destination's transform filtered it too, as storage records it.
+        const outputs =
+          byDestination?.every((o) => "outputs" in o && o.outputs.length === 0) === true
+            ? 0
+            : outcome.outputs.length;
         logger.info({
           event: outputs === 0 ? "filtered" : "transformed",
           channel: config.name,
@@ -2529,6 +2612,31 @@ export class Engine {
   }
 
   /**
+   * Logs each destination whose own transform failed for a message: its index, the failure's kind,
+   * name, code and where, never the error's text, which is stored with its delivery.
+   */
+  private reportDestinations(
+    channel: string,
+    message: number,
+    results: readonly DestinationResult[],
+  ): void {
+    for (const [destination, result] of results.entries()) {
+      if (result.ok) continue;
+      const { kind, name, code, where } = result.failure;
+      this.options.logger.warn({
+        event: "destination-transform-failed",
+        channel,
+        message,
+        destination,
+        kind,
+        name,
+        code,
+        where,
+      });
+    }
+  }
+
+  /**
    * How long ago a message's current deliveries were queued (its transform, replay or resend), when
    * `policy` has a `maxAge` and the store says; otherwise `undefined`. Read only after a failure.
    */
@@ -2537,6 +2645,43 @@ export class Engine {
     const message = await this.options.store.message(messageId);
     const queued = message === undefined ? Number.NaN : Date.parse(message.updatedAt);
     return Number.isNaN(queued) ? undefined : Math.max(0, this.now() - queued);
+  }
+
+  /**
+   * Holds, once per start, the channel's pending deliveries that none of its destinations now was
+   * made for, so none goes to another destination: one queued before destinations were recorded is
+   * failed with the code `destination-unknown`, its message then replayed by an operator; one made
+   * for a destination the channel no longer has (`destination-gone`) waits for it to come back.
+   * Each kind is logged with a count, never content.
+   */
+  private async holdDeliveries(channel: RunningChannel): Promise<void> {
+    const { store, logger } = this.options;
+    channel.held = true;
+    if (store.holdDeliveries === undefined) return;
+    this.options.fence?.check();
+    const held = await store.holdDeliveries(
+      channel.config.name,
+      channel.keys,
+      "delivery: destination-unknown",
+      ...this.epoch(),
+    );
+    const name = channel.config.name;
+    if (held.unknown > 0) {
+      logger.warn({
+        event: "deliveries-held",
+        channel: name,
+        code: "destination-unknown",
+        deliveries: held.unknown,
+      });
+    }
+    if (held.gone > 0) {
+      logger.warn({
+        event: "deliveries-held",
+        channel: name,
+        code: "destination-gone",
+        deliveries: held.gone,
+      });
+    }
   }
 
   /**
@@ -2555,7 +2700,9 @@ export class Engine {
   private async deliverEach(channel: RunningChannel, deadline: DeadlineTimer): Promise<void> {
     const { config, connectors } = channel;
     const { store, logger } = this.options;
+    if (!channel.held) await this.holdDeliveries(channel);
     for (const [index, destination] of connectors.destinations.entries()) {
+      const key = channel.keys[index];
       const dry = runsDry(config, index, this.options.dryRun === true);
       const policy = config.destinations[index]?.retry ?? config.settings.retry;
       // With rotate, a delivery waiting for a retry steps aside for the due ones behind it; each is
@@ -2564,9 +2711,10 @@ export class Engine {
       for (;;) {
         if (channel.state === "stopped" || this.cutOff) return;
         this.step();
+        // By key: the deliveries made for this destination, wherever it stood in the list then.
         const delivery = await (policy.rotate
-          ? store.nextDelivery(config.name, index, { dueBy: this.now() })
-          : store.nextDelivery(config.name, index));
+          ? store.nextDelivery(config.name, index, { dueBy: this.now(), key })
+          : store.nextDelivery(config.name, index, { key }));
         if (delivery === undefined || delivery.nextAttemptAt > this.now()) break;
         if (tried.has(delivery.id)) break;
         tried.add(delivery.id);
