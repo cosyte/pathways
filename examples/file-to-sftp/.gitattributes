@@ -1,0 +1,2 @@
+# HL7 v2 ends each segment with a carriage return and pathways test compares bytes: never convert.
+*.hl7 -text
