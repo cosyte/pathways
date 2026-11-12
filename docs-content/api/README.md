@@ -369,7 +369,7 @@ the header is parsed: never the segments after it.
 > `readonly` **messageId**: `number` \| `undefined`
 
 The stored message's id, or `undefined` when it could not be stored. On a channel that stores
-nothing, the message's pass number in this run, which no command can look up.
+nothing, the message's pass id, which no command can look up.
 
 ##### problem
 
@@ -2632,8 +2632,8 @@ losing a message. If it rejects, do not acknowledge; the sender should send agai
 `options` is optional, so a source that passes only `body` keeps working unchanged.
 
 On a channel that stores nothing (`storage.content: none`), nothing is stored: this resolves
-once the message was transformed and every destination accepted it, with its pass number in
-this run, and rejects with a [PassFailed](#passfailed) that says whether the sender should send again.
+once the message was transformed and every destination accepted it, with its pass id (the
+time it came in, in microseconds since 1970, never given twice), and rejects with a [PassFailed](#passfailed) that says whether the sender should send again.
 
 ###### Parameters
 
@@ -3796,7 +3796,8 @@ const name = (message: OutgoingMessage): string => `${message.messageId}-${messa
 > `readonly` **messageId**: `number`
 
 The id of the stored message this came from; on a channel that stores nothing, the message's
-pass number in this run.
+pass id: the time it came in, in microseconds since 1970, never given twice, so outputs named by
+it stay apart across restarts.
 
 ##### resend?
 

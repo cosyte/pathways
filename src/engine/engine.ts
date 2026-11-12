@@ -193,6 +193,25 @@ class PassCut extends Error {
 
 /** Readiness reads storage at most this often; a probe in between is told the last answer. */
 const STORAGE_CHECK_EVERY_MS = 1_000;
+
+/** The id {@link nextPassId} last gave, in this process. */
+let lastPassId = 0;
+
+/**
+ * A new id for a pass of a channel that stores nothing: the time now in microseconds since 1970
+ * (`nowMs` times 1,000), or one more than the last id given in this process when that is not later.
+ * Destinations name their outputs by it (a file destination writes `<id>-<seq>.<ext>`), so it must
+ * never repeat, and a counter that starts again at 1 on each start would: a restarted engine's first
+ * pass would overwrite the last run's first output before its reader took it, after the source had
+ * deleted its only other copy. A later run starts later, so its ids are higher than every id an
+ * earlier run gave, unless it gave more than 1,000 a millisecond or the clock went back. Engines that
+ * share a store run a channel one at a time, under the engine lease, and the one that takes over
+ * starts after the lease ran out. It stays a safe integer until the year 2255.
+ */
+function nextPassId(nowMs: number): number {
+  lastPassId = Math.max(lastPassId + 1, Math.floor(nowMs) * 1_000);
+  return lastPassId;
+}
 /** A storage read for readiness that takes longer than this counts as storage unreachable. */
 const STORAGE_CHECK_TIMEOUT_MS = 5_000;
 
@@ -828,8 +847,6 @@ interface RunningChannel {
    * destination in the order they came in.
    */
   passing: Promise<unknown>;
-  /** With `storage.content: none`: the number the last pass of this run was given. */
-  passNumber: number;
   /** With `storage.content: none`: how each pass of this run ended. Counts only. */
   readonly passes: { -readonly [K in keyof PassCounts]: number };
 }
@@ -1083,7 +1100,6 @@ export class Engine {
           facts: new Map(),
           receiving: new Set(),
           passing: Promise.resolve(),
-          passNumber: 0,
           passes: { accepted: 0, filtered: 0, unreadable: 0, rejected: 0, deferred: 0 },
         };
         this.channels.push(channel);
@@ -2188,7 +2204,7 @@ export class Engine {
    * One message of a channel that stores nothing (`storage.content: none`): transformed and sent to
    * every destination before this resolves, so its source answers the sender only once every
    * destination accepted it. Nothing of it is stored; only the channel's counts change. Resolves
-   * with the pass's number in this run. Rejects with a {@link PassFailed}: permanent when the
+   * with the pass's id, from {@link nextPassId}. Rejects with a {@link PassFailed}: permanent when the
    * transform failed or a destination rejected the message, so sending it again cannot help;
    * otherwise (a destination failed or took too long, the pass ran past `passTimeout`, the channel
    * was halted) for the sender to send it again. Passes run one at a time, in the order they came.
@@ -2204,8 +2220,7 @@ export class Engine {
     // Checked and copied first, as for a stored message: refused at once with INVALID_SOURCE_FACTS.
     const passed = source === undefined ? undefined : copyFacts(source);
     const receivedAt = this.at();
-    channel.passNumber += 1;
-    const pass = channel.passNumber;
+    const pass = nextPassId(this.now());
     if (failure !== undefined) {
       // A message its source could not read: it answers as it does for a stored one marked failed.
       channel.passes.unreadable += 1;

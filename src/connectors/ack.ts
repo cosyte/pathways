@@ -65,7 +65,7 @@ export interface AckRequest {
   readonly header: Hl7Message | undefined;
   /**
    * The stored message's id, or `undefined` when it could not be stored. On a channel that stores
-   * nothing, the message's pass number in this run, which no command can look up.
+   * nothing, the message's pass id, which no command can look up.
    */
   readonly messageId: number | undefined;
 }

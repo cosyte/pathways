@@ -124,9 +124,25 @@ ended since the engine started:
 ```
 
 `deferred` counts the messages a sender was told to send again, and `rejected` those it was told not
-to. The counts start from zero on each start. The engine logs each pass by number (`passed`,
+to. The counts start from zero on each start. The engine logs each pass by its id (`passed`,
 `pass-filtered`, `pass-failed` and the rest in [Logs and codes](./logs-and-codes.md)), never its
 content.
+
+## Pass ids
+
+Each message gets a pass id: the time it came in, in microseconds since 1970, or one more than the
+last id when two come in the same microsecond. It is the `messageId` a destination is handed, so a
+file destination writes `<pass id>-1.<extension>`, an S3 or Azure Blob destination keys its object the
+same way, and an email destination puts it in its `Message-ID`. A file source with
+`keepProcessed: true` names its kept copy `<pass id>-<file name>`. A later start gives higher ids,
+so its outputs never overwrite one an earlier run wrote and its reader has not taken yet. That holds
+while the clock does not go back. Two engines that share a database run a channel one at a time,
+under the engine lease; two engines on separate databases writing to one folder are not kept apart,
+here or on a channel that stores its messages.
+
+A file source with `keepProcessed: true` keeps a plaintext copy of each file it took in, in
+`processed/`, on a channel that stores nothing too: leave it off if no copy of a message should stay
+on disk.
 
 ## In a cluster
 

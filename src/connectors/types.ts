@@ -83,8 +83,8 @@ export interface MessageSink {
    * `options` is optional, so a source that passes only `body` keeps working unchanged.
    *
    * On a channel that stores nothing (`storage.content: none`), nothing is stored: this resolves
-   * once the message was transformed and every destination accepted it, with its pass number in
-   * this run, and rejects with a {@link PassFailed} that says whether the sender should send again.
+   * once the message was transformed and every destination accepted it, with its pass id (the
+   * time it came in, in microseconds since 1970, never given twice), and rejects with a {@link PassFailed} that says whether the sender should send again.
    */
   receive(body: Uint8Array, options?: ReceiveOptions): Promise<number>;
   /**
@@ -162,7 +162,8 @@ export interface Resend {
 export interface OutgoingMessage {
   /**
    * The id of the stored message this came from; on a channel that stores nothing, the message's
-   * pass number in this run.
+   * pass id: the time it came in, in microseconds since 1970, never given twice, so outputs named by
+   * it stay apart across restarts.
    */
   readonly messageId: number;
   /** Which output of that message's transform this is, from 0. */

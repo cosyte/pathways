@@ -227,6 +227,7 @@ describe("storage.content: none in configuration", () => {
 
 describe("a channel that stores nothing", () => {
   it("answers only once every destination accepted, stores nothing, and shows volatile", async () => {
+    const startedAt = Date.now();
     const { engine, store, sink, destinations, events, lines } = await startNone();
     const [first, second] = destinations as [Scripted, Scripted];
     let release!: () => void;
@@ -242,12 +243,18 @@ describe("a channel that stores nothing", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(answered).toBe(false);
     release();
-    expect(await receiving).toBe(1);
+    // A pass id is the time it came in, in microseconds, so no later start gives it again.
+    const id = await receiving;
+    expect(id).toBeGreaterThanOrEqual(startedAt * 1_000);
+    expect(id).toBeLessThanOrEqual(Date.now() * 1_000);
     expect(first.sent).toEqual(["SYNTHETIC NOTE"]);
     expect(second.sent).toEqual(["SYNTHETIC NOTE"]);
 
-    expect(await sink.receive(text("drop"))).toBe(2);
-    expect(await sink.receive(text("unread"), { failure: "inbound: NO_MSH_SEGMENT" })).toBe(3);
+    const dropped = await sink.receive(text("drop"));
+    expect(dropped).toBeGreaterThan(id);
+    expect(
+      await sink.receive(text("unread"), { failure: "inbound: NO_MSH_SEGMENT" }),
+    ).toBeGreaterThan(dropped);
 
     // Nothing of any message is stored.
     expect(await store.messageCounts("notes")).toEqual({
@@ -270,7 +277,7 @@ describe("a channel that stores nothing", () => {
       expect.objectContaining({ event: "content-none", channel: "notes", passTimeoutMs: 30_000 }),
     );
     expect(events.filter((e) => e.event === "passed")).toEqual([
-      expect.objectContaining({ channel: "notes", pass: 1, outputs: 1 }),
+      expect.objectContaining({ channel: "notes", pass: id, outputs: 1 }),
     ]);
     expect(lines.join("")).not.toContain("synthetic note");
     expect(lines.join("")).not.toContain("SYNTHETIC NOTE");
@@ -286,7 +293,8 @@ describe("a channel that stores nothing", () => {
       sink.receive(text("second")),
       sink.receive(text("third")),
     ]);
-    expect(ids).toEqual([1, 2, 3]);
+    expect([...ids].sort((x, y) => x - y)).toEqual(ids);
+    expect(new Set(ids).size).toBe(3);
     expect(only.sent).toEqual(["FIRST", "SECOND", "THIRD"]);
   });
 
@@ -391,7 +399,7 @@ describe("a channel that stores nothing", () => {
     expect([slow.code, queued.code]).toEqual(["PASS_TIMEOUT", "PASS_TIMEOUT"]);
     // The next pass runs once the slow transform is done.
     await new Promise((resolve) => setTimeout(resolve, 400));
-    expect(await sink.receive(text("after"))).toBe(3);
+    expect(await sink.receive(text("after"))).toEqual(expect.any(Number));
     expect(only.sent).toEqual(["AFTER"]);
     expect((await engine.health()).channels["notes"]?.passes).toMatchObject({
       accepted: 1,
@@ -445,10 +453,10 @@ describe("a channel that stores nothing", () => {
     const { sink, destinations, events } = await startNone(1, undefined, {
       engine: { dryRun: true },
     });
-    expect(await sink.receive(text("synthetic note"))).toBe(1);
+    const id = await sink.receive(text("synthetic note"));
     expect((destinations[0] as Scripted).sent).toEqual([]);
     expect(events).toContainEqual(
-      expect.objectContaining({ event: "dry-run", destination: 0, pass: 1 }),
+      expect.objectContaining({ event: "dry-run", destination: 0, pass: id }),
     );
   });
 
@@ -561,7 +569,7 @@ describe("an HTTP source on a channel that stores nothing", () => {
     const { port, lab } = await startHttp(status(200));
     const answer = await send(port, { body: ADT_A01 });
     expect(answer.status).toBe(202);
-    expect(JSON.parse(answer.body)).toEqual({ id: 1 });
+    expect(JSON.parse(answer.body)).toEqual({ id: expect.any(Number) as number });
     expect(lab.received).toHaveLength(1);
   });
 
@@ -690,6 +698,63 @@ export default () => ({ deliver: () => Promise.reject(Object.assign(new Error("s
     await dropFile(join(root, "data/in/note.txt"), "synthetic note");
     await engine.tick();
     expect(await visible(join(root, "data/error"))).toHaveLength(2);
+  });
+});
+
+describe("a channel that stores nothing, started again", () => {
+  /**
+   * Runs one engine on a file source and a file destination until it took `note` in, then stops
+   * it: a restart, with the same project and database.
+   */
+  async function runOnce(root: string, note: string): Promise<void> {
+    const project = await loadProject(root);
+    const store = await Store.open(project.databaseFile);
+    stores.push(store);
+    const engine = new Engine({ project, store, logger: captureLogger().logger });
+    await engine.start();
+    await dropFile(join(root, "data/in/note.txt"), note);
+    await engine.tick();
+    await engine.stop();
+  }
+
+  async function project(source: string): Promise<string> {
+    return makeProject({
+      "channels/notes/channel.yaml": `format: text
+storage: { content: none }
+source:
+  file: { dir: ../../data/in, errorDir: ../../data/error, minAge: 0${source} }
+transform: ./transform.ts
+destinations:
+  - file: { dir: ../../data/out }
+`,
+      "channels/notes/transform.ts": TEXT_TRANSFORM,
+    });
+  }
+
+  const contents = async (dir: string): Promise<string[]> => {
+    const names = (await readdir(dir)).filter((name) => !name.startsWith("."));
+    return (await Promise.all(names.map((name) => readFile(join(dir, name), "utf8")))).sort();
+  };
+
+  it("names each run's outputs apart, so the second run overwrites nothing", async () => {
+    const root = await project("");
+    await runOnce(root, "first synthetic note");
+    await runOnce(root, "second synthetic note");
+    // Both notes were taken in and their files deleted, so these copies are all there is.
+    expect(await contents(join(root, "data/out"))).toEqual([
+      "FIRST SYNTHETIC NOTE",
+      "SECOND SYNTHETIC NOTE",
+    ]);
+  });
+
+  it("keeps each run's processed files apart under keepProcessed", async () => {
+    const root = await project(", keepProcessed: true");
+    await runOnce(root, "first synthetic note");
+    await runOnce(root, "second synthetic note");
+    expect(await contents(join(root, "data/in/processed"))).toEqual([
+      "first synthetic note",
+      "second synthetic note",
+    ]);
   });
 });
 
