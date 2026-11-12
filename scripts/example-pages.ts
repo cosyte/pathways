@@ -49,6 +49,16 @@ const LEFT_OUT: ReadonlySet<string> = new Set(["README.md", ".gitignore", ".gita
 /** The folders whose files are messages, which the Files section names rather than shows. */
 const MESSAGE_FOLDERS: ReadonlySet<string> = new Set(["tests", "samples"]);
 
+/**
+ * What an example's messages page says beyond "made by `@cosyte/synth`", for an example where part
+ * of a message was then set by hand: the page must not say a field came from the generator when it
+ * did not.
+ */
+const HAND_SET: Readonly<Record<string, string>> = {
+  "hl7-to-fhir":
+    "the patient in `a04.hl7` was then set by hand, to the plainly fake test patient other fixtures use",
+};
+
 /** The fence language of a file, by its extension. */
 const LANGUAGES: Readonly<Record<string, string>> = {
   ".ts": "ts",
@@ -216,8 +226,10 @@ function messagesLine(root: string, name: string): string | null {
   }
   if (folders.size === 0) return null;
   const parts = [...folders].map(([folder, files]) => `in \`${folder}/\`, ${files.join(", ")}`);
+  const byHand = HAND_SET[name];
   return (
-    `Its messages are synthetic, made by \`@cosyte/synth\`, and are on GitHub with the rest: ` +
+    `Its messages are synthetic, made by \`@cosyte/synth\`` +
+    `${byHand === undefined ? "" : ` (${byHand})`}, and are on GitHub with the rest: ` +
     `${parts.join("; ")}. Each input in a \`tests/\` folder has its expected output beside it.`
   );
 }

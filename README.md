@@ -219,13 +219,19 @@ These are on `main` and land in the next release, not in 0.0.4:
 - **A scrape does not hang on a hung database.** The store reads behind `/metrics` wait at most 5
   seconds, as the readiness check does, so a database that hangs reads as `pathways_store_up 0` and
   the store-down alert can fire, instead of the scrape hanging with it. From when reads start
-  until they answer or fail, neither a scrape nor the readiness check starts new ones.
+  until every one has ended, neither a scrape nor the readiness check starts new ones.
   <!-- changesets: metrics-store-timeout -->
 - **What is safe to log from a channel.** The logs page now says what a transform or a channel
   script may log (the ids the engine made, counts, sizes and codes) and what it must not (the
   message, a field that identifies a person, the source's facts, the configuration, an error's own
   text), and how `ctx.logger`, `console` and a thrown error each behave.
   <!-- changesets: examples-print-nothing-identifying -->
+- **The oldest pending age per destination holds.** Each delivery keeps the time it was queued
+  (schema step `0017-delivery-queued-at`, applied at start), and
+  `pathways_oldest_pending_age_seconds` counts from it, so clearing a failed delivery no longer
+  restarts the age of the same message's deliveries at other destinations. The health body waits
+  at most 5 seconds on a database that hangs, and answers `storage: "unreachable"`.
+  <!-- changesets: destination-pending-age -->
 
 ---
 
