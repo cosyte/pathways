@@ -587,7 +587,22 @@ describe("a real pass of each example, as its page shows it", () => {
       expect(await listed(join(dir, "data/receiver"))).toEqual(["1.json"]);
       const body = await bytes(dir, "data/receiver/1.json");
       expect(body).toEqual(await bytes(dir, `${tests}/oru.expected.hl7`));
-      expect(parseResource(body.toString("utf8")).resource).toBeDefined();
+      // Each entry of the Bundle is valid FHIR R4 to @cosyte/fhir's validator: the Bundle itself is
+      // a type the validator does not model, so each entry is checked on its own.
+      const entries = (
+        JSON.parse(body.toString("utf8")) as {
+          readonly entry: readonly { readonly resource: unknown }[];
+        }
+      ).entry;
+      expect(entries.length).toBeGreaterThan(0);
+      for (const entry of entries) {
+        const { resource } = parseResource(JSON.stringify(entry.resource));
+        const { issues, valid } = validateResource(resource);
+        expect(
+          issues.filter((issue) => issue.severity === "error" || issue.severity === "fatal"),
+        ).toEqual([]);
+        expect(valid).toBe(true);
+      }
 
       // The species and breed the lab sent in PID-35 and PID-36 are the ones the Patient carries.
       const sentPatient = parseHL7(await readFile(join(dir, `${tests}/oru.hl7`), "latin1")).patient;
@@ -647,5 +662,69 @@ describe("the veterinary example's messages and transform", () => {
     const person = generateOru({ seed: 4821 });
     expect(person.patient?.species).toBeUndefined();
     expect(() => transform(person)).toThrow("no species in PID-35");
+  });
+
+  /**
+   * The example's synthetic lab result with PID-35 (species) and PID-36 (breed) set to the given
+   * raw field text, parsed as the channel parses it.
+   */
+  async function vetResult(species: string, breed: string): Promise<Hl7Message> {
+    const raw = await readFile(join(tests, "oru.hl7"), "latin1");
+    const segments = raw.split("\r").map((segment) => {
+      if (!segment.startsWith("PID|")) return segment;
+      const fields = segment.split("|");
+      fields[35] = species;
+      fields[36] = breed;
+      return fields.join("|");
+    });
+    return parseHL7(segments.join("\r"));
+  }
+
+  async function vetTransform(): Promise<(msg: Hl7Message) => unknown> {
+    return (
+      (await import(
+        pathToFileURL(
+          join(ROOT, "examples/vet-lab-to-fhir/channels/vet-results-to-fhir/transform.ts"),
+        ).href
+      )) as { readonly default: (msg: Hl7Message) => unknown }
+    ).default;
+  }
+
+  const BREED = "CAT-DSH^Domestic Shorthair^99COSYTE";
+  const ONE_SPECIES = "PID-35 must hold exactly one species, with a code and a coding system";
+  const ONE_BREED =
+    "PID-36 must be empty or hold exactly one breed, with a code and a coding system";
+
+  it.each([
+    ["empty", "", "no species in PID-35"],
+    ["HL7 null", '""', "no species in PID-35"],
+    ["text only, no code", "^Cat^99COSYTE", ONE_SPECIES],
+    ["repeated", "CAT^Cat^99COSYTE~DOG^Dog^99COSYTE", ONE_SPECIES],
+    ["repeated, the first empty", "~DOG^Dog^99COSYTE", ONE_SPECIES],
+    ["uncoded, no coding system", "Cat", ONE_SPECIES],
+    ["a code and text, no coding system", "CAT^Cat", ONE_SPECIES],
+  ])("refuses a lab result whose species is %s", async (_case, species, reason) => {
+    const transform = await vetTransform();
+    const msg = await vetResult(species, BREED);
+    expect(() => transform(msg)).toThrow(reason);
+  });
+
+  it.each([
+    ["text only, no code", "^Domestic Shorthair"],
+    ["text and system, no code", "^Domestic Shorthair^99COSYTE"],
+    ["uncoded, no coding system", "DSH"],
+    ["repeated", "CAT-DSH^Domestic Shorthair^99COSYTE~CAT-MCO^Maine Coon^99COSYTE"],
+  ])("refuses a lab result whose breed is %s", async (_case, breed) => {
+    const transform = await vetTransform();
+    const msg = await vetResult("CAT^Cat^99COSYTE", breed);
+    expect(() => transform(msg)).toThrow(ONE_BREED);
+  });
+
+  it("sends a lab result with one coded species and no breed, and the Bundle has no breed", async () => {
+    const transform = await vetTransform();
+    const out = transform(await vetResult("CAT^Cat^99COSYTE", ""));
+    expect(typeof out).toBe("string");
+    expect(out as string).toContain('"url":"species"');
+    expect(out as string).not.toContain('"url":"breed"');
   });
 });

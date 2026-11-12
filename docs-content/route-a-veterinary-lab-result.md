@@ -28,6 +28,15 @@ The example's channel, `vet-results-to-fhir`, does four things. Its files are on
    filters out every message that is not an `ORU^R01`, and fails one with no species, so a person's
    result on the same feed is never sent on as an animal's. A failed message is kept, and
    [replay](./inspect-replay-and-clear-messages.md) sends it again once it is fixed.
+
+   It also fails a result unless PID-35 holds exactly one species with a code (component 1) and a
+   coding system (component 3), and unless PID-36 is empty or holds exactly one breed coded the same
+   way. Neither field repeats in HL7 v2, and `msg.patient` reads only the first repetition, so a
+   second species or breed would be dropped without a trace. A species or breed with no code, or
+   with no coding system, would reach FHIR as a coding a receiver cannot match to a terminology. We
+   chose to fail such a result rather than send it with the breed left out: the message is kept for
+   replay, and nothing the lab sent is lost on the way.
+
 3. **Convert with `@cosyte/transform`.** `toFhir` turns the message into a FHIR R4 message Bundle.
    The species and breed go into the Patient's `patient-animal` extension
    (`http://hl7.org/fhir/StructureDefinition/patient-animal`), each a `valueCodeableConcept`. The
@@ -68,8 +77,11 @@ CI runs these on every change to Pathways, on synthetic messages only:
   running engine takes the result and the admission over MLLP and acknowledges both, POSTs one Bundle
   to a stand-in receiver, and filters the admission. The Bundle the receiver got matches the expected
   file, and its Patient's `patient-animal` extension holds the species and breed codes that PID-35
-  and PID-36 of the message carried.
-- The transform fails a lab result with no species.
+  and PID-36 of the message carried. Each entry of the Bundle passes `@cosyte/fhir`'s
+  `validateResource` with no error.
+- The transform fails a lab result whose species is absent, empty, HL7 null (`""`), text with no
+  code, repeated, or a code with no coding system, and one whose breed is repeated or has no code or
+  no coding system. It sends one with a coded species and no breed.
 - The test messages are the ones `@cosyte/synth` generates for the seeds the example's README names,
   so they can be made again.
 - The page's channel file passes the channel schema check, and its transform compiles against

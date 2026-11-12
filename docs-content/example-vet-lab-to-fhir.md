@@ -22,7 +22,8 @@ real veterinary feed, and what it does not.
 - An [MLLP source](./send-and-receive-mllp.md) that stores each message before it sends the ACK.
 - A transform that reads the species (PID-35) and breed (PID-36) by name, as `msg.patient.species`
   and `msg.patient.breed` from `@cosyte/hl7`, and fails a result that has no species instead of
-  sending it on as a person's.
+  sending it on as a person's. It also fails a result whose species or breed is repeated or has no
+  code and coding system, instead of sending it on with part of it dropped.
 - `toFhir` from `@cosyte/transform`, which turns the result into a message Bundle: a
   `MessageHeader`, the `Patient` with the `patient-animal` extension, the owner as a
   `RelatedPerson`, and an `Observation` for each result.
@@ -191,7 +192,8 @@ destinations:
 ```ts runnable title="channels/vet-results-to-fhir/transform.ts"
 // Turns each veterinary lab result (ORU^R01) into a FHIR R4 message Bundle with @cosyte/transform,
 // keeping the animal's species and breed, and filters every other message out. A result with no
-// species fails instead of going on as a person's result.
+// species fails instead of going on as a person's result, and so does one whose species or breed is
+// repeated or has no code and coding system, instead of going on with a part of it dropped.
 import { createHash } from "node:crypto";
 
 import { serializeResource } from "@cosyte/fhir";
@@ -236,22 +238,52 @@ function animalPart(bundle: string, part: "species" | "breed"): string | undefin
   return coded?.valueCodeableConcept?.coding?.[0]?.code;
 }
 
+/** The message a transform is given: an HL7 v2 message parsed by @cosyte/hl7. */
+type Message = Parameters<Transform>[0];
+
+/**
+ * How many repetitions PID-`n` holds. PID-35 and PID-36 do not repeat, so a second one is a sender
+ * error, and reading only the first would drop the rest without a trace.
+ */
+function repetitions(msg: Message, n: 35 | 36): number {
+  return msg.segments("PID")[0]?.field(n).repetitions.length ?? 0;
+}
+
+/** Whether a coded value has both a code (component 1) and a coding system (component 3). */
+function coded(value: {
+  readonly identifier?: string;
+  readonly nameOfCodingSystem?: string;
+}): boolean {
+  return Boolean(value.identifier) && Boolean(value.nameOfCodingSystem);
+}
+
 export default ((msg) => {
   if (!msg.is("ORU^R01")) return null;
 
-  // PID-35 species and PID-36 breed, read by name through @cosyte/hl7's typed patient.
-  const species = msg.patient?.species?.identifier;
-  const breed = msg.patient?.breed?.identifier;
-  if (species === undefined) throw new Error("no species in PID-35: not a veterinary result");
+  // PID-35 species and PID-36 breed, read by name through @cosyte/hl7's typed patient. Each must be
+  // one value with a code and a coding system: a repeated value would lose all but its first, and a
+  // value with no code or no system would reach FHIR as a coding a receiver cannot read.
+  const { species, breed } = msg.patient ?? {};
+  if (species === undefined && repetitions(msg, 35) <= 1) {
+    throw new Error("no species in PID-35: not a veterinary result");
+  }
+  if (species === undefined || repetitions(msg, 35) !== 1 || !coded(species)) {
+    throw new Error("PID-35 must hold exactly one species, with a code and a coding system");
+  }
+  if (repetitions(msg, 36) > 1 || (breed !== undefined && !coded(breed))) {
+    throw new Error(
+      "PID-36 must be empty or hold exactly one breed, with a code and a coding system",
+    );
+  }
 
   const { bundle } = toFhir(msg, { generateId: idsFor(msg.meta.controlId ?? "") });
   const json = serializeResource(bundle);
 
   // The Patient in the Bundle carries the same species and breed, or the message fails here.
-  if (animalPart(json, "species") !== species) {
+  if (animalPart(json, "species") !== species.identifier) {
     throw new Error("the Bundle's Patient does not carry the species from PID-35");
   }
-  if (breed !== undefined && animalPart(json, "breed") !== breed) {
+  if (breed !== undefined && animalPart(json, "breed") !== breed.identifier) {
     throw new Error("the Bundle's Patient does not carry the breed from PID-36");
   }
   return json;
