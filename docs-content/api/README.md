@@ -537,6 +537,10 @@ Why it failed, as stored: can quote the message.
 
 > `readonly` **generation**: `number`
 
+##### hops?
+
+> `readonly` `optional` **hops?**: `number` \| `null`
+
 ##### id
 
 > `readonly` **id**: `number`
@@ -558,6 +562,26 @@ Its `ctx.meta`, which can hold identifiers; `null` when it had none or it was dr
 > `readonly` **outputs**: readonly `string`[]
 
 The outputs of its current generation, in order, in base64: those of its first destination.
+
+##### parentChannel?
+
+> `readonly` `optional` **parentChannel?**: `string` \| `null`
+
+The channel that handed it over, the message there, the channel destination's delivery and
+that message's generation, and how many hand-offs in a row brought it: `null` for a message
+a source took in, and absent from an archive written before channels could hand over.
+
+##### parentDelivery?
+
+> `readonly` `optional` **parentDelivery?**: `number` \| `null`
+
+##### parentGeneration?
+
+> `readonly` `optional` **parentGeneration?**: `number` \| `null`
+
+##### parentMessage?
+
+> `readonly` `optional` **parentMessage?**: `number` \| `null`
 
 ##### receivedAt
 
@@ -1287,7 +1311,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-15)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-16)
 
 ##### deliveryId
 
@@ -1867,7 +1891,7 @@ export default ((msg, ctx) => (ctx?.destination?.name === "billing" ? msg : null
 
 > `readonly` **kind**: `string`
 
-`file`, `http`, `mllp`, `tcp`, `smtp` or `module`.
+`file`, `http`, `mllp`, `tcp`, `smtp`, `channel` or `module`.
 
 ##### name
 
@@ -2249,7 +2273,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-15)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-16)
 
 ##### messageId
 
@@ -2262,6 +2286,38 @@ The channel's name.
 ###### Overrides
 
 [`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-8)
+
+***
+
+### HandOff
+
+One message to hand to another channel: its target, body and what is stored with it (the
+parent link, hop count, idempotency key and metadata), and the most messages the target may
+hold waiting for its transform, counting this one.
+
+#### Example
+
+```ts
+const handOff: HandOff = { channel: "lab-results", body, options: { parent, hops: 1 }, maxPending: 10_000 };
+```
+
+#### Properties
+
+##### body
+
+> `readonly` **body**: `Uint8Array`
+
+##### channel
+
+> `readonly` **channel**: `string`
+
+##### maxPending
+
+> `readonly` **maxPending**: `number`
+
+##### options
+
+> `readonly` **options**: [`StoreReceiveOptions`](#storereceiveoptions)
 
 ***
 
@@ -2700,6 +2756,42 @@ const fields: LogFields = { event: "inbox-read-failed", code: "EACCES" };
 
 ***
 
+### MessageParent
+
+Where a message handed over from another channel came from: that channel, its message, the
+channel destination's delivery (none for `ctx.route`), and the parent's generation at the time,
+which is above 0 when the hand-off came from a replay or a resend.
+
+#### Example
+
+```ts
+const parent: MessageParent = { channel: "adt-in", messageId: 12, deliveryId: 40, generation: 0 };
+```
+
+#### Properties
+
+##### channel
+
+> `readonly` **channel**: `string`
+
+##### deliveryId
+
+> `readonly` **deliveryId**: `number` \| `undefined`
+
+The channel destination's delivery that handed it over; `undefined` for `ctx.route`.
+
+##### generation
+
+> `readonly` **generation**: `number`
+
+The parent's generation when it handed over: 0 the first time, more for a replay or resend.
+
+##### messageId
+
+> `readonly` **messageId**: `number`
+
+***
+
 ### MessageQuery
 
 Which messages [MessageStore.listMessages](#listmessages) returns: newest first, every filter optional.
@@ -3051,6 +3143,27 @@ so a restart forgets it.
 
 `Promise`\<`Record`\<`string`, [`ChannelRunState`](#channelrunstate)\>\>
 
+##### children()?
+
+> `optional` **children**(`messageId`, `limit`): `Promise`\<[`MessageSummary`](#messagesummary)[]\>
+
+The messages handed over from message `messageId`, oldest first, at most `limit`. Optional: a
+store without it shows no children.
+
+###### Parameters
+
+###### messageId
+
+`number`
+
+###### limit
+
+`number`
+
+###### Returns
+
+`Promise`\<[`MessageSummary`](#messagesummary)[]\>
+
 ##### clear()
 
 > **clear**(`messageId`, `actor`): `Promise`\<[`ClearResult`](#clearresult)\>
@@ -3244,6 +3357,38 @@ Removes the row of `node` only while it is stale. Returns whether it did. Option
 ###### Returns
 
 `Promise`\<`boolean`\>
+
+##### handOff()?
+
+> `optional` **handOff**(`from`, `handOffs`, `epoch?`): `Promise`\<[`HandOffResult`](#handoffresult)\>
+
+Hands messages to other channels in one transaction with what they come from: `from` a
+channel destination's delivery, marked delivered, or a transform's outcome, recorded as
+[completeTransform](#completetransform) records it. Each new message is stored as `received` in its target
+channel with its parent link and hop count, as [receive](#receive-1) stores one. When a target then
+holds more than its hand-off's `maxPending` messages waiting for the transform, nothing is
+kept and the result names it. Fenced by `epoch` when it is given. Optional: without it the
+engine stores each hand-off with [receive](#receive-1) under an idempotency key built from the source
+channel, the delivery or message, and the generation, then records the source, so a crash
+between the two hands over once.
+
+###### Parameters
+
+###### from
+
+[`HandOffFrom`](#handofffrom)
+
+###### handOffs
+
+readonly [`HandOff`](#handoff)[]
+
+###### epoch?
+
+`number`
+
+###### Returns
+
+`Promise`\<[`HandOffResult`](#handoffresult)\>
 
 ##### heldIdempotencyKey()?
 
@@ -3544,7 +3689,8 @@ How many messages of a channel stand at each status. The health endpoint reports
 
 One message's metadata (`ctx.meta`) as JSON text, through the codec like a body, or `undefined`
 when it has none or it was dropped. Optional: a store without it hands a destination that reads
-metadata none, so a URL placeholder fails its delivery.
+metadata none, so a URL placeholder fails its delivery, and a channel destination with
+`carryMeta` carries nothing.
 
 ###### Parameters
 
@@ -3891,9 +4037,21 @@ The latest earlier message with the same sender and control ID, when there is on
 
 0 until the message is first replayed or resent; one more each time.
 
+##### hops?
+
+> `readonly` `optional` **hops?**: `number`
+
+How many hand-offs in a row brought it here, when another channel handed it over.
+
 ##### id
 
 > `readonly` **id**: `number`
+
+##### parent?
+
+> `readonly` `optional` **parent?**: [`MessageParent`](#messageparent)
+
+Where the message was handed over from, when another channel handed it over.
 
 ##### receivedAt
 
@@ -4662,6 +4820,12 @@ const next: PendingMessage | undefined = await store.nextToTransform("adt");
 
 > `readonly` **body**: `Uint8Array`
 
+##### hops?
+
+> `readonly` `optional` **hops?**: `number`
+
+How many hand-offs in a row brought it here; unset for a message a source took in.
+
 ##### id
 
 > `readonly` **id**: `number`
@@ -4708,7 +4872,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-15)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-16)
 
 ##### duplicateOf
 
@@ -4825,7 +4989,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-15)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-16)
 
 ##### code
 
@@ -5506,7 +5670,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-15)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-16)
 
 ##### code
 
@@ -5574,7 +5738,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-15)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-16)
 
 ##### type
 
@@ -5803,7 +5967,7 @@ const message: StoredMessage | undefined = await store.message(12);
 
 ###### Inherited from
 
-[`MessageSummary`](#messagesummary).[`channel`](#channel-17)
+[`MessageSummary`](#messagesummary).[`channel`](#channel-19)
 
 ##### contentDroppedAt?
 
@@ -5862,7 +6026,17 @@ which can quote the message: never print it.
 
 ###### Inherited from
 
-[`MessageSummary`](#messagesummary).[`generation`](#generation-2)
+[`MessageSummary`](#messagesummary).[`generation`](#generation-3)
+
+##### hops?
+
+> `readonly` `optional` **hops?**: `number`
+
+How many hand-offs in a row brought it here, when another channel handed it over.
+
+###### Inherited from
+
+[`MessageSummary`](#messagesummary).[`hops`](#hops-1)
 
 ##### id
 
@@ -5871,6 +6045,16 @@ which can quote the message: never print it.
 ###### Inherited from
 
 [`MessageSummary`](#messagesummary).[`id`](#id-3)
+
+##### parent?
+
+> `readonly` `optional` **parent?**: [`MessageParent`](#messageparent)
+
+Where the message was handed over from, when another channel handed it over.
+
+###### Inherited from
+
+[`MessageSummary`](#messagesummary).[`parent`](#parent)
 
 ##### receivedAt
 
@@ -5968,6 +6152,10 @@ Why it failed, as stored: can quote the message.
 
 > `readonly` **generation**: `number`
 
+##### hops?
+
+> `readonly` `optional` **hops?**: `number` \| `null`
+
 ##### id
 
 > `readonly` **id**: `number`
@@ -5979,6 +6167,24 @@ Why it failed, as stored: can quote the message.
 ##### meta
 
 > `readonly` **meta**: `string` \| `null`
+
+##### parentChannel?
+
+> `readonly` `optional` **parentChannel?**: `string` \| `null`
+
+The parent link of a message another channel handed over; all null for one taken in.
+
+##### parentDelivery?
+
+> `readonly` `optional` **parentDelivery?**: `number` \| `null`
+
+##### parentGeneration?
+
+> `readonly` `optional` **parentGeneration?**: `number` \| `null`
+
+##### parentMessage?
+
+> `readonly` `optional` **parentMessage?**: `number` \| `null`
 
 ##### receivedAt
 
@@ -6062,6 +6268,12 @@ duplicate of it.
 
 Stores the message as `failed`, with this reason, so it is kept but never transformed.
 
+##### hops?
+
+> `readonly` `optional` **hops?**: `number`
+
+How many hand-offs in a row brought the message here: 1 for the first hand-off.
+
 ##### idempotencyKey?
 
 > `readonly` `optional` **idempotencyKey?**: `string`
@@ -6084,6 +6296,12 @@ The message's metadata. A store wrapper (encryption at rest) turns it into `stor
 > `readonly` `optional` **metaTags?**: readonly [`MetaTag`](#metatag)[]
 
 The metadata's index tags, stored with the message in the same transaction. Set by a wrapper.
+
+##### parent?
+
+> `readonly` `optional` **parent?**: [`MessageParent`](#messageparent)
+
+The message of another channel this one was handed over from, kept with it.
 
 ##### resumed?
 
@@ -6275,6 +6493,34 @@ The stored message's id. 0 under `pathways test`, which stores nothing.
 
 A per-message map of flat values. Always empty in this release: nothing sets it yet.
 
+##### route
+
+> `readonly` **route**: (`channel`, `message`) => `void`
+
+Hands `message` to channel `channel` as a new message of its own, beside what the transform
+returns: a model, a string or bytes, written as an output is. Returns nothing. The target's
+source is `channel:`. The hand-off is stored in the same transaction as this message's outcome,
+so it happens once the transform succeeds and never without it; when the transform fails, none
+of its routes are kept. A name that is no such channel fails this message with
+`ERR_PATHWAYS_UNKNOWN_ROUTE`, and a message that has come through more hand-offs than the
+target's `maxHops` fails with `ERR_PATHWAYS_HOP_LIMIT`. Under `pathways test` it keeps nothing,
+and `pathways replay` refuses a message whose transform routes (`--resend` still works). Throws a `TypeError` when `channel` is not a name or `message` is `null` or
+`undefined`, and when called after the transform settled.
+
+###### Parameters
+
+###### channel
+
+`string`
+
+###### message
+
+`string` \| `number` \| `boolean` \| `object`
+
+###### Returns
+
+`void`
+
 ##### source
 
 > `readonly` **source**: [`SourceFacts`](#sourcefacts) \| `undefined`
@@ -6320,7 +6566,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-15)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-16)
 
 ##### messageId
 
@@ -6377,7 +6623,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-15)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-16)
 
 ##### code
 
@@ -6978,6 +7224,71 @@ A channel's message format, and so what its transform receives:
 
 ```ts
 const format: Format = "x12";
+```
+
+***
+
+### HandOffFrom
+
+> **HandOffFrom** = \{ `deliveryId`: `number`; `kind`: `"delivery"`; \} \| \{ `destinations`: `number`; `keys?`: readonly `string`[]; `kind`: `"transform"`; `messageId`: `number`; `outputs`: [`TransformOutputs`](#transformoutputs); \}
+
+What a hand-off is recorded with, in the same transaction: a channel destination's delivery
+marked delivered, or a transform's outcome (its outputs queued for the destinations) when the
+transform routed with `ctx.route`.
+
+#### Union Members
+
+##### Type Literal
+
+\{ `deliveryId`: `number`; `kind`: `"delivery"`; \}
+
+***
+
+##### Type Literal
+
+\{ `destinations`: `number`; `keys?`: readonly `string`[]; `kind`: `"transform"`; `messageId`: `number`; `outputs`: [`TransformOutputs`](#transformoutputs); \}
+
+###### destinations
+
+> `readonly` **destinations**: `number`
+
+###### keys?
+
+> `readonly` `optional` **keys?**: readonly `string`[]
+
+Each destination's key, in order, as [MessageStore.completeTransform](#completetransform) takes them.
+
+###### kind
+
+> `readonly` **kind**: `"transform"`
+
+###### messageId
+
+> `readonly` **messageId**: `number`
+
+###### outputs
+
+> `readonly` **outputs**: [`TransformOutputs`](#transformoutputs)
+
+#### Example
+
+```ts
+const from: HandOffFrom = { kind: "delivery", deliveryId: 40 };
+```
+
+***
+
+### HandOffResult
+
+> **HandOffResult** = \{ `ids`: readonly `number`[]; `ok`: `true`; \} \| \{ `full`: `string`; `ok`: `false`; \}
+
+What a hand-off came to: the new messages' ids, in order, or, when a target would then hold more
+than its `maxPending` messages waiting, nothing changed and the full target's name.
+
+#### Example
+
+```ts
+if (!result.ok) console.log(`${result.full} is full`);
 ```
 
 ***
@@ -7835,6 +8146,28 @@ export default ((interchange) => interchange) satisfies Transform<X12Interchange
 
 ## Variables
 
+### DEFAULT\_MAX\_HOPS
+
+> `const` **DEFAULT\_MAX\_HOPS**: `8` = `8`
+
+How many hand-offs in a row a message may come through before the next is refused, by default:
+a message taken in by a source has made none, and each `channel:` destination or `ctx.route` adds
+one. Past it, the message that would hand over fails with [HOP\_LIMIT\_CODE](#hop_limit_code), which stops a
+loop made through `ctx.route` that the check at start cannot see.
+
+***
+
+### DEFAULT\_MAX\_PENDING
+
+> `const` **DEFAULT\_MAX\_PENDING**: `10000` = `10_000`
+
+How many messages a channel fed by others may hold waiting for its transform, by default, before
+a hand-off into it waits: a channel destination tries again later, and a transform that routes
+into it is run again on the next pass. It keeps a stopped or slow channel from growing the store
+without bound.
+
+***
+
 ### ENGINE\_LEASE
 
 > `const` **ENGINE\_LEASE**: `"engine"` = `"engine"`
@@ -7847,6 +8180,14 @@ engine on the same database is refused. The fenced writes check this lease's epo
 ```ts
 const holder = await store.leaseHolder?.(ENGINE_LEASE);
 ```
+
+***
+
+### HOP\_LIMIT\_CODE
+
+> `const` **HOP\_LIMIT\_CODE**: `"ERR_PATHWAYS_HOP_LIMIT"` = `"ERR_PATHWAYS_HOP_LIMIT"`
+
+The code a message fails with when a hand-off would take it past its target's `maxHops`.
 
 ***
 
@@ -7883,6 +8224,31 @@ Every role a node row can hold:
 ```ts
 NODE_ROLES.includes("standby"); // true
 ```
+
+***
+
+### TARGET\_FULL\_CODE
+
+> `const` **TARGET\_FULL\_CODE**: `"ERR_PATHWAYS_TARGET_FULL"` = `"ERR_PATHWAYS_TARGET_FULL"`
+
+The code a channel destination's retry carries while its target holds `maxPending` messages.
+
+***
+
+### TOO\_MANY\_ROUTES\_CODE
+
+> `const` **TOO\_MANY\_ROUTES\_CODE**: `"ERR_PATHWAYS_TOO_MANY_ROUTES"` = `"ERR_PATHWAYS_TOO_MANY_ROUTES"`
+
+The code a transform fails with when it routes more messages to one target in one run than that
+target's `maxPending`: the target could never take them all at once, so waiting would not help.
+
+***
+
+### UNKNOWN\_ROUTE\_CODE
+
+> `const` **UNKNOWN\_ROUTE\_CODE**: `"ERR_PATHWAYS_UNKNOWN_ROUTE"` = `"ERR_PATHWAYS_UNKNOWN_ROUTE"`
+
+The code a transform fails with when `ctx.route` names no channel with a `channel:` source.
 
 ***
 

@@ -111,7 +111,16 @@ describe("the context in the worker", () => {
     const source = { kind: "http", headers: { "x-request-id": "synthetic-1" } };
     const first = buildContext({ messageId: 3, attempt: 1, source, meta: {} }, config);
     const second = buildContext({ ...UNSTORED, messageId: 4 }, config);
-    expect(first).toEqual({ messageId: 3, attempt: 1, source, meta: {}, config });
+    expect(first).toEqual({
+      messageId: 3,
+      attempt: 1,
+      source,
+      meta: {},
+      config,
+      route: expect.any(Function) as unknown,
+    });
+    // Without a run that keeps them, a route goes nowhere.
+    expect(first.route("b", "synthetic")).toBeUndefined();
     expect(Object.isFrozen(first)).toBe(true);
     expect(Object.isFrozen(source.headers)).toBe(true);
     expect(Object.isFrozen(config.codes.glucose)).toBe(true);
@@ -134,7 +143,14 @@ describe("the context in the worker", () => {
     const ctx = buildContext({ ...UNSTORED, messageId: 9 }, {});
     await runTransform(two, "text", bytes("again"), ctx);
     expect(seen).toEqual([
-      { messageId: 0, attempt: 1, source: undefined, meta: {}, config: {} },
+      {
+        messageId: 0,
+        attempt: 1,
+        source: undefined,
+        meta: {},
+        config: {},
+        route: expect.any(Function) as unknown,
+      },
       ctx,
     ]);
   });

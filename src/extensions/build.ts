@@ -59,6 +59,8 @@ const STORE_METHOD_LIST = {
   nodes: false,
   forgetNode: false,
   heldIdempotencyKey: false,
+  handOff: false,
+  children: false,
 } satisfies Record<keyof MessageStore, boolean>;
 
 const STORE_METHODS = Object.entries(STORE_METHOD_LIST)

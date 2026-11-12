@@ -655,7 +655,8 @@ destinations:
   it("take a reference at every key that holds one value, but the documented exceptions", () => {
     // configuration-reference.md, "Settings from the environment": plaintext, a channel's or a
     // destination's name and format, the header names an HTTP source hands a transform, a channel's
-    // index: entries, the SHA-1 algorithms an SFTP block turns back on, and a csv channel's csv:
+    // index: entries, the SHA-1 algorithms an SFTP block turns back on, a channel destination's
+    // target and the ctx.meta keys it carries (the links start checks), and a csv channel's csv:
     // block (how its bodies are read, which belongs with its format), are never read from the environment (encryption: none and auth: none are the short form of a
     // block, and blocks are not scalars, so the walk passes over them). Matched by the whole path,
     // so a new key that only shares one of these names is still checked.
@@ -680,6 +681,8 @@ destinations:
       "channel.yaml.destinations.[].smtp.plaintext",
       "channel.yaml.hooks.[].webhook.plaintext",
       "channel.yaml.index.[].key",
+      "channel.yaml.destinations.[].channel.name",
+      "channel.yaml.destinations.[].channel.carryMeta.[]",
       "channel.yaml.index.[].bits",
       "channel.yaml.source.file.sftp.weakAlgorithms.[]",
       "channel.yaml.destinations.[].file.sftp.weakAlgorithms.[]",

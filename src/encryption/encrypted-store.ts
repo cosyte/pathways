@@ -8,6 +8,9 @@ import type {
   DeliveryCounts,
   DestinationOutcome,
   ExpireResult,
+  HandOff,
+  HandOffFrom,
+  HandOffResult,
   LeaseClaim,
   LeaseClaimant,
   LeaseHolder,
@@ -248,6 +251,18 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
   readonly applyExpiry?: RetentionStore["applyExpiry"];
   /** Every column of a message and its deliveries, each body, error text and metadata read back. */
   readonly archiveRows?: RetentionStore["archiveRows"];
+  /**
+   * Hands messages to other channels: each body, and the outputs of a transform it is recorded
+   * with, through the codec, and each one's metadata as {@link receive} stores it. Present only
+   * when the store underneath has it.
+   */
+  readonly handOff?: (
+    from: HandOffFrom,
+    handOffs: readonly HandOff[],
+    epoch?: number,
+  ) => Promise<HandOffResult>;
+  /** The messages handed over from one: ids, statuses and times, so straight through. */
+  readonly children?: (messageId: number, limit: number) => Promise<MessageSummary[]>;
 
   protected constructor(inner: MessageStore, codec: Codec, indexer?: MetaIndexer) {
     this.#inner = inner;
@@ -294,6 +309,11 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
       this.applyExpiry = (channel, ids, query) => steps.applyExpiry(channel, ids, query);
       this.archiveRows = (id) => this.#archiveRows(steps, id);
     }
+    if (typeof inner.handOff === "function") {
+      const handOff = inner.handOff.bind(inner);
+      this.handOff = (from, handOffs, epoch) => this.#handOff(handOff, from, handOffs, epoch);
+    }
+    if (typeof inner.children === "function") this.children = inner.children.bind(inner);
     this.#innerCopies = copiesBodies(inner);
     // A codec that copies keeps no body it is handed and reads each into a new buffer; one that does
     // not passes bodies straight through, so this store copies when the one underneath does.
@@ -313,6 +333,63 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
     const result = await write(stored);
     if (this.#codec.copies && this.#innerCopies) for (const copy of stored) release(copy);
     return result;
+  }
+
+  /**
+   * A hand-off with every body and its metadata through the codec, as {@link receive} stores them,
+   * and a transform's outputs as {@link completeTransform} stores them.
+   */
+  async #handOff(
+    handOff: NonNullable<MessageStore["handOff"]>,
+    from: HandOffFrom,
+    handOffs: readonly HandOff[],
+    epoch: number | undefined,
+  ): Promise<HandOffResult> {
+    if (from.kind !== "transform") {
+      return this.#sealed(handOffs, (sealed) => handOff(from, sealed, epoch));
+    }
+    const { outputs } = from;
+    if (isByDestination(outputs)) {
+      return this.#storedByDestination(outputs.byDestination, (byDestination) =>
+        this.#sealed(handOffs, (sealed) =>
+          handOff({ ...from, outputs: { byDestination } }, sealed, epoch),
+        ),
+      );
+    }
+    return this.#stored(outputs, (stored) =>
+      this.#sealed(handOffs, (sealed) => handOff({ ...from, outputs: stored }, sealed, epoch)),
+    );
+  }
+
+  /** Each hand-off's body and metadata through the codec, handed to `write`. */
+  async #sealed<T>(
+    handOffs: readonly HandOff[],
+    write: (sealed: HandOff[]) => Promise<T>,
+  ): Promise<T> {
+    return this.#stored(
+      handOffs.map((one) => one.body),
+      async (stored) => {
+        const sealed: HandOff[] = [];
+        for (const [index, one] of handOffs.entries()) {
+          const { meta } = one.options;
+          sealed.push({
+            ...one,
+            body: stored[index] as Uint8Array,
+            options: {
+              ...one.options,
+              ...(meta === undefined
+                ? {}
+                : {
+                    meta: undefined,
+                    storedMeta: await this.#codec.storeText(JSON.stringify(meta)),
+                    metaTags: (await this.#indexer?.tagsFor(one.channel, meta)) ?? [],
+                  }),
+            },
+          });
+        }
+        return write(sealed);
+      },
+    );
   }
 
   /** One message's rows, each body, error text and the metadata read back through the codec. */

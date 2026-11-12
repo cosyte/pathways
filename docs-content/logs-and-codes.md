@@ -34,6 +34,9 @@ text or a source file's name. Commands whose standard output is their report (`s
 | `delivery-rejected`       | warn  | `channel`, `destination`, `delivery`, `reason`                                         | the destination rejected it for good                                                                                                                                   |
 | `delivery-exhausted`      | warn  | `channel`, `destination`, `delivery`, `attempt`, `reason`, `code`                      | out of retries (`reason` `limit` or `maxAge`): marked failed, its body kept for a resend                                                                               |
 | `delivery-halted`         | warn  | `channel`, `destination`, `delivery`, `attempt`                                        | `pathways channel halt` cut the send off; it stays pending and is sent again, flagged, after a resume                                                                  |
+| `handed-over`             | info  | `channel`, `message`, `target`, `handedTo`                                             | `ctx.route` handed a message to channel `target`, stored there as message `handedTo`                                                                                   |
+| `hand-off-waiting`        | info  | `channel`, `message` or `destination` and `delivery`, `target`, `retryInMs`, `code`    | the target holds `maxPending` messages: the hand-off is tried again later (`code` `ERR_PATHWAYS_TARGET_FULL`)                                                          |
+| `hand-off-refused`        | warn  | `channel`, `destination`, `delivery`, `code`                                           | a channel destination's delivery failed: past the target's `maxHops`, or no such target                                                                                |
 | `passed`                  | info  | `channel`, `pass`, `outputs`                                                           | `storage.content: none`: every destination accepted the message, and its sender is answered so; `pass` is the message's pass id                                        |
 | `pass-filtered`           | info  | `channel`, `pass`                                                                      | `storage.content: none`: the transform returned no output, and the sender is answered as for one accepted                                                              |
 | `pass-unreadable`         | warn  | `channel`, `pass`                                                                      | `storage.content: none`: the source could not read the message, and answers as it does on any channel                                                                  |
@@ -52,6 +55,17 @@ channel no longer has (removed, renamed, or, without a name, given another targe
 pending and are sent if it comes back; or `destination-unknown` for deliveries queued by a Pathways
 before deliveries recorded their destination, which cannot be matched to one, so each is marked
 failed with the error `delivery: destination-unknown` and its message can be replayed.
+
+A channel destination's `delivered` line also carries `handedTo`, the new message's id in its target.
+
+| Code                           | Meaning                                                                                                                                 |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `ERR_PATHWAYS_UNKNOWN_ROUTE`   | `ctx.route` named no channel whose source is `channel:`; the message fails and nothing is handed over                                   |
+| `ERR_PATHWAYS_HOP_LIMIT`       | a hand-off would take the message past its target's `maxHops`; the message, or the delivery, fails                                      |
+| `ERR_PATHWAYS_TARGET_FULL`     | with the hand-off, the target would hold more than `maxPending` messages waiting for its transform; it is tried again later, not failed |
+| `ERR_PATHWAYS_TOO_MANY_ROUTES` | a transform routed more messages to one target in one run than its `maxPending`; the message fails and nothing is handed over           |
+
+See [Route messages between channels](./route-between-channels.md).
 
 ### Sources and endpoints
 

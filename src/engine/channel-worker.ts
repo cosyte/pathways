@@ -8,6 +8,7 @@ import type {
   DestinationSetup,
   FailureSummary,
   MessageContext,
+  RoutedMessage,
   TransformReply,
   TransformRequest,
   WorkerFormat,
@@ -36,6 +37,8 @@ export type TransformOutcome =
       readonly ok: true;
       readonly outputs: readonly Uint8Array[];
       readonly destinations?: readonly DestinationResult[];
+      /** What the transform handed to other channels with `ctx.route`, in order; none when unset. */
+      readonly routes?: readonly RoutedMessage[];
     }
   | { readonly ok: false; readonly failure: FailureSummary };
 
@@ -363,12 +366,14 @@ export class ChannelWorker {
  * outputs.
  */
 function success(reply: Extract<TransformReply, { ok: true }>): TransformOutcome {
-  const { outputs, destinations } = reply;
-  if (destinations === undefined) return { ok: true, outputs };
+  const { outputs, destinations, routes } = reply;
+  const routed = routes === undefined || routes.length === 0 ? {} : { routes };
+  if (destinations === undefined) return { ok: true, outputs, ...routed };
   return {
     ok: true,
     outputs,
     destinations: destinations.map((result) => result ?? { ok: true, outputs }),
+    ...routed,
   };
 }
 

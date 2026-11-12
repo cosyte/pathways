@@ -290,6 +290,18 @@ export interface TransformContext {
   /** The channel's configuration, resolved when the engine (or the command) started. */
   readonly config: Readonly<TransformConfig>;
   /**
+   * Hands `message` to channel `channel` as a new message of its own, beside what the transform
+   * returns: a model, a string or bytes, written as an output is. Returns nothing. The target's
+   * source is `channel:`. The hand-off is stored in the same transaction as this message's outcome,
+   * so it happens once the transform succeeds and never without it; when the transform fails, none
+   * of its routes are kept. A name that is no such channel fails this message with
+   * `ERR_PATHWAYS_UNKNOWN_ROUTE`, and a message that has come through more hand-offs than the
+   * target's `maxHops` fails with `ERR_PATHWAYS_HOP_LIMIT`. Under `pathways test` it keeps nothing,
+   * and `pathways replay` refuses a message whose transform routes (`--resend` still works). Throws a `TypeError` when `channel` is not a name or `message` is `null` or
+   * `undefined`, and when called after the transform settled.
+   */
+  readonly route: (channel: string, message: object | string | number | boolean) => void;
+  /**
    * The destination whose own transform this is: set only for a destination's `transform:`, never
    * for the channel's.
    */
@@ -308,7 +320,7 @@ export interface TransformContext {
 export interface DestinationFacts {
   readonly index: number;
   readonly name: string | undefined;
-  /** `file`, `http`, `mllp`, `tcp`, `smtp` or `module`. */
+  /** `file`, `http`, `mllp`, `tcp`, `smtp`, `channel` or `module`. */
   readonly kind: string;
 }
 

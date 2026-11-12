@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { ConfigError, loadProject } from "../src/config/load.js";
-import { DEFAULT_PASS_TIMEOUT_MS } from "../src/config/schema.js";
+import { DEFAULT_PASS_TIMEOUT_MS, UNKNOWN_ROUTE_CODE } from "../src/config/schema.js";
 import { RetryableError } from "../src/connectors/http-core.js";
 import {
   DeliveryRejected,
@@ -55,10 +55,14 @@ afterEach(async () => {
   await cleanUp();
 });
 
-/** A text transform: `drop` is filtered, `throw` fails, anything else goes on in capitals. */
+/**
+ * A text transform: `drop` is filtered, `throw` fails, `route` is routed to another channel too,
+ * and anything else goes on in capitals.
+ */
 const TEXT_TRANSFORM = `
-export default (text: string): string | null => {
+export default (text: string, ctx?: { route(name: string, message: string): void }): string | null => {
   if (text === "drop") return null;
+  if (text === "route") ctx?.route("elsewhere", text);
   if (text === "slow") {
     const end = Date.now() + 300;
     while (Date.now() < end) {}
@@ -333,6 +337,18 @@ describe("a channel that stores nothing", () => {
       retryAfterMs: 7_000,
     });
     expect((await engine.health()).channels["notes"]?.passes).toMatchObject({ deferred: 2 });
+  });
+
+  it("refuses for good a message whose transform routes, which nothing here could store", async () => {
+    const { sink, destinations, events } = await startNone();
+    expect(await refusal(sink.receive(text("route")))).toMatchObject({
+      permanent: true,
+      code: "ROUTE_UNSTORED",
+    });
+    expect(destinations.map((destination) => destination.sent)).toEqual([[], []]);
+    expect(events).toContainEqual(
+      expect.objectContaining({ event: "pass-transform-failed", code: UNKNOWN_ROUTE_CODE }),
+    );
   });
 
   it("refuses for good when a destination rejects, and still sends to the others", async () => {
