@@ -56,7 +56,14 @@ destinations:
   arrives over it is closed at once, before any byte of it is read or any TLS handshake starts. The
   engine logs `mllp-connection-refused` with the cap and the code `MLLP_CONNECTION_LIMIT_REACHED`, never
   who connected, and the [health report](./check-status-and-health.md) counts them in the channel's
-  `connections.refused`.
+  `connections.refused`. Over TLS, a sender that connects and then stalls its TLS handshake holds a
+  place from the moment it connects until Node.js's handshake timeout closes it, 120 seconds; the
+  engine then logs `mllp-tls-refused` with the code `ERR_TLS_HANDSHAKE_TIMEOUT`. `receiveTimeout`
+  does not cover that wait, since its clock starts once the handshake is done. Pathways has no key for
+  the handshake timeout, as `@cosyte/mllp` passes none through. To shorten it, end TLS in front of
+  the source, at a proxy whose own handshake timeout is shorter, and run the source on `127.0.0.1` with `plaintext: true` behind it; to make stalled
+  handshakes harmless without that, set `maxConnections` well above the senders you expect, so a few
+  of them cannot fill it.
 - **`receiveTimeout`** (no limit by default) closes a connection that goes this long without a whole
   message: one left idle, and one that sent part of a message and stopped. The clock starts again at
   each message. A part-sent message is never stored, so the sender sends it again on a new connection.
@@ -69,6 +76,77 @@ destinations:
   sender that opens one connection per message. Each ACK is written out before the connection closes,
   and two messages that arrive together are each stored and answered first. By default the connection
   stays open for the next message.
+
+## Dial out to a sender
+
+Some senders do not connect to you: they listen, and expect the receiver to connect to them. Give
+the source `connect` in place of `port`, and it dials out to the sender and reads messages from that
+connection, storing each and answering it on the same connection, as it does on a connection a sender
+opened.
+
+```yaml title="channels/adt-in/channel.yaml"
+source:
+  mllp:
+    connect: { host: ehr.example.test, port: 2575 }
+    connectTimeout: 10s
+    tls:
+      ca: ../../certs/ehr-ca.pem
+      cert: ../../certs/pathways-client.pem
+      key: ../../certs/pathways-client.key
+destinations:
+  - file: { dir: ../../data/adt-in/out }
+```
+
+- **`connect`** is the sender's address and port. The name is looked up again at each dial.
+- **`tls`** reads as a TLS client's here: **`tls: {}`** verifies the sender's certificate against
+  Node.js's built-in roots, and **`tls.ca`** trusts your own CA in their place. The certificate is
+  always verified. **`tls.cert` and `tls.key`**, or `tls.pfx`, present a client certificate, for a
+  sender that requires mutual TLS. `minVersion`, `profile` and `ciphers` work as on a listening source.
+- **`connectTimeout`** (10 seconds by default) bounds each dial, the TLS handshake included.
+
+A dial that fails, or a connection that drops, is dialled again after 1 second, doubling with each
+failure in a row to 5 minutes, and back to 1 second once a connection opens. Until it is back the
+[health report](./check-status-and-health.md) shows the channel's source `down` and readiness fails;
+the engine logs `source-lost` with a `code` such as `ECONNREFUSED`, `CONNECT_TIMEOUT` or
+`MLLP_CONNECTION_CLOSED`, then `source-regained`, and logs `mllp-connected` at each connection.
+`receiveTimeout` and `maxMessageSize` apply to the dialled connection as to any other: past either,
+the connection closes and is dialled again. A source that dials out listens on no port, so `port`,
+`host`, `maxConnections`, `keepOpen` and `replyTo` cannot be set with `connect`. A stop closes the
+connection once the messages on it are answered.
+
+## Send each ACK to another address
+
+A sender that wants its ACKs on a connection of their own, not the one it sent on, names an address
+for them. Give the source `replyTo`, and it opens a new connection there for each ACK, writes the ACK,
+and closes it. No ACK goes back on the connection the message came on.
+
+```yaml title="channels/adt-in/channel.yaml"
+source:
+  mllp:
+    port: 2575
+    tls:
+      cert: ../../certs/server.pem
+      key: ../../certs/server.key
+      ca: ../../certs/senders-ca.pem
+    replyTo: { host: ehr.example.test, port: 2576 }
+    connectTimeout: 5s
+destinations:
+  - file: { dir: ../../data/adt-in/out }
+```
+
+- **`replyTo`** comes from the channel's file only. The message's own header (MSH-3, MSH-4 or any
+  other field) never chooses where its ACK goes.
+- The reply connection runs over TLS when the source does: the reply host's certificate is verified
+  against `tls.ca`, or Node.js's built-in roots when the source has none, and the source's own
+  certificate is presented to it, so a reply host that requires a client certificate needs that
+  certificate to allow client authentication.
+- **`connectTimeout`** (10 seconds by default) bounds opening each reply connection.
+
+Each message is stored before its ACK is sent, as always. When the reply address refuses, or does not
+answer in time, the message stays stored and the engine logs `mllp-reply-failed` with the message id
+and a code such as `ECONNREFUSED` or `CONNECT_TIMEOUT`, never content. The sender, with no ACK, sends
+the message again, and the copy is flagged as a possible duplicate. Messages on one connection are
+still answered one at a time, in order, so a slow reply address holds the next ACK behind it.
 
 ## Choose the TLS version and cipher suites
 

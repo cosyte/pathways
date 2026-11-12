@@ -582,7 +582,9 @@ function resolveSource(
     return {
       kind: "mllp",
       host: mllp.host ?? DEFAULT_HOST,
-      port: mllp.port,
+      // The schema lets a source without connect through only with a port; one with connect listens
+      // on none.
+      port: mllp.port ?? 0,
       tls: mllp.tls === undefined ? undefined : resolveMllpServerTls(mllp.tls, dir),
       plaintext: mllp.plaintext === true,
       onStoreFailure: mllp.onStoreFailure ?? settings.onStoreFailure,
@@ -591,6 +593,9 @@ function resolveSource(
       ...(mllp.receiveTimeout === undefined ? {} : { receiveTimeoutMs: mllp.receiveTimeout }),
       ...(mllp.maxMessageSize === undefined ? {} : { maxMessageSize: mllp.maxMessageSize }),
       ...(mllp.keepOpen === undefined ? {} : { keepOpen: mllp.keepOpen }),
+      ...(mllp.connect === undefined ? {} : { connect: mllp.connect }),
+      ...(mllp.replyTo === undefined ? {} : { replyTo: mllp.replyTo }),
+      ...(mllp.connectTimeout === undefined ? {} : { connectTimeoutMs: mllp.connectTimeout }),
     };
   }
   if (http !== undefined) {

@@ -408,23 +408,34 @@ an API key header included.
 
 #### MLLP source
 
-| Key              | Type                  | Default                     |
-| ---------------- | --------------------- | --------------------------- |
-| `port`           | 1 to 65,535           | required                    |
-| `host`           | an address            | `127.0.0.1`                 |
-| `tls`            | [MLLP TLS](#tls)      | required unless `plaintext` |
-| `plaintext`      | boolean               | `false`                     |
-| `onStoreFailure` | `close`, `AE` or `AR` | the channel's               |
-| `ackBuilder`     | path to a module      | the default ACK             |
-| `maxConnections` | 1 to 100,000          | `100`                       |
-| `receiveTimeout` | duration              | no limit                    |
-| `maxMessageSize` | size                  | `4MB`                       |
-| `keepOpen`       | boolean               | `true`                      |
+| Key              | Type                  | Default                         |
+| ---------------- | --------------------- | ------------------------------- |
+| `port`           | 1 to 65,535           | required unless `connect`       |
+| `host`           | an address            | `127.0.0.1`                     |
+| `connect`        | `{ host, port }`      | none: the source listens        |
+| `replyTo`        | `{ host, port }`      | none: ACKs go on the connection |
+| `connectTimeout` | duration              | `10s`                           |
+| `tls`            | [MLLP TLS](#tls)      | required unless `plaintext`     |
+| `plaintext`      | boolean               | `false`                         |
+| `onStoreFailure` | `close`, `AE` or `AR` | the channel's                   |
+| `ackBuilder`     | path to a module      | the default ACK                 |
+| `maxConnections` | 1 to 100,000          | `100`                           |
+| `receiveTimeout` | duration              | no limit                        |
+| `maxMessageSize` | size                  | `4MB`                           |
+| `keepOpen`       | boolean               | `true`                          |
 
 A connection over `maxConnections` is closed at accept. `receiveTimeout` closes a connection that goes
 that long without a whole message, a part-sent one included. A message over `maxMessageSize` closes
 the connection and is not stored. `keepOpen: false` closes each connection once its messages are
 answered. See [Bound connections and messages](./send-and-receive-mllp.md#bound-connections-and-messages).
+
+`connect` makes the source dial out to the sender in place of listening, so it cannot be set with
+`port`, `host`, `maxConnections`, `keepOpen` or `replyTo`; its `tls` is a client's, where `tls: {}`
+verifies the sender against Node.js's built-in roots. `replyTo` sends each ACK on a new connection to
+that address. `connectTimeout` bounds each connection the source opens itself, for `connect` or
+`replyTo`, and is refused without one of them. See
+[Dial out to a sender](./send-and-receive-mllp.md#dial-out-to-a-sender) and
+[Send each ACK to another address](./send-and-receive-mllp.md#send-each-ack-to-another-address).
 
 #### TCP source
 
