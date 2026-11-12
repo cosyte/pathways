@@ -124,8 +124,8 @@ destinations:
       dir: out
 ```
 
-We test against MinIO. Whether another S3-compatible server honours `If-None-Match`, the probe says
-at start.
+We test against LocalStack's S3. Whether another S3-compatible server honours `If-None-Match`, the
+probe says at start.
 
 ## When S3 cannot be reached
 

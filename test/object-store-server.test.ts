@@ -16,7 +16,7 @@ import {
   type ReceiveOptions,
 } from "../src/connectors/types.js";
 
-// The object store source and destination against local emulators: MinIO for S3, where
+// The object store source and destination against local emulators: LocalStack's S3, where
 // PATHWAYS_TEST_S3_ENDPOINT names it (with the AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY the SDK's
 // default chain reads), and Azurite for Azure Blob Storage, where PATHWAYS_TEST_AZURITE holds its
 // connection string. .github/workflows/object-stores.yml starts both and sets them. Elsewhere this
@@ -41,7 +41,7 @@ interface Emulator {
 
 const emulators: Emulator[] = [
   {
-    name: "S3 on MinIO",
+    name: "S3 on LocalStack",
     enabled: S3_ENDPOINT !== undefined,
     store: () =>
       new S3Bucket({

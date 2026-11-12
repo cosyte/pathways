@@ -18,7 +18,7 @@ import { FakeObjectStore } from "./fake-object-store.js";
 
 // The object store source and destination over a store held in memory (test/fake-object-store.ts),
 // which keeps S3's and Azure Blob's rules: a new entity tag on each write, and conditional writes,
-// reads and deletes checked against it. The same source runs against MinIO and Azurite in
+// reads and deletes checked against it. The same source runs against LocalStack and Azurite in
 // test/object-store-server.test.ts.
 
 /** A sink that stores each message once by its idempotency key, as the engine's store does. */

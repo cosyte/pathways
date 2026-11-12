@@ -5,7 +5,7 @@ import { S3Bucket, type S3ClientLike, type S3Sdk } from "../src/connectors/s3.js
 
 // The S3 adapter against a stand-in for @aws-sdk/client-s3 that records each command and answers
 // as S3 does, errors included (a name and $metadata.httpStatusCode). The same adapter runs against
-// MinIO in test/object-store-server.test.ts.
+// LocalStack's S3 in test/object-store-server.test.ts.
 
 /** A command the stand-in builds: its kind and its input. */
 interface Sent {

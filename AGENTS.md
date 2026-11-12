@@ -21,7 +21,7 @@ Server when an administrator's URL for each is set (`PATHWAYS_TEST_POSTGRES_URL`
 `databases` workflow runs one job per server. The SFTP location runs against a stand-in for the
 `ssh2` package everywhere, and against OpenSSH's own server where `PATHWAYS_TEST_SSHD` names the
 `sshd` binary: CI's `sftp` workflow sets it. The S3 and Azure Blob locations run against a store in
-memory everywhere, and against MinIO and Azurite where `PATHWAYS_TEST_S3_ENDPOINT` and
+memory everywhere, and against LocalStack's S3 and Azurite where `PATHWAYS_TEST_S3_ENDPOINT` and
 `PATHWAYS_TEST_AZURITE` are set: CI's `object-stores` workflow starts both and sets them. The crash tests in `test/fault-points.test.ts`, and in
 `test/sftp-crash.test.ts` against that server, kill a real `pathways` process at the named points in
 `src/fault-points.ts`, which do nothing unless
