@@ -25,6 +25,21 @@ export function unknownPlaceholders(template: string): string[] {
     .filter((name) => !NAME.test(name));
 }
 
+/**
+ * Whether `template` has a `{{ meta.<key> }}` placeholder, and so reads the message's metadata.
+ *
+ * @example
+ * ```ts
+ * readsMeta("Result {{ meta.messageType }}"); // true
+ * readsMeta("Message {{ messageId }}"); // false
+ * ```
+ */
+export function readsMeta(template: string): boolean {
+  return [...template.matchAll(PLACEHOLDER)].some(
+    ([, name]) => NAME.test(name as string) && (name as string).startsWith("meta."),
+  );
+}
+
 /** What a template's placeholders are filled from. */
 export interface TemplateValues {
   readonly messageId: number;
@@ -50,7 +65,8 @@ export function renderTemplate(template: string, values: TemplateValues): string
     if (name === "seq") return String(values.seq);
     if (name === "channel") return values.channel;
     if (!NAME.test(name)) return written;
-    const value = values.meta[name.slice("meta.".length)];
+    const key = name.slice("meta.".length);
+    const value = Object.hasOwn(values.meta, key) ? values.meta[key] : undefined;
     return value === undefined ? "" : String(value);
   });
 }

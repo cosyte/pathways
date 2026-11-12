@@ -1,6 +1,6 @@
 import { RetryableError } from "./http-core.js";
 import { composeMessage, sendMail, SmtpFailure, type MailerOptions } from "./mailer.js";
-import { renderTemplate, type TemplateValues } from "./smtp-template.js";
+import { readsMeta, renderTemplate, type TemplateValues } from "./smtp-template.js";
 import { DeliveryRejected, type DestinationConnector, type OutgoingMessage } from "./types.js";
 
 /**
@@ -118,12 +118,17 @@ export class SmtpDestination implements DestinationConnector {
     this.now = options.now ?? Date.now;
   }
 
+  /** Whether a delivery reads the message's metadata: true when the subject or body names a key. */
+  get usesMeta(): boolean {
+    return readsMeta(this.options.subject) || readsMeta(this.options.body);
+  }
+
   /** Sends one output. */
   async deliver(message: OutgoingMessage): Promise<void> {
     const { mailer, channel, from, to, cc, attach, maxBytes } = this.options;
     const { messageId, seq } = message;
-    // ctx.meta is not handed to destinations yet, so a meta placeholder is filled with nothing.
-    const values: TemplateValues = { messageId, seq, channel, meta: {} };
+    // The engine hands over the message's metadata only when a template reads it.
+    const values: TemplateValues = { messageId, seq, channel, meta: message.meta ?? {} };
     const data = composeMessage({
       from,
       to,

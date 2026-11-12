@@ -342,7 +342,8 @@ const BODILESS: ReadonlySet<HttpDestinationMethod> = new Set(["GET", "DELETE"]);
  * Sends each output to a URL, by POST unless `method` names another. The URL's path, and the values
  * of `query`, may hold `{key}` placeholders, each filled from the message's metadata
  * (`OutgoingMessage.meta`) percent-encoded, so a value never reaches the scheme, the host or the port;
- * a key the metadata lacks fails that delivery with a `DeliveryRejected`. With `addressGuard`, every
+ * a key the metadata lacks fails that attempt with a `MetaKeyMissing`, retried, and a value that
+ * cannot fill it fails the delivery with a `DeliveryRejected`. With `addressGuard`, every
  * connection is checked against it at connect.
  *
  * The server's certificate is always verified. The answer is read by
@@ -425,7 +426,8 @@ export class HttpDestination implements DestinationConnector {
       sent["Content-Length"] = message.body.byteLength;
     }
     return new Promise((resolve, reject) => {
-      // A throw here rejects the delivery: a placeholder that cannot be filled fails it for good.
+      // A throw here fails the attempt: a missing key is retried, a value that cannot fill the URL
+      // is rejected.
       const url = this.target.fill(message.meta);
       if (this.literal !== undefined && addressGuard?.permits(this.literal) === false) {
         throw transientError(ADDRESS_REFUSED);

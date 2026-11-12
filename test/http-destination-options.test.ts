@@ -9,6 +9,7 @@ import { ADDRESS_REFUSED, AddressGuard, parseNetwork } from "../src/connectors/a
 import { HttpDestination, type HttpDestinationOptions } from "../src/connectors/http.js";
 import { RetryableError } from "../src/connectors/http-core.js";
 import {
+  MetaKeyMissing,
   queryValueProblem,
   templateProblem,
   UrlTemplate,
@@ -178,16 +179,17 @@ describe("an HTTP destination's URL template", () => {
     },
   );
 
-  it("fails a delivery whose metadata lacks a key, or holds it empty, naming the key alone", async () => {
+  it("fails an attempt whose metadata lacks a key, to retry, and rejects an empty one, naming the key alone", async () => {
     const r = await lab();
     const target = destination({ url: at(r, "/patients/{mrn}/visits/{visit}") });
     const missing = await outcomeOf(
       target.deliver({ messageId: 1, seq: 0, body: BODY, meta: { mrn: "SYN-0001" } }),
     );
-    expect(missing).toBeInstanceOf(DeliveryRejected);
-    expect((missing as DeliveryRejected).reason).toBe("URL_TEMPLATE_MISSING visit");
+    expect(missing).toBeInstanceOf(MetaKeyMissing);
+    expect(missing).not.toBeInstanceOf(DeliveryRejected);
+    expect(missing).toMatchObject({ code: "URL_TEMPLATE_MISSING", key: "visit" });
     const none = await outcomeOf(target.deliver({ messageId: 1, seq: 0, body: BODY }));
-    expect((none as DeliveryRejected).reason).toBe("URL_TEMPLATE_MISSING mrn");
+    expect((none as MetaKeyMissing).key).toBe("mrn");
     // A key inherited from Object.prototype is no key of the metadata.
     const inherited = await outcomeOf(
       destination({ url: at(r, "/{constructor}") }).deliver({
@@ -197,7 +199,7 @@ describe("an HTTP destination's URL template", () => {
         meta: {},
       }),
     );
-    expect((inherited as DeliveryRejected).reason).toBe("URL_TEMPLATE_MISSING constructor");
+    expect((inherited as MetaKeyMissing).key).toBe("constructor");
     const empty = await outcomeOf(
       target.deliver({ messageId: 1, seq: 0, body: BODY, meta: { mrn: "", visit: 1 } }),
     );
@@ -235,7 +237,7 @@ describe("an HTTP destination's URL template", () => {
     const missing = await outcomeOf(
       target.deliver({ messageId: 2, seq: 0, body: BODY, meta: { mrn: "SYN-2" } }),
     );
-    expect((missing as DeliveryRejected).reason).toBe("URL_TEMPLATE_MISSING visit");
+    expect((missing as MetaKeyMissing).key).toBe("visit");
     const unpaired = await outcomeOf(
       target.deliver({ messageId: 2, seq: 0, body: BODY, meta: { mrn: "\udc00", visit: 1 } }),
     );
@@ -561,19 +563,18 @@ destinations:
     ]);
     expect(r.received[0]?.headers["idempotency-key"]).toBe("1-0");
     expect(r.received[0]?.headers["content-type"]).toBe("application/hl7-v2");
-    // A key the metadata lacks fails that delivery alone, naming the key, never a value.
+    // A key the metadata lacks fails that attempt, naming the key, never a value, and the
+    // delivery waits for a retry, holding the ones behind it in order.
     expect((await store.deliveries(2))[0]).toMatchObject({
-      status: "failed",
-      error: "rejected: URL_TEMPLATE_MISSING visit",
+      status: "pending",
+      attempts: 1,
+      error: "delivery: URL_TEMPLATE_MISSING visit",
     });
-    expect((await store.deliveries(3))[0]).toMatchObject({
-      status: "failed",
-      error: "rejected: URL_TEMPLATE_MISSING mrn",
-    });
+    expect((await store.deliveries(3))[0]).toMatchObject({ status: "pending", attempts: 0 });
     expect(JSON.stringify(events)).not.toContain("SYN/0002");
   });
 
-  it("hands no metadata over from a store that keeps none, so a placeholder fails the delivery", async () => {
+  it("hands no metadata over from a store that keeps none, so a placeholder fails the attempt", async () => {
     const { r, store } = await pass(
       (lab) =>
         `url: "http://127.0.0.1:${lab.port}/patients/{mrn}", plaintext: true, allowNetworks: [127.0.0.1]`,
@@ -582,8 +583,8 @@ destinations:
     );
     expect(r.received).toHaveLength(0);
     expect((await store.deliveries(1))[0]).toMatchObject({
-      status: "failed",
-      error: "rejected: URL_TEMPLATE_MISSING mrn",
+      status: "pending",
+      error: "delivery: URL_TEMPLATE_MISSING mrn",
     });
   });
 

@@ -132,9 +132,10 @@ export class UrlTemplate {
   }
 
   /**
-   * The URL for one delivery. A key `meta` lacks, an empty value in the path, a value that cannot be
-   * encoded, or a filled URL whose origin or path reads back otherwise (a value of `.` or `..`)
-   * fails the delivery for good with a {@link DeliveryRejected} naming the key, never the value.
+   * The URL for one delivery. A key `meta` lacks fails the attempt with a {@link MetaKeyMissing},
+   * retried. An empty value in the path, a value that cannot be encoded, or a filled URL whose origin
+   * or path reads back otherwise (a value of `.` or `..`) fails the delivery for good with a
+   * {@link DeliveryRejected}. Each names the key, never the value.
    */
   fill(meta: TemplateMeta = {}): URL {
     if (this.fixed !== undefined) return this.fixed;
@@ -162,10 +163,35 @@ export class UrlTemplate {
   }
 }
 
-/** A metadata value, percent-encoded, or a rejection naming its key. */
+/**
+ * A delivery whose URL names a metadata key the message does not carry. It fails that attempt, and
+ * the delivery is retried as any other failed attempt is, so the message is kept and sent once the
+ * configuration names a key it carries. Its `code` is `URL_TEMPLATE_MISSING`, and it names the key,
+ * never a value.
+ *
+ * @example
+ * ```ts
+ * throw new MetaKeyMissing("mrn");
+ * ```
+ */
+export class MetaKeyMissing extends Error {
+  /** Always `URL_TEMPLATE_MISSING`. */
+  readonly code = "URL_TEMPLATE_MISSING";
+  /** The metadata key the URL names and the message lacks. */
+  readonly key: string;
+
+  /** @param key The metadata key the URL names and the message lacks. */
+  constructor(key: string) {
+    super(`the URL names the metadata key ${key}, which the message does not carry`);
+    this.name = "MetaKeyMissing";
+    this.key = key;
+  }
+}
+
+/** A metadata value, percent-encoded, or an error naming its key. */
 function value(meta: TemplateMeta, key: string, inPath: boolean): string {
   const held = Object.hasOwn(meta, key) ? meta[key] : undefined;
-  if (held === undefined) throw new DeliveryRejected(`URL_TEMPLATE_MISSING ${key}`);
+  if (held === undefined) throw new MetaKeyMissing(key);
   const text = String(held);
   if (inPath && text === "") throw new DeliveryRejected(`URL_TEMPLATE_EMPTY ${key}`);
   return encode(text, key);

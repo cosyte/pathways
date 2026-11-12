@@ -175,8 +175,9 @@ export interface OutgoingMessage {
    */
   readonly signal?: AbortSignal | undefined;
   /**
-   * The message's metadata (`ctx.meta`), passed only to a destination that reads it, such as an
-   * HTTP destination whose URL has placeholders. Undefined otherwise.
+   * The message's metadata (`ctx.meta`), passed only to a built-in destination that reads it: an
+   * HTTP destination whose URL has placeholders, or an SMTP destination whose subject or body names
+   * a `meta.<key>`. Undefined otherwise.
    */
   readonly meta?: Readonly<Record<string, string | number | boolean>> | undefined;
 }

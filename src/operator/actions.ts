@@ -4,6 +4,7 @@ import type { Env } from "../connectors/endpoint.js";
 import { EncryptionError } from "../encryption/envelope.js";
 import { ChannelWorker, TransformLoadError } from "../engine/channel-worker.js";
 import { storedFailure } from "../engine/engine.js";
+import { messageMetaOf } from "../engine/message-meta.js";
 import type { FailureSummary } from "../engine/worker-entry.js";
 import type { MessageStatus, MessageStore, RequeueResult } from "../storage/store.js";
 import { describeFailure } from "../testing/run-tests.js";
@@ -200,9 +201,11 @@ export async function replayMessages(
         return { id, outcome: "not-found" };
       }
       // The run after this message's generation: the first transform was run 1. What its source
-      // knew is not stored, so a replay runs without it.
+      // knew is not stored, so a replay runs without it; its metadata is worked out from the body
+      // again, as at receipt.
+      const meta = messageMetaOf(channel.format, body);
       const outcome = await worker.run(body, {
-        context: { messageId: id, attempt: message.generation + 2, source: undefined, meta: {} },
+        context: { messageId: id, attempt: message.generation + 2, source: undefined, meta },
       });
       outputs = outcome.ok ? outcome.outputs : [];
       failure = outcome.ok ? undefined : outcome.failure;

@@ -3708,8 +3708,9 @@ The id of the stored message this came from.
 
 > `readonly` `optional` **meta?**: `Readonly`\<`Record`\<`string`, `string` \| `number` \| `boolean`\>\>
 
-The message's metadata (`ctx.meta`), passed only to a destination that reads it, such as an
-HTTP destination whose URL has placeholders. Undefined otherwise.
+The message's metadata (`ctx.meta`), passed only to a built-in destination that reads it: an
+HTTP destination whose URL has placeholders, or an SMTP destination whose subject or body names
+a `meta.<key>`. Undefined otherwise.
 
 ##### resend?
 
@@ -5384,7 +5385,9 @@ The stored message's id. 0 under `pathways test`, which stores nothing.
 
 > `readonly` **meta**: `Readonly`\<`Record`\<`string`, `string` \| `number` \| `boolean`\>\>
 
-A per-message map of flat values. Always empty in this release: nothing sets it yet.
+The message's metadata, a map of flat values the engine sets from the message itself: for an
+`hl7v2` message, the fields of its MSH segment and its first PID segment's medical record
+number, each only when it holds a value. Empty for every other format.
 
 ##### source
 

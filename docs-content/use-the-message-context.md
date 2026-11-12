@@ -10,13 +10,13 @@ description: "Read a message's source facts, its id and the channel's configurat
 A transform receives a second argument, `ctx`, beside the message. It is a frozen plain object, built
 for each message:
 
-| Field           | What it holds                                                                                               |
-| --------------- | ----------------------------------------------------------------------------------------------------------- |
-| `ctx.messageId` | the stored message's id; `0` under `pathways test`                                                          |
-| `ctx.attempt`   | `1` the first time the message is transformed, one more for each replay or resend                           |
-| `ctx.source`    | what the source knew when it took the message in, by kind; see below                                        |
-| `ctx.config`    | the channel's configuration, from `config:` blocks, read when the engine started                            |
-| `ctx.meta`      | a per-message map; always empty in this release; see [search by metadata](./search-messages-by-metadata.md) |
+| Field           | What it holds                                                                                |
+| --------------- | -------------------------------------------------------------------------------------------- |
+| `ctx.messageId` | the stored message's id; `0` under `pathways test`                                           |
+| `ctx.attempt`   | `1` the first time the message is transformed, one more for each replay or resend            |
+| `ctx.source`    | what the source knew when it took the message in, by kind; see below                         |
+| `ctx.config`    | the channel's configuration, from `config:` blocks, read when the engine started             |
+| `ctx.meta`      | the message's metadata, set by Pathways from the message; see [below](#the-message-metadata) |
 
 A transform that takes one argument keeps working unchanged: `ctx` is optional in the `Transform`
 type, so a test can still call a transform with the message alone. Nothing in `ctx` is logged, sent
@@ -151,6 +151,29 @@ is transformed; they are not stored with the message. So `ctx.source` is `undefi
 A transform that depends on a source fact should handle its absence: filter the message, fail it, or
 use a value from the configuration. A transform that branches on `ctx.source` can therefore treat a
 replayed message differently from its first run, and send it to other destinations or none.
+
+## The message metadata
+
+`ctx.meta` is a frozen map of text values that Pathways sets for each message when it takes the
+message in, and stores with it. For an HL7 v2 channel it holds the fields of the MSH segment and the
+medical record number of the first PID segment, each only when the message carries a value:
+
+```ts runnable title="channels/results-to-ehr/transform.ts"
+import type { Transform } from "@cosyte/pathways";
+
+export default ((msg, ctx) => {
+  if (ctx?.meta["processingId"] === "T") return null;
+  return msg;
+}) satisfies Transform;
+```
+
+The map's type names no keys, so a key is read with brackets, as `ctx.meta["mrn"]`, and may be
+undefined. The [configuration reference](./configuration-reference.md#message-metadata) lists every
+key. A
+channel of another format gets an empty map in this release. The same map fills an HTTP
+destination's URL placeholders, such as `{mrn}`, and an SMTP destination's `{{ meta.<key> }}`, and
+an `index:` block makes a key searchable: see
+[Search messages by metadata](./search-messages-by-metadata.md).
 
 ## Keep state between messages
 

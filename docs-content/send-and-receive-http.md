@@ -212,7 +212,7 @@ destinations:
       url: https://orders.example.com/patients/{mrn}/orders
       method: PUT
       query:
-        visit: "{visit}"
+        event: "{triggerEvent}"
         source: pathways
       idempotencyHeader: Idempotency-Key
       headers:
@@ -221,19 +221,25 @@ destinations:
 
 - **`method`** is `POST` (the default), `PUT`, `PATCH`, `DELETE` or `GET`. `GET` and `DELETE` send no
   body and no `Content-Type`.
-- **A placeholder**, a [`ctx.meta`](./use-the-message-context.md) key in braces such as `{mrn}`, may
-  stand in the URL's path and in each `query` value. Each message's own value fills it,
+- **A placeholder**, a key of the message's metadata in braces such as `{mrn}`, may stand in the
+  URL's path and in each `query` value. Each message's own value fills it,
   percent-encoded: `SYN/0001` becomes `SYN%2F0001`, so it stays one path segment, and no value can
   change the scheme, the host or the port. A placeholder in the host, the port or the URL's own
   query is refused when the configuration loads; put query values in `query:`.
-- **A message that cannot fill the URL** fails that delivery for good, and the destination moves on:
-  a key its metadata lacks (`rejected: URL_TEMPLATE_MISSING mrn`), an empty value in the path
-  (`URL_TEMPLATE_EMPTY`), a value of `.` or `..`, which would move the path (`URL_TEMPLATE_REFUSED`),
-  or text that cannot be encoded (`URL_TEMPLATE_ENCODING`). The error names the key, never the
-  value.
-- **The metadata** is the message's stored `ctx.meta`. In this release nothing sets it yet (see
-  [Use the message context](./use-the-message-context.md)), so a URL with a placeholder fails each
-  delivery until it is.
+- **The metadata** is the message's `ctx.meta`, which Pathways sets when it takes the message in:
+  on an HL7 v2 channel, the MSH fields and the first PID segment's medical record number, such as
+  `{mrn}`, `{messageCode}`, `{triggerEvent}` and `{controlId}`. The
+  [configuration reference](./configuration-reference.md#message-metadata) lists every key.
+- **A message whose metadata lacks a key** the URL names fails that attempt with `MetaKeyMissing`,
+  and the delivery is kept and retried, with the error `delivery: URL_TEMPLATE_MISSING mrn`, under
+  the destination's `retry` block, as a server that does not answer is. The later messages of that
+  destination wait behind it, so order is kept. Correct the URL, and the next retry after the engine
+  reads the change delivers it. A delivery that runs out of retries is failed with its output kept,
+  so `pathways replay --resend` sends it again.
+- **A value that cannot fill the URL** fails that delivery for good, and the destination moves on:
+  an empty value in the path (`URL_TEMPLATE_EMPTY`), a value of `.` or `..`, which would move the
+  path (`URL_TEMPLATE_REFUSED`), or text that cannot be encoded (`URL_TEMPLATE_ENCODING`). Every
+  error names the key, never the value.
 - **`idempotencyHeader`** names a header sent on every attempt, `<messageId>-<seq>` such as `12-0`,
   the same for each attempt of one output, so a receiver that keeps idempotency keys drops a copy
   it already has.

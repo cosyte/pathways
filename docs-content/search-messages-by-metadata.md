@@ -12,10 +12,11 @@ number, a visit. Pathways stores it with the message, encrypted like the body. T
 key without decrypting every row, name the key in the channel's `index:` block: Pathways then also
 stores a short tag of each value, and `pathways messages --where` looks the tag up.
 
-In this release nothing in the engine sets `ctx.meta` yet: a transform reads it empty. Metadata is
-stored when the code that stores a message passes it (`StoreReceiveOptions.meta`), and a later
-release fills it from the channel. Until then, an index finds nothing among the messages the engine
-stored.
+Pathways sets `ctx.meta` itself when it takes a message in: for an HL7 v2 channel, the fields of the
+MSH segment and the medical record number of the first PID segment, such as `mrn` and `controlId`.
+The [configuration reference](./configuration-reference.md#message-metadata) lists every key. A
+channel of another format gets none in this release, so an index there finds only messages stored
+by code that passes metadata itself (`StoreReceiveOptions.meta`).
 
 ## Name the keys to index
 
