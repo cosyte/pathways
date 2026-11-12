@@ -423,6 +423,8 @@ for (const database of TEST_DATABASES) {
       expect(await store.messageMeta(handed[2]?.id ?? 0)).toBeUndefined();
       expect(tagged.id).toBe(sources[0]?.id);
       expect(await readdir(join(root, "data", "out"))).toHaveLength(5);
+      // Each source message's only delivery is its hand-off, which ended it: each is settled.
+      expect(await store.unsettled("a", 0, 10)).toEqual([]);
 
       // messages show names the link both ways, and status names the channels each feeds.
       const parent = operatorContext(project, store);
@@ -602,6 +604,8 @@ export default (msg: string, ctx: { route(name: string, message: string): void }
       });
       expect(lost?.state).toBe("failed");
       expect((await store.message(lost?.id ?? 0))?.error).toContain(UNKNOWN_ROUTE_CODE);
+      // Failed by its route, and delivered: both ended, so both are settled.
+      expect(await store.unsettled("a", 0, 10)).toEqual([]);
       expect(await readdir(join(root, "data", "out"))).toHaveLength(1);
     });
 
@@ -640,6 +644,8 @@ export default (msg: string, ctx: { route(name: string, message: string): void }
         await engine.tick();
         const [source] = await messagesOf(store, "a");
         expect(source?.state).toBe("delivered");
+        // Its last delivery, the hand-off, ended it, so it is settled.
+        expect(await store.unsettled("a", 0, 10)).toEqual([]);
         const upper = await readdir(join(root, "data", "a-upper"));
         expect(upper).toHaveLength(1);
         expect(await readFile(join(root, "data", "a-upper", upper[0] ?? ""), "utf8")).toBe(
