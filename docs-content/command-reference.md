@@ -250,7 +250,11 @@ pathways retention [--dry-run] [--json]
 ```
 
 Deletes delivered, filtered and cleared messages past their channel's retention period, with their
-deliveries. A real run is audited.
+deliveries, and runs the content and failed clocks a `retention:` block sets, writing and checking a
+sealed archive first when `retention.archive` is set. A dry run prints each clock's counts. A real
+run is audited; it exits 1 when it left a channel alone part way because an archive could not be
+written, having deleted nothing of that channel without its archive. See [Set message
+retention](./set-message-retention.md).
 
 | Option      | Meaning                                   |
 | ----------- | ----------------------------------------- |
@@ -264,7 +268,7 @@ pathways audit [--action <name>] [--message <id>] [--channel <name>] [--since <t
 
 Reads the audit log, newest first. `--action` takes `search`, `view`, `content-view`, `replay`,
 `resend`, `clear`, `retention`, `config`, `lease-release`, `migrate`, `channel-pause`,
-`channel-resume`, `channel-stop`, `channel-halt`, `channel-reload` or `verify`; `--message` takes a
+`channel-resume`, `channel-stop`, `channel-halt`, `channel-reload`, `verify` or `archive`; `--message` takes a
 message id; the other options are as for `messages`.
 
 ## pathways rekey
