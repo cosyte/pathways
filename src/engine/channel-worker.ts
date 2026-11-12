@@ -2,6 +2,7 @@ import { Worker } from "node:worker_threads";
 
 import { ownsBuffer } from "../storage/ownership.js";
 import type {
+  CsvSettings,
   FailureSummary,
   MessageContext,
   TransformReply,
@@ -72,6 +73,8 @@ export interface ChannelWorkerOptions {
    * holds as `config`. Defaults to none.
    */
   readonly config?: Readonly<Record<string, unknown>>;
+  /** A `csv` channel's `csv:` block, as validated: how its bodies are read and written. */
+  readonly csv?: CsvSettings | undefined;
   readonly workerUrl?: URL;
 }
 
@@ -153,6 +156,7 @@ export class ChannelWorker {
       transformFile,
       format,
       config: this.options.config ?? {},
+      ...(this.options.csv === undefined ? {} : { formatSettings: { csv: this.options.csv } }),
     };
     const worker = new Worker(this.options.workerUrl ?? defaultWorkerUrl(), {
       workerData: setup,

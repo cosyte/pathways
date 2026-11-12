@@ -320,6 +320,41 @@ describe("phi-scan fields: each format's identifying fields are caught", () => {
   });
 });
 
+describe("phi-scan fields: a CSV file's identifying columns", () => {
+  it("reads each identifying column under a header, on every delimiter it tries", () => {
+    for (const delimiter of [",", "\t", "|", ";"]) {
+      const csv = [
+        ["Last Name", "first_name", "DOB", "MRN", "Phone", "Code"].join(delimiter),
+        ["Okonkwo", '"Marisol"', "1984-07-23", "48213977", "(617) 293-8841", "58410-2"].join(
+          delimiter,
+        ),
+      ].join("\r\n");
+      expect(detect(csv).fields, delimiter).toEqual([
+        "csv Last Name",
+        "csv first_name",
+        "csv DOB",
+        "csv MRN",
+        "csv Phone",
+      ]);
+    }
+  });
+
+  it("stops at a line with another count of cells, and clears the declared test patient", () => {
+    const csv =
+      'name,dob,note\nTESTPATIENT ALPHA,19700101,"a, ""quoted"" note"\nnot,a,row,here\nOkonkwo,1,2\n';
+    expect(detect(csv).fields).toEqual([]);
+    // An unquoted quote, and a quote left open, keep their text in the cell.
+    expect(detect('ssn;x\n48 1229930;a"b\n"481229930;\n').fields).toEqual(["csv ssn"]);
+  });
+
+  it("leaves alone a line that is not a header, and a header with no identifying column", () => {
+    expect(detect("code,count\n48213977,6172938841\n").fields).toEqual([]);
+    expect(detect("1,name\nOkonkwo,Marisol\n").fields).toEqual([]);
+    expect(detect("name\nOkonkwo\n").fields).toEqual([]);
+    expect(detect("name,\nOkonkwo,\n").fields).toEqual([]);
+  });
+});
+
 describe("phi-scan fields: the allow-list declares synthetic tokens, file by file content", () => {
   it("clears the test patient in every format, and only because the allow-list declares it", () => {
     const helpers = readFileSync(join(REPO_ROOT, "test", "helpers.ts"), "utf8");
