@@ -115,6 +115,31 @@ finishes.
 
 How long your backups, and a database server's logs, keep what was deleted is yours to set.
 
+## One message per idempotency key
+
+A source that names each message with an idempotency key (the file source, on a local folder or over
+SFTP, and the Amazon S3 and Azure Blob sources do, and a custom source can) hands a message in again, marked resumed, when an earlier
+attempt may have stored it: after a stop between storing and acknowledging, say. The store keeps one
+message per channel under each key, on SQLite, PostgreSQL, MySQL, MariaDB and SQL Server alike, each
+at its default isolation level:
+
+- A message claims its key in the same statement that inserts it, in the `idempotency_claim` column,
+  which a unique index covers (`messages_by_channel_idempotency_claim`). When the same message is
+  handed in twice at the same moment, on two connections of one engine's pool or on two nodes, only
+  one insert takes the claim: the other waits until the first's transaction ends, then yields to its
+  row. A resumed hand-in then gets that message's id back, and nothing new is stored.
+- A hand-in that is not resumed is always stored: its source says it never handed the message in. If
+  another message of the channel already holds the key's claim, it is stored without one.
+- A resumed hand-in whose claim is free still looks for an earlier message under its key, so it finds
+  one stored before claims were, or by an older Pathways running on the same database.
+- A message that retention deleted frees its key: handed in again after that, it is stored again.
+
+Schema step `0014-idempotency-claims` adds the column and the index, and gives each key's claim to
+the earliest message of its channel stored under it. A database where an older Pathways stored two
+messages under one key at the same moment keeps both, each with its body, its status and its
+deliveries; only the earliest holds the claim, and a resumed hand-in finds that one, as before. The
+step is an expand step: an older Pathways never reads the column, and goes on running beside it.
+
 ## One engine per database
 
 One engine runs against a database at a time. Before it opens a source, `pathways start` takes the

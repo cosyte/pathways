@@ -514,3 +514,29 @@ function interop(module: unknown): unknown {
 function definedOnly(options: Readonly<Record<string, unknown>>): TlsOptions {
   return Object.fromEntries(Object.entries(options).filter(([, value]) => value !== undefined));
 }
+
+/**
+ * Whether `error` is MySQL's or MariaDB's refusal (errno 1062) or SQL Server's (number 2601) of a
+ * row that repeats a key of the unique index named `index`. Each server names the index in its
+ * text, and only that name is read from it. Kysely's SQL Server driver passes an array when the
+ * server sent more than one error, as it does for this one: the refusal, then that the statement
+ * was ended.
+ *
+ * @example
+ * ```ts
+ * repeatsUniqueKey(error, "messages_by_channel_idempotency_claim"); // true for that refusal
+ * ```
+ */
+export function repeatsUniqueKey(error: unknown, index: string): boolean {
+  const errors: readonly unknown[] = Array.isArray(error) ? error : [error];
+  return errors.some((each) => {
+    const { errno, number, message } = (each ?? {}) as {
+      readonly errno?: unknown;
+      readonly number?: unknown;
+      readonly message?: unknown;
+    };
+    return (
+      (errno === 1062 || number === 2601) && typeof message === "string" && message.includes(index)
+    );
+  });
+}
