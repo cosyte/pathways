@@ -3,6 +3,7 @@ import type { Env } from "../connectors/endpoint.js";
 import { channelStatus } from "../engine/health.js";
 import { describeHolder } from "../engine/lease.js";
 import { destinationKeys } from "../engine/destination-key.js";
+import { describeNode, seconds } from "../engine/nodes.js";
 import { EXIT } from "../exit.js";
 import {
   AUDIT_ACTIONS,
@@ -10,6 +11,7 @@ import {
   ENGINE_LEASE,
   leaseStore,
   MESSAGE_STATES,
+  nodeStore,
   type AuditAction,
   type AuditDetail,
   type AuditEntry,
@@ -17,6 +19,7 @@ import {
   type MessageState,
   type MessageStore,
   type MessageSummary,
+  type NodeRow,
   type Page,
   type StoredDelivery,
 } from "../storage/store.js";
@@ -723,6 +726,147 @@ export async function leaseReleaseCommand(context: OperatorContext): Promise<num
     `Engine lease released: it was held by ${describeHolder(held)}. The next engine to start takes it.`,
   ]);
   return EXIT.ok;
+}
+
+/**
+ * `pathways nodes`: every engine on this database, by node id: its host, process, role, version,
+ * and how long ago its last heartbeat was, by the database's clock, `stale` once that is older than
+ * its bound (three of its heartbeat intervals). Ids, a host name, times and numbers only.
+ *
+ * @example
+ * ```ts
+ * const code = await nodesCommand(context);
+ * ```
+ */
+export async function nodesCommand(context: OperatorContext): Promise<number> {
+  const nodes = nodeStore(context.store);
+  if (nodes === undefined) return noNodes(context);
+  const rows = await nodes.nodes();
+  const lines =
+    rows.length === 0
+      ? ["No engine runs on this database."]
+      : table([
+          ["NODE", "HOST", "PID", "ROLE", "VERSION", "HEARTBEAT", "STATE"],
+          ...rows.map((row) => [
+            row.node,
+            row.host,
+            String(row.pid),
+            row.role,
+            row.version,
+            `${seconds(row.heartbeatAgeMs)} ago`,
+            row.stale ? "stale" : "live",
+          ]),
+        ]);
+  print(context, { nodes: rows }, lines);
+  return EXIT.ok;
+}
+
+/**
+ * `pathways nodes forget <id>`: removes the row of an engine whose heartbeat stopped, once it shows
+ * stale, so `pathways nodes` lists it no more. A live node's row is refused: stop that engine, and
+ * its row goes with it. Written to the audit log, whichever way it goes.
+ *
+ * @example
+ * ```ts
+ * const code = await nodeForgetCommand(context, "engine-a");
+ * ```
+ */
+export async function nodeForgetCommand(context: OperatorContext, node: string): Promise<number> {
+  const nodes = nodeStore(context.store);
+  if (nodes === undefined) return noNodes(context);
+  // A read or the DELETE that fails is audited before the command reports it, with the code only:
+  // the error's own text can name the server. A database that refuses the statement may refuse the
+  // entry too; the statement's error is the one reported.
+  const audited = async <T>(reason: string, statement: () => Promise<T>): Promise<T> => {
+    try {
+      return await statement();
+    } catch (error) {
+      const code = (error as { code?: unknown } | undefined)?.code;
+      try {
+        await context.audit.record({
+          action: "node-forget",
+          outcome: "refused",
+          detail: { node, reason, ...(typeof code === "string" ? { code } : {}) },
+        });
+      } catch {
+        // The statement's error is the one to report.
+      }
+      throw error;
+    }
+  };
+  const find = async (): Promise<NodeRow | undefined> =>
+    audited("unreadable", async () =>
+      (await nodes.nodes()).find((candidate) => candidate.node === node),
+    );
+  const notFound = async (): Promise<number> => {
+    await context.audit.record({ action: "node-forget", outcome: "not-found", detail: { node } });
+    print(context, { forgotten: false, node: null }, ["No node by that id on this database."]);
+    return EXIT.failed;
+  };
+  const row = await find();
+  if (row === undefined) return notFound();
+  if (!(await audited("unwritable", () => nodes.forgetNode(node)))) {
+    // Gone between the read and the DELETE (its engine stopped cleanly): not found, not live.
+    if ((await find()) === undefined) return notFound();
+    await context.audit.record({
+      action: "node-forget",
+      outcome: "refused",
+      detail: { node, reason: "live", heartbeatAgeMs: row.heartbeatAgeMs },
+    });
+    print(context, { forgotten: false, node: row }, [
+      `Node ${node} is live, not forgotten: ${describeNode(row)}. Stop that engine first; its row goes with it.`,
+    ]);
+    return EXIT.failed;
+  }
+  await context.audit.record({
+    action: "node-forget",
+    detail: { node, host: row.host, heartbeatAgeMs: row.heartbeatAgeMs },
+  });
+  print(context, { forgotten: true, node: row }, [`Node forgotten: ${describeNode(row)}.`]);
+  return EXIT.ok;
+}
+
+/**
+ * `pathways nodes forget` with an argument that is not a node id: audited as refused, without the
+ * argument, which can hold anything, and exits 2 with the rule for a node id. The CLI runs it only on
+ * a store opened with no schema step applied; where that cannot open, it exits 2 unaudited. An entry
+ * the database refuses changes neither the message nor the exit code.
+ *
+ * @example
+ * ```ts
+ * const code = await nodeForgetInvalidCommand(context);
+ * ```
+ */
+export async function nodeForgetInvalidCommand(context: OperatorContext): Promise<number> {
+  try {
+    await context.audit.record({
+      action: "node-forget",
+      outcome: "refused",
+      detail: { reason: "invalid-id" },
+    });
+  } catch {
+    // The command line was still not understood: that is what to say.
+  }
+  context.err(`pathways: ${NODE_ID_RULE} Run "pathways --help" for usage.\n`);
+  return EXIT.usage;
+}
+
+/**
+ * What a node id may be, as `pathways nodes forget` says when given something else.
+ *
+ * @example
+ * ```ts
+ * NODE_ID_RULE.startsWith("a node id is"); // true
+ * ```
+ */
+export const NODE_ID_RULE =
+  "a node id is 1 to 64 letters, digits, dots, hyphens and underscores, starting with a letter or a digit.";
+
+function noNodes(context: OperatorContext): number {
+  context.err(
+    "pathways: this store keeps no node rows: a custom store without the node methods lists no engines.\n",
+  );
+  return EXIT.failed;
 }
 
 /**
