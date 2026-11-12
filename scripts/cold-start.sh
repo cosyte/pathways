@@ -87,6 +87,14 @@ run 0 npm install
 run 0 npx pathways --version
 check "npx pathways --version prints the latest, $LATEST" '[ "$LAST" = "$LATEST" ]'
 
+echo "## Install page: an existing project"
+mkdir -p "$ROOT/existing" && cd "$ROOT/existing" || exit 1
+run 0 npm init -y
+run 0 npm install --save-dev @cosyte/pathways
+run 0 npx pathways --version
+run 3 npx pathways test
+cd "$ROOT/tutorial/my-project" || exit 1
+
 echo "## Quickstart"
 run 0 find . -path ./node_modules -prune -o -type f -print
 run 0 npm test
