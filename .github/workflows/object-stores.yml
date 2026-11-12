@@ -46,16 +46,19 @@ jobs:
         env:
           MINIO_ROOT_USER: pathways-test
           MINIO_ROOT_PASSWORD: pathways-test-only
+        # MinIO's images are no longer on Docker Hub; its own registry on quay.io still serves them.
         run: |
+          minio=quay.io/minio/minio:latest
+          azurite=mcr.microsoft.com/azure-storage/azurite:latest
           docker run -d --name minio -p 127.0.0.1:9000:9000 \
             -e MINIO_ROOT_USER -e MINIO_ROOT_PASSWORD \
-            minio/minio:latest server /data
+            "$minio" server /data
           docker run -d --name azurite -p 127.0.0.1:10000:10000 \
-            mcr.microsoft.com/azure-storage/azurite:latest \
-            azurite-blob --blobHost 0.0.0.0 --skipApiVersionCheck
-          for image in minio/minio:latest mcr.microsoft.com/azure-storage/azurite:latest; do
+            "$azurite" azurite-blob --blobHost 0.0.0.0 --skipApiVersionCheck
+          for image in "$minio" "$azurite"; do
             docker image inspect --format '{{index .RepoDigests 0}}' "$image"
           done
+          docker exec minio minio --version || true
           for port in 9000 10000; do
             for _ in $(seq 1 60); do
               if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then break; fi
