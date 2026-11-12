@@ -142,6 +142,12 @@ function channelUses(channel: ChannelConfig, skipDry: DrySkip | undefined): Secr
       uses.push(...sftpUses(destination.sftp, `${file}: destinations.${index}.file.sftp`));
       uses.push(...azblobUses(destination.azblob, `${file}: destinations.${index}.file.azblob`));
     }
+    if (destination.kind === "smtp" && !dry && destination.user !== undefined) {
+      const where = `${file}: destinations.${index}.smtp`;
+      uses.push({ source: destination.user, where: `${where}.user` });
+      // The schema sets the password with the user, and never one without the other.
+      uses.push({ source: destination.password as SecretSource, where: `${where}.password` });
+    }
   }
   uses.push(...hookUses(channel.hooks, file));
   return uses;
