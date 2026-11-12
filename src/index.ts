@@ -135,6 +135,9 @@ export type {
   RefusalReason,
   RequeueRequest,
   RequeueResult,
+  RetentionQuery,
+  RetentionStep,
+  RetentionStore,
   RetryingDelivery,
   SendingMarker,
   SendStart,
@@ -152,3 +155,9 @@ export {
   type LeaseHolder,
 } from "./storage/lease.js";
 export type { AuditListener } from "./operator/audit.js";
+export type {
+  ArchivedDelivery,
+  ArchivedMessage,
+  ArchiveErrorCode,
+  ArchiveHeader,
+} from "./operator/archive.js";

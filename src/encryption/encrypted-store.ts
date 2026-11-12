@@ -27,7 +27,12 @@ import type {
   StoredMessage,
   StoreReceiveOptions,
 } from "../storage/store.js";
-import { channelStateStore, leaseStore } from "../storage/store.js";
+import {
+  channelStateStore,
+  leaseStore,
+  retentionStore,
+  type RetentionStore,
+} from "../storage/store.js";
 import { copiesBodies, markCopiesBodies, release } from "../storage/ownership.js";
 import {
   decrypt,
@@ -198,6 +203,13 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
   readonly setChannelState?: (channel: string, state: ChannelRunState) => Promise<void>;
   /** Straight through, present only when the store underneath has it. */
   readonly markDryRun?: (deliveryId: number, epoch?: number) => Promise<void>;
+  /**
+   * The retention steps: ids and counts, and rows changed whole or emptied, so straight through,
+   * present only when the store underneath has all three.
+   */
+  readonly countExpiring?: RetentionStore["countExpiring"];
+  readonly listExpiring?: RetentionStore["listExpiring"];
+  readonly applyExpiry?: RetentionStore["applyExpiry"];
 
   protected constructor(inner: MessageStore, codec: Codec, indexer?: MetaIndexer) {
     this.#inner = inner;
@@ -220,6 +232,12 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
       this.setChannelState = states.setChannelState;
     }
     if (inner.markDryRun !== undefined) this.markDryRun = inner.markDryRun.bind(inner);
+    const steps = retentionStore(inner);
+    if (steps !== undefined) {
+      this.countExpiring = steps.countExpiring;
+      this.listExpiring = steps.listExpiring;
+      this.applyExpiry = steps.applyExpiry;
+    }
     this.#innerCopies = copiesBodies(inner);
     // A codec that copies keeps no body it is handed and reads each into a new buffer; one that does
     // not passes bodies straight through, so this store copies when the one underneath does.

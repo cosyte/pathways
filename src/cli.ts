@@ -572,7 +572,14 @@ async function openWrapped(
   context: OpenStoreContext & { readonly secrets: Secrets },
   io: CliIo,
   command?: string,
-): Promise<{ readonly store: MessageStore; readonly encrypted: boolean } | number> {
+): Promise<
+  | {
+      readonly store: MessageStore;
+      readonly encrypted: boolean;
+      readonly keys: KeyProvider | undefined;
+    }
+  | number
+> {
   const keys = await keysOrExit(project, context, io);
   if (typeof keys === "number") return keys;
   const { storage } = project;
@@ -580,7 +587,8 @@ async function openWrapped(
     context.logger.warn({ event: "plaintext", endpoint: "storage" });
   }
   try {
-    return { store: await openStore(project, { ...context, keys }), encrypted: keys !== undefined };
+    const store = await openStore(project, { ...context, keys });
+    return { store, encrypted: keys !== undefined, keys };
   } catch (error) {
     return reportStoreError(error, io, command);
   }
@@ -695,6 +703,7 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
     env,
     secrets,
     audit,
+    keys: opened.keys,
     dryRun: mode.dryRun,
     ...(lease === undefined ? {} : { fence: lease }),
   });
@@ -1416,6 +1425,7 @@ async function operator(
       err: io.err,
       now: Date.now,
       env: context.env,
+      keys: (wrapped as { readonly keys?: KeyProvider | undefined }).keys,
     });
   } catch (error) {
     // A stored value that cannot be decrypted: never shown garbled. Fixed text and at most a key id.
