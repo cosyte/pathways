@@ -114,12 +114,14 @@
     "@types/better-sqlite3": "9.6.0",
     "@types/node": "^24.0.0",
     "@types/pg": "8.23.1",
+    "@types/ssh2": "1.15.6",
     "ajv": "8.17.1",
     "fast-check": "4.10.2",
     "hdr-histogram-js": "3.0.0",
     "mysql2": "3.24.6",
     "pg": "8.23.1",
     "simple-git-hooks": "2.14.0",
+    "ssh2": "1.17.0",
     "tarn": "3.1.2",
     "tedious": "20.3.8",
     "tsx": "4.23.15",
@@ -143,7 +145,8 @@
     "mysql2": "^3.0.0",
     "pg": "^8.0.0",
     "tarn": "^3.0.0",
-    "tedious": "^20.0.0"
+    "tedious": "^20.0.0",
+    "ssh2": "1.17.0"
   },
   "peerDependenciesMeta": {
     "mysql2": {
@@ -156,6 +159,9 @@
       "optional": true
     },
     "tedious": {
+      "optional": true
+    },
+    "ssh2": {
       "optional": true
     }
   },

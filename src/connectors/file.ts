@@ -5,7 +5,13 @@ import { createContext, Script } from "node:vm";
 import { DEFAULT_READ_TRIES, type PathPattern } from "../config/schema.js";
 import { faultPoint } from "../fault-points.js";
 import { copiesBodies, markCopiesBodies, release } from "../storage/ownership.js";
-import { type FileSystem, type Location, LocalFolder } from "./file-system.js";
+import {
+  type FileSystem,
+  inside,
+  isLocationDown,
+  type Location,
+  LocalFolder,
+} from "./file-system.js";
 import type {
   DestinationConnector,
   MessageSink,
@@ -226,6 +232,17 @@ function unsteady(): Error {
   });
 }
 
+/**
+ * Rethrows `error` when it says the location cannot be reached, so the pass ends there rather than
+ * count it against one file.
+ */
+function unlessDown(error: unknown): void {
+  if (isLocationDown(error)) throw error;
+}
+
+/** How long a source waits to try a location again when its sink gives no wait, in milliseconds. */
+const DOWN_WAIT_MS = 1_000;
+
 /** Options for a {@link FileSource}. */
 export interface FileSourceOptions {
   readonly dir: string;
@@ -350,6 +367,8 @@ export class FileSource implements SourceConnector {
   private refused = new Set<string>();
   /** Whether the folder's file system keeps a file's id when it moves, once a claim has asked. */
   private steady: boolean | undefined;
+  /** When the location was found down: the time to try it again, in epoch milliseconds. */
+  private down: number | undefined;
 
   /**
    * @param options The folder to read, the channel it is read for, how long a file must sit before
@@ -374,6 +393,30 @@ export class FileSource implements SourceConnector {
    * `sink`. A file is deleted (or moved into `processed/`) only once `sink` has stored it.
    */
   async poll(sink: MessageSink): Promise<void> {
+    const { now = Date.now } = this.options;
+    if (this.down !== undefined && now() < this.down) return;
+    try {
+      await this.pass(sink);
+    } catch (error) {
+      if (!isLocationDown(error)) throw error;
+      // A remote location that cannot be reached: the source is down, not the engine. The files
+      // stay where they are, and the next pass after the wait tries again.
+      this.down = now() + (sink.sourceDown?.(error.code) ?? DOWN_WAIT_MS);
+      return;
+    }
+    if (this.down !== undefined) {
+      this.down = undefined;
+      sink.sourceUp?.();
+    }
+  }
+
+  /** Closes the location's connection, where it has one. */
+  async stop(): Promise<void> {
+    await this.fs.close?.();
+  }
+
+  /** One pass of {@link FileSource.poll}. */
+  private async pass(sink: MessageSink): Promise<void> {
     const { fs } = this;
     const claims = fs.join(this.options.dir, CLAIMED_DIR, this.options.channel);
     await fs.mkdir(claims);
@@ -554,6 +597,7 @@ export class FileSource implements SourceConnector {
           try {
             await walk(path, `${rel}/`);
           } catch (error) {
+            unlessDown(error);
             onReadError?.(error);
           }
         } else if (entry.kind !== "file") {
@@ -622,6 +666,7 @@ export class FileSource implements SourceConnector {
       try {
         this.steady = await fs.keepsIds(fs.join(dir, CLAIMED_DIR));
       } catch (error) {
+        unlessDown(error);
         onReadError?.(error);
         return taken;
       }
@@ -650,6 +695,7 @@ export class FileSource implements SourceConnector {
         // opened to write too, as flushing it below needs, so a file that cannot be flushed stays.
         handle = await fs.open(file.path);
       } catch (error) {
+        unlessDown(error);
         onReadError?.(error);
         await this.unreadable(file, root);
         continue;
@@ -662,7 +708,7 @@ export class FileSource implements SourceConnector {
         id = stats.id;
         // The open file must be the one at its path, under dir with no link on the way: a folder
         // swapped for a link would otherwise lead the open and the move outside dir.
-        if (!(await fs.inside(file.path, root, id))) throw moved();
+        if (!(await inside(fs, file.path, root, id))) throw moved();
         // The open file's own size: a file that grew since it was found is held to maxSize too.
         grown = stats.size > maxSize;
         if (!grown) {
@@ -670,6 +716,7 @@ export class FileSource implements SourceConnector {
           await this.relocate(file.path, path, id);
         }
       } catch (error) {
+        unlessDown(error);
         onReadError?.(error);
         continue;
       } finally {
@@ -695,11 +742,12 @@ export class FileSource implements SourceConnector {
         const marker = fs.join(dir, `${file.rel}${doneFile}`);
         const found = await fs.stat(marker).catch(() => undefined);
         if (found === undefined) continue;
-        if (!(await fs.inside(marker, root, found.id))) continue;
+        if (!(await inside(fs, marker, root, found.id))) continue;
         const doomed = fs.join(dir, CLAIMED_DIR, `marker-${randomBytes(8).toString("hex")}`);
         try {
           await this.relocate(marker, doomed, found.id);
         } catch (error) {
+          unlessDown(error);
           onReadError?.(error);
           continue;
         }
@@ -744,9 +792,10 @@ export class FileSource implements SourceConnector {
         () => false,
       );
       if (taken) throw Object.assign(new Error("a file is already there"), { code: "EEXIST" });
-      if (!(await fs.inside(file.path, root, id))) throw moved();
+      if (!(await inside(fs, file.path, root, id))) throw moved();
       await this.relocate(file.path, target, id);
     } catch (error) {
+      unlessDown(error);
       onFileFault?.({ reason, moved: false, error });
       return;
     }
@@ -765,6 +814,7 @@ export class FileSource implements SourceConnector {
     try {
       body = await fs.read(file.path);
     } catch (error) {
+      unlessDown(error);
       onReadError?.(error);
       return;
     }
@@ -821,6 +871,11 @@ export class FileDestination implements DestinationConnector {
     this.options = options;
     // The file is written before `deliver` resolves, and the body is not kept.
     markCopiesBodies(this);
+  }
+
+  /** Closes the location's connection, where it has one. */
+  async stop(): Promise<void> {
+    await this.options.location?.close?.();
   }
 
   /** Writes one output as a file. */

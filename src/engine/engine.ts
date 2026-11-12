@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { readFileSync, statSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 import { setTimeout as sleep } from "node:timers/promises";
 
@@ -13,6 +14,7 @@ import {
   type Format,
   type ProjectConfig,
   type RetryPolicy,
+  type SftpConfig,
   type TransformConfigBlock,
 } from "../config/schema.js";
 import { resolveTransformConfig } from "../config/transform-config.js";
@@ -23,6 +25,8 @@ import {
   type Env,
 } from "../connectors/endpoint.js";
 import { FileDestination, FileSource } from "../connectors/file.js";
+import { KnownHosts, pinnedKey } from "../connectors/known-hosts.js";
+import { SftpLocation } from "../connectors/sftp.js";
 import { HttpDestination, HttpSource } from "../connectors/http.js";
 import { RedirectHeld, RetryableError } from "../connectors/http-core.js";
 import { MllpDestination, MllpSource } from "../connectors/mllp.js";
@@ -39,7 +43,7 @@ import type { LifecycleEvent } from "../extensions/events.js";
 import { HookSet } from "../extensions/hooks.js";
 import type { ChannelContext } from "../extensions/types.js";
 import { AuditLog, auditEvent } from "../operator/audit.js";
-import { resolveSecrets, type Secrets } from "../secrets/resolve.js";
+import { resolveSecrets, type Secrets, secretsOf } from "../secrets/resolve.js";
 import { recordRetention, runRetention, type RetentionReport } from "../operator/retention.js";
 import { copiesBodies, markCopiesBodies, release } from "../storage/ownership.js";
 import {
@@ -363,6 +367,11 @@ export async function connectorsFor(
         ...source,
         channel: channel.name,
         now,
+        ...(source.sftp === undefined
+          ? {}
+          : {
+              location: sftpLocation(source.sftp, secretsOf(secrets), `${file}: source.file.sftp`),
+            }),
         onReadError: (error) => {
           logger.warn({
             event: "source-read-failed",
@@ -455,7 +464,19 @@ export async function connectorsFor(
     switch (destination.kind) {
       case "file":
         destinations.push(
-          new FileDestination({ dir: destination.dir, extension: EXTENSIONS[channel.format] }),
+          new FileDestination({
+            dir: destination.dir,
+            extension: EXTENSIONS[channel.format],
+            ...(destination.sftp === undefined
+              ? {}
+              : {
+                  location: sftpLocation(
+                    destination.sftp,
+                    secretsOf(secrets),
+                    `${file}: destinations.${index}.file.sftp`,
+                  ),
+                }),
+          }),
         );
         break;
       case "http": {
@@ -2290,4 +2311,77 @@ function errorName(error: unknown): string {
 /** A key's SHA-256 in hex, as storage keeps it, or undefined when there is no key. */
 function hashed(key: string | undefined): string | undefined {
   return key === undefined ? undefined : createHash("sha256").update(key).digest("hex");
+}
+
+/**
+ * The location an `sftp:` block names: its key and passphrase read through `secrets`, and its host
+ * key check from its known hosts file or its one key, read now. `where` names the block.
+ *
+ * @throws {ConfigError} when the key cannot be read, its file can be read by its group or others,
+ *   the known hosts file cannot be read or holds no entry, or `hostKey` is not a key.
+ */
+function sftpLocation(sftp: SftpConfig, secrets: Secrets, where: string): SftpLocation {
+  if ("file" in sftp.key) keyFileClosed(sftp.key.file, `${where}.key`);
+  const privateKey = secrets.read(sftp.key, `${where}.key`);
+  const passphrase =
+    sftp.passphrase === undefined
+      ? undefined
+      : secrets.read(sftp.passphrase, `${where}.passphrase`);
+  let verifyHost: (host: string, port: number, key: Uint8Array) => void;
+  if (sftp.knownHosts === undefined) {
+    try {
+      verifyHost = pinnedKey(String(sftp.hostKey));
+    } catch {
+      throw new ConfigError([
+        `${where}.hostKey: neither a public key (keytype base64) nor a SHA256: fingerprint`,
+      ]);
+    }
+  } else {
+    let known: KnownHosts;
+    try {
+      known = KnownHosts.parse(readFileSync(sftp.knownHosts, "utf8"));
+    } catch (error) {
+      throw new ConfigError([
+        `${where}.knownHosts: the file could not be read (${errorCode(error) ?? "unknown"})`,
+      ]);
+    }
+    if (known.size === 0) {
+      throw new ConfigError([`${where}.knownHosts: the file holds no host key`]);
+    }
+    verifyHost = (host, port, key) => {
+      known.check(host, port, key);
+    };
+  }
+  return new SftpLocation({
+    host: sftp.host,
+    port: sftp.port,
+    user: sftp.user,
+    privateKey,
+    passphrase,
+    verifyHost,
+    weakAlgorithms: sftp.weakAlgorithms,
+    ...(sftp.connectTimeoutMs === undefined ? {} : { connectTimeoutMs: sftp.connectTimeoutMs }),
+    ...(sftp.timeoutMs === undefined ? {} : { timeoutMs: sftp.timeoutMs }),
+    ...(sftp.keepaliveMs === undefined ? {} : { keepaliveMs: sftp.keepaliveMs }),
+  });
+}
+
+/**
+ * Refuses a private key file its group or others can read or write, as ssh(1) does: on Linux and
+ * macOS. Windows keeps no such mode bits, so there the check is the folder's own access control.
+ */
+function keyFileClosed(path: string, where: string): void {
+  if (process.platform === "win32") return;
+  let mode: number;
+  try {
+    mode = statSync(path).mode;
+  } catch {
+    // Said by the secret's own read, with its code.
+    return;
+  }
+  if ((mode & 0o077) !== 0) {
+    throw new ConfigError([
+      `${where}: the key file can be read by its group or others; chmod 600 it`,
+    ]);
+  }
 }

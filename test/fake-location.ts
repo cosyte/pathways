@@ -80,6 +80,8 @@ export class FakeLocation implements Location {
     return file;
   }
 
+  readonly sep = "/";
+
   join(...parts: string[]): string {
     return posix.join(...parts);
   }
@@ -170,11 +172,6 @@ export class FakeLocation implements Location {
         Promise.resolve({ size: file.body.byteLength, mtimeMs: file.mtimeMs, id: file.id }),
       close: () => Promise.resolve(),
     };
-  }
-
-  async inside(path: string, root: string, id: string): Promise<boolean> {
-    await this.step("inside", path);
-    return path.startsWith(`${root}/`) && this.files.get(path)?.id === id;
   }
 
   async restore(from: string, to: string): Promise<void> {

@@ -654,8 +654,8 @@ destinations:
 
   it("take a reference at every key that holds one value, but the documented exceptions", () => {
     // configuration-reference.md, "Settings from the environment": plaintext, a channel's name and
-    // format, the header names an HTTP source hands a transform, and a channel's index: entries,
-    // are never read from the environment (encryption: none and auth: none are the short form of a
+    // format, the header names an HTTP source hands a transform, a channel's index: entries, and
+    // the SHA-1 algorithms an SFTP block turns back on, are never read from the environment (encryption: none and auth: none are the short form of a
     // block, and blocks are not scalars, so the walk passes over them). Matched by the whole path,
     // so a new key that only shares one of these names is still checked.
     const EXCEPTIONS: readonly string[] = [
@@ -675,6 +675,8 @@ destinations:
       "channel.yaml.hooks.[].webhook.plaintext",
       "channel.yaml.index.[].key",
       "channel.yaml.index.[].bits",
+      "channel.yaml.source.file.sftp.weakAlgorithms.[]",
+      "channel.yaml.destinations.[].file.sftp.weakAlgorithms.[]",
     ];
     type Node = Record<string, unknown>;
     const isNode = (value: unknown): value is Node =>

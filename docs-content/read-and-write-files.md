@@ -87,7 +87,7 @@ polling one location at once store each file once.
 | Location                 | Claim rule                                                                                                                       | Status          |
 | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------- | --------------- |
 | A folder on this machine | Rename to a unique claim name, checked after the move by the file's id; the moves are flushed to disk before anything is stored. | Available       |
-| SFTP                     | Rename to a unique claim name. A rename that finds the file gone means another engine claimed it first.                          | Planned         |
+| SFTP                     | Rename to a unique claim name. A rename that finds the file gone means another engine claimed it first.                          | Available       |
 | FTPS and WebDAV          | Decided with their support.                                                                                                      | Planned         |
 | S3 and Azure Blob        | An object store cannot rename an object, so the claim is not a rename. Decided with their support.                               | Planned         |
 | SMB                      | Not decided yet.                                                                                                                 | Not planned yet |
@@ -240,6 +240,129 @@ on an `hl7v2` channel is `12-1.hl7`. The extension comes from the channel's form
 The destination writes to a hidden temporary name and renames it, so a reader of the folder never sees
 half a file. Any failure to write (a full disk, a folder it may not write to) is retried, with the
 destination's later outputs waiting behind it, until it succeeds.
+
+## Read and write over SFTP
+
+A file source or destination reads or writes a folder on an SFTP server when its block has `sftp:`.
+Everything above holds there too: the claim folder, the order, the options and the recovery after a
+stop. Pathways runs SFTP on the `ssh2` package, which a project installs itself, at the one version
+Pathways is tested with:
+
+```sh
+npm install --save-exact --ignore-scripts ssh2@1.17.0
+```
+
+`--ignore-scripts` keeps the install pure JavaScript: `ssh2` has two optional native add-ons, a crypto
+binding its install script compiles and `cpu-features`, which only orders its default ciphers. Without
+them it runs the same, and nothing is compiled on the machine. With pnpm, list both `cpu-features`
+and `nan` under `ignoredOptionalDependencies` instead, as this repository does.
+
+```yaml title="channels/lab-results/channel.yaml"
+source:
+  file:
+    dir: /outbound/results
+    minAge: 5s
+    sftp:
+      host: sftp.lab.example.test
+      user: pathways
+      key: { file: ../../secrets/lab-sftp-key }
+      knownHosts: ../../secrets/known_hosts
+destinations:
+  - file:
+      dir: /inbound/orders
+      sftp:
+        host: sftp.lab.example.test
+        user: pathways
+        key: { secret: { provider: vault, name: lab/sftp-key } }
+        hostKey: SHA256:CFY8XaC1J5xaY6jNX8es0DZ6xbstXn97aJTKHEVBVIc
+```
+
+- **`dir`** (and a source's `errorDir`) is an absolute path on the server.
+- **`key`** is the private key to log in with, read at start as every secret is: `{ env: NAME }`,
+  `{ file: path }` or `{ secret: { provider, name } }`, never written in the YAML. A key file its
+  group or others can read is refused, as `ssh` refuses one; `chmod 600` it. A key with a passphrase
+  takes `passphrase:`, read the same way. Pathways never logs a key or a passphrase, nor puts one in
+  an error.
+- **`knownHosts` or `hostKey`, exactly one.** The server's key is always checked, and there is no
+  setting that skips the check. `knownHosts` is a file in OpenSSH's `known_hosts` format, relative to
+  the channel's folder: plain or hashed (`ssh-keygen -H`) names, `[host]:port` for a port other than
+  22, `*` and `?` wildcards, `!` to leave a name out, and `@revoked` lines. `hostKey` is the one key:
+  the server's public key as its `.pub` file holds it (`ssh-ed25519 AAAA...`), or its fingerprint as
+  `ssh-keygen -l` prints it (`SHA256:...`). A key the file does not hold is refused as
+  `ERR_PATHWAYS_SFTP_HOST_KEY_UNKNOWN`; one that differs from the key the file holds for that host as
+  `ERR_PATHWAYS_SFTP_HOST_KEY_CHANGED`; a key on an `@revoked` line, for any host, as
+  `ERR_PATHWAYS_SFTP_HOST_KEY_REVOKED`. The error names the host and the key's SHA256 fingerprint,
+  never the key. `@cert-authority` lines are read and never accept a key, since Pathways takes no
+  host certificates.
+- **`port`** is 22 by default.
+
+### What the server must have
+
+The claim is a rename in one step, so the server must offer OpenSSH's `posix-rename@openssh.com`;
+one that does not is refused at connect with `ERR_PATHWAYS_SFTP_NO_POSIX_RENAME`. OpenSSH's server
+has it, and also these two, which Pathways uses where the server names them in its first answer:
+
+- `hardlink@openssh.com`: a file a claim's check refused goes back to its folder by a second name,
+  which never replaces a file there. Without it, a plain SFTP rename does the same, since the
+  protocol says that rename fails when the name is taken.
+- `fsync@openssh.com`: each claimed file is flushed to the server's disk, under its new name, before
+  anything is stored, and each written file before it is renamed into place. SFTP has no way to flush
+  a folder, so a power cut on the server before its own disk catches up can undo a claim, and a file
+  stored just before can be stored again. Without the extension nothing is flushed.
+
+SFTP gives no inode, so the source tells one file from another by its mode, owner, group, size and
+change time together, and an SFTP open follows a link, so the source reads a file's own entry first,
+refuses a link, and checks after the open that the open file is that entry. A file being written when
+the source finds it changes size, so its claim is refused that pass and taken on a later one.
+
+### Deadlines, keepalives and a server that goes down
+
+| Key              | Default | Meaning                                                                       |
+| ---------------- | ------- | ----------------------------------------------------------------------------- |
+| `connectTimeout` | `20s`   | the connection, key exchange and login together                               |
+| `timeout`        | `30s`   | one request: a listing, a stat, or one read or write of a transfer            |
+| `keepalive`      | `15s`   | how often a keepalive is sent while connected; three unanswered drop the link |
+
+A request past its deadline drops the connection, and a connection that drops fails every request in
+flight: a pass never hangs on a silent server. The next request connects again. After each transfer
+the bytes read or written are checked against the file's size, and a difference fails it
+(`ERR_PATHWAYS_SFTP_SIZE_MISMATCH`), so a short read is never stored and a short write is never
+renamed into place.
+
+When the server cannot be reached, the source's pass ends with every file where it was, and the
+channel's source shows `down` on the health endpoint with the code (`ECONNREFUSED`,
+`ERR_PATHWAYS_SFTP_TIMEOUT`, `ERR_PATHWAYS_SFTP_CONNECTION_LOST`, `ERR_PATHWAYS_SFTP_AUTH` or a host
+key code), the engine logs `source-lost`, and the hooks get `source-down`. The source tries again
+after 1 second, doubling to 5 minutes, and once a pass runs it is `up` again. A destination that
+cannot reach its server fails the delivery, which is retried as any delivery is.
+
+### Algorithms
+
+`ssh2` offers modern algorithms first, and by default also `ssh-rsa` host key signatures and the
+`hmac-sha1` MACs, which rest on SHA-1. `ssh-rsa` signs with SHA-1, for which chosen-prefix
+collisions are practical, so a server's signature over it is weaker evidence that the key is the
+server's; OpenSSH stopped offering it by default in its 8.8 release. `hmac-sha1` is not known to be
+broken, but rests on the same retired hash. Pathways leaves all three out, and a server that offers
+nothing else is refused. For an old server that needs one, name it:
+
+```yaml title="channels/old-lab/channel.yaml"
+source:
+  file:
+    dir: /outbound
+    sftp:
+      host: old-sftp.example.test
+      user: pathways
+      key: { env: OLD_LAB_SFTP_KEY }
+      knownHosts: known_hosts
+      weakAlgorithms: [ssh-rsa, hmac-sha1]
+destinations:
+  - file: { dir: ../../data/old-lab/out }
+```
+
+`weakAlgorithms` takes `ssh-rsa`, `hmac-sha1` and `hmac-sha1-etm@openssh.com`, and nothing weaker:
+`ssh-dss`, MD5 MACs, SHA-1 key exchanges and CBC or RC4 ciphers are never offered. Ask the server's
+owner for an Ed25519 or ECDSA host key, or RSA with SHA-2 signatures, and drop the setting once they
+move.
 
 ## Related
 

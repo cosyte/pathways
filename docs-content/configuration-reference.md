@@ -75,7 +75,8 @@ health:
   file, where the audit sees it. Nor are the names in an HTTP source's `contextHeaders`: which
   request headers reach a transform stays in the file, where a credential header is refused at load.
   Nor is a channel's `index:` block: which `ctx.meta` keys are stored as searchable tags, and how
-  many bits each keeps, stays in the file, where the audit sees it.
+  many bits each keeps, stays in the file, where the audit sees it. Nor is an SFTP block's
+  `weakAlgorithms`: turning a SHA-1 algorithm back on stays in the file too.
 - `pathways validate --print` prints the configuration as `start` reads it, with every setting the
   environment gave and the variable it named; see
   [Command reference](./command-reference.md#pathways-validate). The query string of a URL read
@@ -356,6 +357,7 @@ error's code when it has one, rather than as an expression of the wrong shape.
 | `doneFile`      | a suffix, such as `.done`      | none       | take a file only once its marker is there, then delete the marker    |
 | `errorDir`      | path                           | none       | where a file set aside goes, under its path from `dir`               |
 | `readTries`     | a whole number, 1 or more      | `3`        | passes in a row a file fails to open before it goes into `errorDir`  |
+| `sftp`          | an [SFTP block](#sftp-block)   | none       | read `dir` on an SFTP server; `dir` and `errorDir` are its paths     |
 
 A path from `dir` is written with `/` on every system. A glob is read as Node.js's
 `path.matchesGlob` reads it, and its `*` never matches a leading dot. A `regex` is at most 256
@@ -461,7 +463,30 @@ receiver should drop a copy by that pair. See
 
 #### File destination
 
-`file: { dir: path }`: the folder to write into, created if missing.
+`file: { dir: path }`: the folder to write into, created if missing. With an
+[SFTP block](#sftp-block), `file: { dir, sftp }` writes into `dir` on the server, an absolute path
+there.
+
+#### SFTP block
+
+A file source's or destination's `sftp:`. Exactly one of `knownHosts` and `hostKey`: the server's
+key is always checked.
+
+| Key              | Type                                                  | Default  |
+| ---------------- | ----------------------------------------------------- | -------- |
+| `host`           | host name or address                                  | required |
+| `port`           | 1 to 65535                                            | `22`     |
+| `user`           | the user to log in as                                 | required |
+| `key`            | a [secret](#secrets): the private key                 | required |
+| `passphrase`     | a [secret](#secrets): the key's passphrase            | none     |
+| `knownHosts`     | path to a `known_hosts` file                          | none     |
+| `hostKey`        | the server's public key, or its `SHA256:` fingerprint | none     |
+| `weakAlgorithms` | `ssh-rsa`, `hmac-sha1`, `hmac-sha1-etm@openssh.com`   | none     |
+| `connectTimeout` | duration                                              | `20s`    |
+| `timeout`        | duration, for one request                             | `30s`    |
+| `keepalive`      | duration                                              | `15s`    |
+
+[Read and write over SFTP](./read-and-write-files.md#read-and-write-over-sftp) says what each does.
 
 #### HTTP destination
 

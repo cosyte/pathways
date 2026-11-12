@@ -65,6 +65,8 @@ export interface OpenFile {
  */
 export interface FileSystem {
   readonly capabilities: FileCapabilities;
+  /** The character between the parts of a path, as the location writes paths. */
+  readonly sep: string;
   /** `parts` joined into one path, as the location writes paths. */
   join(...parts: string[]): string;
   /** The folder that holds `path`. */
@@ -83,6 +85,8 @@ export interface FileSystem {
   remove(path: string): Promise<void>;
   /** Makes `path` and each folder above it that is missing. */
   mkdir(path: string): Promise<void>;
+  /** Ends the location's connection, where it has one; the next operation connects again. */
+  close?(): Promise<void>;
 }
 
 /**
@@ -96,14 +100,20 @@ export interface ClaimRule {
    * each move compares ids, so where they change no claim is made. Asked once, before the first claim.
    */
   keepsIds(folder: string): Promise<boolean>;
-  /** `dir` as every check holds a path to: with each link on the way resolved. */
+  /**
+   * `dir` as every check holds a path to: with each link on the way resolved. {@link inside} reads
+   * the folder of each file it checks through this too.
+   */
   root(dir: string): Promise<string>;
   /** `path` as {@link ClaimRule.root} gives it, or as written when it is not there. */
   canonical(path: string): Promise<string>;
-  /** Opens `path` to read it, and to write it too where {@link ClaimRule.durable} must. */
+  /**
+   * Opens `path` to read it, and to write it too where {@link ClaimRule.durable} must. Never through
+   * a link in the last part of `path`: a link there is refused, not followed, whatever it points to.
+   * A location whose protocol cannot refuse one when it opens (SFTP) reads the path's own entry
+   * first, refuses a link, and checks after the open that the open file is that entry.
+   */
   open(path: string): Promise<OpenFile>;
-  /** Whether `path` is in `root` or below it, with no link on the way, and is still the file `id`. */
-  inside(path: string, root: string, id: string): Promise<boolean>;
   /** Puts the file at `from` back at `to` without replacing a file there; fails if one is. */
   restore(from: string, to: string): Promise<void>;
   /**
@@ -115,6 +125,71 @@ export interface ClaimRule {
 
 /** A location a file source can claim from: its file system and its claim rule. */
 export interface Location extends FileSystem, ClaimRule {}
+
+/**
+ * An error that says a location cannot be reached at all (a remote server down, a connection lost or
+ * too slow), rather than that one file failed. It carries `down: true`. A file source ends its pass
+ * on one, says the source is down, and tries again later; it never counts one against a file.
+ */
+export interface LocationDownError extends Error {
+  readonly code: string;
+  readonly down: true;
+}
+
+/**
+ * Whether `error` is a {@link LocationDownError}.
+ *
+ * @example
+ * ```ts
+ * if (isLocationDown(error)) sink.sourceDown?.(error.code);
+ * ```
+ */
+export function isLocationDown(error: unknown): error is LocationDownError {
+  return (error as { down?: unknown } | undefined)?.down === true;
+}
+
+/**
+ * Whether `path`, as `location` writes paths, is `root` itself or a path below it. Lexical: it reads
+ * nothing, so the caller hands it paths with every link already resolved.
+ *
+ * @example
+ * ```ts
+ * within(new LocalFolder(), "/srv/inbox/a", "/srv/inbox"); // true
+ * ```
+ */
+export function within(location: FileSystem, path: string, root: string): boolean {
+  return path === root || path.startsWith(location.join(root, location.sep));
+}
+
+/**
+ * The check every claim, move and set-aside runs before it touches a file, on every kind of location:
+ * whether `path`'s folder, with each link on the way resolved by the location, is `root` or under
+ * it, and `path` itself, read without following a link, is still the file `id` names. A link in the
+ * last part is refused when the file is opened, so a folder on the way swapped for a link since the
+ * pass found the file is caught here. Any failure to read either answers false.
+ *
+ * It is here, not in each location, so a location cannot leave it out: each one only resolves a
+ * folder ({@link ClaimRule.root}) and reads a file's id ({@link FileSystem.stat}).
+ *
+ * @example
+ * ```ts
+ * if (!(await inside(location, file.path, root, id))) throw moved();
+ * ```
+ */
+export async function inside(
+  location: Location,
+  path: string,
+  root: string,
+  id: string,
+): Promise<boolean> {
+  try {
+    const folder = await location.root(location.dirname(path));
+    if (!within(location, folder, root)) return false;
+    return (await location.stat(path)).id === id;
+  } catch {
+    return false;
+  }
+}
 
 /** A local file's device and inode as one id. */
 function localId(stats: { readonly dev: bigint; readonly ino: bigint }): string {
@@ -170,6 +245,9 @@ export class LocalFolder implements Location {
     noClobberRename: false,
     listingConsistent: true,
   };
+
+  /** This platform's separator. */
+  readonly sep: string = sep;
 
   /** `parts` joined with this platform's separator. */
   join(...parts: string[]): string {
@@ -266,21 +344,6 @@ export class LocalFolder implements Location {
       stat: async () => localStat(await handle.stat({ bigint: true })),
       close: () => handle.close(),
     };
-  }
-
-  /**
-   * Whether `path`'s folder, with each link on the way resolved, is `root` or under it, and `path` is
-   * still the file `id` names. `O_NOFOLLOW` refuses a link only in a path's last part, so a folder on
-   * the way swapped for a link since the pass found the file is caught here.
-   */
-  async inside(path: string, root: string, id: string): Promise<boolean> {
-    try {
-      const folder = await realpath(dirname(path));
-      if (folder !== root && !folder.startsWith(join(root, sep))) return false;
-      return localId(await lstat(path, { bigint: true })) === id;
-    } catch {
-      return false;
-    }
   }
 
   /** A hard link, never a rename, which would replace a file put at `to` since. */

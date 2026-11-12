@@ -6,6 +6,7 @@ import type {
   HookConfig,
   ProjectConfig,
   SecretSource,
+  SftpConfig,
 } from "../config/schema.js";
 
 // Where a project reads its secrets: each reference, by the file and key that wrote it. The loader
@@ -121,14 +122,28 @@ function channelUses(channel: ChannelConfig, skipDry: DrySkip | undefined): Secr
       uses.push(...headerUses(source.response.headers, `${file}: source.http.response`));
     }
   }
+  if (source.kind === "file") uses.push(...sftpUses(source.sftp, `${file}: source.file.sftp`));
   for (const [index, destination] of channel.destinations.entries()) {
     // A destination that runs dry builds no connector, so its secrets are never needed.
     const dry = skipDry === "all" || (skipDry === "each" && destination.dryRun === true);
     if (destination.kind === "http" && !dry) {
       uses.push(...headerUses(destination.headers, `${file}: destinations.${index}.http`));
     }
+    if (destination.kind === "file" && !dry) {
+      uses.push(...sftpUses(destination.sftp, `${file}: destinations.${index}.file.sftp`));
+    }
   }
   uses.push(...hookUses(channel.hooks, file));
+  return uses;
+}
+
+/** An `sftp:` block's private key and passphrase, when the block is there. */
+function sftpUses(sftp: SftpConfig | undefined, where: string): SecretUse[] {
+  if (sftp === undefined) return [];
+  const uses: SecretUse[] = [{ source: sftp.key, where: `${where}.key` }];
+  if (sftp.passphrase !== undefined) {
+    uses.push({ source: sftp.passphrase, where: `${where}.passphrase` });
+  }
   return uses;
 }
 
