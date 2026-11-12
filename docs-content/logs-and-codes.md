@@ -371,11 +371,21 @@ How each way of writing behaves:
   `channel-script` events. A transform itself receives no logger. A code is still words you
   choose: `testpatient-alpha` is a valid code and is logged as written, and a record number passed
   as a number (`{ mrn: 12345 }`) is kept. So never build a code or an id from the message.
-- **`console`**, in a transform or a script, writes to the standard output of the process it runs
-  in: beside the engine's JSON lines under `pathways start`, and in the command's output under
-  `pathways test`, `pathways replay` and `pathways verify`. It is not filtered.
-- **A thrown error** fails the message. The log, `pathways messages show` and `pathways test` give
-  its stage, name, code and place, never its text. Where the text goes depends on the channel:
+- **`console`**, in a transform or a script, writes to the process it runs in: `console.log` and
+  `console.info` to standard output, beside the engine's JSON lines under `pathways start` and in
+  the command's output under `pathways test`, `pathways replay` and `pathways verify`;
+  `console.error` and `console.warn` to standard error. It is not filtered.
+- **An error thrown from a destination connector's send** (a custom connector's `deliver`) does not
+  fail the message: the delivery is retried, as for a network error (see
+  [order and retries](./delivery-and-errors.md#order-and-retries-per-destination)), for as long as
+  it takes unless the destination sets a `retry.limit` or `retry.maxAge`. Only the error's `code` is
+  stored with the delivery and logged (`delivery: ECONNRESET`, or `delivery: error` when it has
+  none), never its text. A
+  `DeliveryRejected` fails the delivery for good, and its reason is stored and logged as given, so
+  give it a code.
+- **An error thrown from a transform** fails the message. The log, `pathways messages show` and
+  `pathways test` give its stage, name, code and place, never its text. Where the text goes depends
+  on the channel:
   - A channel that stores its messages keeps the text stored with the message, encrypted when the
     store is encrypted. Anyone who reads the database with the keys reads it.
   - With `encryption: none`, the text is stored in the clear: anyone who can read the database reads

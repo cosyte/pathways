@@ -111,11 +111,13 @@ What ends a read that hangs depends on the database, since Pathways sets no quer
   `pathways_deliveries_failed` and `pathways_messages_failed` are read from the database (at most
   once every 5 seconds), so they survive a restart, and every node on the same database reports the same values.
   Take `max` over nodes, never `sum`.
-- **The oldest pending age counts from the message's last update.**
-  `pathways_oldest_pending_age_seconds` counts from when the oldest pending delivery's message was
-  transformed, replayed or resent, or had a failed delivery cleared, whichever came last. Clearing a
-  message's failed delivery to one destination restarts the age of its deliveries still pending at
-  the others.
+- **The oldest pending age counts from when the delivery was queued.**
+  `pathways_oldest_pending_age_seconds` counts from when the oldest pending delivery was queued: the
+  transform, replay or resend that made it. Each delivery keeps that time (schema step
+  `0017-delivery-queued-at`), so a retry, a failure, or an operator clearing a failed delivery of the
+  same message to another destination never restarts it. A delivery queued before that step, or by
+  an older Pathways on the same database, has no time of its own and counts from its message's last
+  update, as every delivery did before.
 - **A standby serves no gauges.** Until it takes the engine lease, a standby
   (`pathways start --standby`) serves its counters, all 0, and nothing else.
 - **Labels are bounded.** Each series is labelled by `channel`, `destination` (the destination's

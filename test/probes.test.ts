@@ -575,6 +575,83 @@ describe("the engine's liveness and readiness", () => {
   });
 });
 
+describe("the health body on a database that hangs", () => {
+  /** A store whose health reads hang until let go, counting each read it is asked for. */
+  function hangingStore(): { store: MessageStore; reads: () => number; letGo: () => void } {
+    let reads = 0;
+    let release: () => void = () => undefined;
+    const hung = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const hang = <T>(value: T) => {
+      reads += 1;
+      return hung.then(() => value);
+    };
+    const store = {
+      messageCounts: () =>
+        hang({ received: 0, transformed: 0, filtered: 0, failed: 0, cleared: 0 }),
+      deliveryCounts: () => hang({ pending: 0, delivered: 0, failed: 0, filtered: 0, cleared: 0 }),
+      retryingDeliveries: () => hang(0),
+    } as unknown as MessageStore;
+    return { store, reads: () => reads, letGo: () => release() };
+  }
+
+  const UNREACHABLE = {
+    status: "unavailable",
+    storage: "unreachable",
+    channels: { adt: { status: "unknown", source: "up", state: "running" } },
+  };
+
+  it("answers storage unreachable within 5 seconds, as readiness does, never a request that hangs", async () => {
+    const loaded = await loadProject(await project(""));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { store } = hangingStore();
+    const { logger } = captureLogger();
+    const engine = new Engine({ project: loaded, store, logger });
+    let answered = false;
+    const health = engine.health().finally(() => {
+      answered = true;
+    });
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(answered).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await health).toEqual(UNREACHABLE);
+  });
+
+  it("starts no new reads while a set that timed out still hangs, shares one younger than 5 seconds, and reads again once it ends", async () => {
+    const loaded = await loadProject(await project(""));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { store, reads, letGo } = hangingStore();
+    const { logger } = captureLogger();
+    const clock = { now: 0 };
+    const engine = new Engine({ project: loaded, store, logger, monotonic: () => clock.now });
+    const first = engine.health();
+    await vi.advanceTimersByTimeAsync(2_000);
+    clock.now += 2_000;
+    // A second request 2 seconds in shares the set in flight, and its answer.
+    const shared = engine.health();
+    await vi.advanceTimersByTimeAsync(3_000);
+    clock.now += 3_000;
+    expect(await first).toEqual(UNREACHABLE);
+    expect(await shared).toEqual(UNREACHABLE);
+    expect(reads()).toBe(3);
+    // Past the timeout, the reads still hang: unreachable at once, and no new reads.
+    let answered = false;
+    const later = engine.health().finally(() => {
+      answered = true;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(answered).toBe(true);
+    expect(await later).toEqual(UNREACHABLE);
+    expect(reads()).toBe(3);
+    // They end: the next request reads afresh.
+    letGo();
+    await vi.advanceTimersByTimeAsync(0);
+    expect((await engine.health()).storage).toBe("ok");
+    expect(reads()).toBe(6);
+  });
+});
+
 describe("pathways start with probes", () => {
   it("answers live while a source cannot listen, not ready, and says who it is in the health body", async () => {
     await onPickedPorts(2, async ([probePort = 0, healthPort = 0]) => {

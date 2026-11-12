@@ -455,6 +455,13 @@ The latest attempt found cut off, when one was.
 
 Epoch milliseconds before which it was not to be tried again; 0 when due at once.
 
+##### queuedAt?
+
+> `readonly` `optional` **queuedAt?**: `string` \| `null`
+
+When it was queued, when the store recorded it: null for a delivery queued before schema step
+`0017-delivery-queued-at`, and absent from an archive written before it.
+
 ##### sendingAt
 
 > `readonly` **sendingAt**: `number` \| `null`
@@ -2008,7 +2015,9 @@ Its deliveries that failed for good and are not cleared.
 > `readonly` **oldestPendingSince**: `string` \| `undefined`
 
 When the oldest of its pending deliveries was queued (its message transformed, replayed or
-resent, as the message's last update), ISO 8601 in UTC; undefined when none is pending.
+resent), ISO 8601 in UTC; undefined when none is pending. A retry, a failure or a clear never
+moves it. A delivery queued before schema step `0017-delivery-queued-at`, or by an older
+Pathways, has no queue time of its own and counts from its message's last update.
 
 ##### pending
 
@@ -6362,6 +6371,13 @@ When it failed for good; unset on a store that does not record it.
 ##### nextAttemptAt
 
 > `readonly` **nextAttemptAt**: `number`
+
+##### queuedAt?
+
+> `readonly` `optional` **queuedAt?**: `string` \| `null`
+
+When it was queued; null for one queued before schema step `0017-delivery-queued-at`, unset on
+a store that does not record it.
 
 ##### sendingAt
 

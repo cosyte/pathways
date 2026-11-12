@@ -83,12 +83,20 @@ engine lease's epoch while it holds it, else `null`; and `draining`, `true` once
 and is closing its sources.
 
 The answer is 503, with `status: "unavailable"`, only when the engine itself is broken: the database
-cannot be read (`storage: "unreachable"`, and each channel's status `unknown`), a channel's transform
+cannot be read (`storage: "unreachable"`, and each channel's status `unknown`, with no `messages` or
+`deliveries`), a channel's transform
 would not load in a replacement worker (below), or a source is down
 (its `source: "down"`): it cannot listen, and the engine keeps trying it, or it said it lost its
 connection (a broker, a remote server or a socket it dialled), until it says it has it again. A destination that is down shows as a
 channel `retrying`, and the answer stays 200, because restarting the engine would not bring the
 destination back. Point a restart policy at the status code, and an alert at the channels.
+
+A database that hangs, neither answering nor failing, counts as unreachable once its reads have not
+all answered in 5 seconds, as readiness counts it: the body then answers 503 with
+`storage: "unreachable"` rather than waiting on the database. Those reads are left running, and while
+any of them has not ended no new set starts: a request in their first 5 seconds shares their answer,
+and a later one answers `storage: "unreachable"` at once, so a hung database holds one set of reads,
+not one per request.
 
 A channel whose source is MLLP or tcp also has `connections`, with `refused`: how many connections the
 source closed at accept since the engine started, because it already held its `maxConnections`. A

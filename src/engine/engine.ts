@@ -84,11 +84,13 @@ import {
   channelStateStore,
   type AuditAction,
   type ChannelRunState,
+  type DeliveryTally,
   type DestinationQueue,
   type DestinationOutcome,
   type HandOff,
   type HandOffFrom,
   type HandOffResult,
+  type MessageStatus,
   type MessageStore,
   type PendingDelivery,
   type ReceivedMessage,
@@ -251,6 +253,31 @@ const STORAGE_CHECK_TIMEOUT_MS = 5_000;
 
 /** {@link METRICS_STORE_TIMEOUT_MS} in seconds: the least a set of store reads that timed out took. */
 const METRICS_TIMEOUT_SECONDS = METRICS_STORE_TIMEOUT_MS / 1000;
+
+/**
+ * How long the health body waits for its store reads: as long as the readiness check. Reads that
+ * neither answer nor fail in that time leave the body saying storage is unreachable.
+ */
+const HEALTH_STORE_TIMEOUT_MS = STORAGE_CHECK_TIMEOUT_MS;
+
+/**
+ * `read`'s answer, or `late()`'s once `ms` have passed without one. The read is left running; the
+ * timer is cleared when it settles and never holds the process open.
+ */
+function raceTimeout<T>(read: Promise<T>, ms: number, late: () => T): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timedOut = new Promise<T>((resolve) => {
+    timer = setTimeout(() => {
+      resolve(late());
+    }, ms);
+    timer.unref();
+  });
+  const clear = (): void => {
+    clearTimeout(timer);
+  };
+  void read.then(clear, clear);
+  return Promise.race([read, timedOut]);
+}
 
 /**
  * The file extension a file destination writes for each format, from the format registry.
@@ -904,6 +931,17 @@ interface StoreGauges {
   readonly latencySeconds: number;
 }
 
+/**
+ * One set of the store reads behind the health body: each channel's message and delivery counts, in
+ * the project's channel order, or undefined when a read failed or the set ran past its timeout.
+ */
+type HealthCounts =
+  | readonly {
+      readonly messages: Readonly<Record<MessageStatus, number>>;
+      readonly deliveries: DeliveryTally;
+    }[]
+  | undefined;
+
 interface RunningChannel {
   /** Replaced by a reload, between messages. */
   config: ChannelConfig;
@@ -1145,6 +1183,15 @@ export class Engine {
    */
   private metricsInFlight:
     { readonly began: number; readonly reading: Promise<StoreGauges> } | undefined;
+  /**
+   * The set of store reads for the health body in flight, from when it starts until every read in
+   * it has ended: when it began, by the monotonic clock, and its counts raced against the timeout.
+   * A request shares it while it is younger than {@link HEALTH_STORE_TIMEOUT_MS}, and after that
+   * reads storage as unreachable at once, so a database that hangs holds one set, not one a request.
+   * Only the set that set it clears it.
+   */
+  private healthInFlight:
+    { readonly began: number; readonly counts: Promise<HealthCounts> } | undefined;
   /** The engine-wide hooks, from `pathways.yaml`, once started. */
   private hooks: HookSet | undefined;
   /** The environment the engine started with: a reload reads the transform's configuration from it. */
@@ -1782,51 +1829,91 @@ export class Engine {
 
   /**
    * Each channel's status and counts, for the health endpoint. Its `status` is `unavailable` only
-   * when storage cannot be read or a source cannot listen. Holds counts and states, never content.
+   * when storage cannot be read or a source cannot listen. Storage counts as unreachable when a read
+   * fails, or when the reads have not all answered within {@link HEALTH_STORE_TIMEOUT_MS} (5
+   * seconds, as readiness waits): a database that hangs makes the body say so, never a request that
+   * hangs. While a set of reads is in flight no new set starts: a request shares it until it is 5
+   * seconds old, and after that answers unreachable at once, until every read in it has ended.
+   * Holds counts and states, never content.
    */
   async health(): Promise<EngineHealth> {
-    const { project, store } = this.options;
+    const { project } = this.options;
     const states = this.channelStates();
     const down = new Set(this.channels.filter(isDown).map((c) => c.config.name));
     const source = (name: string): "up" | "down" => (down.has(name) ? "down" : "up");
+    const at = this.monotonic();
+    const inFlight = this.healthInFlight;
+    const counts = await (inFlight === undefined
+      ? this.readHealthCounts(at)
+      : at - inFlight.began < HEALTH_STORE_TIMEOUT_MS
+        ? inFlight.counts
+        : Promise.resolve(undefined));
     const channels: Record<string, ChannelHealth> = {};
-    let storage: EngineHealth["storage"] = "ok";
-    try {
-      for (const { name } of project.channels) {
-        const [messages, counts, retrying] = await Promise.all([
-          store.messageCounts(name),
-          store.deliveryCounts(name),
-          store.retryingDeliveries(name),
-        ]);
-        const deliveries = { ...counts, retrying };
-        channels[name] = {
-          status: channelStatus(messages, deliveries),
-          source: source(name),
-          /* v8 ignore next: a channel not started yet, or stopped with the engine, runs by default */
-          state: states[name] ?? "running",
-          messages,
-          deliveries,
-          ...this.connectionCounts(name),
-          ...this.transformHealth(name),
-          ...this.passCounts(name),
-        };
-      }
-    } catch {
-      storage = "unreachable";
-      for (const { name } of project.channels) {
-        channels[name] = {
-          status: "unknown",
-          source: source(name),
-          /* v8 ignore next: as above */
-          state: states[name] ?? "running",
-          ...this.transformHealth(name),
-          ...this.passCounts(name),
-        };
-      }
+    for (const [index, { name }] of project.channels.entries()) {
+      const read = counts?.[index];
+      channels[name] =
+        read === undefined
+          ? {
+              status: "unknown",
+              source: source(name),
+              /* v8 ignore next: a channel not started yet, or stopped with the engine, runs by default */
+              state: states[name] ?? "running",
+              ...this.transformHealth(name),
+              ...this.passCounts(name),
+            }
+          : {
+              status: channelStatus(read.messages, read.deliveries),
+              source: source(name),
+              /* v8 ignore next: as above */
+              state: states[name] ?? "running",
+              messages: read.messages,
+              deliveries: read.deliveries,
+              ...this.connectionCounts(name),
+              ...this.transformHealth(name),
+              ...this.passCounts(name),
+            };
     }
+    const storage: EngineHealth["storage"] = counts === undefined ? "unreachable" : "ok";
     const unloaded = this.channels.some((channel) => channel.loadFailed !== undefined);
     const broken = storage !== "ok" || down.size > 0 || unloaded;
     return { status: broken ? "unavailable" : "ok", storage, channels };
+  }
+
+  /**
+   * One set of the store reads behind {@link health}, in the project's channel order. Never
+   * rejects: a failed read, or reads that have not all answered within
+   * {@link HEALTH_STORE_TIMEOUT_MS}, give undefined. Reads that time out are left running, and the
+   * set is marked in flight in {@link healthInFlight} from when it begins until every read has ended.
+   */
+  private readHealthCounts(began: number): Promise<HealthCounts> {
+    const { project, store } = this.options;
+    const calls: Promise<unknown>[] = [];
+    const call = <T>(read: Promise<T>): Promise<T> => {
+      calls.push(read);
+      return read;
+    };
+    const reads = Promise.all(
+      project.channels.map(async ({ name }) => {
+        const [messages, counts, retrying] = await Promise.all([
+          call(store.messageCounts(name)),
+          call(store.deliveryCounts(name)),
+          call(store.retryingDeliveries(name)),
+        ]);
+        return { messages, deliveries: { ...counts, retrying } };
+      }),
+    ).then(
+      (channels): HealthCounts => channels,
+      (): HealthCounts => undefined,
+    );
+    const mine = { began, counts: raceTimeout(reads, HEALTH_STORE_TIMEOUT_MS, () => undefined) };
+    this.healthInFlight = mine;
+    // Held until every read has ended, not only until the first fails: one that still hangs would
+    // otherwise sit beside the next set's reads.
+    void Promise.allSettled(calls).then(() => {
+      // Only this set's own mark: never one a later set made.
+      if (this.healthInFlight === mine) this.healthInFlight = undefined;
+    });
+    return mine.counts;
   }
 
   /**
@@ -1836,9 +1923,9 @@ export class Engine {
    * the store reads as down and its gauges are left out. The store is read at most once every
    * {@link METRICS_STORE_CACHE_MS}, however often or however many at once this is asked; the
    * sources and the age of each queue are read at each call. While a set of reads is in flight, no
-   * new set starts: a scrape shares its reading until it is {@link METRICS_STORE_TIMEOUT_MS} old,
-   * and after that the store reads as down at once, its latency counted from when that set began,
-   * until the set answers or fails. Counts and times, never content.
+   * new set starts: the scrapes within {@link METRICS_STORE_CACHE_MS} of its start share its
+   * reading, and a later one reads the store as down at once, its latency counted from when that set
+   * began, until every read in the set has ended. Counts and times, never content.
    */
   async metricsSnapshot(): Promise<MetricsSnapshot> {
     const { project } = this.options;
@@ -1856,17 +1943,18 @@ export class Engine {
     const at = this.monotonic();
     if (this.metricsRead === undefined || at - this.metricsRead.at >= METRICS_STORE_CACHE_MS) {
       const inFlight = this.metricsInFlight;
+      // A set still in flight once the cache has run out is at least as old as the timeout (the cache
+      // lasts as long as the timeout, and both count from the set's start), so it is never shared
+      // here: the store reads as down at once.
       this.metricsRead = {
         at,
         reading:
           inFlight === undefined
             ? this.readStoreGauges(at)
-            : at - inFlight.began < METRICS_STORE_TIMEOUT_MS
-              ? inFlight.reading
-              : Promise.resolve({
-                  channels: undefined,
-                  latencySeconds: Math.max(METRICS_TIMEOUT_SECONDS, (at - inFlight.began) / 1000),
-                }),
+            : Promise.resolve({
+                channels: undefined,
+                latencySeconds: Math.max(METRICS_TIMEOUT_SECONDS, (at - inFlight.began) / 1000),
+              }),
       };
     }
     const read = await this.metricsRead.reading;
@@ -1924,16 +2012,22 @@ export class Engine {
    * that have not all answered within {@link METRICS_STORE_TIMEOUT_MS}, as the readiness check
    * counts a read that hangs: a database that hangs reads as down, never as a scrape that hangs.
    * Its latency is then the timeout, the least it took. Reads that time out are left running, and
-   * the set is marked in flight in {@link metricsInFlight} from when it begins until they settle.
+   * the set is marked in flight in {@link metricsInFlight} from when it begins until every read in
+   * it has ended, a read that failed beside one that hangs included.
    */
   private readStoreGauges(began: number): Promise<StoreGauges> {
     const { project, store } = this.options;
     const took = (): number => Math.max(0, this.monotonic() - began) / 1000;
+    const calls: Promise<unknown>[] = [];
+    const call = <T>(read: Promise<T>): Promise<T> => {
+      calls.push(read);
+      return read;
+    };
     const reads = Promise.all(
       project.channels.map(async ({ name }) => {
         const [messages, queues] = await Promise.all([
-          store.messageCounts(name),
-          store.destinationQueues?.(name),
+          call(store.messageCounts(name)),
+          call(Promise.resolve(store.destinationQueues?.(name))),
         ]);
         return { messagesFailed: messages.failed, queues };
       }),
@@ -1953,6 +2047,10 @@ export class Engine {
     this.metricsInFlight = mine;
     void reads.then(() => {
       clearTimeout(timer);
+    });
+    // Held until every read has ended, not only until the first fails: one that still hangs would
+    // otherwise sit beside the next set's reads.
+    void Promise.allSettled(calls).then(() => {
       // Only this set's own mark: never one a later set made.
       if (this.metricsInFlight === mine) this.metricsInFlight = undefined;
     });

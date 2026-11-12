@@ -84,7 +84,7 @@ PASS adt-to-fhir/tests/oru.hl7
 
 Every file of `examples/hl7-to-fhir/` but its README and git settings: [hl7-to-fhir on GitHub](https://github.com/cosyte/pathways/tree/main/examples/hl7-to-fhir).
 
-Its messages are synthetic, made by `@cosyte/synth`, and are on GitHub with the rest: in `channels/adt-to-fhir/tests/`, `a01.hl7`, `a04.hl7`, `oru.hl7`. Each input in a `tests/` folder has its expected output beside it.
+Its messages are synthetic, made by `@cosyte/synth` (the patient in `a04.hl7` was then set by hand, to the plainly fake test patient other fixtures use), and are on GitHub with the rest: in `channels/adt-to-fhir/tests/`, `a01.hl7`, `a04.hl7`, `oru.hl7`. Each input in a `tests/` folder has its expected output beside it.
 
 ### package.json
 

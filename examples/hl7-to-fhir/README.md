@@ -28,4 +28,5 @@ PASS adt-to-fhir/tests/oru.hl7
 3 passed, 0 failed
 ```
 
-The messages in `channels/adt-to-fhir/tests/` are synthetic, made by `@cosyte/synth`.
+The messages in `channels/adt-to-fhir/tests/` are synthetic, made by `@cosyte/synth`. The patient in
+`a04.hl7` was then set by hand, to the plainly fake test patient other fixtures use.

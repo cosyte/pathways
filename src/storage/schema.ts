@@ -138,6 +138,7 @@ function newer(a: string, b: string): string {
  * The steps as Kysely runs them: each step from {@link SCHEMA_INFO_STEP} on also writes its row in
  * `schema_info` (`SCHEMA_INFO_STEP` itself writes the rows of every step up to it), in the same
  * transaction and under the same lock as the step, so a step is recorded once, when it is applied.
+ * A step with a `down` deletes its row again when Kysely takes it back down.
  *
  * @param steps Every step, by name.
  * @param engine The Pathways version applying them, recorded on each row.
@@ -188,6 +189,19 @@ export function recordedSteps(
         }
       },
     };
+    if (step.down !== undefined) {
+      const down = step.down.bind(step);
+      recorded[name] = {
+        ...recorded[name],
+        async down(db: Kysely<unknown>): Promise<void> {
+          await down(db);
+          await (db as Kysely<GateTables>)
+            .deleteFrom("schema_info")
+            .where("step", "=", name)
+            .execute();
+        },
+      };
+    }
   }
   return recorded;
 }

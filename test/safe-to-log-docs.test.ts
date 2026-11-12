@@ -493,7 +493,155 @@ describe("What is safe to log from a channel: a thrown error, in each storage se
     expect(text).toMatch(/never build a code or an id from the message/u);
   });
 
-  it("says ctx.messageId on a channel that stores nothing is the pass id", () => {
+  it("says ctx.messageId on a channel that stores nothing is the pass id, as the engine gives it", async () => {
     expect(text).toMatch(/`ctx\.messageId`[^.]*stores nothing, the pass id/u);
+    const { seen, pass, log } = await passOnChannelThatStoresNothing();
+    // The id the source was answered with, the one the destination was handed and the one the
+    // transform read are the one pass id, which the log names.
+    expect(seen).toEqual([{ messageId: pass, body: String(pass) }]);
+    expect(log).toContain(`"pass":${String(pass)}`);
+  });
+
+  it("says console.error and console.warn go to standard error, console.log to standard output", () => {
+    expect(text).toMatch(/`console\.log`[^;]*standard output/u);
+    expect(text).toMatch(/`console\.error` and `console\.warn` to standard error/u);
+  });
+
+  it("says a destination connector's thrown error is retried with only its code stored, as the engine does", async () => {
+    expect(text).toMatch(
+      /error thrown from a destination connector's send[^.]*does not fail the message: the delivery is retried/u,
+    );
+    expect(text).toMatch(/Only the error's `code` is stored with the delivery and logged/u);
+    expect(text).toMatch(/error thrown from a transform\*\* fails the message/u);
+    const { message, deliveries, log } = await sendThrows();
+    expect(message).toBe("transformed");
+    expect(deliveries).toEqual([{ status: "pending", attempts: 1, error: "delivery: ECONNRESET" }]);
+    expect(log).toContain('"event":"delivery-retry"');
+    expect(log).toContain('"code":"ECONNRESET"');
+    expect(log).not.toContain("TESTPATIENT");
   });
 });
+
+/** A text channel of one destination, `content: none` or stored, with `transform` as its transform. */
+async function textChannel(transform: string, storesNothing: boolean): Promise<string> {
+  return makeProject({
+    "channels/notes/channel.yaml": [
+      "format: text",
+      ...(storesNothing ? ["storage: { content: none }"] : []),
+      "source:",
+      "  file: { dir: ../../data/in, errorDir: ../../data/error }",
+      "transform: ./transform.ts",
+      "destinations:",
+      "  - file: { dir: ../../data/out }",
+      "",
+    ].join("\n"),
+    "channels/notes/transform.ts": transform,
+  });
+}
+
+/**
+ * One message through a channel that stores nothing whose transform outputs `ctx.messageId`: the
+ * pass id its source was answered with, what its destination was handed, and the log.
+ */
+async function passOnChannelThatStoresNothing(): Promise<{
+  seen: { messageId: number; body: string }[];
+  pass: number;
+  log: string;
+}> {
+  const root = await textChannel(
+    "export default (_text: string, ctx?: { messageId: number }): string => String(ctx?.messageId);\n",
+    true,
+  );
+  const project = await loadProject(root);
+  const { logger, lines } = captureLogger();
+  const store = await openStore(project, { env: {}, logger, keys: undefined });
+  const seen: { messageId: number; body: string }[] = [];
+  let sink: MessageSink | undefined;
+  const engine = new Engine({
+    project,
+    store,
+    logger,
+    connectors: () => ({
+      source: {
+        start: (given: MessageSink) => {
+          sink = given;
+          return Promise.resolve();
+        },
+      },
+      destinations: [
+        {
+          deliver: (message) => {
+            seen.push({
+              messageId: message.messageId,
+              body: Buffer.from(message.body).toString("utf8"),
+            });
+            return Promise.resolve();
+          },
+        },
+      ],
+    }),
+  });
+  await engine.start();
+  try {
+    if (sink === undefined) throw new Error("the source was not started");
+    const pass = await sink.receive(Buffer.from("synthetic note", "utf8"));
+    return { seen, pass, log: lines.join("") };
+  } finally {
+    await engine.stop();
+    await store.close();
+  }
+}
+
+/**
+ * One message through a stored channel whose destination's send throws an error that quotes the
+ * message and carries a code: the message's status, its deliveries and the log.
+ */
+async function sendThrows(): Promise<{
+  message: string | undefined;
+  deliveries: { status: string; attempts: number; error: string | null }[];
+  log: string;
+}> {
+  const root = await textChannel("export default (text: string): string => text;\n", false);
+  const project = await loadProject(root);
+  const { logger, lines } = captureLogger();
+  // No keys is `encryption: none`: the stored error reads as it was written.
+  const store = await openStore(project, { env: {}, logger, keys: undefined });
+  let sink: MessageSink | undefined;
+  const engine = new Engine({
+    project,
+    store,
+    logger,
+    connectors: () => ({
+      source: {
+        start: (given: MessageSink) => {
+          sink = given;
+          return Promise.resolve();
+        },
+      },
+      destinations: [
+        {
+          deliver: () =>
+            Promise.reject(
+              Object.assign(new Error(`cannot send ${QUOTED}`), { code: "ECONNRESET" }),
+            ),
+        },
+      ],
+    }),
+  });
+  await engine.start();
+  try {
+    if (sink === undefined) throw new Error("the source was not started");
+    const id = await sink.receive(Buffer.from(QUOTED, "utf8"));
+    await engine.tick();
+    const stored = await store.message(id);
+    const deliveries = (await store.deliveries(id)).map(({ status, attempts, error }) => ({
+      status,
+      attempts,
+      error,
+    }));
+    return { message: stored?.status, deliveries, log: lines.join("") };
+  } finally {
+    await engine.stop();
+    await store.close();
+  }
+}
