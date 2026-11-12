@@ -152,11 +152,12 @@ destinations:
   writing the ACK on it, so a reply host that takes the connection and never reads cannot hold the
   ACKs behind it for longer.
 
-Each message is stored before its ACK is sent, as always. When the reply address refuses, or does not
-answer in time, the message stays stored and the engine logs `mllp-reply-failed` with the message id
-and a code such as `ECONNREFUSED`, `CONNECT_TIMEOUT` or `SEND_TIMEOUT`, never content. The sender, with no ACK, sends
-the message again, and the copy is flagged as a possible duplicate. Messages on one connection are
-still answered one at a time, in order, so a slow reply address holds the next ACK behind it.
+Each message is stored before its ACK is sent, as always. When the reply address refuses, or does
+not answer in time, the message stays stored and the engine logs `mllp-reply-failed` with the
+message id and a code such as `ECONNREFUSED`, `CONNECT_TIMEOUT` or `SEND_TIMEOUT`, never content.
+The sender, with no ACK, sends the message again, and the copy is flagged as a possible duplicate.
+Messages on one connection are still answered one at a time, in order, so a slow reply address
+holds the next ACK behind it.
 
 ## Choose the TLS version and cipher suites
 
@@ -212,12 +213,18 @@ When a message cannot be stored, `onStoreFailure` decides: `close` (the default)
 closes the connection, so the sender sends the message again; `AE` or `AR` answers with that code
 instead. Set it on the source, the channel or `defaults`.
 
+A channel that stores nothing (`storage.content: none`) answers `AA` only once every destination
+accepted the message, closes without an ACK when one failed in a way that may pass, and answers `AE`
+when the transform failed or a destination rejected it for good. See [Pass messages through without
+storing them](./pass-messages-through-without-storing.md).
+
 A message whose sender (MSH-3 and MSH-4) and MSH-10 repeat an earlier one is stored and processed as
 usual, and flagged as a possible duplicate of it: never dropped. The engine logs
 `possible-duplicate`, and `pathways messages` shows the earlier message's id.
 
 The ACK swaps sender and receiver, echoes MSH-10 in MSA-2, and on a negative ACK adds one ERR segment
-with an HL7 table 0357 code: 207 when storing failed, 101 for a missing MSH-10, 100 otherwise. It never
+with an HL7 table 0357 code: 207 when storing failed or a channel that stores nothing could not pass
+the message on, 101 for a missing MSH-10, 100 otherwise. It never
 carries message content. To answer differently, write your own
 [ACK builder](./write-custom-connectors.md#build-your-own-mllp-ack).
 
