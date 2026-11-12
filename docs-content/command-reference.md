@@ -15,7 +15,7 @@ Every command runs on the project in the current folder, or the one `-C <dir>` (
 names. `pathways --help` prints the usage, and `pathways --version` the version.
 
 The commands that read or change stored messages (`start`, `status`, `messages`, `replay`, `clear`,
-`retention`, `audit`, `rekey`, `lease`, and `verify` unless it is given `--samples`) open the database as `start` does, so they need the same
+`retention`, `audit`, `rekey`, `lease`, `nodes`, and `verify` unless it is given `--samples`) open the database as `start` does, so they need the same
 `pathways.yaml`, encryption keys and environment. None of them prints a value you typed back to you:
 an argument can hold a path or a value from a message, and standard error often ends up in a log.
 
@@ -255,7 +255,7 @@ pathways audit [--action <name>] [--message <id>] [--channel <name>] [--since <t
 
 Reads the audit log, newest first. `--action` takes `search`, `view`, `content-view`, `replay`,
 `resend`, `clear`, `retention`, `config`, `lease-release`, `migrate`, `channel-pause`,
-`channel-resume`, `channel-stop`, `channel-halt`, `channel-reload` or `verify`; `--message` takes a
+`channel-resume`, `channel-stop`, `channel-halt`, `channel-reload`, `verify` or `node-forget`; `--message` takes a
 message id; the other options are as for `messages`.
 
 ## pathways rekey
@@ -294,6 +294,37 @@ it has left, by the database's clock. `lease release --force` frees the lease of
 host is gone, so the next start takes it at once instead of after it lapses, and writes the release
 to the audit log (`lease-release`); it exits 1 when the lease is already free. An engine still
 running under a lease freed this way stops at its next renewal.
+
+## pathways nodes
+
+```text
+pathways nodes [--json]
+pathways nodes forget <id> [--json]
+```
+
+`nodes` lists every engine on this database, one row per node: its node id, host, process id, role,
+Pathways version, and how long ago its last heartbeat was, by the database's clock, so no engine's own
+clock moves it. A node is `stale` once its last heartbeat is older than three of its heartbeat
+intervals (`node.heartbeat` in `pathways.yaml`, 5 seconds by default, so 15 seconds), and `live`
+before that. The role is `single` (a custom store without leases), `standby`, `active`, `draining`
+(told to stop, closing its sources) or `fenced` (it lost the engine lease and is stopping). An engine
+writes its row when it starts and removes it at a clean stop, so a row that shows stale is an engine
+that was killed or whose host is gone.
+
+```text
+NODE              HOST      PID   ROLE     VERSION  HEARTBEAT  STATE
+3f9a1c2b7d4e5f60  engine-a  4242  active   0.0.2    1.2s ago   live
+engine-b          engine-b  311   standby  0.0.2    3.9s ago   live
+```
+
+`nodes forget <id>` removes a stale node's row, so the list shows it no more, and writes that to the
+audit log (`node-forget`), whichever way it goes. It exits 1, changing nothing, when no node has that
+id, or when the node is live: stop that engine, and its row goes with it. The rows hold ids, a host
+name, numbers and states: no message content and no URL.
+
+With `--json`, `nodes` prints `{ "nodes": [...] }`, each with `node`, `host`, `pid`, `version`,
+`schemaGeneration`, `role`, `draining`, `staleAfterMs`, `startedAt`, `heartbeatAgeMs` and `stale`.
+See [nodes and heartbeats](./check-status-and-health.md#nodes-and-heartbeats).
 
 ## pathways probe
 
@@ -376,13 +407,13 @@ answers, it says `engine not running` and exits 1. See
 
 ## Exit codes
 
-| Code | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0    | done                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| 1    | a test failed; the engine, a command or an extension module could not start or stopped on an error; `init` could not write; `rekey` left a value not under the current key, or on SQLite a read under way kept it from emptying the write-ahead log; a replay, resend or clear was refused, or the message failed again; another engine holds the lease, the engine lost its lease, or there was no lease to release; the database schema is one this version will not run on or migrate; `verify` found a difference or a failure; `secrets check` found a secret or the key provider that could not be had; `probe` found the engine not alive or not ready; no engine runs the project, or a channel command was refused |
-| 2    | the command line was not understood; nothing was done                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| 3    | the configuration is invalid; nothing was done                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| 4    | a message named does not exist; any others named were still acted on                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| Code | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0    | done                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| 1    | a test failed; the engine, a command or an extension module could not start or stopped on an error; `init` could not write; `rekey` left a value not under the current key, or on SQLite a read under way kept it from emptying the write-ahead log; a replay, resend or clear was refused, or the message failed again; another engine holds the lease, the engine lost its lease, or there was no lease to release; another live engine runs under the same node id, or a node to forget was unknown or live; the database schema is one this version will not run on or migrate; `verify` found a difference or a failure; `secrets check` found a secret or the key provider that could not be had; `probe` found the engine not alive or not ready; no engine runs the project, or a channel command was refused |
+| 2    | the command line was not understood; nothing was done                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| 3    | the configuration is invalid; nothing was done                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| 4    | a message named does not exist; any others named were still acted on                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 
 ## Related
 

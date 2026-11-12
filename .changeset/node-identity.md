@@ -1,0 +1,12 @@
+---
+"@cosyte/pathways": patch
+---
+
+Each engine is a node with an id, a row in the database and a heartbeat, so `pathways nodes`, a refused start and the health body say which engines run, which version, and whether each is alive.
+
+- The node id is `node.id` in `pathways.yaml` (1 to 64 letters, digits, dots, hyphens and underscores; `{ env: NAME }` works), or one generated at the first start and kept in the project's `.pathways/node-id`, so a restart is the same node. The engine lease is taken under it, and the health body's `node` is it. Before, each process drew a fresh id.
+- New schema step `0011-nodes` (expand) adds a `nodes` table: node id, host, process id, start time, Pathways version, schema generation, role (`single`, `standby`, `active`, `proving`, `draining` or `fenced`), a draining flag, the stale bound and the last heartbeat. It holds no message content and no URL. Every time in it comes from the database's clock.
+- `pathways start` writes its row before it asks for the engine lease, then writes its heartbeat once per `node.heartbeat` (default `5s`, at least `1s`) in one `UPDATE` that takes the time from the database's clock in the same statement; the interval is timed by the process's monotonic clock. A clean stop removes the row. A node shows stale once its last heartbeat is older than three intervals (15 seconds by default).
+- A start under the id of a live node is refused, exit 1, naming the node, host, process id, version, role and heartbeat age. A row left by an earlier run on the same host whose process is gone is taken over at once.
+- New command `pathways nodes [--json]` lists each node's id, host, process id, role, version, heartbeat age and `live` or `stale`; `pathways nodes forget <id>` removes a stale node's row and writes a `node-forget` audit entry, whichever way it goes (a new `AuditAction`). New log events: `node-id-unsaved`, `heartbeat-failed`, `node-rejoined`, `node-duplicate` and `node-leave-failed`.
+- A custom store may implement the five optional `MessageStore` methods `joinNode`, `nodeHeartbeat`, `leaveNode`, `nodes` and `forgetNode` (types `NodeInfo`, `NodeRow`, `NodeJoin`, `NodeSelf`, `NodeState`, `NodeRole`, `NodeStore` and `NODE_ROLES` are exported). A store without them needs no change: its engines write no node row. Two engines run from one project folder on one host now share the kept id, so the second is refused as a duplicate node; give each its own `node.id`.

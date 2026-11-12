@@ -15,6 +15,11 @@ import type {
   MessageStore,
   MessageSummary,
   NextDeliveryOptions,
+  NodeInfo,
+  NodeJoin,
+  NodeRow,
+  NodeSelf,
+  NodeState,
   Page,
   PendingDelivery,
   SendStart,
@@ -27,7 +32,7 @@ import type {
   StoredMessage,
   StoreReceiveOptions,
 } from "../storage/store.js";
-import { channelStateStore, leaseStore } from "../storage/store.js";
+import { channelStateStore, leaseStore, nodeStore } from "../storage/store.js";
 import { copiesBodies, markCopiesBodies, release } from "../storage/ownership.js";
 import {
   decrypt,
@@ -198,6 +203,12 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
   readonly setChannelState?: (channel: string, state: ChannelRunState) => Promise<void>;
   /** Straight through, present only when the store underneath has it. */
   readonly markDryRun?: (deliveryId: number, epoch?: number) => Promise<void>;
+  /** The node methods, straight through, present only when the store underneath has all five. */
+  readonly joinNode?: (info: NodeInfo, replace?: NodeSelf) => Promise<NodeJoin>;
+  readonly nodeHeartbeat?: (self: NodeSelf, state: NodeState) => Promise<boolean>;
+  readonly leaveNode?: (self: NodeSelf) => Promise<boolean>;
+  readonly nodes?: () => Promise<NodeRow[]>;
+  readonly forgetNode?: (node: string) => Promise<boolean>;
 
   protected constructor(inner: MessageStore, codec: Codec, indexer?: MetaIndexer) {
     this.#inner = inner;
@@ -220,6 +231,14 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
       this.setChannelState = states.setChannelState;
     }
     if (inner.markDryRun !== undefined) this.markDryRun = inner.markDryRun.bind(inner);
+    const nodes = nodeStore(inner);
+    if (nodes !== undefined) {
+      this.joinNode = nodes.joinNode;
+      this.nodeHeartbeat = nodes.nodeHeartbeat;
+      this.leaveNode = nodes.leaveNode;
+      this.nodes = nodes.nodes;
+      this.forgetNode = nodes.forgetNode;
+    }
     this.#innerCopies = copiesBodies(inner);
     // A codec that copies keeps no body it is handed and reads each into a new buffer; one that does
     // not passes bodies straight through, so this store copies when the one underneath does.

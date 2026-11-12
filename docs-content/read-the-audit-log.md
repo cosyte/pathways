@@ -27,6 +27,7 @@ entry.
 | `migrate`                                                                           | `pathways migrate` applied schema steps, said which it would apply (a dry run), or refused; once the database has an audit log |
 | `verify`                                                                            | `pathways verify` reads a stored message to run it through the project's transform; written before its content is read         |
 | `channel-pause`, `channel-resume`, `channel-stop`, `channel-halt`, `channel-reload` | a `pathways channel` command, whether it was done or refused, with the user the command reports                                |
+| `node-forget`                                                                       | `pathways nodes forget` removed a stale node's row, or was refused: no such node, or a live one; with the node id              |
 
 Each entry holds the time, the operating system user who acted, the action, its outcome (`ok`,
 `refused` or `not-found`), the channel and the message, and a detail of counts, states, codes and

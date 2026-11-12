@@ -2,6 +2,7 @@ import { parseDuration, type ProjectConfig } from "../config/schema.js";
 import type { Env } from "../connectors/endpoint.js";
 import { channelStatus } from "../engine/health.js";
 import { describeHolder } from "../engine/lease.js";
+import { describeNode, seconds } from "../engine/nodes.js";
 import { EXIT } from "../exit.js";
 import {
   AUDIT_ACTIONS,
@@ -9,6 +10,7 @@ import {
   ENGINE_LEASE,
   leaseStore,
   MESSAGE_STATES,
+  nodeStore,
   type AuditAction,
   type AuditDetail,
   type AuditEntry,
@@ -659,6 +661,84 @@ export async function leaseReleaseCommand(context: OperatorContext): Promise<num
     `Engine lease released: it was held by ${describeHolder(held)}. The next engine to start takes it.`,
   ]);
   return EXIT.ok;
+}
+
+/**
+ * `pathways nodes`: every engine on this database, by node id: its host, process, role, version,
+ * and how long ago its last heartbeat was, by the database's clock, `stale` once that is older than
+ * its bound (three of its heartbeat intervals). Ids, a host name, times and numbers only.
+ *
+ * @example
+ * ```ts
+ * const code = await nodesCommand(context);
+ * ```
+ */
+export async function nodesCommand(context: OperatorContext): Promise<number> {
+  const nodes = nodeStore(context.store);
+  if (nodes === undefined) return noNodes(context);
+  const rows = await nodes.nodes();
+  const lines =
+    rows.length === 0
+      ? ["No engine runs on this database."]
+      : table([
+          ["NODE", "HOST", "PID", "ROLE", "VERSION", "HEARTBEAT", "STATE"],
+          ...rows.map((row) => [
+            row.node,
+            row.host,
+            String(row.pid),
+            row.role,
+            row.version,
+            `${seconds(row.heartbeatAgeMs)} ago`,
+            row.stale ? "stale" : "live",
+          ]),
+        ]);
+  print(context, { nodes: rows }, lines);
+  return EXIT.ok;
+}
+
+/**
+ * `pathways nodes forget <id>`: removes the row of an engine whose heartbeat stopped, once it shows
+ * stale, so `pathways nodes` lists it no more. A live node's row is refused: stop that engine, and
+ * its row goes with it. Written to the audit log, whichever way it goes.
+ *
+ * @example
+ * ```ts
+ * const code = await nodeForgetCommand(context, "engine-a");
+ * ```
+ */
+export async function nodeForgetCommand(context: OperatorContext, node: string): Promise<number> {
+  const nodes = nodeStore(context.store);
+  if (nodes === undefined) return noNodes(context);
+  const row = (await nodes.nodes()).find((candidate) => candidate.node === node);
+  if (row === undefined) {
+    await context.audit.record({ action: "node-forget", outcome: "not-found", detail: { node } });
+    print(context, { forgotten: false, node: null }, ["No node by that id on this database."]);
+    return EXIT.failed;
+  }
+  if (!(await nodes.forgetNode(node))) {
+    await context.audit.record({
+      action: "node-forget",
+      outcome: "refused",
+      detail: { node, reason: "live", heartbeatAgeMs: row.heartbeatAgeMs },
+    });
+    print(context, { forgotten: false, node: row }, [
+      `Node ${node} is live, not forgotten: ${describeNode(row)}. Stop that engine first; its row goes with it.`,
+    ]);
+    return EXIT.failed;
+  }
+  await context.audit.record({
+    action: "node-forget",
+    detail: { node, host: row.host, heartbeatAgeMs: row.heartbeatAgeMs },
+  });
+  print(context, { forgotten: true, node: row }, [`Node forgotten: ${describeNode(row)}.`]);
+  return EXIT.ok;
+}
+
+function noNodes(context: OperatorContext): number {
+  context.err(
+    "pathways: this store keeps no node rows: a custom store without the node methods lists no engines.\n",
+  );
+  return EXIT.failed;
 }
 
 /**
