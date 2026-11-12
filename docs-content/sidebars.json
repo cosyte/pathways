@@ -47,6 +47,7 @@
         "add-lifecycle-hooks",
         "write-custom-connectors",
         "check-status-and-health",
+        "collect-metrics",
         "pause-stop-and-reload-a-channel",
         "inspect-replay-and-clear-messages",
         "search-messages-by-metadata",

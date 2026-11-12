@@ -84,6 +84,7 @@ import {
   channelStateStore,
   type AuditAction,
   type ChannelRunState,
+  type DestinationQueue,
   type DestinationOutcome,
   type HandOff,
   type HandOffFrom,
@@ -104,6 +105,13 @@ import {
 } from "./channel-worker.js";
 import type { EngineFence } from "./lease.js";
 import { channelStatus, type ChannelHealth, type EngineHealth, type PassCounts } from "./health.js";
+import {
+  METRICS_STORE_CACHE_MS,
+  type ChannelGauges,
+  type DeliveryOutcome,
+  type EngineMetrics,
+  type MetricsSnapshot,
+} from "./metrics.js";
 import { formatTable, type FailureSummary, type RoutedMessage } from "./worker-entry.js";
 import { DeadlineTimer } from "./deadline.js";
 import { destinationKeys } from "./destination-key.js";
@@ -411,6 +419,11 @@ export interface ConnectorContext {
    * `drain.timeout`. Defaults to the source's own default, 30 seconds.
    */
   readonly drainTimeoutMs?: number | undefined;
+  /**
+   * Told the status of each request an HTTP source refuses before storing anything, as its
+   * `http-refused` log line is: a status, never the request.
+   */
+  readonly onSourceRefused?: ((status: number) => void) | undefined;
 }
 
 /**
@@ -551,6 +564,7 @@ export async function connectorsFor(
         token,
         onRefused: (status) => {
           logger.warn({ event: "http-refused", channel: channel.name, status });
+          context.onSourceRefused?.(status);
         },
         onUnreadable: (message, problem) => {
           logger.warn({ event: "http-unreadable", channel: channel.name, message, problem });
@@ -863,6 +877,26 @@ export interface EngineOptions {
    * Node's timers; tests pass their own clock's, with `now` from the same clock.
    */
   readonly wait?: EngineWait;
+  /**
+   * The metrics `/metrics` serves: the engine counts each message received, transform run and
+   * delivery attempt in them, and how long each attempt took. Without them it counts nothing.
+   */
+  readonly metrics?: EngineMetrics;
+}
+
+/**
+ * One set of the store reads behind `/metrics`: each channel's failed messages and its
+ * destinations' queues, in the project's channel order, or undefined when a read failed; and how
+ * long the reads took, in seconds.
+ */
+interface StoreGauges {
+  readonly channels:
+    | readonly {
+        readonly messagesFailed: number;
+        readonly queues?: readonly DestinationQueue[] | undefined;
+      }[]
+    | undefined;
+  readonly latencySeconds: number;
 }
 
 interface RunningChannel {
@@ -1089,6 +1123,8 @@ export class Engine {
   private steppedAt: number | undefined;
   /** The last storage check for readiness: when it started and what it found. */
   private storageCheck: { readonly at: number; readonly reachable: Promise<boolean> } | undefined;
+  /** The last set of store reads for `/metrics`: when it started and what it found. */
+  private metricsRead: { readonly at: number; readonly reading: Promise<StoreGauges> } | undefined;
   /** The engine-wide hooks, from `pathways.yaml`, once started. */
   private hooks: HookSet | undefined;
   /** The environment the engine started with: a reload reads the transform's configuration from it. */
@@ -1186,6 +1222,9 @@ export class Engine {
               secrets,
               dryRun,
               drainTimeoutMs: this.drainTimeoutMs(),
+              onSourceRefused: (status) => {
+                this.options.metrics?.sourceRefused(config.name, status);
+              },
             }));
         } catch (error) {
           await hooks.stop();
@@ -1752,6 +1791,103 @@ export class Engine {
   }
 
   /**
+   * The gauges a scrape of `/metrics` reads: whether each channel's source is up, the connections
+   * an MLLP or tcp source holds, and from the store, each channel's failed messages and each
+   * destination's queue. How long the store took is measured over all its reads; when one fails,
+   * the store reads as down and its gauges are left out. The store is read at most once every
+   * {@link METRICS_STORE_CACHE_MS}, however often or however many at once this is asked; the
+   * sources and the age of each queue are read at each call. Counts and times, never content.
+   */
+  async metricsSnapshot(): Promise<MetricsSnapshot> {
+    const { project } = this.options;
+    const down = new Set(this.channels.filter(isDown).map((c) => c.config.name));
+    const live = (name: string): Omit<ChannelGauges, "messagesFailed" | "destinations"> => {
+      const source = this.channels.find((c) => c.config.name === name)?.connectors.source;
+      return {
+        channel: name,
+        sourceUp: !down.has(name),
+        ...(source instanceof MllpSource || source instanceof TcpSource
+          ? { openConnections: source.openConnections }
+          : {}),
+      };
+    };
+    const at = this.monotonic();
+    if (this.metricsRead === undefined || at - this.metricsRead.at >= METRICS_STORE_CACHE_MS) {
+      this.metricsRead = { at, reading: this.readStoreGauges() };
+    }
+    const read = await this.metricsRead.reading;
+    const store = { up: read.channels !== undefined, latencySeconds: read.latencySeconds };
+    if (read.channels === undefined) {
+      return { store, channels: project.channels.map(({ name }) => live(name)) };
+    }
+    const now = this.now();
+    const channels = project.channels.map(({ name, destinations }, index): ChannelGauges => {
+      const { messagesFailed, queues } = read.channels?.[index] ?? { messagesFailed: 0 };
+      const keys = this.channels.find((c) => c.config.name === name)?.keys;
+      return {
+        ...live(name),
+        messagesFailed,
+        ...(queues === undefined
+          ? {}
+          : {
+              destinations: destinations.map((_, destination) => {
+                // By key, as the deliveries are sent: the destination they were made for, wherever
+                // it stands in the list now. Those made before keys are found by their place.
+                const key = keys?.[destination];
+                const mine = queues.filter((q) =>
+                  q.destinationKey === undefined
+                    ? q.destination === destination
+                    : q.destinationKey === key,
+                );
+                const oldest = Math.min(
+                  ...mine.map((q) =>
+                    q.oldestPendingSince === undefined
+                      ? Number.POSITIVE_INFINITY
+                      : Date.parse(q.oldestPendingSince),
+                  ),
+                );
+                const sum = (pick: (q: DestinationQueue) => number): number =>
+                  mine.reduce((total, q) => total + pick(q), 0);
+                return {
+                  destination,
+                  queueDepth: sum((q) => q.pending),
+                  oldestPendingAgeSeconds: Number.isFinite(oldest)
+                    ? Math.max(0, now - oldest) / 1000
+                    : 0,
+                  retrying: sum((q) => q.retrying),
+                  failed: sum((q) => q.failed),
+                };
+              }),
+            }),
+      };
+    });
+    return { store, channels };
+  }
+
+  /**
+   * One set of the store reads behind {@link metricsSnapshot}, in the project's channel order, and
+   * how long they took. Never rejects: a failed read leaves `channels` undefined.
+   */
+  private async readStoreGauges(): Promise<StoreGauges> {
+    const { project, store } = this.options;
+    const began = this.monotonic();
+    try {
+      const channels = await Promise.all(
+        project.channels.map(async ({ name }) => {
+          const [messages, queues] = await Promise.all([
+            store.messageCounts(name),
+            store.destinationQueues?.(name),
+          ]);
+          return { messagesFailed: messages.failed, queues };
+        }),
+      );
+      return { channels, latencySeconds: Math.max(0, this.monotonic() - began) / 1000 };
+    } catch {
+      return { channels: undefined, latencySeconds: Math.max(0, this.monotonic() - began) / 1000 };
+    }
+  }
+
+  /**
    * How many connections a channel's MLLP or tcp source closed at accept for being over its cap, for
    * the health body; nothing for any other source. A count only, never who connected.
    */
@@ -2212,12 +2348,14 @@ export class Engine {
   }
 
   /**
-   * Hands an event to the channel's hooks and the engine-wide ones. Never waits, never throws. The
-   * event is built only when some hook will be handed it.
+   * Hands an event to the metrics, the channel's hooks and the engine-wide ones. Never waits, never
+   * throws. The event is built only when the metrics or some hook will be handed it.
    */
   private emit(channel: RunningChannel, event: () => LifecycleEvent): void {
-    if (channel.hooks.empty && (this.hooks?.empty ?? true)) return;
+    const { metrics } = this.options;
+    if (channel.hooks.empty && (this.hooks?.empty ?? true) && metrics === undefined) return;
     const built = event();
+    metrics?.observe(built);
     channel.hooks.emit(built);
     this.hooks?.emit(built);
   }
@@ -3014,6 +3152,8 @@ export class Engine {
       });
       return "full";
     }
+    // Received once on each channel it was handed to; the channel it came from counted it already.
+    for (const { channel: target } of handOffs) this.options.metrics?.handedIn(target);
     for (const [index, id] of result.ids.entries()) {
       logger.info({
         event: "handed-over",
@@ -3075,6 +3215,7 @@ export class Engine {
         delivery: delivery.id,
         code,
       });
+      this.options.metrics?.deliveryAttempt(config.name, index, "rejected");
       this.emit(channel, () => ({
         type: "delivery-rejected",
         at: this.at(),
@@ -3140,8 +3281,12 @@ export class Engine {
         retryInMs: wait,
         code: TARGET_FULL_CODE,
       });
+      this.options.metrics?.deliveryAttempt(config.name, index, "retry");
       return "wait";
     }
+    // Delivered on this channel and received once on its target, as any delivery and any message.
+    this.options.metrics?.deliveryAttempt(config.name, index, "delivered");
+    this.options.metrics?.handedIn(destination.channel);
     logger.info({
       event: "delivered",
       channel: config.name,
@@ -3333,6 +3478,7 @@ export class Engine {
             destination: index,
             delivery: delivery.id,
           });
+          this.options.metrics?.deliveryAttempt(config.name, index, "dry_run");
           continue;
         }
         const handTo = config.destinations[index];
@@ -3401,9 +3547,17 @@ export class Engine {
           expired = true;
           cutOff.abort();
         });
+        // How long the attempt took, from its hand-over until the destination answered or failed,
+        // counted under its outcome once that is recorded.
+        const began = this.monotonic();
+        let tookMs = 0;
         const ended = (): void => {
+          tookMs = Math.max(0, this.monotonic() - began);
           deadline.clear();
           halt.removeEventListener("abort", onHalt);
+        };
+        const counted = (outcome: DeliveryOutcome): void => {
+          this.options.metrics?.deliveryAttempt(config.name, index, outcome, tookMs / 1000);
         };
         try {
           // Read only for a destination that fills its URL from it: the metadata stays in storage
@@ -3451,6 +3605,7 @@ export class Engine {
               delivery: delivery.id,
               reason: error.reason,
             });
+            counted("rejected");
             this.emit(channel, () => ({
               type: "delivery-rejected",
               at: this.at(),
@@ -3492,6 +3647,7 @@ export class Engine {
               reason: exhausted,
               code,
             });
+            counted("exhausted");
             this.emit(channel, () => ({
               type: "delivery-exhausted",
               at: this.at(),
@@ -3521,6 +3677,7 @@ export class Engine {
               status,
               locationHost,
             });
+            counted("redirected");
             this.emit(channel, () => ({
               type: "delivery-redirected",
               at: this.at(),
@@ -3540,6 +3697,7 @@ export class Engine {
               retryInMs: wait,
               code,
             });
+            counted("retry");
             this.emit(channel, () => ({
               type: "delivery-retry",
               at: this.at(),
@@ -3581,6 +3739,7 @@ export class Engine {
           delivery: delivery.id,
           ...(resend === undefined ? {} : { resend }),
         });
+        counted("delivered");
         this.emit(channel, () => ({ type: "delivered", at: this.at(), ...about }));
       }
     }

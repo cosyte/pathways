@@ -367,7 +367,7 @@ export default () => ({
     const stopStandby = await onPickedPorts(1, async ([port = 0]) => {
       const holderRoot = await project(store);
       const standbyRoot = await project(
-        `${store}health: { port: ${String(port)}, plaintext: true, auth: none }\n`,
+        `${store}health: { port: ${String(port)}, plaintext: true, auth: none, metrics: { allowUnauthenticated: true } }\n`,
       );
       const health = async (): Promise<{ status: number; body: { status: string } }> => {
         const response = await fetch(`http://127.0.0.1:${String(port)}/`);
@@ -405,6 +405,13 @@ export default () => ({
                 channels: {},
               },
             });
+            // Its metrics: the counters, all 0, and no gauge until it takes the lease.
+            const metrics = await (await fetch(`http://127.0.0.1:${String(port)}/metrics`)).text();
+            expect(metrics).toMatch(
+              /^pathways_messages_received_total\{channel="adt",outcome="stored"\} 0$/m,
+            );
+            expect(metrics).not.toMatch(/^pathways_(source_up|store_up)/m);
+            expect(metrics.endsWith("# EOF\n")).toBe(true);
             // A standby reads no folder: its message waits in its inbox.
             expect(await readdir(join(standbyRoot, "data/inbox"))).toContain("a01.hl7");
 

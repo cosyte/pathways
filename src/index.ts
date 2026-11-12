@@ -10,7 +10,8 @@
  *
  * Nothing here loads the engine, the transports or a database driver: apart from `DeliveryRejected`,
  * `PassFailed`, `EncryptionError`, `SecretError`, `defaultAckBuilder`, `fakeSecretProvider`,
- * `LIFECYCLE_EVENTS` and `VERSION`, every export is a type.
+ * `LIFECYCLE_EVENTS`, `METRIC_FAMILIES`, `OPENMETRICS_CONTENT_TYPE` and `VERSION`, every export is a
+ * type.
  */
 export { VERSION } from "./version.js";
 export type { Format } from "./config/schema.js";
@@ -152,6 +153,7 @@ export type {
   DeliveryCounts,
   DeliveryStatus,
   DeliveryTally,
+  DestinationQueue,
   DestinationKey,
   DestinationOutcome,
   ExpireResult,
@@ -213,6 +215,12 @@ export {
   type NodeState,
 } from "./storage/nodes.js";
 export type { AuditListener } from "./operator/audit.js";
+export {
+  METRIC_FAMILIES,
+  OPENMETRICS_CONTENT_TYPE,
+  type MetricFamily,
+  type MetricType,
+} from "./engine/metrics.js";
 export type {
   ArchivedDelivery,
   ArchivedMessage,

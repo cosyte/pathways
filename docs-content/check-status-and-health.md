@@ -48,7 +48,7 @@ health:
 curl --cacert certs/ca.pem -H "Authorization: Bearer $PATHWAYS_HEALTH_TOKEN" https://localhost:9090/
 ```
 
-A `GET` or `HEAD` on any path but `/livez` and `/readyz` answers with JSON:
+A `GET` or `HEAD` on any path but `/livez`, `/readyz` and `/metrics` answers with JSON:
 
 ```json
 {
@@ -121,6 +121,10 @@ A channel's `deliveries` also counts `dry-run` once one of its destinations has
 
 `/livez` and `/readyz` on the health endpoint answer as the probe listener below does, behind the
 same token.
+
+`/metrics` on the health endpoint serves the engine's counters and gauges in the OpenMetrics text
+format, for Prometheus or any collector that reads it, behind the same token. See
+[Collect metrics](./collect-metrics.md).
 
 ## Probe liveness and readiness
 

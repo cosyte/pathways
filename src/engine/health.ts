@@ -9,6 +9,7 @@ import {
   reply,
 } from "../connectors/endpoint.js";
 import type { ServerTlsMaterial } from "../connectors/tls.js";
+import { OPENMETRICS_CONTENT_TYPE } from "./metrics.js";
 import type { SecretReader } from "../secrets/resolve.js";
 import type { ChannelRunState, DeliveryTally, MessageStatus } from "../storage/store.js";
 import { answerProbe, type EngineRole, type Probes } from "./probes.js";
@@ -160,13 +161,23 @@ export interface HealthEndpointOptions {
   readonly probes?: Probes;
   /** Told the status of each request refused (401, 405). */
   readonly onRefused?: (status: number) => void;
+  /**
+   * What `GET /metrics` answers: the OpenMetrics text this gives, or 403 when `refused`. Without
+   * it, `/metrics` answers with the health body, as any other path does.
+   */
+  readonly metrics?: (() => Promise<string>) | "refused";
 }
+
+/** Why `/metrics` is refused on a listener that checks no one. */
+const METRICS_REFUSED =
+  "metrics need authentication: set health.auth or health.tls.ca, or health.metrics.allowUnauthenticated: true";
 
 /**
  * The health endpoint: `GET` (or `HEAD`) on any path answers 200 with a {@link HealthReport}, or
  * 503 when the engine itself is broken or is a standby. Given probes, `/livez` and `/readyz` answer
- * as the probe listener does, with one word. It is authenticated like an HTTP source: a bearer
- * token by default, or mutual TLS.
+ * as the probe listener does, with one word; given metrics, `/metrics` answers with their
+ * OpenMetrics text. It is authenticated like an HTTP source: a bearer token by default, or mutual
+ * TLS.
  *
  * @example
  * ```ts
@@ -182,7 +193,7 @@ export class HealthEndpoint {
 
   /** @param options Where to listen, TLS, the token, and where the report comes from. */
   constructor(options: HealthEndpointOptions) {
-    const { host, port, tls, token, report, probes, onRefused } = options;
+    const { host, port, tls, token, report, probes, onRefused, metrics } = options;
     this.endpoint = new Endpoint(
       { host, port, tls, token, ...(onRefused === undefined ? {} : { onRefused }) },
       async (request, response) => {
@@ -192,6 +203,21 @@ export class HealthEndpoint {
           return;
         }
         if (probes !== undefined && (await answerProbe(request, response, probes))) return;
+        if (metrics !== undefined && String(request.url).replace(/\?.*$/s, "") === "/metrics") {
+          if (metrics === "refused") {
+            reply(response, 403, { error: METRICS_REFUSED });
+            onRefused?.(403);
+            return;
+          }
+          const text = await metrics();
+          response.writeHead(200, {
+            "Content-Type": OPENMETRICS_CONTENT_TYPE,
+            "Content-Length": Buffer.byteLength(text),
+            "Cache-Control": "no-store",
+          });
+          response.end(text);
+          return;
+        }
         const body = await report();
         reply(response, body.status === "ok" ? 200 : 503, body);
       },
@@ -215,8 +241,25 @@ export class HealthEndpoint {
 }
 
 /**
+ * What `/metrics` on the health endpoint `config` describes does: `serve`, `refuse` (a listener
+ * that checks no one, `auth: none` with no client CA, plaintext or TLS alike, that did not opt in
+ * with `metrics.allowUnauthenticated`), or `off` (`metrics.enabled: false`).
+ *
+ * @example
+ * ```ts
+ * if (metricsMode(project.health) === "serve") metrics = new EngineMetrics(channels);
+ * ```
+ */
+export function metricsMode(config: HealthConfig): "serve" | "refuse" | "off" {
+  if (!config.metrics.enabled) return "off";
+  // TLS without a client CA encrypts but lets anyone who reaches the port read, as plaintext does.
+  const open = config.auth.kind === "none" && config.tls?.ca === undefined;
+  return open && !config.metrics.allowUnauthenticated ? "refuse" : "serve";
+}
+
+/**
  * Builds the health endpoint `pathways.yaml` configures, reading its TLS files and token, and logs
- * once if it runs without TLS or without authentication.
+ * once if it runs without TLS or without authentication, and once if it refuses `/metrics`.
  *
  * @throws {ConfigError} when a TLS file cannot be read or loaded, or the token is missing or weak.
  * @example
@@ -231,12 +274,18 @@ export function healthEndpointFor(
   env: SecretReader,
   logger: Logger,
   probes?: Probes,
+  metrics?: () => Promise<string>,
 ): HealthEndpoint {
   const { tls, token } = listenerSecurity(config, env, "pathways.yaml: health");
   for (const warning of listenerWarnings(config)) {
     logger.warn({ event: warning, endpoint: "health" });
   }
+  const mode = metricsMode(config);
+  if (mode === "refuse") logger.warn({ event: "metrics-refused", endpoint: "health" });
+  const served =
+    mode === "refuse" ? "refused" : mode === "serve" && metrics !== undefined ? metrics : undefined;
   return new HealthEndpoint({
+    ...(served === undefined ? {} : { metrics: served }),
     host: config.host,
     port: config.port,
     tls,

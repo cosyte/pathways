@@ -52,6 +52,7 @@ const STORE_METHOD_LIST = {
   markDryRun: false,
   holdDeliveries: false,
   metaCandidates: false,
+  destinationQueues: false,
   messageMeta: false,
   settle: false,
   unsettled: false,

@@ -128,6 +128,7 @@ See [Route messages between channels](./route-between-channels.md).
 | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `plaintext`              | an endpoint runs without TLS (`endpoint` says which); logged at every start                                                                                                             |
 | `unauthenticated`        | a listening endpoint has neither a token nor `tls.ca`                                                                                                                                   |
+| `metrics-refused`        | the health endpoint has `auth: none` and no `tls.ca`, so it answers `/metrics` with 403; set a token, or `health.metrics.allowUnauthenticated: true`                                    |
 | `plaintext-copies`       | a file source keeps plaintext copies (`keepProcessed: true`)                                                                                                                            |
 | `smtp-attach`            | an SMTP destination attaches each message to its email (`attach: true`), which every mail server on the way can read; logged at every start                                             |
 | `unencrypted-storage`    | `encryption: none`                                                                                                                                                                      |

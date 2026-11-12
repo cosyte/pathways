@@ -597,6 +597,8 @@ describe("TcpSource", () => {
       held.map((socket) => new Promise((resolve) => socket.once("connect", resolve))),
     );
     await sleep(50);
+    // A count only, for /metrics: the two it holds.
+    expect(source.openConnections).toBe(2);
     const refused = await talk(port, [text(`${ORDER(1)}\n`)]);
     expect(refused.closed).toBe(true);
     expect(received).toEqual([]);

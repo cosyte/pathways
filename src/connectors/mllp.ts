@@ -355,6 +355,8 @@ export class MllpSource implements SourceConnector {
   private dialling: AbortController | undefined;
   /** The dial loop of a source that dials out, settled once it has ended. */
   private dialLoop: Promise<void> | undefined;
+  /** 1 while a connection this source dialled is open, else 0. */
+  private dialledOpen = 0;
 
   /** @param options Where to listen, TLS, and how to answer. */
   constructor(options: MllpSourceOptions) {
@@ -367,6 +369,14 @@ export class MllpSource implements SourceConnector {
    */
   get refusedConnections(): number {
     return this.refused;
+  }
+
+  /**
+   * How many connections the source holds open now, those it dialled out included: a count only,
+   * never who connected.
+   */
+  get openConnections(): number {
+    return (this.server?.getStats().connections ?? 0) + this.dialledOpen;
   }
 
   /** The port the source listens on, or undefined when it is not listening. */
@@ -487,7 +497,12 @@ export class MllpSource implements SourceConnector {
           signal,
         );
         failures = 0;
-        code = await this.read(sink, socket, tls !== undefined, signal);
+        this.dialledOpen += 1;
+        try {
+          code = await this.read(sink, socket, tls !== undefined, signal);
+        } finally {
+          this.dialledOpen -= 1;
+        }
       } catch (error) {
         code = (error as MllpDialError).code;
       }
