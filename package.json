@@ -82,7 +82,7 @@
     "test:coverage": "cosyte-process test --coverage",
     "clean": "rm -rf dist schema coverage",
     "attw": "cosyte-attw",
-    "version": "changeset version && tsx scripts/sync-version.ts && cosyte-process format",
+    "version": "changeset version && tsx scripts/sync-version.ts && cosyte-process format && cosyte-docs-reference",
     "pack:docs": "cosyte-process pack-docs",
     "docs:reference": "cosyte-docs-reference",
     "check:docs-reference": "cosyte-docs-reference --check",
