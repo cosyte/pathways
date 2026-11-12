@@ -292,26 +292,31 @@ describe("an MLLP source with replyTo", () => {
 });
 
 describe("sendOnce", () => {
-  it("gives up on a reply address that takes the connection but never reads, once its time is up", async () => {
-    // A peer that never reads: a frame larger than the kernel's buffers cannot be written out.
-    const silent = await startSilent();
-    const started = Date.now();
-    const sending = sendOnce(
-      { host: "127.0.0.1", port: silent },
-      undefined,
-      200,
-      Buffer.alloc(64 * 1024 * 1024, 0x41),
-    );
-    const outcome = await Promise.race([
-      sending.then(
-        () => "sent",
-        (error: unknown) => (error as MllpDialError).code,
-      ),
-      sleep(3_000).then(() => "still waiting"),
-    ]);
-    expect(outcome).toBe("SEND_TIMEOUT");
-    expect(Date.now() - started).toBeLessThan(2_000);
-  });
+  // Windows takes the whole write into its own buffers on loopback, so a peer that never reads
+  // cannot hold it up there; Linux and macOS stop the write once the peer's window is full.
+  it.skipIf(process.platform === "win32")(
+    "gives up on a reply address that takes the connection but never reads, once its time is up",
+    async () => {
+      // A peer that never reads: a frame larger than the kernel's buffers cannot be written out.
+      const silent = await startSilent();
+      const started = Date.now();
+      const sending = sendOnce(
+        { host: "127.0.0.1", port: silent },
+        undefined,
+        200,
+        Buffer.alloc(64 * 1024 * 1024, 0x41),
+      );
+      const outcome = await Promise.race([
+        sending.then(
+          () => "sent",
+          (error: unknown) => (error as MllpDialError).code,
+        ),
+        sleep(3_000).then(() => "still waiting"),
+      ]);
+      expect(outcome).toBe("SEND_TIMEOUT");
+      expect(Date.now() - started).toBeLessThan(2_000);
+    },
+  );
 });
 
 describe("an MLLP source that connects", () => {
