@@ -1770,14 +1770,39 @@ const STORAGE_BLOCK_KINDS = [...STORAGE_KINDS, "module"] as const;
 /**
  * What storage keeps of a message's content: `keep` keeps its body and outputs until retention
  * deletes the message; `dropAfterDelivery` deletes them in the transaction that records its last
- * delivery, keeping its metadata.
+ * delivery, keeping its metadata; `none`, which only a channel may set, stores nothing at all: each
+ * message is transformed and delivered while its sender waits, and answered only once every
+ * destination accepted it.
  *
  * @example
  * ```ts
- * CONTENT_POLICIES.includes("dropAfterDelivery"); // true
+ * CONTENT_POLICIES.includes("none"); // true
  * ```
  */
-export const CONTENT_POLICIES = ["keep", "dropAfterDelivery"] as const;
+export const CONTENT_POLICIES = ["keep", "dropAfterDelivery", "none"] as const;
+
+/**
+ * The {@link CONTENT_POLICIES} `pathways.yaml` may set for every channel: all but `none`, which a
+ * channel chooses for itself.
+ *
+ * @example
+ * ```ts
+ * PROJECT_CONTENT_POLICIES.includes("none"); // false
+ * ```
+ */
+export const PROJECT_CONTENT_POLICIES = ["keep", "dropAfterDelivery"] as const;
+
+/**
+ * How long a channel with `storage.content: none` lets one message's pass run (its transform and
+ * every delivery) before it answers the sender as for a failure it should retry, by default: 30
+ * seconds.
+ *
+ * @example
+ * ```ts
+ * DEFAULT_PASS_TIMEOUT_MS; // 30000
+ * ```
+ */
+export const DEFAULT_PASS_TIMEOUT_MS = 30_000;
 
 /**
  * One of {@link CONTENT_POLICIES}.
@@ -1789,11 +1814,19 @@ export const CONTENT_POLICIES = ["keep", "dropAfterDelivery"] as const;
  */
 export type ContentPolicy = (typeof CONTENT_POLICIES)[number];
 
-/** `storage.content`, in `pathways.yaml` and in a channel. */
+/** `storage.content` in `pathways.yaml`. */
 const content = envable(
+  z.enum(PROJECT_CONTENT_POLICIES).meta({
+    description:
+      "What is kept of a message's content: keep (the default) keeps its body and outputs until retention deletes the message; dropAfterDelivery deletes them once every delivery is delivered, keeping ids, times, statuses, sizes and a hash. A channel overrides it, and only a channel may set none.",
+  }),
+);
+
+/** `storage.content` in a channel, which alone may set `none`. */
+const channelContent = envable(
   z.enum(CONTENT_POLICIES).meta({
     description:
-      "What is kept of a message's content: keep (the default) keeps its body and outputs until retention deletes the message; dropAfterDelivery deletes them once every delivery is delivered, keeping ids, times, statuses, sizes and a hash. A channel overrides it.",
+      "What is kept of this channel's messages: keep keeps their bodies and outputs until retention deletes them; dropAfterDelivery deletes them once every delivery is delivered, keeping ids, times, statuses, sizes and a hash; none stores nothing, and answers each sender only once every destination accepted its message, so nothing is kept to replay. Default: pathways.yaml's, else keep.",
   }),
 );
 
@@ -3014,7 +3047,22 @@ export const channelSchema = restate(
       config: transformConfig.optional(),
       retry: settingsShape.retry,
       storage: z
-        .strictObject({ content: content.optional() })
+        .strictObject({
+          content: channelContent.optional(),
+          passTimeout: duration(
+            "With content: none, how long one message's pass (its transform and every delivery) may run before its sender is answered as for a failure to retry: 503 over HTTP, no ACK over MLLP. A duration above zero, such as 30s. Default 30s.",
+            { ms: 1, message: "must be above zero" },
+          ).optional(),
+        })
+        .superRefine((value, ctx) => {
+          if (value.passTimeout !== undefined && value.content !== "none") {
+            ctx.addIssue({
+              code: "custom",
+              path: ["passTimeout"],
+              message: "applies only with content: none",
+            });
+          }
+        })
         .meta({
           description: "What is kept of this channel's messages: overrides pathways.yaml's.",
         })
@@ -3151,9 +3199,15 @@ export interface Settings {
   readonly retry: RetryPolicy;
   /**
    * What is kept of a message's content, from `storage.content` in `pathways.yaml` or the channel:
-   * `keep`, or `dropAfterDelivery` to delete the bodies once every delivery is delivered.
+   * `keep`, `dropAfterDelivery` to delete the bodies once every delivery is delivered, or, set by a
+   * channel, `none` to store nothing and pass each message through while its sender waits.
    */
   readonly content: ContentPolicy;
+  /**
+   * With `content: none`, how long one message's pass may run before its sender is answered as for
+   * a failure to retry, in milliseconds. Undefined for {@link DEFAULT_PASS_TIMEOUT_MS}.
+   */
+  readonly passTimeoutMs?: number | undefined;
 }
 
 /**

@@ -20,6 +20,28 @@ import { answerProbe, type EngineRole, type Probes } from "./probes.js";
  */
 export type ChannelStatus = "ok" | "retrying" | "failed" | "unknown";
 
+/**
+ * How the passes of a channel that stores nothing (`storage.content: none`) ended since the engine
+ * started: counts only, kept in memory, so they start from zero on each start.
+ *
+ * @example
+ * ```ts
+ * const passes: PassCounts = { accepted: 41, filtered: 2, unreadable: 0, rejected: 1, deferred: 3 };
+ * ```
+ */
+export interface PassCounts {
+  /** Every destination accepted the message, and its sender was answered so. */
+  readonly accepted: number;
+  /** The transform sent the message nowhere, and its sender was answered as for one accepted. */
+  readonly filtered: number;
+  /** The source could not read the message, and answered its sender so. */
+  readonly unreadable: number;
+  /** The transform failed or a destination rejected the message: sending it again will not help. */
+  readonly rejected: number;
+  /** A destination failed or the pass ran out of time: the sender was told to send it again. */
+  readonly deferred: number;
+}
+
 /** One channel on the health endpoint: states and counts, never content. */
 export interface ChannelHealth {
   readonly status: ChannelStatus;
@@ -42,6 +64,14 @@ export interface ChannelHealth {
    * already held `maxConnections`, since the engine started. Absent for any other source.
    */
   readonly connections?: { readonly refused: number };
+  /**
+   * `volatile` for a channel that stores nothing (`storage.content: none`): a message is held only
+   * while its sender waits for the answer, and nothing is kept to replay. Absent for every other
+   * channel.
+   */
+  readonly storage?: "volatile";
+  /** For a channel that stores nothing: how its passes ended since the engine started. */
+  readonly passes?: PassCounts;
 }
 
 /**
