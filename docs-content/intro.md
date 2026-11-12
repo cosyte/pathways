@@ -63,8 +63,9 @@ on one machine, from the command line or in Docker.
 - Start from an example, a small project that runs on synthetic messages:
   [HL7 v2 over MLLP in, HTTP out](./example-mllp-to-http.md),
   [a file drop to SFTP](./example-file-to-sftp.md), [HL7 v2 to FHIR](./example-hl7-to-fhir.md),
-  [filter, then send to two destinations](./example-filter-and-route.md), and
-  [replay after a failure](./example-replay-after-failure.md).
+  [filter, then send to two destinations](./example-filter-and-route.md),
+  [replay after a failure](./example-replay-after-failure.md), and
+  [a veterinary lab result to FHIR](./example-vet-lab-to-fhir.md).
 - [How delivery and errors work](./delivery-and-errors.md), before you run Pathways for real.
 
 The repository: https://github.com/cosyte/pathways
