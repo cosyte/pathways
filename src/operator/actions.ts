@@ -2,7 +2,7 @@ import type { ChannelConfig, ProjectConfig } from "../config/schema.js";
 import { transformConfigFor } from "../config/transform-config.js";
 import type { Env } from "../connectors/endpoint.js";
 import { EncryptionError } from "../encryption/envelope.js";
-import { ChannelWorker, TransformLoadError } from "../engine/channel-worker.js";
+import { ChannelWorker, inboundOf, TransformLoadError } from "../engine/channel-worker.js";
 import { storedFailure } from "../engine/engine.js";
 import type { FailureSummary } from "../engine/worker-entry.js";
 import type { MessageStatus, MessageStore, RequeueResult } from "../storage/store.js";
@@ -286,6 +286,7 @@ async function workerFor(
   const worker = new ChannelWorker({
     channel: channel.name,
     transformFile: channel.transform,
+    ...inboundOf(channel),
     format: channel.format,
     timeoutMs: channel.settings.timeoutMs,
     memoryMb: channel.settings.memoryMb,

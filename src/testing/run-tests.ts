@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { ChannelConfig, ProjectConfig } from "../config/schema.js";
 import { transformConfigFor } from "../config/transform-config.js";
 import type { Env } from "../connectors/endpoint.js";
-import { ChannelWorker, TransformLoadError } from "../engine/channel-worker.js";
+import { ChannelWorker, inboundOf, TransformLoadError } from "../engine/channel-worker.js";
 import type { FailureSummary } from "../engine/worker-entry.js";
 
 /** Options for {@link runChannelTests}. */
@@ -90,6 +90,7 @@ export async function runChannelTests(
     const worker = new ChannelWorker({
       channel: channel.name,
       transformFile: channel.transform,
+      ...inboundOf(channel),
       format: channel.format,
       timeoutMs: channel.settings.timeoutMs,
       memoryMb: channel.settings.memoryMb,
@@ -228,7 +229,11 @@ export function describeFailure(failure: FailureSummary, channel: ChannelConfig)
       if (failure.code === "TRANSFORM_CONFIG") {
         return `the transform's configuration could not be resolved: ${failure.detail.split("\n").join("; ")}`;
       }
-      return `the transform could not be loaded (${failure.name}${where})`;
+      return failure.code === "ENCODING_UNSUPPORTED"
+        ? `the channel's encoding cannot be read here (${failure.code})`
+        : `the transform could not be loaded (${failure.name}${where})`;
+    case "preprocess":
+      return `the preprocessor failed (${failure.code ?? failure.name}${where})`;
     case "parse":
       return `the input could not be parsed as ${channel.format} (${failure.code ?? failure.name})`;
     case "transform":

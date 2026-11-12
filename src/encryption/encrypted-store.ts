@@ -198,6 +198,12 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
   readonly setChannelState?: (channel: string, state: ChannelRunState) => Promise<void>;
   /** Straight through, present only when the store underneath has it. */
   readonly markDryRun?: (deliveryId: number, epoch?: number) => Promise<void>;
+  /** Straight through, present only when the store underneath has it: codes are not content. */
+  readonly recordWarnings?: (
+    messageId: number,
+    codes: readonly string[],
+    epoch?: number,
+  ) => Promise<void>;
 
   protected constructor(inner: MessageStore, codec: Codec, indexer?: MetaIndexer) {
     this.#inner = inner;
@@ -220,6 +226,7 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
       this.setChannelState = states.setChannelState;
     }
     if (inner.markDryRun !== undefined) this.markDryRun = inner.markDryRun.bind(inner);
+    if (inner.recordWarnings !== undefined) this.recordWarnings = inner.recordWarnings.bind(inner);
     this.#innerCopies = copiesBodies(inner);
     // A codec that copies keeps no body it is handed and reads each into a new buffer; one that does
     // not passes bodies straight through, so this store copies when the one underneath does.

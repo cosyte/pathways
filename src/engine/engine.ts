@@ -54,7 +54,12 @@ import {
   type ReceivedMessage,
 } from "../storage/store.js";
 import type { SourceFacts } from "../transform.js";
-import { ChannelWorker, TransformLoadError, type TransformOutcome } from "./channel-worker.js";
+import {
+  ChannelWorker,
+  inboundOf,
+  TransformLoadError,
+  type TransformOutcome,
+} from "./channel-worker.js";
 import type { EngineFence } from "./lease.js";
 import { channelStatus, type ChannelHealth, type EngineHealth } from "./health.js";
 import { formatTable, type FailureSummary } from "./worker-entry.js";
@@ -746,6 +751,8 @@ export class Engine {
   private readonly now: () => number;
   private readonly monotonic: () => number;
   private readonly channels: RunningChannel[] = [];
+  /** The inbound warnings each channel's messages raised since the engine started, by code. */
+  private readonly inboundWarnings = new Map<string, Record<string, number>>();
   /** When the engine loop last made a step, by the monotonic clock, while {@link run} runs. */
   private steppedAt: number | undefined;
   /** The last storage check for readiness: when it started and what it found. */
@@ -822,6 +829,7 @@ export class Engine {
         const worker = new ChannelWorker({
           channel: config.name,
           transformFile: config.transform,
+          ...inboundOf(config),
           format: config.format,
           timeoutMs: config.settings.timeoutMs,
           memoryMb: config.settings.memoryMb,
@@ -1262,6 +1270,7 @@ export class Engine {
           store.retryingDeliveries(name),
         ]);
         const deliveries = { ...counts, retrying };
+        const warnings = this.inboundWarnings.get(name);
         channels[name] = {
           status: channelStatus(messages, deliveries),
           source: source(name),
@@ -1269,6 +1278,7 @@ export class Engine {
           state: states[name] ?? "running",
           messages,
           deliveries,
+          ...(warnings === undefined ? {} : { warnings: { ...warnings } }),
         };
       }
     } catch {
@@ -1602,6 +1612,7 @@ export class Engine {
     const worker = new ChannelWorker({
       channel: name,
       transformFile: next.transform,
+      ...inboundOf(next),
       format: next.format,
       timeoutMs: next.settings.timeoutMs,
       memoryMb: next.settings.memoryMb,
@@ -1889,6 +1900,8 @@ export class Engine {
         context: { messageId: next.id, attempt: 1, source, meta: {} },
       });
       if (outcome.ok) {
+        if (outcome.warnings !== undefined)
+          await this.noteWarnings(config.name, next.id, outcome.warnings);
         faultPoint("after-transform-before-complete");
         await store.completeTransform(
           next.id,
@@ -1935,6 +1948,23 @@ export class Engine {
         }));
       }
     }
+  }
+
+  /**
+   * Keeps the inbound warnings one message's parse raised (`ENCODING_MISMATCH` and the like): stored
+   * with the message when the store can, counted for the health endpoint, and logged by code.
+   */
+  private async noteWarnings(
+    channel: string,
+    messageId: number,
+    codes: readonly string[],
+  ): Promise<void> {
+    const { store, logger } = this.options;
+    await store.recordWarnings?.(messageId, codes, ...this.epoch());
+    const counts = this.inboundWarnings.get(channel) ?? {};
+    for (const code of codes) counts[code] = (counts[code] ?? 0) + 1;
+    this.inboundWarnings.set(channel, counts);
+    logger.warn({ event: "inbound-warning", channel, message: messageId, codes: codes.join(",") });
   }
 
   /**

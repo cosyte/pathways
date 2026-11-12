@@ -27,7 +27,7 @@ export type TransformFunction = (message: unknown, ctx?: unknown) => unknown;
 
 /** What stage a failure happened in. */
 export type FailureKind =
-  "load" | "parse" | "transform" | "output" | "timeout" | "memory" | "crash";
+  "load" | "preprocess" | "parse" | "transform" | "output" | "timeout" | "memory" | "crash";
 
 /**
  * A failure, described without the message's content: an error name, a stable code where there is
@@ -70,7 +70,13 @@ export interface TransformRequest extends MessageContext {
 
 /** The worker's reply to one request. */
 export type TransformReply =
-  | { readonly id: number; readonly ok: true; readonly outputs: readonly Uint8Array[] }
+  | {
+      readonly id: number;
+      readonly ok: true;
+      readonly outputs: readonly Uint8Array[];
+      /** The inbound warning codes the parse raised, set only when there was one. */
+      readonly warnings?: readonly string[];
+    }
   | { readonly id: number; readonly ok: false; readonly failure: FailureSummary };
 
 /** The worker's first message: ready, or the transform could not be loaded. */
@@ -88,6 +94,85 @@ export interface WorkerSetup {
    * values, frozen once here and shared by every message's context.
    */
   readonly config: Readonly<Record<string, unknown>>;
+  /** The channel's preprocessor module, run on each body before it is decoded. Absent for none. */
+  readonly preprocessFile?: string | undefined;
+  /** How the channel reads its bodies: its `encoding:` and its `parse:` options. Absent for none. */
+  readonly inbound?: InboundSettings | undefined;
+}
+
+/**
+ * The character encodings a channel may read its bodies in, with its `encoding:` setting.
+ *
+ * @example
+ * ```ts
+ * ENCODINGS.includes("latin1"); // true
+ * ```
+ */
+export const ENCODINGS = Object.freeze(["utf-8", "latin1", "windows-1252"] as const);
+
+/** A character encoding a channel may read its bodies in: one of {@link ENCODINGS}. */
+export type InboundEncoding = (typeof ENCODINGS)[number];
+
+/**
+ * The `@cosyte/hl7` parse options an `hl7v2` channel may set with its `parse:` block. Line endings
+ * need none: the library reads CR, LF and CRLF alike.
+ */
+export interface Hl7ParseSettings {
+  /** Refuse a message that raises any parse warning, rather than reading it. Default false. */
+  readonly strict?: boolean | undefined;
+  /** Trim the spaces around each field's value, as `@cosyte/hl7` does by default. Default true. */
+  readonly trimFields?: boolean | undefined;
+}
+
+/** How a channel reads its bodies: plain data, sent to the worker with its setup. */
+export interface InboundSettings {
+  /**
+   * The encoding the channel's bodies are in. Unset, `text` reads UTF-8 leniently, `hl7v2` reads
+   * the charset each message declares in MSH-18, and every other format reads strict UTF-8.
+   */
+  readonly encoding?: InboundEncoding | undefined;
+  /** The parse options of an `hl7v2` channel. */
+  readonly parse?: Hl7ParseSettings | undefined;
+}
+
+/** What a format's `decode` reads a body with, beyond its bytes. */
+export interface DecodeOptions extends InboundSettings {
+  /** Hears each warning the parse raised that the engine stores and counts, by its code. */
+  readonly warn?: ((code: string) => void) | undefined;
+}
+
+/**
+ * The warning codes an `hl7v2` parse raises that the engine stores with the message and counts:
+ * those about its character set, so a sender that mislabels its bytes is seen.
+ */
+export const INBOUND_WARNINGS: ReadonlySet<string> = new Set([
+  "ENCODING_MISMATCH",
+  "UNKNOWN_CHARSET",
+  "UNSUPPORTED_CHARSET",
+]);
+
+/**
+ * What a preprocessor is told about the body it is handed: the message's stored id (0 for one that
+ * is not stored), the channel's format, and its `encoding:` when it sets one.
+ */
+export interface PreprocessInfo {
+  readonly messageId: number;
+  readonly format: WorkerFormat;
+  readonly encoding: InboundEncoding | undefined;
+}
+
+/**
+ * A channel's preprocessor, as loaded from its module's default export: the body's bytes as they
+ * were received, and what is known of them; it returns the bytes or the text to decode.
+ */
+export type PreprocessFunction = (bytes: Uint8Array, info: PreprocessInfo) => unknown;
+
+/** The preprocessor of one message, its info bound already, and how the channel reads bodies. */
+export interface InboundStep {
+  readonly preprocess?: ((bytes: Uint8Array) => unknown) | undefined;
+  readonly settings?: InboundSettings | undefined;
+  /** Collects the warning codes the parse raised, each once. */
+  readonly warnings?: string[] | undefined;
 }
 
 /**
@@ -105,6 +190,19 @@ export function isWorkerSetup(data: unknown): data is WorkerSetup {
     data !== null &&
     (data as { pathwaysWorker?: unknown }).pathwaysWorker === true
   );
+}
+
+/**
+ * A failure of the worker's own, with a stable code and a fixed text that never quotes the body.
+ */
+class InboundError extends Error {
+  readonly code: string;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = "InboundError";
+    this.code = code;
+  }
 }
 
 class StageError extends Error {
@@ -138,6 +236,82 @@ const lenientUtf8 = new TextDecoder();
  * `ERR_ENCODING_INVALID_ENCODED_DATA` rather than being changed in silence.
  */
 const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
+/**
+ * Windows-1252 as the WHATWG Encoding standard maps it: 0x80 to 0x9F are the characters that code
+ * page gives them (0x80 is the euro sign), and the five it leaves undefined map to the C1 control of
+ * the same value.
+ */
+const windows1252 = new TextDecoder("windows-1252");
+
+/**
+ * A body read as text in `encoding`. Unset, UTF-8, leniently (`text` keeps its first behaviour).
+ * Latin-1 is read here byte for byte, since `TextDecoder` gives the label `latin1` (and
+ * `iso-8859-1`) windows-1252's mapping of 0x80 to 0x9F.
+ */
+function textIn(body: Uint8Array, encoding: InboundEncoding | undefined): string {
+  switch (encoding) {
+    case undefined:
+      return lenientUtf8.decode(body);
+    case "utf-8":
+      return strictUtf8.decode(body);
+    case "latin1":
+      return Buffer.from(body.buffer, body.byteOffset, body.byteLength).toString("latin1");
+    case "windows-1252":
+      return windows1252.decode(body);
+  }
+}
+
+/** A body a format reads as strict UTF-8, or the text a preprocessor returned, as it is. */
+function utf8Text(body: Uint8Array | string): string {
+  return typeof body === "string" ? body : strictUtf8.decode(body);
+}
+
+/** The MSH-18 label `@cosyte/hl7` is given for each channel encoding, as its charset override. */
+const HL7_CHARSETS: Readonly<Record<InboundEncoding, string>> = Object.freeze({
+  "utf-8": "UNICODE UTF-8",
+  latin1: "8859/1",
+  "windows-1252": "WINDOWS-1252",
+});
+
+/**
+ * Reads an HL7 v2 body with the channel's parse options and encoding. The channel's encoding is the
+ * library's charset override, so it wins over what MSH-18 declares: a sender known to mislabel its
+ * bytes is read as the channel says, and the library's `ENCODING_MISMATCH` warning says so. Text a
+ * preprocessor returned is read as it is, with no charset.
+ */
+async function decodeHl7(
+  body: Uint8Array | string,
+  options: DecodeOptions,
+): Promise<Hl7.Hl7Message> {
+  const library = await libraries.hl7();
+  const { encoding, parse, warn } = options;
+  const parseOptions: Hl7.ParseOptions = {
+    ...(parse?.strict === undefined ? {} : { strict: parse.strict }),
+    ...(parse?.trimFields === undefined ? {} : { trimFields: parse.trimFields }),
+  };
+  const message =
+    typeof body === "string"
+      ? library.parseHL7(body, parseOptions)
+      : library.parseHL7(Buffer.from(body.buffer, body.byteOffset, body.byteLength), {
+          ...parseOptions,
+          ...(encoding === undefined ? {} : { charset: HL7_CHARSETS[encoding] }),
+        });
+  if (warn !== undefined) {
+    for (const warning of message.warnings) {
+      if (INBOUND_WARNINGS.has(warning.code)) warn(warning.code);
+    }
+  }
+  return message;
+}
+
+/**
+ * Whether this thread's `@cosyte/hl7` decodes windows-1252. One that does not reads it as Latin-1
+ * would, so a channel that asks for it is refused when its worker starts rather than given the
+ * wrong characters for 0x80 to 0x9F.
+ */
+async function hl7DecodesWindows1252(): Promise<boolean> {
+  return (await libraries.hl7()).resolveCharset("WINDOWS-1252").treatment === "decode";
+}
 
 let hl7: Promise<typeof Hl7> | undefined;
 let fhir: Promise<typeof Fhir> | undefined;
@@ -195,8 +369,16 @@ export interface FormatEntry<Message> {
   readonly contentType: string;
   /** Loads the library the format reads with, so the first message does not wait. Absent for none. */
   readonly load?: () => Promise<unknown>;
-  /** Parses a stored body into what the transform receives; a throw is a parse failure. */
-  readonly decode: (body: Uint8Array) => Message | Promise<Message>;
+  /**
+   * Parses a stored body, or the text its channel's preprocessor returned, into what the transform
+   * receives, with the channel's encoding and parse options; a throw is a parse failure.
+   */
+  readonly decode: (
+    body: Uint8Array | string,
+    options: DecodeOptions,
+  ) => Message | Promise<Message>;
+  /** Whether a channel of this format may set `encoding:`. Absent for no: it reads strict UTF-8. */
+  readonly takesEncoding?: true;
   /** Writes this format's model, on a channel of any format. */
   readonly model?: ModelWriter;
   /**
@@ -220,7 +402,8 @@ function defineFormat<Message>(entry: FormatEntry<Message>): FormatEntry<Message
  * - `x12`: an `X12Interchange` from `@cosyte/x12`;
  * - `ccda`: a `CcdaDocument` from `@cosyte/ccda`;
  * - `json`: the value `JSON.parse` returns;
- * - `text`: the body as a string.
+ * - `text`: the body as a string;
+ * - `raw`: the body's bytes, a copy, as a `Uint8Array`.
  *
  * @example
  * ```ts
@@ -232,9 +415,9 @@ export const FORMAT_REGISTRY = Object.freeze({
     extension: "hl7",
     contentType: "application/hl7-v2",
     load: libraries.hl7,
-    // The library reads the bytes itself, in the charset the message declares.
-    decode: async (body) =>
-      (await libraries.hl7()).parseHL7(Buffer.from(body.buffer, body.byteOffset, body.byteLength)),
+    // The library reads the bytes itself, in the charset the message declares or the channel sets.
+    decode: decodeHl7,
+    takesEncoding: true,
     model: {
       byShape: false,
       write: async (value) =>
@@ -245,8 +428,7 @@ export const FORMAT_REGISTRY = Object.freeze({
     extension: "json",
     contentType: "application/fhir+json",
     load: libraries.fhir,
-    decode: async (body) =>
-      (await libraries.fhir()).parseResource(strictUtf8.decode(body)).resource,
+    decode: async (body) => (await libraries.fhir()).parseResource(utf8Text(body)).resource,
     model: {
       byShape: true,
       write: async (value) =>
@@ -257,7 +439,7 @@ export const FORMAT_REGISTRY = Object.freeze({
     extension: "x12",
     contentType: "application/edi-x12",
     load: libraries.x12,
-    decode: async (body) => (await libraries.x12()).parseX12(strictUtf8.decode(body)),
+    decode: async (body) => (await libraries.x12()).parseX12(utf8Text(body)),
     model: {
       byShape: true,
       write: async (value) =>
@@ -268,7 +450,7 @@ export const FORMAT_REGISTRY = Object.freeze({
     extension: "xml",
     contentType: "application/xml",
     load: libraries.ccda,
-    decode: async (body) => (await libraries.ccda()).parseCcda(strictUtf8.decode(body)),
+    decode: async (body) => (await libraries.ccda()).parseCcda(utf8Text(body)),
     model: {
       byShape: false,
       write: async (value) => {
@@ -280,13 +462,20 @@ export const FORMAT_REGISTRY = Object.freeze({
   json: defineFormat<JsonValue>({
     extension: "json",
     contentType: "application/json",
-    decode: (body) => parseJson(strictUtf8.decode(body)) as JsonValue,
+    decode: (body) => parseJson(utf8Text(body)) as JsonValue,
     value: jsonValue,
   }),
   text: defineFormat<string>({
     extension: "txt",
     contentType: "text/plain",
-    decode: (body) => lenientUtf8.decode(body),
+    decode: (body, { encoding }) => (typeof body === "string" ? body : textIn(body, encoding)),
+    takesEncoding: true,
+  }),
+  raw: defineFormat<Uint8Array>({
+    extension: "bin",
+    contentType: "application/octet-stream",
+    // A copy, so what the transform changes is its own; text a preprocessor returned, as UTF-8.
+    decode: (body) => (typeof body === "string" ? encoder.encode(body) : new Uint8Array(body)),
   }),
 });
 
@@ -337,7 +526,7 @@ export function formatTable(
 
 /**
  * Loads the parser a format reads with, so a channel's first message does not wait for it.
- * `json` and `text` need none.
+ * `json`, `text` and `raw` need none.
  *
  * @example
  * ```ts
@@ -350,8 +539,9 @@ export async function loadFormat(format: WorkerFormat): Promise<void> {
 }
 
 /**
- * Parses a stored body into what the transform receives for `format`, with its registry entry (see
- * {@link FORMAT_REGISTRY} for what each gives).
+ * Parses a stored body, or the text a preprocessor returned, into what the transform receives for
+ * `format`, with its registry entry (see {@link FORMAT_REGISTRY} for what each gives) and the
+ * channel's encoding and parse options.
  *
  * A library's parse failure keeps its stable `code` (`NO_MSH_SEGMENT`, `MALFORMED_JSON`,
  * `X12_NO_ISA_HEADER`, `NOT_WELL_FORMED_XML` and the rest). `json` refuses a body that is not JSON
@@ -366,13 +556,14 @@ export async function loadFormat(format: WorkerFormat): Promise<void> {
  */
 export async function decode<F extends WorkerFormat>(
   format: F,
-  body: Uint8Array,
+  body: Uint8Array | string,
+  options: DecodeOptions = {},
 ): Promise<FormatModel<F>> {
   const entry = FORMAT_REGISTRY[format] as FormatEntry<FormatModel<F>>;
   // Called inside this async function, so a parser that throws as it is called rejects like one that
   // rejects. Only a parser's promise is awaited: a parser that returns its value at once (json,
   // text) leaves nothing waiting, so a run of calls that never yields piles up no continuations.
-  const message = entry.decode(body);
+  const message = entry.decode(body, options);
   return message instanceof Promise ? await message : message;
 }
 
@@ -702,9 +893,47 @@ export function buildContext(
 }
 
 /**
- * Runs one message through `transform`: parse, call with its context, serialize. `null` or
- * `undefined` filters the message out; an array sends several. Without a context, the transform
- * gets that of a message that is not stored, with no configuration.
+ * Runs a channel's preprocessor on one body, and gives what it returned: bytes, or text. A throw,
+ * an empty result or anything else fails the message at the `preprocess` stage, with a code.
+ *
+ * @example
+ * ```ts
+ * await preprocessBody((bytes) => bytes.subarray(3), new TextEncoder().encode("...MSH")); // "MSH"
+ * ```
+ */
+export async function preprocessBody(
+  preprocess: (bytes: Uint8Array) => unknown,
+  body: Uint8Array,
+): Promise<Uint8Array | string> {
+  let result: unknown;
+  try {
+    result = await preprocess(body);
+  } catch (error) {
+    throw new StageError("preprocess", error);
+  }
+  if (typeof result !== "string" && !(result instanceof Uint8Array)) {
+    throw new StageError(
+      "preprocess",
+      new InboundError(
+        "PREPROCESS_INVALID",
+        "the preprocessor returned neither bytes nor a string",
+      ),
+    );
+  }
+  if (result.length === 0) {
+    throw new StageError(
+      "preprocess",
+      new InboundError("PREPROCESS_EMPTY", "the preprocessor returned an empty body"),
+    );
+  }
+  return result;
+}
+
+/**
+ * Runs one message through `transform`: preprocess (when the channel has a preprocessor), parse,
+ * call with its context, serialize. `null` or `undefined` filters the message out; an array sends
+ * several. Without a context, the transform gets that of a message that is not stored, with no
+ * configuration. The parse's inbound warnings are added to `inbound.warnings`, each once.
  *
  * @example
  * ```ts
@@ -716,10 +945,23 @@ export async function runTransform(
   format: WorkerFormat,
   body: Uint8Array,
   ctx: unknown = buildContext(UNSTORED, {}),
+  inbound: InboundStep = {},
 ): Promise<Uint8Array[]> {
+  const input =
+    inbound.preprocess === undefined ? body : await preprocessBody(inbound.preprocess, body);
+  const sink = inbound.warnings;
   let message: unknown;
   try {
-    message = await decode(format, body);
+    message = await decode(format, input, {
+      ...inbound.settings,
+      ...(sink === undefined
+        ? {}
+        : {
+            warn: (code: string): void => {
+              if (!sink.includes(code)) sink.push(code);
+            },
+          }),
+    });
   } catch (error) {
     throw new StageError("parse", error);
   }
@@ -766,21 +1008,74 @@ export async function loadTransform(transformFile: string | undefined): Promise<
 }
 
 /**
- * Describes a failure by name, code and location, keeping the error's text in `detail` only.
+ * Loads a channel's preprocessor: its module's default export. Absent, there is none.
+ *
+ * @example
+ * ```ts
+ * const preprocess = await loadPreprocess("/project/channels/adt-to-lab/preprocess.ts");
+ * ```
+ */
+export async function loadPreprocess(
+  preprocessFile: string | undefined,
+): Promise<PreprocessFunction | undefined> {
+  if (preprocessFile === undefined) return undefined;
+  let module: { default?: unknown };
+  try {
+    module = (await import(pathToFileURL(preprocessFile).href)) as { default?: unknown };
+  } catch (error) {
+    throw new StageError("load", error);
+  }
+  if (typeof module.default !== "function") {
+    throw new StageError(
+      "load",
+      new TypeError("the preprocess module has no default export function"),
+    );
+  }
+  return module.default as PreprocessFunction;
+}
+
+/**
+ * Checks, as a worker starts, that it can read its channel's bodies as the channel says: a
+ * windows-1252 `hl7v2` channel needs an `@cosyte/hl7` that decodes windows-1252.
+ */
+export async function checkInbound(
+  format: WorkerFormat,
+  inbound: InboundSettings | undefined,
+): Promise<void> {
+  if (format !== "hl7v2" || inbound?.encoding !== "windows-1252") return;
+  if (await hl7DecodesWindows1252()) return;
+  throw new StageError(
+    "load",
+    new InboundError(
+      "ENCODING_UNSUPPORTED",
+      "this @cosyte/hl7 does not decode windows-1252; update it, or set encoding: latin1",
+    ),
+  );
+}
+
+/**
+ * Describes a failure by name, code and location, keeping the error's text in `detail` only. A
+ * preprocessor's failure always has a code: its error's own, or `PREPROCESS_FAILED`.
  *
  * @example
  * ```ts
  * summarize(new TypeError("..."), "/project/channels/adt-to-lab/transform.ts").name; // "TypeError"
  * ```
  */
-export function summarize(error: unknown, transformFile?: string): FailureSummary {
+export function summarize(
+  error: unknown,
+  transformFile?: string,
+  preprocessFile?: string,
+): FailureSummary {
   const kind = error instanceof StageError ? error.kind : "transform";
   const cause = error instanceof StageError ? error.cause : error;
   const name = cause instanceof Error ? cause.name : typeof cause;
   const rawCode = cause instanceof Error ? (cause as Error & { code?: unknown }).code : undefined;
-  const code = typeof rawCode === "string" ? rawCode : undefined;
+  const code =
+    typeof rawCode === "string" ? rawCode : kind === "preprocess" ? "PREPROCESS_FAILED" : undefined;
   const detail = cause instanceof Error ? cause.message : String(cause);
-  const where = transformFile === undefined ? undefined : locate(cause, transformFile);
+  const file = kind === "preprocess" ? preprocessFile : transformFile;
+  const where = file === undefined ? undefined : locate(cause, file);
   return {
     kind,
     name,
@@ -800,6 +1095,7 @@ export function summarize(error: unknown, transformFile?: string): FailureSummar
  * the package's own.
  */
 function locate(error: unknown, transformFile: string): string | undefined {
+  // `transformFile` is whichever module is being looked for: the transform or the preprocessor.
   if (!(error instanceof Error) || error.stack === undefined) return undefined;
   const names = new Set([normalize(transformFile)]);
   try {
@@ -868,20 +1164,40 @@ if (!isMainThread && parentPort !== null && isWorkerSetup(workerData)) {
   });
   // Frozen once: every message's context shares it.
   const config = freezeDeep(setup.config);
-  Promise.all([loadTransform(setup.transformFile), parser]).then(
-    ([transform]) => {
+  const settings = setup.inbound === undefined ? undefined : freezeDeep(setup.inbound);
+  Promise.all([
+    loadTransform(setup.transformFile),
+    loadPreprocess(setup.preprocessFile),
+    parser.then(() => checkInbound(setup.format, settings)),
+  ]).then(
+    ([transform, preprocess]) => {
       port.on("message", (request: TransformRequest) => {
-        runTransform(transform, setup.format, request.body, buildContext(request, config)).then(
+        const info: PreprocessInfo = Object.freeze({
+          messageId: request.messageId,
+          format: setup.format,
+          encoding: settings?.encoding,
+        });
+        const warnings: string[] = [];
+        runTransform(transform, setup.format, request.body, buildContext(request, config), {
+          preprocess: preprocess === undefined ? undefined : (bytes) => preprocess(bytes, info),
+          settings,
+          warnings,
+        }).then(
           (outputs) =>
             port.postMessage(
-              { id: request.id, ok: true, outputs } satisfies TransformReply,
+              {
+                id: request.id,
+                ok: true,
+                outputs,
+                ...(warnings.length === 0 ? {} : { warnings }),
+              } satisfies TransformReply,
               transferable(outputs),
             ),
           (error: unknown) =>
             port.postMessage({
               id: request.id,
               ok: false,
-              failure: summarize(error, setup.transformFile),
+              failure: summarize(error, setup.transformFile, setup.preprocessFile),
             } satisfies TransformReply),
         );
       });

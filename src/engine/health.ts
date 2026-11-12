@@ -36,6 +36,11 @@ export interface ChannelHealth {
    * `dry-run` is there only when a destination ran dry.
    */
   readonly deliveries?: DeliveryTally;
+  /**
+   * The inbound warnings the channel's messages raised since the engine started, by code, such as
+   * `ENCODING_MISMATCH` when MSH-18 disagrees with the channel's `encoding:`. Absent while none has.
+   */
+  readonly warnings?: Readonly<Record<string, number>>;
 }
 
 /**

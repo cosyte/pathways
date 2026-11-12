@@ -43,6 +43,7 @@ const SAMPLES: Record<Format, string> = {
   ccda: CCDA_DOCUMENT,
   json: '{ "status": "ok", "tries": [1, 2] }',
   text: "plain",
+  raw: "plain bytes",
 };
 
 async function failureOf(promise: Promise<unknown>, transformFile?: string) {
@@ -62,7 +63,7 @@ async function roundTrip(format: WorkerFormat, body: string): Promise<string> {
 
 describe("the format registry", () => {
   it("is where the formats, their extensions and their content types are read from", () => {
-    expect(FORMATS).toEqual(["hl7v2", "fhir", "x12", "ccda", "json", "text"]);
+    expect(FORMATS).toEqual(["hl7v2", "fhir", "x12", "ccda", "json", "text", "raw"]);
     expect(FORMATS).toEqual(Object.keys(FORMAT_REGISTRY));
     expect(formatTable("extension")).toEqual(
       Object.fromEntries(FORMATS.map((format) => [format, FORMAT_REGISTRY[format].extension])),

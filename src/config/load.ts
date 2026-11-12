@@ -241,6 +241,18 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
       );
       continue;
     }
+    const preprocess =
+      channel.preprocess === undefined ? undefined : resolve(channelDir, channel.preprocess);
+    if (preprocess !== undefined && !(await exists(preprocess))) {
+      problems.push(
+        `${show(file)}: preprocess: ${absent(preprocess, "preprocess", channelEnv, show)}`,
+      );
+      continue;
+    }
+    const inbound = {
+      ...(channel.encoding === undefined ? {} : { encoding: channel.encoding }),
+      ...(channel.parse === undefined ? {} : { parse: channel.parse }),
+    };
     const channelSettings = mergeSettings(settings, {
       ...channel,
       content: channel.storage?.content,
@@ -317,6 +329,9 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
       format: channel.format ?? "hl7v2",
       source,
       transform,
+      // Each set only when the channel sets it, so a channel without them resolves as it always has.
+      ...(preprocess === undefined ? {} : { preprocess }),
+      ...(Object.keys(inbound).length === 0 ? {} : { inbound }),
       destinations,
       settings: channelSettings,
       hooks: channelHooks,

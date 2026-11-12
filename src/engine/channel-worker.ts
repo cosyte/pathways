@@ -3,6 +3,7 @@ import { Worker } from "node:worker_threads";
 import { ownsBuffer } from "../storage/ownership.js";
 import type {
   FailureSummary,
+  InboundSettings,
   MessageContext,
   TransformReply,
   TransformRequest,
@@ -13,7 +14,12 @@ import type {
 
 /** The result of one message's transform. */
 export type TransformOutcome =
-  | { readonly ok: true; readonly outputs: readonly Uint8Array[] }
+  | {
+      readonly ok: true;
+      readonly outputs: readonly Uint8Array[];
+      /** The inbound warning codes the parse raised (`ENCODING_MISMATCH` and the like), if any. */
+      readonly warnings?: readonly string[];
+    }
   | { readonly ok: false; readonly failure: FailureSummary };
 
 /**
@@ -72,7 +78,30 @@ export interface ChannelWorkerOptions {
    * holds as `config`. Defaults to none.
    */
   readonly config?: Readonly<Record<string, unknown>>;
+  /** The channel's preprocessor module, run before each body is decoded. Defaults to none. */
+  readonly preprocessFile?: string | undefined;
+  /** The channel's `encoding:` and `parse:` options. Defaults to none. */
+  readonly inbound?: InboundSettings | undefined;
   readonly workerUrl?: URL;
+}
+
+/**
+ * The worker options a channel's inbound settings give: its preprocessor, its encoding and its
+ * parse options, each only when it sets them.
+ *
+ * @example
+ * ```ts
+ * new ChannelWorker({ channel: config.name, ...inboundOf(config), ...rest });
+ * ```
+ */
+export function inboundOf(channel: {
+  readonly preprocess?: string | undefined;
+  readonly inbound?: InboundSettings | undefined;
+}): Pick<ChannelWorkerOptions, "preprocessFile" | "inbound"> {
+  return {
+    ...(channel.preprocess === undefined ? {} : { preprocessFile: channel.preprocess }),
+    ...(channel.inbound === undefined ? {} : { inbound: channel.inbound }),
+  };
 }
 
 /**
@@ -147,12 +176,14 @@ export class ChannelWorker {
   }
 
   private spawn(): Promise<Worker> {
-    const { channel, transformFile, format, memoryMb } = this.options;
+    const { channel, transformFile, format, memoryMb, preprocessFile, inbound } = this.options;
     const setup: WorkerSetup = {
       pathwaysWorker: true,
       transformFile,
       format,
       config: this.options.config ?? {},
+      ...(preprocessFile === undefined ? {} : { preprocessFile }),
+      ...(inbound === undefined ? {} : { inbound }),
     };
     const worker = new Worker(this.options.workerUrl ?? defaultWorkerUrl(), {
       workerData: setup,
@@ -227,7 +258,13 @@ export class ChannelWorker {
         // a reply that carries this message's id settles it; anything else is ignored.
         if (!isReplyTo(reply, id)) return;
         finish(
-          reply.ok ? { ok: true, outputs: reply.outputs } : { ok: false, failure: reply.failure },
+          reply.ok
+            ? {
+                ok: true,
+                outputs: reply.outputs,
+                ...(reply.warnings === undefined ? {} : { warnings: reply.warnings }),
+              }
+            : { ok: false, failure: reply.failure },
           false,
         );
       };

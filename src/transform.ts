@@ -4,7 +4,7 @@ import type * as Hl7 from "@cosyte/hl7";
 import type * as X12 from "@cosyte/x12";
 
 import type { Format } from "./config/schema.js";
-import type { FormatModel, JsonValue } from "./engine/worker-entry.js";
+import type { FormatModel, JsonValue, PreprocessInfo } from "./engine/worker-entry.js";
 
 /**
  * An HL7 v2 message as an `hl7v2` channel's transform receives it: `@cosyte/hl7`'s `Hl7Message`.
@@ -60,13 +60,38 @@ export type X12Interchange = X12.X12Interchange;
 export type CcdaDocument = Ccda.CcdaDocument;
 
 // Declared beside the format registry, in the worker, which imports nothing of the package's own.
-export type { JsonValue } from "./engine/worker-entry.js";
+export type { InboundEncoding, JsonValue, PreprocessInfo } from "./engine/worker-entry.js";
+
+/**
+ * A channel's preprocessor: the default export of the module its `preprocess:` names. It takes each
+ * body's bytes as they were received, before they are decoded, and returns the bytes to decode (in
+ * the channel's encoding) or the text to decode (as it is). It runs in the transform worker, under
+ * the transform's time and memory limits. The stored body stays the bytes as received.
+ *
+ * A throw fails the message at the `preprocess` stage with the error's code, or
+ * `PREPROCESS_FAILED`; an empty result fails it with `PREPROCESS_EMPTY`.
+ *
+ * @example
+ * ```ts
+ * import type { Preprocess } from "@cosyte/pathways";
+ *
+ * // Drops a byte order mark a sender writes before MSH.
+ * export default ((bytes) =>
+ *   bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf ? bytes.subarray(3) : bytes
+ * ) satisfies Preprocess;
+ * ```
+ */
+export type Preprocess = (
+  bytes: Uint8Array,
+  info: PreprocessInfo,
+) => Uint8Array | string | Promise<Uint8Array | string>;
 
 /**
  * The message each format hands a transform, by the `format` a channel declares, read from the
  * format registry: `hl7v2` an {@link Hl7Message}, `fhir` a {@link FhirResource}, `x12` an
  * {@link X12Interchange}, `ccda` a {@link CcdaDocument}, `json` a {@link JsonValue} (a string a
- * `json` transform returns is sent as it is, not JSON-quoted), and `text` the body as a string.
+ * `json` transform returns is sent as it is, not JSON-quoted), `text` the body as a string, and
+ * `raw` a copy of the body's bytes as a `Uint8Array`.
  *
  * @example
  * ```ts
