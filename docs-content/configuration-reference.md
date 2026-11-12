@@ -667,9 +667,11 @@ fails the delivery for good. The destination's [`retry`](#retry) block sets the 
 answer after it, and is retried when none comes within `timeout` or the connection closes. See [Send and receive over HTTP](./send-and-receive-http.md).
 
 With `ack: xml`, a 2xx answer is read as an HL7 v2 XML acknowledgement and settles the delivery:
-`AA` or `CA` delivered, `AR` or `CR` failed, and `AE` or `CE`, an answer that cannot be read or one
-that answers another `MSH.10`, retried. `AE` and `AR` settle the other way round from an MLLP
-destination. See
+`AA` or `CA` delivered, `AR` or `CR` failed, and `AE` or `CE`, an answer that is not exactly one
+acknowledgement or one that answers another `MSH.10`, retried. `AE` and `AR` settle the other way
+round from an MLLP destination. A message sent as XML the reader refuses fails at once, unsent,
+with the reason `SENT_XML_UNREADABLE`; the control ID check is skipped only for a body that is not
+XML at all. The destination's format must be `hl7v2` or `text`. See
 [Settle by an HL7 v2 XML acknowledgement](./send-and-receive-http.md#settle-by-an-hl7-v2-xml-acknowledgement).
 
 #### MLLP destination

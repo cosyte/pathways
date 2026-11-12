@@ -1145,7 +1145,7 @@ const httpDestination = restate(
       ack: envable(
         z.enum(["xml"]).meta({
           description:
-            "xml: read each 2xx answer as an HL7 v2 XML acknowledgement and settle by its MSA.1: AA or CA delivered, AR or CR failed, AE or CE (or an answer that is not one acknowledgement or answers another MSH.10) retried. Default: the status alone decides.",
+            "xml: read each 2xx answer as an HL7 v2 XML acknowledgement and settle by its MSA.1: AA or CA delivered, AR or CR failed, AE or CE (or an answer that is not exactly one acknowledgement or answers another MSH.10) retried. Needs the destination's format to be hl7v2 or text. Default: the status alone decides.",
         }),
       ).optional(),
     })
@@ -3258,6 +3258,19 @@ export const channelSchema = restate(
           path: ["hl7v2"],
           message: "an hl7v2: block needs format: hl7v2",
         });
+      }
+      // An XML acknowledgement answers an HL7 v2 message, so `ack: xml` needs a destination that
+      // sends one: hl7v2, or text a transform wrote. Any other format says the body is something
+      // else, whose control ID could never be checked.
+      for (const [index, destination] of channel.destinations.entries()) {
+        const sends = destination.format ?? channel.format ?? "hl7v2";
+        if (destination.http?.ack === "xml" && sends !== "hl7v2" && sends !== "text") {
+          ctx.addIssue({
+            code: "custom",
+            path: ["destinations", index, "http", "ack"],
+            message: `an HL7 v2 XML acknowledgement answers HL7 v2 only, and this destination sends ${sends}; set its format to hl7v2 or text, or drop ack`,
+          });
+        }
       }
       // MLLP frames HL7 v2 and its ACKs are HL7 v2 messages, so an MLLP endpoint needs that format.
       if ((channel.format ?? "hl7v2") === "hl7v2") return;

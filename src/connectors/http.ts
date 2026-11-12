@@ -24,7 +24,15 @@ import {
   type OutgoingMessage,
   type SourceConnector,
 } from "./types.js";
-import { MAX_XML_ACK_BYTES, readXmlAck, settleXmlAck, xmlControlId } from "./xml-ack.js";
+import {
+  MAX_XML_ACK_BYTES,
+  type MISFIT,
+  readXmlAck,
+  REFUSED,
+  SENT_XML_UNREADABLE,
+  settleXmlAck,
+  xmlControlId,
+} from "./xml-ack.js";
 
 /** A method an HTTP source can take a message by. */
 export type HttpSourceMethod = "POST" | "PUT";
@@ -354,10 +362,12 @@ export interface HttpDestinationOptions {
  * With `ack: "xml"`, a 2xx answer's body is read, up to 1 MiB and within the same time limit, as an
  * HL7 v2 XML acknowledgement, the way a web service that takes v2 XML answers on the same connection:
  * `AA` or `CA` is delivered; `AR` or `CR` a `DeliveryRejected`; `AE` or `CE`, an answer that is not
- * one acknowledgement, a larger one, one that answers another `MSH.10` than the message sent, or a
- * message sent that is XML but cannot be read, a `RetryableError` coded `ACK_AE`, `ACK_CE`,
- * `ACK_UNREADABLE` or `ACK_CONTROL_ID_MISMATCH`. Only the code and the control ID are read; the rest
- * is dropped, never logged.
+ * exactly one acknowledgement, a larger one, one that answers another `MSH.10` than the message
+ * sent, or a message sent as XML that is not one message with one `MSH.10`, a `RetryableError` coded
+ * `ACK_AE`, `ACK_CE`, `ACK_UNREADABLE` or `ACK_CONTROL_ID_MISMATCH`. The message sent is read once
+ * per delivery, before its first POST; when it is XML the hardened reader refuses, nothing is sent
+ * and the delivery fails at once, a `DeliveryRejected` whose reason is `SENT_XML_UNREADABLE`. Only
+ * the code and the control ID are read; the rest is dropped, never logged.
  *
  * @example
  * ```ts
@@ -375,6 +385,18 @@ export class HttpDestination implements DestinationConnector {
   private readonly agent: HttpAgent;
   private readonly send: typeof httpRequest;
   private readonly now: () => number;
+  /**
+   * The control ID read from the last message delivered with `ack: xml`, kept so the attempts after
+   * the first one of a delivery do not read the message again: its id, output and bytes.
+   */
+  private lastSent:
+    | {
+        readonly messageId: number;
+        readonly seq: number;
+        readonly body: Buffer;
+        readonly controlId: string | typeof REFUSED | typeof MISFIT | undefined;
+      }
+    | undefined;
 
   /** @param options The URL, headers, timeout, TLS and, for tests, a clock. */
   constructor(options: HttpDestinationOptions) {
@@ -392,6 +414,41 @@ export class HttpDestination implements DestinationConnector {
 
   /** Sends one output. */
   deliver(message: OutgoingMessage): Promise<void> {
+    if (this.options.ack !== "xml") return this.post(message, undefined);
+    return this.sentControlId(message).then((sent) => {
+      if (sent === REFUSED) throw new DeliveryRejected(SENT_XML_UNREADABLE);
+      return this.post(message, sent);
+    });
+  }
+
+  /**
+   * The control ID of `message`, read once per delivery: an attempt that sends the same output of the
+   * same message, byte for byte, as the one before takes what was read then.
+   */
+  private async sentControlId(
+    message: OutgoingMessage,
+  ): Promise<string | typeof REFUSED | typeof MISFIT | undefined> {
+    const body = Buffer.from(message.body.buffer, message.body.byteOffset, message.body.byteLength);
+    const last = this.lastSent;
+    if (
+      last?.messageId === message.messageId &&
+      last.seq === message.seq &&
+      last.body.equals(body)
+    ) {
+      return last.controlId;
+    }
+    const controlId = await xmlControlId(message.body);
+    this.lastSent = {
+      messageId: message.messageId,
+      seq: message.seq,
+      body: Buffer.from(body),
+      controlId,
+    };
+    return controlId;
+  }
+
+  /** POSTs one output, and with `ack: xml` settles it by the answer matched to `sent`. */
+  private post(message: OutgoingMessage, sent: string | typeof MISFIT | undefined): Promise<void> {
     const { headers, timeoutMs, resendHeader } = this.options;
     const flag =
       resendHeader === undefined || message.resend === undefined
@@ -417,7 +474,7 @@ export class HttpDestination implements DestinationConnector {
           readAnswer(response).then(
             (answer) => {
               clearTimeout(timer);
-              this.settle(answer, message.body).then(resolve, reject);
+              this.settle(answer, sent).then(resolve, reject);
             },
             () => {
               clearTimeout(timer);
@@ -451,10 +508,13 @@ export class HttpDestination implements DestinationConnector {
     });
   }
 
-  /** Settles a delivery by the XML acknowledgement `answer`, matched to the `sent` message. */
-  private async settle(answer: Buffer | "too-large", sent: Uint8Array): Promise<void> {
+  /** Settles a delivery by the XML acknowledgement `answer`, matched to the control ID `sent`. */
+  private async settle(
+    answer: Buffer | "too-large",
+    sent: string | typeof MISFIT | undefined,
+  ): Promise<void> {
     if (answer === "too-large") throw transientError("ACK_UNREADABLE");
-    settleXmlAck(await readXmlAck(answer), await xmlControlId(sent));
+    settleXmlAck(await readXmlAck(answer), sent);
   }
 
   /** Closes the connections kept open between deliveries. */

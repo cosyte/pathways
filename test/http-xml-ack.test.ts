@@ -1,6 +1,8 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import type * as Ccda from "@cosyte/ccda";
+
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { ConfigError, loadProject } from "../src/config/load.js";
 import type { ChannelConfig } from "../src/config/schema.js";
@@ -16,6 +18,19 @@ import {
   type Certificates,
   type Receiver,
 } from "./net-helpers.js";
+
+// The XML reader, watched so a test can count how often the message sent is read.
+const parses = vi.hoisted(() => ({ texts: [] as string[] }));
+vi.mock("@cosyte/ccda", async (original) => {
+  const actual = await original<typeof Ccda>();
+  return {
+    ...actual,
+    parseSecureXml: (...args: Parameters<typeof Ccda.parseSecureXml>) => {
+      parses.texts.push(args[0]);
+      return actual.parseSecureXml(...args);
+    },
+  };
+});
 
 /**
  * The HTTP destination's `ack: xml` mode: a web service that takes HL7 v2 XML answers each POST on
@@ -146,15 +161,85 @@ describe("HttpDestination with ack: xml", () => {
   it.each([
     ["XML that is not well-formed", Buffer.from(`<ORU_R01><MSH><MSH.10>${CONTROL_ID}</MSH.10>`)],
     ["XML that is not UTF-8", Buffer.from([0x3c, 0x41, 0xff, 0x3e])],
+    [
+      "XML holding a document type declaration in a CDATA section",
+      Buffer.from(
+        `<ORU_R01><MSH><MSH.10>${CONTROL_ID}</MSH.10></MSH>` +
+          `<OBX><OBX.5><![CDATA[<!DOCTYPE html><p>SYN</p>]]></OBX.5></OBX></ORU_R01>`,
+      ),
+    ],
   ])(
-    "retries when the message sent is %s, so its control ID cannot be checked",
+    "fails the delivery at once, sending nothing, when the message sent is %s",
     async (_n, body) => {
       const r = await serve(answer(ack("AA")));
       const outcome = await deliver(destination({ url: r.url }), body);
-      expect(outcome).toBeInstanceOf(RetryableError);
-      expect(outcome).toMatchObject({ code: "ACK_CONTROL_ID_MISMATCH" });
+      expect(outcome).toBeInstanceOf(DeliveryRejected);
+      expect(outcome).toMatchObject({ reason: "SENT_XML_UNREADABLE" });
+      expect(r.received).toEqual([]);
     },
   );
+
+  it.each([
+    ["no MSH", Buffer.from("<ORU_R01><PID/></ORU_R01>")],
+    [
+      "two MSH",
+      Buffer.from(
+        `<ORU_R01><MSH><MSH.10>${CONTROL_ID}</MSH.10></MSH>` +
+          `<G><MSH><MSH.10>SYN-CTL-9999</MSH.10></MSH></G></ORU_R01>`,
+      ),
+    ],
+  ])("retries a message sent as XML with %s as a mismatch", async (_n, body) => {
+    const r = await serve(answer(ack("AA")));
+    const outcome = await deliver(destination({ url: r.url }), body);
+    expect(outcome).toBeInstanceOf(RetryableError);
+    expect(outcome).toMatchObject({ code: "ACK_CONTROL_ID_MISMATCH" });
+  });
+
+  it("checks the control ID of a message sent whose MSH sits below the root", async () => {
+    const nested = Buffer.from(`<R><G><MSH><MSH.10>${CONTROL_ID}</MSH.10></MSH></G></R>`);
+    const other = await serve(answer(ack("AA", "SYN-CTL-9999")));
+    expect(await deliver(destination({ url: other.url }), nested)).toMatchObject({
+      code: "ACK_CONTROL_ID_MISMATCH",
+    });
+  });
+
+  it("reads the message sent once per delivery, not once per attempt", async () => {
+    const r = await serve(answer(ack("AE")));
+    const target = destination({ url: r.url });
+    const sent = SENT.toString("utf8");
+    parses.texts.length = 0;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      expect(await deliver(target)).toMatchObject({ code: "ACK_AE" });
+    }
+    expect(parses.texts.filter((text) => text === sent)).toHaveLength(1);
+    // Another delivery, another output, or another body under the same id, is read again.
+    const changed = Buffer.from(SENT.toString("utf8").replace(CONTROL_ID, "SYN-CTL-0002"));
+    expect(await deliver(target, changed)).toMatchObject({ code: "ACK_CONTROL_ID_MISMATCH" });
+    expect(await outcomeOf(target.deliver({ messageId: 2, seq: 0, body: SENT }))).toMatchObject({
+      code: "ACK_AE",
+    });
+    expect(await outcomeOf(target.deliver({ messageId: 2, seq: 1, body: SENT }))).toMatchObject({
+      code: "ACK_AE",
+    });
+    expect(parses.texts.filter((text) => text === sent)).toHaveLength(3);
+  });
+
+  it.each([
+    [
+      "a second MSA deeper in it rejects the message",
+      ack("AA").replace(
+        "</ACK>",
+        `<X><MSA><MSA.1>AR</MSA.1><MSA.2>${CONTROL_ID}</MSA.2></MSA></X></ACK>`,
+      ),
+    ],
+    [
+      "its one MSA holds a second MSA.1",
+      ack("AA").replace("</MSA.1>", "</MSA.1><MSA.1>AR</MSA.1>"),
+    ],
+  ])("retries an AA answer as unreadable when %s", async (_name, body) => {
+    const r = await serve(answer(body));
+    expect(await deliver(destination({ url: r.url }))).toMatchObject({ code: "ACK_UNREADABLE" });
+  });
 
   it("retries an answer with more than one MSA as unreadable", async () => {
     const two =
@@ -220,7 +305,7 @@ describe("HttpDestination with ack: xml", () => {
     expect(await deliver(destination({ url: busy.url }))).toMatchObject({ code: "HTTP_503" });
   });
 
-  it("skips the control ID check when the message sent carries none", async () => {
+  it("skips the control ID check only when the message sent is not XML at all", async () => {
     const r = await serve(answer(ack("AA", "SYN-CTL-9999")));
     expect(await deliver(destination({ url: r.url }), Buffer.from("MSH|^~\\&|"))).toBe("delivered");
   });
@@ -272,6 +357,37 @@ describe("an http destination's ack setting", () => {
     const root = await makeProject(channel(`http: { url: "https://lab.example.test/" }`));
     const [config] = (await loadProject(root)).channels;
     expect(config?.destinations[0]).toMatchObject({ kind: "http", ack: undefined });
+  });
+
+  it.each(["fhir", "x12", "ccda", "json", "csv"])(
+    "is refused at load on a destination whose format is %s, which is not HL7 v2 XML",
+    async (format) => {
+      const root = await makeProject(
+        channel(`{ format: ${format}, http: { url: "https://lab.example.test/", ack: xml } }`),
+      );
+      const error = await loadProject(root).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(ConfigError);
+      expect((error as ConfigError).problems.join("\n")).toContain("destinations.0.http.ack");
+    },
+  );
+
+  it("is refused at load on a channel whose format is not HL7 v2 or text", async () => {
+    const root = await makeProject({
+      "channels/lab/channel.yaml":
+        "format: json\nsource:\n  file: { dir: in }\ndestinations:\n" +
+        '  - http: { url: "https://lab.example.test/", ack: xml }\n',
+    });
+    const error = await loadProject(root).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ConfigError);
+    expect((error as ConfigError).problems.join("\n")).toContain("destinations.0.http.ack");
+  });
+
+  it.each(["hl7v2", "text"])("is taken on a destination whose format is %s", async (format) => {
+    const root = await makeProject(
+      channel(`{ format: ${format}, http: { url: "https://lab.example.test/", ack: xml } }`),
+    );
+    const [config] = (await loadProject(root)).channels;
+    expect(config?.destinations[0]).toMatchObject({ kind: "http", ack: "xml" });
   });
 
   it("takes xml alone", async () => {
