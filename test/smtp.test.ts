@@ -15,12 +15,11 @@ import {
 } from "../src/connectors/mailer.js";
 import {
   messageIdFor,
-  renderTemplate,
   SmtpDestination,
   SmtpHeld,
-  unknownPlaceholders,
   type SmtpDestinationOptions,
 } from "../src/connectors/smtp.js";
+import { renderTemplate, unknownPlaceholders } from "../src/connectors/smtp-template.js";
 import { DeliveryRejected, type OutgoingMessage } from "../src/connectors/types.js";
 import { ADT_A01 } from "./helpers.js";
 import { OPENSSL, TLS_TESTS } from "./mllp-helpers.js";

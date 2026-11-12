@@ -174,11 +174,11 @@ class Session {
   /** The stage a lost connection or a timeout is put down to. */
   stage: SmtpStage = "greeting";
 
-  constructor(
-    socket: Socket,
-    private readonly socketTimeoutMs: number,
-  ) {
+  private readonly socketTimeoutMs: number;
+
+  constructor(socket: Socket, socketTimeoutMs: number) {
     this.socket = socket;
+    this.socketTimeoutMs = socketTimeoutMs;
     this.attach(socket);
   }
 

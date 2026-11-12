@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 import { normalisePath } from "../connectors/http-path.js";
-import { unknownPlaceholders } from "../connectors/smtp.js";
+import { unknownPlaceholders } from "../connectors/smtp-template.js";
 import { FORMATS } from "../engine/worker-entry.js";
 import { LIFECYCLE_EVENTS, type LifecycleEventType } from "../extensions/events.js";
 import type { JsonValue } from "../transform.js";
@@ -977,18 +977,20 @@ export const SMTP_TLS_MODES = ["implicit", "starttls"] as const;
 
 /** A subject or body template: placeholders name messageId, seq, channel or meta.<key> only. */
 const mailTemplate = (description: string) =>
-  z
-    .string()
-    .max(8_192)
-    .meta({ description })
-    .superRefine((value, ctx) => {
-      for (const name of unknownPlaceholders(value)) {
-        ctx.addIssue({
-          code: "custom",
-          message: `{{ ${name} }} is not a placeholder: use messageId, seq, channel or meta.<key>`,
-        });
-      }
-    });
+  envable(
+    z
+      .string()
+      .max(8_192)
+      .meta({ description })
+      .superRefine((value, ctx) => {
+        for (const name of unknownPlaceholders(value)) {
+          ctx.addIssue({
+            code: "custom",
+            message: `{{ ${name} }} is not a placeholder: use messageId, seq, channel or meta.<key>`,
+          });
+        }
+      }),
+  );
 
 /** A positive time limit of an `smtp:` block. */
 const smtpTimeout = (description: string) =>
@@ -1001,13 +1003,12 @@ const smtpDestination = restate(
       port: port.optional(),
       tls: z
         .strictObject({
-          mode: z
-            .enum(SMTP_TLS_MODES)
-            .meta({
+          mode: envable(
+            z.enum(SMTP_TLS_MODES).meta({
               description:
                 "implicit: TLS from the first byte (port 465, the default, preferred); starttls: upgrade by STARTTLS, and fail when the server does not offer it (port 587).",
-            })
-            .optional(),
+            }),
+          ).optional(),
           ca: path
             .meta({
               description:
