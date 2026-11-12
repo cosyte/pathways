@@ -234,9 +234,10 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
     if (inner.markDryRun !== undefined) this.markDryRun = inner.markDryRun.bind(inner);
     const steps = retentionStore(inner);
     if (steps !== undefined) {
-      this.countExpiring = steps.countExpiring;
-      this.listExpiring = steps.listExpiring;
-      this.applyExpiry = steps.applyExpiry;
+      this.countExpiring = (channel, query) => steps.countExpiring(channel, query);
+      this.listExpiring = (channel, query, limit, after) =>
+        steps.listExpiring(channel, query, limit, after);
+      this.applyExpiry = (channel, ids, query) => steps.applyExpiry(channel, ids, query);
     }
     this.#innerCopies = copiesBodies(inner);
     // A codec that copies keeps no body it is handed and reads each into a new buffer; one that does

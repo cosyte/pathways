@@ -11,25 +11,21 @@ import { EncryptedStore } from "../src/encryption/encrypted-store.js";
 import { decrypt, encrypt, EncryptionError } from "../src/encryption/envelope.js";
 import { KEY_BYTES, LocalKeyProvider } from "../src/encryption/keys.js";
 import {
-  ArchiveError,
+  archivedMessage,
   LOCAL_ARCHIVE_FILES,
   openArchive,
   sealArchive,
+  type ArchiveError,
   type ArchiveFiles,
   type ArchivedMessage,
 } from "../src/operator/archive.js";
 import { AuditLog } from "../src/operator/audit.js";
+import { retentionCommand } from "../src/operator/commands.js";
+import { Engine } from "../src/engine/engine.js";
 import { runRetention, type RetentionOptions } from "../src/operator/retention.js";
 import type { MessageStore, RetentionStore } from "../src/storage/store.js";
-import {
-  available,
-  closeAdmins,
-  dropDatabases,
-  TEST_DATABASES,
-  testStorage,
-  type TestDatabase,
-} from "./databases.js";
-import { cleanUp, makeProject } from "./helpers.js";
+import { available, closeAdmins, dropDatabases, TEST_DATABASES, testStorage } from "./databases.js";
+import { captureLogger, cleanUp, makeProject } from "./helpers.js";
 
 const DAY = 86_400_000;
 const closers: (() => Promise<void>)[] = [];
@@ -99,7 +95,8 @@ describe("retention's configuration", () => {
 
   it("refuses an archive without encryption keys, and an archive or an audit clock in a channel", async () => {
     const root = await makeProject({
-      "pathways.yaml": "encryption: none\ndefaults:\n  retention: { archive: { dir: ./archive } }\n",
+      "pathways.yaml":
+        "encryption: none\ndefaults:\n  retention: { archive: { dir: ./archive } }\n",
       "channels/adt/channel.yaml": CHANNEL,
     });
     await expect(loadProject(root)).rejects.toThrow(ConfigError);
@@ -189,7 +186,12 @@ describe("an archive", () => {
     const unsealed = await reseal((lines) => lines.slice(0, -1));
     expect(await code(unsealed)).toBe("ERR_PATHWAYS_ARCHIVE_FORMAT");
     const other = await sealArchive(
-      { channel: "adt", step: "content", created: "2026-11-11T00:00:00.000Z", messages: [message(1, "lab")] },
+      {
+        channel: "adt",
+        step: "content",
+        created: "2026-11-11T00:00:00.000Z",
+        messages: [message(1, "lab")],
+      },
       keys,
     );
     expect(await code(other)).toBe("ERR_PATHWAYS_ARCHIVE_INTEGRITY");
@@ -205,6 +207,25 @@ describe("an archive", () => {
     expect(await code({ maxFileBytes: 16 })).toBe("ERR_PATHWAYS_ARCHIVE_TOO_LARGE");
     expect(await code({ maxDecompressedBytes: 64 })).toBe("ERR_PATHWAYS_ARCHIVE_TOO_LARGE");
     expect(await code({ maxRecordBytes: 32 })).toBe("ERR_PATHWAYS_ARCHIVE_TOO_LARGE");
+  });
+
+  it("refuses what is not an archive inside a good envelope", async () => {
+    const code = async (inside: Buffer) =>
+      openArchive(await encrypt(inside, keys), keys).catch(
+        (error: unknown) => (error as ArchiveError).code,
+      );
+    expect(await code(Buffer.from("not gzip"))).toBe("ERR_PATHWAYS_ARCHIVE_FORMAT");
+    expect(await code(gzipSync("{}"))).toBe("ERR_PATHWAYS_ARCHIVE_FORMAT");
+    expect(await code(gzipSync("not json\n{}\n"))).toBe("ERR_PATHWAYS_ARCHIVE_FORMAT");
+    expect(await code(gzipSync("[]\n{}\n"))).toBe("ERR_PATHWAYS_ARCHIVE_FORMAT");
+    const short = await reseal((lines) =>
+      lines.map((line, index) =>
+        index === lines.length - 1 ? JSON.stringify({ trailer: true, count: 2, hmac: "00" }) : line,
+      ),
+    );
+    expect(
+      await openArchive(short, keys).catch((error: unknown) => (error as ArchiveError).code),
+    ).toBe("ERR_PATHWAYS_ARCHIVE_INTEGRITY");
   });
 });
 
@@ -237,8 +258,11 @@ for (const database of TEST_DATABASES) {
       return id;
     }
 
-    const run = (store: MessageStore, config: ProjectConfig, extra: Partial<RetentionOptions> = {}) =>
-      runRetention(store, config, { now: Date.now(), dryRun: false, keys, ...extra });
+    const run = (
+      store: MessageStore,
+      config: ProjectConfig,
+      extra: Partial<RetentionOptions> = {},
+    ) => runRetention(store, config, { now: Date.now(), dryRun: false, keys, ...extra });
 
     it("drops content on its own clock and keeps the row, which replay then refuses", async () => {
       const config = await project("{ content: 7d, metadata: 90d }");
@@ -249,7 +273,10 @@ for (const database of TEST_DATABASES) {
       const recent = await delivered(store, "SYNTHETIC-2");
 
       const dry = await run(store, config, { dryRun: true });
-      expect(dry.channels["adt"]).toMatchObject({ messages: 0, content: { messages: 1, deliveries: 1 } });
+      expect(dry.channels["adt"]).toMatchObject({
+        messages: 0,
+        content: { messages: 1, deliveries: 1 },
+      });
       expect(dry.pruned).toBe(1);
       expect(read(await store.messageBody(id))).toBe("SYNTHETIC-1");
 
@@ -304,6 +331,86 @@ for (const database of TEST_DATABASES) {
       expect(await store.message(young)).toBeDefined();
     });
 
+    it("changes nothing given no ids, or ids a step no longer reaches", async () => {
+      const config = await project("{ content: 7d, metadata: 90d }");
+      const { store, clock } = await storeFor(config);
+      clock.now = Date.now();
+      const id = await delivered(store, "SYNTHETIC-5");
+      const steps = store as unknown as RetentionStore;
+      const query = {
+        step: "content" as const,
+        cutoff: new Date(Date.now() - 7 * DAY).toISOString(),
+      };
+      expect(await steps.applyExpiry("adt", [], query)).toEqual({ messages: 0, deliveries: 0 });
+      expect(await steps.applyExpiry("adt", [id], query)).toEqual({ messages: 0, deliveries: 0 });
+      expect(read(await store.messageBody(id))).toBe("SYNTHETIC-5");
+    });
+
+    it("prints each clock's counts, and fails a run that left a channel alone", async () => {
+      const config = await project(
+        "{ archive: { dir: ./archive }, content: 7d, metadata: 30d, failed: 60d }",
+      );
+      const { store, clock } = await storeFor(config);
+      clock.now = Date.now() - 40 * DAY;
+      await delivered(store, "SYNTHETIC-6");
+      await failed(store);
+      const out: string[] = [];
+      const err: string[] = [];
+      const context = {
+        project: config,
+        store,
+        audit: new AuditLog(store, { actor: "tester" }),
+        json: false,
+        out: (line: string) => out.push(line),
+        err: (line: string) => err.push(line),
+        now: Date.now,
+        keys,
+      };
+      expect(await retentionCommand(context, true)).toBe(0);
+      expect(out.join("")).toMatch(/Content would be dropped from 1 message\./);
+      expect(out.join("")).toMatch(/    content: 1 message \(done, and last active before /);
+      expect(out.join("")).toMatch(/    failed: 0 messages, 0 deliveries \(last active before /);
+      out.length = 0;
+      expect(await retentionCommand({ ...context, keys: undefined }, false)).toBe(1);
+      expect(out.join("")).toMatch(/left alone from here: ERR_PATHWAYS_ARCHIVE_NO_KEYS/);
+      expect(err.join("")).toMatch(/retention left 1 channel alone part way/);
+      out.length = 0;
+      expect(await retentionCommand(context, false)).toBe(0);
+      expect(out.join("")).toMatch(/Content was dropped from 1 message\./);
+      expect(out.join("")).toMatch(/2 archives written and checked first\./);
+    });
+
+    it("logs a channel the engine's run left alone, and what an archiving run did", async () => {
+      const config = await project("{ archive: { dir: ./archive }, metadata: 30d }");
+      const { store, clock } = await storeFor(config);
+      clock.now = Date.now() - 40 * DAY;
+      await delivered(store, "SYNTHETIC-7");
+      const keyless = captureLogger();
+      await new Engine({ project: config, store, logger: keyless.logger }).retention();
+      expect(keyless.events).toContainEqual(
+        expect.objectContaining({
+          event: "retention-skipped",
+          channel: "adt",
+          code: "ERR_PATHWAYS_ARCHIVE_NO_KEYS",
+        }),
+      );
+      const keyed = captureLogger();
+      await new Engine({ project: config, store, logger: keyed.logger, keys }).retention();
+      expect(keyed.events).toContainEqual(
+        expect.objectContaining({ event: "retention", messages: 1, archives: 1 }),
+      );
+    });
+
+    it("skips the clocks on a store without the retention methods", async () => {
+      const config = await project("{ content: 7d }");
+      const bare = {
+        channels: () => Promise.resolve(["adt"]),
+        expire: () => Promise.resolve({ messages: 0, deliveries: 0 }),
+      } as unknown as MessageStore;
+      const report = await runRetention(bare, config, { now: Date.now(), dryRun: false });
+      expect(report.channels["adt"]?.skipped).toBe("ERR_PATHWAYS_RETENTION_UNSUPPORTED");
+    });
+
     describe("with an archive", () => {
       async function archived(batch: number) {
         const config = await project("{ archive: { dir: ./archive }, metadata: 30d }");
@@ -349,7 +456,7 @@ for (const database of TEST_DATABASES) {
         [step]: () => Promise.reject(Object.assign(new Error("injected"), { code: "EINJECTED" })),
       });
 
-      for (const step of ["makeDir", "write", "sync", "rename"] as const) {
+      for (const step of ["makeDir", "write", "sync", "rename", "syncDir"] as const) {
         it(`deletes nothing and logs a code when ${step} fails`, async () => {
           const { config, store, ids, files, entries, options } = await archived(2);
           const skipped: string[] = [];
@@ -367,6 +474,34 @@ for (const database of TEST_DATABASES) {
         });
       }
 
+      it("starts a new archive once one holds enough, and names a failure without a code", async () => {
+        const { config, store, files, options } = await archived(10);
+        const plain = await run(store, config, {
+          ...options,
+          files: { ...LOCAL_ARCHIVE_FILES, write: () => Promise.reject(new Error("no code")) },
+        });
+        expect(plain.channels["adt"]?.skipped).toBe("ERR_PATHWAYS_ARCHIVE");
+        expect(await run(store, config, { ...options, archiveBytes: 1 })).toMatchObject({
+          messages: 3,
+          archives: 3,
+        });
+        expect(await files()).toHaveLength(3);
+      });
+
+      it("archives on the metadata clock alone in a project built without clocks", async () => {
+        const { config, store, files, options } = await archived(10);
+        const bare = {
+          ...config,
+          settings: { ...config.settings, retentionClocks: undefined },
+          channels: config.channels.map((c) => ({
+            ...c,
+            settings: { ...c.settings, retentionClocks: undefined },
+          })),
+        };
+        expect(await run(store, bare, options)).toMatchObject({ messages: 3, archives: 1 });
+        expect(await files()).toHaveLength(1);
+      });
+
       it("deletes nothing when the file read back is not what was written", async () => {
         const { config, store, ids, files, options } = await archived(2);
         const report = await run(store, config, {
@@ -382,7 +517,49 @@ for (const database of TEST_DATABASES) {
         });
         expect(report.channels["adt"]?.skipped).toBe("ERR_PATHWAYS_INTEGRITY");
         expect(await files()).toEqual([]);
+        // A sound archive, but not the one written: other ids.
+        const other = await sealArchive(
+          { channel: "adt", step: "metadata", created: new Date().toISOString(), messages: [] },
+          keys,
+        );
+        const swapped = await run(store, config, {
+          ...options,
+          files: { ...LOCAL_ARCHIVE_FILES, read: () => Promise.resolve(other) },
+        });
+        expect(swapped.channels["adt"]?.skipped).toBe("ERR_PATHWAYS_ARCHIVE_INTEGRITY");
+        expect(await files()).toEqual([]);
         for (const id of ids) expect(await store.message(id)).toBeDefined();
+      });
+
+      it("passes over a message gone since it was listed, and keeps going when a cleanup fails", async () => {
+        const { config, store, ids, files, options } = await archived(10);
+        expect(await archivedMessage(store, 9_999)).toBeUndefined();
+        Object.defineProperty(store, "message", {
+          value: () => Promise.resolve(undefined),
+          configurable: true,
+        });
+        expect(await run(store, config, options)).toMatchObject({ messages: 0, archives: 0 });
+        Reflect.deleteProperty(store, "message");
+        const report = await run(store, config, {
+          ...options,
+          files: {
+            ...LOCAL_ARCHIVE_FILES,
+            syncDir: () => Promise.reject(Object.assign(new Error("x"), { code: "EIO" })),
+            remove: () => Promise.reject(new Error("cannot remove")),
+          },
+        });
+        expect(report.channels["adt"]?.skipped).toBe("EIO");
+        for (const id of ids) expect(await store.message(id)).toBeDefined();
+        // The archive that did not prove itself is still there; nothing was deleted on its strength.
+        expect(await files()).toHaveLength(1);
+      });
+
+      it("names a channel's folder so no name leaves the archive folder", async () => {
+        const { config, store, options } = await archived(10);
+        const { id } = await store.receive("lab.v2", text("SYNTHETIC-8"));
+        await store.completeTransform(id, [], 1);
+        await run(store, config, { ...options, now: Date.now() + 40 * DAY });
+        expect(await readdir(join(config.root, "archive"))).toEqual(["adt", "lab%2ev2"]);
       });
 
       it("deletes nothing when the archive cannot be audited, or there are no keys", async () => {
@@ -400,7 +577,7 @@ for (const database of TEST_DATABASES) {
       it("leaves a duplicate archive and no loss when the delete fails after the archive", async () => {
         const { config, store, ids, files, options } = await archived(10);
         const steps = store as unknown as RetentionStore;
-        const apply = steps.applyExpiry;
+        const apply = steps.applyExpiry.bind(steps);
         Object.defineProperty(store, "applyExpiry", {
           value: () => Promise.reject(Object.assign(new Error("lost"), { code: "ELOST" })),
           configurable: true,
@@ -425,14 +602,16 @@ for (const database of TEST_DATABASES) {
         expect(await run(store, config)).toMatchObject({ messages: 1, archives: 1 });
         const dir = join(config.root, "archive", "adt");
         const opened = await Promise.all(
-          (await readdir(dir)).sort().map(async (f) => openArchive(await readFile(join(dir, f)), keys)),
+          (await readdir(dir))
+            .sort()
+            .map(async (f) => openArchive(await readFile(join(dir, f)), keys)),
         );
-        expect(opened.map((a) => [a.header.step, a.messages[0]?.id, a.messages[0]?.body !== null])).toEqual(
-          [
-            ["content", id, true],
-            ["metadata", id, false],
-          ],
-        );
+        expect(
+          opened.map((a) => [a.header.step, a.messages[0]?.id, a.messages[0]?.body !== null]),
+        ).toEqual([
+          ["content", id, true],
+          ["metadata", id, false],
+        ]);
       });
     });
   });

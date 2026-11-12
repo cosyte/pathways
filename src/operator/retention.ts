@@ -114,6 +114,11 @@ export interface RetentionOptions {
   readonly files?: ArchiveFiles | undefined;
   /** The most messages one batch (and one archive) takes. Default 500. */
   readonly batch?: number | undefined;
+  /**
+   * How much one archive holds, roughly, in bytes, before the batch ends and the next archive
+   * starts. Default 256 MiB, so each opens within `DEFAULT_ARCHIVE_LIMITS`.
+   */
+  readonly archiveBytes?: number | undefined;
 }
 
 /** How many messages one batch, and so one archive, takes by default. */
@@ -208,7 +213,10 @@ export async function runRetention(
   };
 }
 
-type Clocked = Pick<ChannelRetention, "messages" | "deliveries" | "content" | "failed" | "archives" | "skipped">;
+type Clocked = Pick<
+  ChannelRetention,
+  "messages" | "deliveries" | "content" | "failed" | "archives" | "skipped"
+>;
 
 /** Every clock of one channel, archiving first when the project archives. */
 async function clocked(
@@ -224,10 +232,18 @@ async function clocked(
   const plan: { step: RetentionStep; retentionMs: number; query: RetentionQuery }[] = [];
   const { contentMs, failedMs } = clock.clocks ?? {};
   if (contentMs !== undefined) {
-    plan.push({ step: "content", retentionMs: contentMs, query: { step: "content", cutoff: at(contentMs) } });
+    plan.push({
+      step: "content",
+      retentionMs: contentMs,
+      query: { step: "content", cutoff: at(contentMs) },
+    });
   }
   if (failedMs !== undefined) {
-    plan.push({ step: "failed", retentionMs: failedMs, query: { step: "failed", cutoff: at(failedMs) } });
+    plan.push({
+      step: "failed",
+      retentionMs: failedMs,
+      query: { step: "failed", cutoff: at(failedMs) },
+    });
   }
   plan.push({
     step: "metadata",
@@ -302,37 +318,51 @@ async function runStep(
   for (;;) {
     const ids = await steps.listExpiring(channel, query, limit, after);
     if (ids.length === 0) break;
+    // How many of `ids` this batch went through: all of them, unless one archive filled first.
+    let seen = ids.length;
     let batch: readonly number[] = ids;
     if (project.archive !== undefined) {
-      const records = await readBatch(store, ids);
-      batch = records.map((record) => record.id);
-      if (batch.length > 0) {
-        await archiveBatch(store, project.archive.dir, channel, query.step, records, options);
+      const read = await readBatch(store, ids, options.archiveBytes ?? ARCHIVE_TARGET_BYTES);
+      seen = read.seen;
+      batch = read.records.map((record) => record.id);
+      if (read.records.length > 0) {
+        await archiveBatch(store, project.archive.dir, channel, query.step, read.records, options);
         archives += 1;
       }
     }
     const applied = await steps.applyExpiry(channel, batch, query);
     messages += applied.messages;
     deliveries += applied.deliveries;
-    // Past this batch, so a message that changed meanwhile, and was left, is not taken again.
-    after = batch.at(-1) ?? ids.at(-1) ?? after;
-    if (ids.length < limit && batch.length === ids.length) break;
+    // Past what this batch went through, so a message that changed meanwhile, and was left, is
+    // not taken again.
+    after = ids[seen - 1] as number;
+    if (ids.length < limit && seen === ids.length) break;
   }
   return { messages, deliveries, archives };
 }
 
-/** The records of `ids`, decrypted, up to the size one archive takes; a message gone is passed over. */
-async function readBatch(store: MessageStore, ids: readonly number[]): Promise<ArchivedMessage[]> {
+/**
+ * The records of `ids`, decrypted, until they hold `bytes`, and how many of `ids` that went through.
+ * A message deleted since it was listed is passed over.
+ */
+async function readBatch(
+  store: MessageStore,
+  ids: readonly number[],
+  bytes: number,
+): Promise<{ readonly records: ArchivedMessage[]; readonly seen: number }> {
   const records: ArchivedMessage[] = [];
-  let bytes = 0;
+  let held = 0;
+  let seen = 0;
   for (const id of ids) {
+    seen += 1;
     const record = await archivedMessage(store, id);
+    // Listed a moment ago: another run can have deleted it meanwhile.
     if (record === undefined) continue;
     records.push(record);
-    bytes += JSON.stringify(record).length;
-    if (bytes >= ARCHIVE_TARGET_BYTES) break;
+    held += JSON.stringify(record).length;
+    if (held >= bytes) break;
   }
-  return records;
+  return { records, seen };
 }
 
 /** Writes, checks and audits one batch's archive; any failure is a {@link Skip}. */
@@ -363,8 +393,8 @@ async function archiveBatch(
       detail: {
         step,
         messages: records.length,
-        first: records[0]?.id ?? 0,
-        last: records.at(-1)?.id ?? 0,
+        first: (records[0] as ArchivedMessage).id,
+        last: (records.at(-1) as ArchivedMessage).id,
       },
     });
   } catch (error) {

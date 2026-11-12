@@ -3145,7 +3145,10 @@ export class Store implements MessageStore, ContentStore, MetaStore {
           .where("messages.id", "in", batch)
           .where("messages.status", "=", EXPIRING);
       await tx.deleteFrom("meta_index").where("message_id", "in", marked).execute();
-      const gone = await tx.deleteFrom("deliveries").where("message_id", "in", marked).executeTakeFirst();
+      const gone = await tx
+        .deleteFrom("deliveries")
+        .where("message_id", "in", marked)
+        .executeTakeFirst();
       const deleted = await tx
         .deleteFrom("messages")
         .where("id", "in", batch)

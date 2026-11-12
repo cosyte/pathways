@@ -155,6 +155,7 @@ const ARCHIVE_MESSAGES: Readonly<Record<ArchiveErrorCode, string>> = {
 export class ArchiveError extends Error {
   readonly code: ArchiveErrorCode;
 
+  /** @param code Why, as {@link ArchiveErrorCode} says. */
   constructor(code: ArchiveErrorCode) {
     super(ARCHIVE_MESSAGES[code]);
     this.name = "ArchiveError";
@@ -303,7 +304,8 @@ async function readLines(
   while (start < plain.length) {
     let end = plain.indexOf(0x0a, start);
     if (end === -1) end = plain.length;
-    if (end - start > limits.maxRecordBytes) throw new ArchiveError("ERR_PATHWAYS_ARCHIVE_TOO_LARGE");
+    if (end - start > limits.maxRecordBytes)
+      throw new ArchiveError("ERR_PATHWAYS_ARCHIVE_TOO_LARGE");
     lines.push(plain.toString("utf8", start, end));
     start = end + 1;
   }
@@ -397,7 +399,12 @@ function asMessage(value: unknown): ArchivedMessage {
 
 /**
  * Reads one message as an archive record, through `store`, so its bodies and texts come back
- * decrypted; `undefined` when it is gone. Its byte size, roughly, comes with it.
+ * decrypted; `undefined` when it is gone.
+ *
+ * @example
+ * ```ts
+ * const record = await archivedMessage(store, 12);
+ * ```
  */
 export async function archivedMessage(
   store: MessageStore,
@@ -451,30 +458,48 @@ export interface ArchiveFiles {
   makeDir(dir: string): Promise<void>;
   /** Creates `path`, which must not exist, readable by this user alone, and writes `bytes`. */
   write(path: string, bytes: Uint8Array): Promise<void>;
-  /** Flushes `path`, a file or a folder, to disk. */
+  /** Flushes the file `path` to disk. */
   sync(path: string): Promise<void>;
   /** Renames `from` to `to`. */
   rename(from: string, to: string): Promise<void>;
+  /** Flushes the folder `dir` to disk, so a file renamed into it stays there after a power cut. */
+  syncDir(dir: string): Promise<void>;
   /** Reads `path` back whole. */
   read(path: string): Promise<Uint8Array>;
   /** Removes `path` when it is there. */
   remove(path: string): Promise<void>;
 }
 
+/** How a file is opened to flush it: on Windows, `fsync` needs a handle that can write. */
+/* v8 ignore next */
+const FILE_FLUSH = process.platform === "win32" ? "r+" : "r";
+
+/** Opens `path` with `flags` and flushes it to disk. */
+async function flush(path: string, flags: "r" | "r+"): Promise<void> {
+  const handle = await open(path, flags);
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
 /**
- * The archive file operations on this machine's disk. Flushing a folder is skipped on Windows, which
- * cannot open one to flush it; the rename there is flushed with the file.
+ * The archive file operations on this machine's disk. A folder is not flushed on Windows, which
+ * cannot open one to flush it; there the file, opened to write, is flushed with its name.
  *
  * @example
  * ```ts
- * await writeArchive({ dir, channel: "adt", step: "metadata", messages, keys, files: LOCAL_ARCHIVE_FILES });
+ * await writeArchive({ dir, channel: "adt", step: "metadata", messages, keys, now: new Date(), files: LOCAL_ARCHIVE_FILES });
  * ```
  */
 export const LOCAL_ARCHIVE_FILES: ArchiveFiles = {
-  async makeDir(dir) {
+  /** Makes the folder, readable by this user alone. */
+  makeDir: async (dir) => {
     await mkdir(dir, { recursive: true, mode: 0o700 });
   },
-  async write(path, bytes) {
+  /** Creates the file, readable by this user alone, refusing one already there. */
+  write: async (path, bytes) => {
     const handle = await open(path, "wx", 0o600);
     try {
       await handle.writeFile(bytes);
@@ -482,18 +507,19 @@ export const LOCAL_ARCHIVE_FILES: ArchiveFiles = {
       await handle.close();
     }
   },
-  async sync(path) {
-    /* v8 ignore next: Windows cannot open a folder to flush it */
-    if (process.platform === "win32" && !path.endsWith(ARCHIVE_EXTENSION)) return;
-    const handle = await open(path, process.platform === "win32" ? "r+" : "r");
-    try {
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-  },
+  /** Flushes the file: on Windows, `fsync` needs a handle that can write. */
+  sync: (path) => flush(path, FILE_FLUSH),
+  /** Renames the file. */
   rename: (from, to) => rename(from, to),
+  /** Flushes the folder, except on Windows. */
+  syncDir: async (dir) => {
+    /* v8 ignore next: Windows cannot open a folder to flush it */
+    if (process.platform === "win32") return;
+    await flush(dir, "r");
+  },
+  /** Reads the file whole. */
   read: (path) => readFile(path),
+  /** Removes the file, when it is there. */
   remove: (path) => rm(path, { force: true }),
 };
 
@@ -510,10 +536,12 @@ export interface WrittenArchive {
   readonly messages: number;
 }
 
-/** A channel name as one folder name: every character but letters, digits, `.`, `_` and `-` escaped. */
+/**
+ * A channel name as one folder name: every character but letters, digits, `_` and `-` escaped, a
+ * dot among them, so no name walks out of the archive folder.
+ */
 function folderName(channel: string): string {
-  const safe = channel.replaceAll(/[^A-Za-z0-9._-]/g, (c) => `%${c.charCodeAt(0).toString(16)}`);
-  return safe === "." || safe === ".." ? `%2e${safe.slice(1)}` : safe;
+  return channel.replaceAll(/[^A-Za-z0-9_-]/g, (c) => `%${c.charCodeAt(0).toString(16)}`);
 }
 
 /**
@@ -542,10 +570,11 @@ export async function writeArchive(options: {
   const files = options.files ?? LOCAL_ARCHIVE_FILES;
   const created = now.toISOString();
   const folder = join(dir, folderName(channel));
-  const first = messages[0]?.id ?? 0;
-  const last = messages.at(-1)?.id ?? 0;
+  // Named by the ids it holds, lowest and highest: retention lists them in order.
+  const first = String(messages[0]?.id);
+  const last = String(messages.at(-1)?.id);
   const stamp = created.replaceAll(/[-:.]/g, "");
-  const name = `${stamp}-${step}-${String(first)}-${String(last)}-${randomBytes(4).toString("hex")}`;
+  const name = `${stamp}-${step}-${first}-${last}-${randomBytes(4).toString("hex")}`;
   const file = join(folder, `${name}${ARCHIVE_EXTENSION}`);
   const partial = `${file}.partial`;
   const sealed = await sealArchive({ channel, step, created, messages }, keys);
@@ -554,7 +583,7 @@ export async function writeArchive(options: {
     await files.write(partial, sealed);
     await files.sync(partial);
     await files.rename(partial, file);
-    await files.sync(folder);
+    await files.syncDir(folder);
     const back = await openArchive(await files.read(file), keys);
     const ids = back.messages.map((message) => message.id);
     if (

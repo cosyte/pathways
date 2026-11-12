@@ -164,7 +164,9 @@ Commands:
   clear <id...>       Mark failed messages cleared, so they leave the failed
                       count and retention can delete them
   retention           Delete delivered, filtered and cleared messages past
-                      their channel's retention period (default 30d)
+                      their channel's retention period (default 30d), and
+                      run its content and failed clocks, archiving first
+                      when retention.archive is set
   audit               Read the audit log, newest first
   rekey               Re-encrypt every stored message under the current key
                       of pathways.yaml's encryption, so older keys can be
@@ -257,7 +259,7 @@ Options:
                         replay, resend, clear, retention, config,
                         lease-release, migrate, channel-pause,
                         channel-resume, channel-stop, channel-halt,
-                        channel-reload or verify
+                        channel-reload, verify or archive
       --message <id>    audit: only entries about this message
       --encrypt-plaintext
                         rekey: also encrypt what was stored while encryption

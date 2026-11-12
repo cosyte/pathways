@@ -792,7 +792,8 @@ function mergeRetention(
   base: Settings,
   retention: RetentionYaml,
 ): Pick<Settings, "retentionMs" | "retentionClocks"> {
-  const inherited = base.retentionClocks === undefined ? {} : { retentionClocks: base.retentionClocks };
+  const inherited =
+    base.retentionClocks === undefined ? {} : { retentionClocks: base.retentionClocks };
   if (retention === undefined) return { retentionMs: base.retentionMs, ...inherited };
   if (typeof retention === "number") return { retentionMs: retention, ...inherited };
   const contentMs = retention.content ?? base.retentionClocks?.contentMs;

@@ -278,6 +278,178 @@ codes (such as `NO_MSH_SEGMENT`), `NO_CONTROL_ID`, `MULTIPLE_MESSAGES` or
 
 ***
 
+### ArchivedDelivery
+
+One delivery of an archived message, as storage held it, without its body.
+
+#### Example
+
+```ts
+const sent = (d: ArchivedDelivery): boolean => d.status === "delivered";
+```
+
+#### Properties
+
+##### attempts
+
+> `readonly` **attempts**: `number`
+
+##### deliveredAt
+
+> `readonly` **deliveredAt**: `string` \| `null`
+
+##### destination
+
+> `readonly` **destination**: `number`
+
+##### error
+
+> `readonly` **error**: `string` \| `null`
+
+Its last error text, which can quote the message.
+
+##### generation
+
+> `readonly` **generation**: `number`
+
+##### id
+
+> `readonly` **id**: `number`
+
+##### seq
+
+> `readonly` **seq**: `number`
+
+##### status
+
+> `readonly` **status**: [`DeliveryStatus`](#deliverystatus)
+
+***
+
+### ArchivedMessage
+
+One message in an archive: everything storage held about it when retention reached it. Bodies
+are base64, and `null` (with no outputs) once its content was dropped.
+
+#### Example
+
+```ts
+const body = (record: ArchivedMessage): Buffer | undefined =>
+  record.body === null ? undefined : Buffer.from(record.body, "base64");
+```
+
+#### Properties
+
+##### body
+
+> `readonly` **body**: `string` \| `null`
+
+The body as it arrived, in base64; `null` once dropped.
+
+##### channel
+
+> `readonly` **channel**: `string`
+
+##### contentDroppedAt
+
+> `readonly` **contentDroppedAt**: `string` \| `null`
+
+##### contentHash
+
+> `readonly` **contentHash**: `string` \| `null`
+
+##### deliveries
+
+> `readonly` **deliveries**: readonly [`ArchivedDelivery`](#archiveddelivery)[]
+
+##### duplicateOf
+
+> `readonly` **duplicateOf**: `number` \| `null`
+
+##### error
+
+> `readonly` **error**: `string` \| `null`
+
+Why it failed, as stored: can quote the message.
+
+##### generation
+
+> `readonly` **generation**: `number`
+
+##### id
+
+> `readonly` **id**: `number`
+
+##### outputs
+
+> `readonly` **outputs**: readonly `string`[]
+
+The outputs of its current generation, in order, in base64.
+
+##### receivedAt
+
+> `readonly` **receivedAt**: `string`
+
+##### size
+
+> `readonly` **size**: `number` \| `null`
+
+##### status
+
+> `readonly` **status**: [`MessageStatus`](#messagestatus)
+
+##### updatedAt
+
+> `readonly` **updatedAt**: `string`
+
+***
+
+### ArchiveHeader
+
+The first line of an archive: what it is, which channel's messages it holds, the master key it is
+sealed under, when it was written and which retention step wrote it. `mac` is the trailer's HMAC
+key, wrapped under that master key, in base64.
+
+#### Example
+
+```ts
+const header: ArchiveHeader = { format: "pathways-archive", version: 1, channel: "adt", keyId: "dev", created: "2026-11-11T00:00:00.000Z", step: "metadata", mac: "..." };
+```
+
+#### Properties
+
+##### channel
+
+> `readonly` **channel**: `string`
+
+##### created
+
+> `readonly` **created**: `string`
+
+ISO 8601, UTC.
+
+##### format
+
+> `readonly` **format**: `"pathways-archive"`
+
+##### keyId
+
+> `readonly` **keyId**: `string`
+
+##### mac
+
+> `readonly` **mac**: `string`
+
+##### step
+
+> `readonly` **step**: [`RetentionStep`](#retentionstep)
+
+##### version
+
+> `readonly` **version**: `1`
+
+***
+
 ### AuditEntry
 
 One entry of the audit log, as stored.
@@ -292,7 +464,7 @@ const line = (entry: AuditEntry): string => `${entry.at} ${entry.actor} ${entry.
 
 ##### action
 
-> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"`
+> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"archive"`
 
 ##### actor
 
@@ -412,7 +584,7 @@ await store.appendAudit("noah", [{ action: "content-view", channel: "adt", messa
 
 ##### action
 
-> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"`
+> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"archive"`
 
 ##### channel?
 
@@ -448,7 +620,7 @@ const views = await store.auditEntries({ action: "content-view", since: "2026-11
 
 ##### action?
 
-> `readonly` `optional` **action?**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"`
+> `readonly` `optional` **action?**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"archive"`
 
 ##### before?
 
@@ -653,7 +825,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-6)
+[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-8)
 
 ##### deliveryId
 
@@ -671,7 +843,7 @@ The destination's place in the channel's `destinations:` list, from 0.
 
 ###### Inherited from
 
-[`DeliveryEventBase`](#deliveryeventbase).[`destination`](#destination-1)
+[`DeliveryEventBase`](#deliveryeventbase).[`destination`](#destination-2)
 
 ##### messageId
 
@@ -755,7 +927,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-13)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-15)
 
 ##### deliveryId
 
@@ -840,7 +1012,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-6)
+[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-8)
 
 ##### code
 
@@ -864,7 +1036,7 @@ The destination's place in the channel's `destinations:` list, from 0.
 
 ###### Inherited from
 
-[`DeliveryEventBase`](#deliveryeventbase).[`destination`](#destination-1)
+[`DeliveryEventBase`](#deliveryeventbase).[`destination`](#destination-2)
 
 ##### messageId
 
@@ -959,7 +1131,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-6)
+[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-8)
 
 ##### deliveryId
 
@@ -977,7 +1149,7 @@ The destination's place in the channel's `destinations:` list, from 0.
 
 ###### Inherited from
 
-[`DeliveryEventBase`](#deliveryeventbase).[`destination`](#destination-1)
+[`DeliveryEventBase`](#deliveryeventbase).[`destination`](#destination-2)
 
 ##### locationHost
 
@@ -1082,7 +1254,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-6)
+[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-8)
 
 ##### deliveryId
 
@@ -1100,7 +1272,7 @@ The destination's place in the channel's `destinations:` list, from 0.
 
 ###### Inherited from
 
-[`DeliveryEventBase`](#deliveryeventbase).[`destination`](#destination-1)
+[`DeliveryEventBase`](#deliveryeventbase).[`destination`](#destination-2)
 
 ##### messageId
 
@@ -1189,7 +1361,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-6)
+[`DeliveryEventBase`](#deliveryeventbase).[`channel`](#channel-8)
 
 ##### code
 
@@ -1213,7 +1385,7 @@ The destination's place in the channel's `destinations:` list, from 0.
 
 ###### Inherited from
 
-[`DeliveryEventBase`](#deliveryeventbase).[`destination`](#destination-1)
+[`DeliveryEventBase`](#deliveryeventbase).[`destination`](#destination-2)
 
 ##### messageId
 
@@ -1663,7 +1835,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-13)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-15)
 
 ##### messageId
 
@@ -3495,7 +3667,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-13)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-15)
 
 ##### duplicateOf
 
@@ -3589,7 +3761,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-13)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-15)
 
 ##### code
 
@@ -3785,6 +3957,131 @@ The secret itself. Pathways never logs it, and never puts it in an error.
 > `readonly` **version**: `string`
 
 The version resolved, as the provider names it; never secret.
+
+***
+
+### RetentionQuery
+
+Which messages one retention step reaches: those of its kind whose last activity is before
+`cutoff`.
+
+#### Example
+
+```ts
+const query: RetentionQuery = { step: "metadata", cutoff: "2026-08-01T00:00:00.000Z", includeDropped: true };
+```
+
+#### Properties
+
+##### cutoff
+
+> `readonly` **cutoff**: `string`
+
+ISO 8601, UTC.
+
+##### includeDropped?
+
+> `readonly` `optional` **includeDropped?**: `boolean`
+
+For the `metadata` step: also delete a message whose content was dropped, after delivery or by
+the `content` step. Without it such a message is kept, as `retention: 30d` always has.
+
+##### step
+
+> `readonly` **step**: [`RetentionStep`](#retentionstep)
+
+***
+
+### RetentionStore
+
+What retention needs from storage to archive before it changes anything: the messages a step
+would reach, a batch at a time, and a way to change exactly those. Each method is optional on
+[MessageStore](#messagestore); Store has all three.
+
+#### Example
+
+```ts
+const ids = await store.listExpiring("adt", query, 500);
+await store.applyExpiry("adt", ids, query);
+```
+
+#### Methods
+
+##### applyExpiry()
+
+> **applyExpiry**(`channel`, `ids`, `query`): `Promise`\<[`ExpireResult`](#expireresult)\>
+
+Applies `query`'s step to those of `ids` it still reaches, in one transaction, re-checking each,
+so a message replayed or given a new delivery meanwhile is left alone. `content` empties the
+bodies and error texts, drops `ctx.meta` and its index tags, and marks the message's content
+dropped; `metadata` and `failed` delete the rows. Returns how many messages and deliveries it
+changed.
+
+###### Parameters
+
+###### channel
+
+`string`
+
+###### ids
+
+readonly `number`[]
+
+###### query
+
+[`RetentionQuery`](#retentionquery)
+
+###### Returns
+
+`Promise`\<[`ExpireResult`](#expireresult)\>
+
+##### countExpiring()
+
+> **countExpiring**(`channel`, `query`): `Promise`\<[`ExpireResult`](#expireresult)\>
+
+How many messages, and their deliveries, `query` reaches on `channel` now.
+
+###### Parameters
+
+###### channel
+
+`string`
+
+###### query
+
+[`RetentionQuery`](#retentionquery)
+
+###### Returns
+
+`Promise`\<[`ExpireResult`](#expireresult)\>
+
+##### listExpiring()
+
+> **listExpiring**(`channel`, `query`, `limit`, `after?`): `Promise`\<`number`[]\>
+
+Up to `limit` ids of the messages `query` reaches on `channel`, lowest first, above `after`.
+
+###### Parameters
+
+###### channel
+
+`string`
+
+###### query
+
+[`RetentionQuery`](#retentionquery)
+
+###### limit
+
+`number`
+
+###### after?
+
+`number`
+
+###### Returns
+
+`Promise`\<`number`[]\>
 
 ***
 
@@ -4106,7 +4403,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-13)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-15)
 
 ##### code
 
@@ -4174,7 +4471,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-13)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-15)
 
 ##### type
 
@@ -4303,7 +4600,7 @@ const message: StoredMessage | undefined = await store.message(12);
 
 ###### Inherited from
 
-[`MessageSummary`](#messagesummary).[`channel`](#channel-15)
+[`MessageSummary`](#messagesummary).[`channel`](#channel-17)
 
 ##### contentDroppedAt?
 
@@ -4315,7 +4612,7 @@ message cannot be replayed or resent, and its content cannot be shown.
 
 ###### Inherited from
 
-[`MessageSummary`](#messagesummary).[`contentDroppedAt`](#contentdroppedat)
+[`MessageSummary`](#messagesummary).[`contentDroppedAt`](#contentdroppedat-1)
 
 ##### contentHash?
 
@@ -4325,7 +4622,7 @@ The hash of the body as received, when one was stored with it: see [StoreReceive
 
 ###### Inherited from
 
-[`MessageSummary`](#messagesummary).[`contentHash`](#contenthash)
+[`MessageSummary`](#messagesummary).[`contentHash`](#contenthash-1)
 
 ##### deliveries
 
@@ -4335,7 +4632,7 @@ The deliveries of the current generation, by status.
 
 ###### Inherited from
 
-[`MessageSummary`](#messagesummary).[`deliveries`](#deliveries-2)
+[`MessageSummary`](#messagesummary).[`deliveries`](#deliveries-3)
 
 ##### duplicateOf
 
@@ -4345,7 +4642,7 @@ The latest earlier message with the same sender and control ID, when there is on
 
 ###### Inherited from
 
-[`MessageSummary`](#messagesummary).[`duplicateOf`](#duplicateof)
+[`MessageSummary`](#messagesummary).[`duplicateOf`](#duplicateof-1)
 
 ##### error
 
@@ -4362,7 +4659,7 @@ which can quote the message: never print it.
 
 ###### Inherited from
 
-[`MessageSummary`](#messagesummary).[`generation`](#generation)
+[`MessageSummary`](#messagesummary).[`generation`](#generation-2)
 
 ##### id
 
@@ -4370,7 +4667,7 @@ which can quote the message: never print it.
 
 ###### Inherited from
 
-[`MessageSummary`](#messagesummary).[`id`](#id-1)
+[`MessageSummary`](#messagesummary).[`id`](#id-3)
 
 ##### receivedAt
 
@@ -4378,7 +4675,7 @@ which can quote the message: never print it.
 
 ###### Inherited from
 
-[`MessageSummary`](#messagesummary).[`receivedAt`](#receivedat-2)
+[`MessageSummary`](#messagesummary).[`receivedAt`](#receivedat-3)
 
 ##### size
 
@@ -4388,7 +4685,7 @@ The body's size in bytes, or null for a message stored before sizes were kept.
 
 ###### Inherited from
 
-[`MessageSummary`](#messagesummary).[`size`](#size-1)
+[`MessageSummary`](#messagesummary).[`size`](#size-2)
 
 ##### state
 
@@ -4406,7 +4703,7 @@ The status and the current deliveries, as an operator sees them.
 
 ###### Inherited from
 
-[`MessageSummary`](#messagesummary).[`status`](#status-1)
+[`MessageSummary`](#messagesummary).[`status`](#status-3)
 
 ##### updatedAt
 
@@ -4416,7 +4713,7 @@ When the message last changed: transformed, failed, replayed or cleared.
 
 ###### Inherited from
 
-[`MessageSummary`](#messagesummary).[`updatedAt`](#updatedat)
+[`MessageSummary`](#messagesummary).[`updatedAt`](#updatedat-1)
 
 ***
 
@@ -4645,7 +4942,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-13)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-15)
 
 ##### messageId
 
@@ -4702,7 +4999,7 @@ The channel's name.
 
 ###### Inherited from
 
-[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-13)
+[`LifecycleEventBase`](#lifecycleeventbase).[`channel`](#channel-15)
 
 ##### code
 
@@ -4822,6 +5119,28 @@ if (request.reason === "unreadable") console.warn(request.problem);
 
 ***
 
+### ArchiveErrorCode
+
+> **ArchiveErrorCode** = `"ERR_PATHWAYS_ARCHIVE_FORMAT"` \| `"ERR_PATHWAYS_ARCHIVE_INTEGRITY"` \| `"ERR_PATHWAYS_ARCHIVE_TOO_LARGE"`
+
+Why an archive could not be written or read:
+
+- `ERR_PATHWAYS_ARCHIVE_FORMAT`: it is not an archive in a layout this Pathways reads;
+- `ERR_PATHWAYS_ARCHIVE_INTEGRITY`: its trailer does not match its records (count or HMAC), or a
+  record names another channel than its header;
+- `ERR_PATHWAYS_ARCHIVE_TOO_LARGE`: the file, its decompressed size or one record passes a limit
+  of ArchiveLimits.
+
+Decrypting it can also fail with an `EncryptionError`, `ERR_PATHWAYS_UNKNOWN_KEY` among them.
+
+#### Example
+
+```ts
+const code: ArchiveErrorCode = "ERR_PATHWAYS_ARCHIVE_INTEGRITY";
+```
+
+***
+
 ### AuditAction
 
 > **AuditAction** = *typeof* `AUDIT_ACTIONS`\[`number`\]
@@ -4852,15 +5171,16 @@ const detail: AuditDetail = { status: "transformed", queued: 2 };
 
 ### AuditEventAction
 
-> **AuditEventAction** = `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"`
+> **AuditEventAction** = `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"archive"`
 
 Every action the audit log records, as an [AuditEvent](#auditevent)'s `action`: `search` (messages
 listed), `view` (one message's details, without content), `content-view`, `replay`, `resend`,
 `clear`, `retention` (a run, with what it deleted), `config` (a configuration change seen when
 the engine started), `lease-release` (the engine lease freed by force), `migrate` (schema steps
 applied by `pathways migrate`), `channel-pause`, `channel-resume`, `channel-stop`,
-`channel-halt` and `channel-reload` (a `pathways channel` command), and `verify` (a stored
-message read by `pathways verify`). Kept equal to the audit log's own list by a test.
+`channel-halt` and `channel-reload` (a `pathways channel` command), `verify` (a stored
+message read by `pathways verify`), and `archive` (a sealed archive retention wrote and checked
+before changing what it holds). Kept equal to the audit log's own list by a test.
 
 #### Example
 
@@ -5427,7 +5747,7 @@ The message a channel of format `F` hands its transform.
 
 ##### F
 
-`F` *extends* [`Format`](#format-1)
+`F` *extends* [`Format`](#format-2)
 
 #### Example
 
@@ -5565,6 +5885,24 @@ Earlier deliveries that had failed for good, now cleared.
 ```ts
 const result: RequeueResult = await store.requeue(12, request, "noah");
 if (!result.done) console.log(result.reason);
+```
+
+***
+
+### RetentionStep
+
+> **RetentionStep** = `"content"` \| `"metadata"` \| `"failed"`
+
+One step of retention, each with its own clock:
+
+- `content`: a done message's bodies, error texts and `ctx.meta` go, and its row stays;
+- `metadata`: a done message's row goes, with its deliveries;
+- `failed`: a failed message's row goes, with its deliveries.
+
+#### Example
+
+```ts
+const step: RetentionStep = "content";
 ```
 
 ***
@@ -5840,11 +6178,11 @@ second format, `To`, when the transform returns another format's model.
 
 ##### F
 
-`F` *extends* [`Format`](#format-1)
+`F` *extends* [`Format`](#format-2)
 
 ##### To
 
-`To` *extends* [`Format`](#format-1) = `F`
+`To` *extends* [`Format`](#format-2) = `F`
 
 #### Example
 
