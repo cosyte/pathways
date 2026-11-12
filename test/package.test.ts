@@ -157,10 +157,21 @@ describe("the release workflow", () => {
 
   it("has the scripts the shared pipeline runs", () => {
     expect(pkg.scripts["version"]).toBe(
-      "changeset version && tsx scripts/sync-version.ts && cosyte-process format",
+      "changeset version && tsx scripts/sync-version.ts && cosyte-process format && cosyte-docs-reference",
     );
     expect(pkg.scripts["pack:docs"]).toBe("cosyte-process pack-docs");
     expect(pkg.scripts["release"]).toBe("changeset publish");
+  });
+
+  // The reference documents VERSION by its value, so a bump that does not regenerate
+  // docs-content/api/ leaves the Version Packages pull request red on `docs-reference`. The
+  // generator runs after the version is written into src/version.ts, never before it.
+  it("regenerates the API reference after the version bump", () => {
+    const steps = (pkg.scripts["version"] ?? "").split(" && ");
+    const sync = steps.indexOf("tsx scripts/sync-version.ts");
+    const reference = steps.indexOf("cosyte-docs-reference");
+    expect(sync, "the version script must sync src/version.ts").toBeGreaterThan(-1);
+    expect(reference, "the version script must regenerate docs-content/api/").toBeGreaterThan(sync);
   });
 
   // A pull request that changes an export without regenerating docs-content/api/, or adds an export
