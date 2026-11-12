@@ -139,8 +139,15 @@ describe("onStart", () => {
   });
 
   it("is timed from when it begins, not from the module's load", async () => {
-    // A limit shorter than loading the worker takes: only onStart's own run counts against it.
-    const { worker, root } = await workerFor(scripts(), { scriptTimeoutMs: 50 });
+    // A module that takes 1.5 s to load, and a limit shorter than that but long enough for onStart
+    // on a loaded runner: only onStart's own run counts against it.
+    const { worker, root } = await workerFor(
+      scripts({
+        transform:
+          "(() => { const end = Date.now() + 1_500; while (Date.now() < end) { /* a slow load */ } return (m: string): string => m; })()",
+      }),
+      { scriptTimeoutMs: 1_000 },
+    );
     await worker.start();
     expect(await journal(root)).toEqual(["start"]);
   });
