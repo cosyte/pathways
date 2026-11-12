@@ -9,6 +9,7 @@ import {
   TransformLoadError,
   type TransformOutcome,
 } from "../engine/channel-worker.js";
+import { messageMetaOf } from "../engine/message-meta.js";
 import type { FailureSummary, MessageContext } from "../engine/worker-entry.js";
 import { EXIT } from "../exit.js";
 import type { MessageStore, MessageSummary } from "../storage/store.js";
@@ -253,7 +254,7 @@ async function verifyBatch(stored: Stored, batch: readonly MessageSummary[]): Pr
           messageId: message.id,
           attempt: message.generation + 1,
           source: undefined,
-          meta: {},
+          meta: messageMetaOf(config.format, body),
         }),
         recorded,
       ),

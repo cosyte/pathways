@@ -94,10 +94,10 @@ export const MAX_WAITING_FACTS = 4_096;
  * keepFacts(channel.facts, 12, facts); // drops the oldest when the channel already holds the most
  * ```
  */
-export function keepFacts(
-  map: Map<number, SourceFacts>,
+export function keepFacts<T = SourceFacts>(
+  map: Map<number, T>,
   id: number,
-  facts: SourceFacts,
+  facts: T,
   max = MAX_WAITING_FACTS,
 ): void {
   for (const oldest of map.keys()) {

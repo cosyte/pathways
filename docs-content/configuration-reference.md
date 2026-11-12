@@ -309,6 +309,40 @@ A channel with an MLLP source or destination must have the format `hl7v2`. A cha
 source or destination and the format `hl7v2`, said or by default, loads with a warning: tcp sends no
 HL7 ACK, so HL7 v2 with ACKs goes over MLLP.
 
+### Message metadata
+
+Pathways sets each message's metadata, `ctx.meta`, when it takes the message in, from the message
+itself, and stores it with the message, encrypted like the body. A transform reads it as `ctx.meta`,
+an HTTP destination fills its URL placeholders from it, an SMTP destination fills its
+`{{ meta.<key> }}` placeholders, and an [`index:`](./search-messages-by-metadata.md) block makes a
+key searchable. Nothing in the configuration sets it.
+
+For a channel of format `hl7v2`, the keys are:
+
+| Key                 | From                                                                                        | Such as           |
+| ------------------- | ------------------------------------------------------------------------------------------- | ----------------- |
+| `messageType`       | MSH-9, whole                                                                                | `ADT^A01^ADT_A01` |
+| `messageCode`       | MSH-9.1                                                                                     | `ADT`             |
+| `triggerEvent`      | MSH-9.2                                                                                     | `A01`             |
+| `controlId`         | MSH-10                                                                                      | `MSG00001`        |
+| `version`           | MSH-12                                                                                      | `2.5.1`           |
+| `processingId`      | MSH-11.1                                                                                    | `P`               |
+| `sendingApp`        | MSH-3.1                                                                                     | `SYNTHLIS`        |
+| `sendingFacility`   | MSH-4.1                                                                                     | `SYNTHLAB`        |
+| `receivingApp`      | MSH-5.1                                                                                     | `SYNTHEHR`        |
+| `receivingFacility` | MSH-6.1                                                                                     | `SYNTHHOSP`       |
+| `mrn`               | the first PID segment's PID-3: the first identifier of type `MR`, else the first identifier | `SYN-000123`      |
+
+Each value is text, trimmed. A key is set only when its field holds a value of at most 200
+characters: an empty field, a longer one, a message whose first segment is not a readable MSH, and
+a message without a PID segment leave the key out. A channel of any other format gets no keys in
+this release.
+
+The metadata is worked out from the message as it arrived, before the transform, so what a
+transform changes in the message does not change it; a replay and `pathways test` work it out the
+same way. Once a message's content is dropped, by `storage.content: dropAfterDelivery` or by
+retention, its metadata goes with it.
+
 ### Sources
 
 Exactly one of `file`, `http`, `mllp`, `tcp` or `module`. A `file` or `module` source may add `poll` beside
@@ -603,14 +637,18 @@ A file source's or destination's `azblob:`. The identity is Azure's default chai
 
 #### HTTP destination
 
-| Key            | Type                                                 | Default                  |
-| -------------- | ---------------------------------------------------- | ------------------------ |
-| `url`          | an `https://` URL, or `http://` with `plaintext`     | required                 |
-| `headers`      | a mapping of names to a string or a secret reference | none                     |
-| `tls`          | [client TLS](#tls)                                   | Node.js's built-in roots |
-| `plaintext`    | boolean, only with an `http://` URL                  | `false`                  |
-| `timeout`      | duration                                             | `30s`                    |
-| `resendHeader` | a header name                                        | none                     |
+| Key                 | Type                                                    | Default                  |
+| ------------------- | ------------------------------------------------------- | ------------------------ |
+| `url`               | an `https://` URL, or `http://` with `plaintext`        | required                 |
+| `method`            | `POST`, `PUT`, `PATCH`, `DELETE` or `GET`               | `POST`                   |
+| `query`             | a mapping of names to text, which may hold placeholders | none                     |
+| `headers`           | a mapping of names to a string or a secret reference    | none                     |
+| `tls`               | [client TLS](#tls)                                      | Node.js's built-in roots |
+| `plaintext`         | boolean, only with an `http://` URL                     | `false`                  |
+| `timeout`           | duration                                                | `30s`                    |
+| `resendHeader`      | a header name                                           | none                     |
+| `idempotencyHeader` | a header name                                           | none                     |
+| `allowNetworks`     | a list of addresses or CIDR ranges                      | none                     |
 
 The URL may not hold a user name or password. A header whose name holds `auth`, `cookie`, `token`,
 `secret`, `password`, `key`, `signature` or `credential` must be a secret reference. `Content-Length`,
@@ -621,6 +659,29 @@ The URL may not hold a user name or password. A header whose name holds `auth`, 
 off by a stop. Its value is the number of attempts before, such as `1`. It may not be one of the
 headers above, `Content-Type`, or a name `headers` sets. See
 [Delivery and errors](./delivery-and-errors.md#a-resend-after-a-crash-is-flagged).
+
+`method` is how each output is sent; `GET` and `DELETE` send no body, and no `Content-Type`. The
+`url`'s path may hold placeholders, a key of the [message metadata](#message-metadata) in braces
+such as `{mrn}`, and so may each `query` value. Each is filled per message, percent-encoded, so a
+value never changes the scheme, the host or the port; a placeholder in the host, the port or the
+`url`'s own query is refused when the configuration loads. A key the message's metadata lacks fails
+that attempt with `MetaKeyMissing` (code `URL_TEMPLATE_MISSING`), and the delivery is kept and
+retried under the destination's [`retry`](#retry) block, its error naming the key, such as
+`delivery: URL_TEMPLATE_MISSING mrn`. An empty value in the path, or a value of `.` or `..`, fails
+that delivery for good. Each error names the key and never the value. Values in a URL reach the
+server's and any proxy's logs: put identifiers there only when the receiver's API asks for them.
+
+`idempotencyHeader` names a header sent on every attempt, its value `<messageId>-<seq>`, the same
+for each attempt of one output, so a receiver can drop a copy it already has. It follows the
+`resendHeader` rules, and may not be the same name.
+
+Every connection is checked against the address it connects to, each time it connects: a host that
+resolves to a loopback (`127.0.0.0/8`, `::1`), link-local (`169.254.0.0/16`, `fe80::/10`, where
+cloud metadata services answer), private (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`,
+`100.64.0.0/10`, `fc00::/7`) or unspecified address is refused, and the delivery retried with the
+code `ADDRESS_REFUSED`, unless `allowNetworks` names its network, such as `10.20.0.0/16` or
+`127.0.0.1`. A name that resolves to some refused addresses and some allowed ones connects to an
+allowed one.
 
 A 2xx is delivered; a 408, 425, 429, 5xx, a network error or no answer within `timeout` is retried,
 waiting longer when a 429 or a 503 asks with `Retry-After`, never more than `retry.max` (5 minutes
@@ -681,7 +742,8 @@ output the framing cannot carry fails for good.
 | `socketTimeout`    | duration, at most the destination's `timeout`                                             | `20s`                                           |
 
 An address is plain, such as `lab@example.test`, with no display name. A template's placeholders
-are `{{ messageId }}`, `{{ seq }}`, `{{ channel }}` and `{{ meta.<key> }}`. The server's certificate is
+are `{{ messageId }}`, `{{ seq }}`, `{{ channel }}` and `{{ meta.<key> }}`, a key of the
+[message metadata](#message-metadata). The server's certificate is
 always verified, with TLS 1.2 or later. [Send email over SMTP](./send-email-over-smtp.md) says what
 each answer means.
 

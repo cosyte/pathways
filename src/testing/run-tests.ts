@@ -5,6 +5,7 @@ import type { ChannelConfig, ProjectConfig } from "../config/schema.js";
 import { transformConfigFor } from "../config/transform-config.js";
 import type { Env } from "../connectors/endpoint.js";
 import { ChannelWorker, TransformLoadError } from "../engine/channel-worker.js";
+import { messageMetaOf } from "../engine/message-meta.js";
 import type { FailureSummary } from "../engine/worker-entry.js";
 
 /** Options for {@link runChannelTests}. */
@@ -109,7 +110,16 @@ export async function runChannelTests(
     try {
       for (const input of inputs) {
         const label = `${channel.name}/tests/${input}`;
-        const outcome = await worker.run(new Uint8Array(await readFile(join(testsDir, input))));
+        const body = new Uint8Array(await readFile(join(testsDir, input)));
+        // Stored nothing, so no id, and no source; the metadata the engine would set, from the input.
+        const outcome = await worker.run(body, {
+          context: {
+            messageId: 0,
+            attempt: 1,
+            source: undefined,
+            meta: messageMetaOf(channel.format, body),
+          },
+        });
         if (!outcome.ok) {
           options.out(`FAIL ${label}: ${describeFailure(outcome.failure, channel)}`);
           failed += 1;

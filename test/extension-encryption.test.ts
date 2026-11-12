@@ -200,9 +200,10 @@ describe("a custom key provider", () => {
       await store.close();
     }
 
+    // The message's body, its delivery's body, and the metadata the engine set.
     const rekeyed = await pathways(["rekey", "-C", root]);
     expect(rekeyed.code).toBe(EXIT.ok);
-    expect(rekeyed.out).toContain("already under the current key: 2\n");
+    expect(rekeyed.out).toContain("already under the current key: 3\n");
   });
 
   it("stops the start, by file and key, when the module is wrong", async () => {

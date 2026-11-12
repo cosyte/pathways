@@ -76,9 +76,9 @@ destinations:
 | `{{ meta.<key> }}` | the `ctx.meta` key, or nothing when it is not set |
 
 Any other placeholder stops the engine at start, naming the file and the key. Line breaks are taken
-out of the filled subject, so no text can add a header. `ctx.meta` is empty in this release (see
-[Use the message context](./use-the-message-context.md)), so a `{{ meta.<key> }}` is filled with
-nothing for now.
+out of the filled subject, so no text can add a header. `ctx.meta` holds the keys Pathways sets for
+each message, such as `{{ meta.messageCode }}` and `{{ meta.controlId }}` on an HL7 v2 channel: the
+[configuration reference](./configuration-reference.md#message-metadata) lists them.
 
 Without `subject`, the subject is `Pathways message {{ messageId }}-{{ seq }}`. Without `body`, the
 text names the channel, the message id and the output.

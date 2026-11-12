@@ -450,6 +450,17 @@ describe.skipIf(!OPENSSL)("the engine, with an SMTP destination", () => {
     expect(await store.deliveryCounts("adt")).toMatchObject({ failed: 1 });
   });
 
+  it("fills a subject's meta placeholders from the metadata the engine set", async () => {
+    const server = await peer({
+      implicit: { cert: certificates.serverCert, key: certificates.serverKey },
+    });
+    const { store } = await run(server, [
+      'subject: "Result {{ meta.messageCode }} {{ meta.controlId }} [{{ meta.absent }}]"',
+    ]);
+    expect(server.taken[0]?.data).toContain("Subject: Result ADT MSG00001 []\r\n");
+    expect(await store.deliveryCounts("adt")).toMatchObject({ delivered: 1 });
+  });
+
   it("warns at start of an SMTP destination without TLS", async () => {
     const server = await peer();
     const root = await project([

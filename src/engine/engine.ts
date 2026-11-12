@@ -32,7 +32,9 @@ import { KnownHosts, pinnedKey } from "../connectors/known-hosts.js";
 import { ObjectDestination, ObjectSource, type ObjectStore } from "../connectors/object-store.js";
 import { S3Bucket } from "../connectors/s3.js";
 import { SftpLocation } from "../connectors/sftp.js";
+import { AddressGuard } from "../connectors/address-guard.js";
 import { HttpDestination, HttpSource } from "../connectors/http.js";
+import { MetaKeyMissing } from "../connectors/http-template.js";
 import { RedirectHeld, RetryableError } from "../connectors/http-core.js";
 import { MllpDestination, MllpSource } from "../connectors/mllp.js";
 import { loadMllpClientTls, loadMllpServerTls } from "../connectors/mllp-tls.js";
@@ -51,6 +53,7 @@ import {
   type MessageSink,
   type SourceConnector,
 } from "../connectors/types.js";
+import type { MessageMeta } from "../encryption/blind-index.js";
 import {
   customDestination,
   customSource,
@@ -81,6 +84,7 @@ import { formatTable, type FailureSummary } from "./worker-entry.js";
 import { DeadlineTimer } from "./deadline.js";
 import { nextPollAt, pollOf } from "./schedule.js";
 import { copyFacts, keepFacts, sourceFacts } from "./source-facts.js";
+import { messageMetaOf } from "./message-meta.js";
 
 /**
  * By default the first retry waits this long, and each later one twice as long as the one before.
@@ -587,6 +591,10 @@ export async function connectorsFor(
             ),
             timeoutMs: destination.timeoutMs,
             resendHeader: destination.resendHeader,
+            method: destination.method,
+            query: destination.query,
+            idempotencyHeader: destination.idempotencyHeader,
+            addressGuard: new AddressGuard(destination.allowNetworks),
             now,
             ...(destination.tls === undefined
               ? {}
@@ -815,6 +823,12 @@ interface RunningChannel {
    * go, and those messages are transformed with no source facts.
    */
   readonly facts: Map<number, SourceFacts>;
+  /**
+   * The metadata the engine set for each message it took in that waits for its transform, by
+   * message id, kept as `facts` is, so the transform reads it without parsing the message again. A
+   * message past the bound, or taken in before a restart, has it worked out again from its body.
+   */
+  readonly metas: Map<number, MessageMeta>;
   /**
    * Each `sink.receive` under way, settled once its message's facts are set or it failed: a pass that
    * takes a message whose facts are not set yet waits for these before it runs the transform.
@@ -1069,6 +1083,7 @@ export class Engine {
           draining: false,
           reloads: Promise.resolve(),
           facts: new Map(),
+          metas: new Map(),
           receiving: new Set(),
         };
         this.channels.push(channel);
@@ -2047,6 +2062,8 @@ export class Engine {
           // An engine that lost its lease takes nothing more in: the source answers as it does
           // when a message cannot be stored, so the sender keeps it.
           this.options.fence?.check();
+          // Worked out before the store call, which may take the body over.
+          const meta = messageMetaOf(config.format, body);
           received = await store.receive(config.name, body, {
             // Storage keeps a hash of each key, so a sender's identifiers and a file's name are not
             // stored.
@@ -2055,6 +2072,9 @@ export class Engine {
             resumed,
             failure,
             size: body.byteLength,
+            // The metadata the engine sets (`ctx.meta`), stored with the message, so a
+            // destination that fills a URL from it reads what the message carried when it came in.
+            ...metaOption(meta),
             // Kept with the metadata once the body is dropped, to match a copy held elsewhere.
             ...(config.settings.content === "dropAfterDelivery"
               ? { contentHash: createHash("sha256").update(body).digest("hex") }
@@ -2067,6 +2087,7 @@ export class Engine {
               received.id,
               sourceFacts(config.source.kind, passed, body.byteLength, receivedAt),
             );
+            keepFacts(channel.metas, received.id, meta);
           }
           settled();
         } catch (error) {
@@ -2183,10 +2204,13 @@ export class Engine {
       }
       const source = channel.facts.get(next.id);
       channel.facts.delete(next.id);
+      // As set at receipt; worked out again from the body, which gives the same, when not held.
+      const meta = channel.metas.get(next.id) ?? messageMetaOf(config.format, next.body);
+      channel.metas.delete(next.id);
       const outcome: TransformOutcome = await worker.run(next.body, {
         transfer: owned,
         // Every message the engine transforms is on its first run: a replay runs elsewhere.
-        context: { messageId: next.id, attempt: 1, source, meta: {} },
+        context: { messageId: next.id, attempt: 1, source, meta },
       });
       if (outcome.ok) {
         faultPoint("after-transform-before-complete");
@@ -2259,6 +2283,13 @@ export class Engine {
     } finally {
       deadline.close();
     }
+  }
+
+  /** A message's metadata, read back from the store: empty when it has none or the store keeps none. */
+  private async messageMeta(messageId: number): Promise<MessageMeta> {
+    const text = await this.options.store.messageMeta?.(messageId);
+    // Stored by receive() from a MessageMeta: flat values only.
+    return text === undefined ? {} : (JSON.parse(text) as MessageMeta);
   }
 
   private async deliverEach(channel: RunningChannel, deadline: DeadlineTimer): Promise<void> {
@@ -2354,6 +2385,12 @@ export class Engine {
           halt.removeEventListener("abort", onHalt);
         };
         try {
+          // Read only for a destination that fills a URL or a template from it: the metadata stays
+          // in storage otherwise. A store that keeps none hands over none, and a URL placeholder
+          // fails the attempt. Read inside the attempt, so `ended` runs however the read settles.
+          const meta = readsMeta(destination)
+            ? await this.messageMeta(delivery.messageId)
+            : undefined;
           await untilAborted(
             () =>
               destination.deliver({
@@ -2361,6 +2398,7 @@ export class Engine {
                 seq: delivery.seq,
                 body: delivery.body,
                 ...(resend === undefined ? {} : { resend }),
+                ...(meta === undefined ? {} : { meta }),
                 signal,
               }),
             signal,
@@ -2407,7 +2445,8 @@ export class Engine {
             held === undefined
               ? retryWait(attempts, hint, policy, this.options.random)
               : policy.maxMs;
-          const failure = `delivery: ${code ?? "error"}`;
+          // A missing URL key is named, so an operator knows which key to fix; never a value.
+          const failure = `delivery: ${code ?? "error"}${error instanceof MetaKeyMissing ? ` ${error.key}` : ""}`;
           const exhausted = retryExhausted(
             attempts,
             wait,
@@ -2477,6 +2516,7 @@ export class Engine {
               attempt: attempts,
               retryInMs: wait,
               code,
+              ...(error instanceof MetaKeyMissing ? { key: error.key } : {}),
             });
             this.emit(channel, () => ({
               type: "delivery-retry",
@@ -2606,6 +2646,19 @@ function auditDetail(
 /** An error's name, or the type of what was thrown when it is not an error: never its text. */
 function errorName(error: unknown): string {
   return error instanceof Error ? error.name : typeof error;
+}
+
+/** Whether `destination` reads the message's metadata: a URL or a template of it names a key. */
+function readsMeta(destination: DestinationConnector): boolean {
+  return (
+    (destination instanceof HttpDestination || destination instanceof SmtpDestination) &&
+    destination.usesMeta
+  );
+}
+
+/** The `meta` option of a receive: none when the engine set no metadata, so nothing is stored. */
+function metaOption(meta: MessageMeta): { meta?: MessageMeta } {
+  return Object.keys(meta).length === 0 ? {} : { meta };
 }
 
 /** A key's SHA-256 in hex, as storage keeps it, or undefined when there is no key. */

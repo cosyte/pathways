@@ -266,7 +266,11 @@ export interface TransformContext {
    * oldest of a channel's messages past the 4,096 whose facts the engine holds while they wait.
    */
   readonly source: SourceFacts | undefined;
-  /** A per-message map of flat values. Always empty in this release: nothing sets it yet. */
+  /**
+   * The message's metadata, a map of flat values the engine sets from the message itself: for an
+   * `hl7v2` message, the fields of its MSH segment and its first PID segment's medical record
+   * number, each only when it holds a value. Empty for every other format.
+   */
   readonly meta: Readonly<Record<string, string | number | boolean>>;
   /** The channel's configuration, resolved when the engine (or the command) started. */
   readonly config: Readonly<TransformConfig>;
