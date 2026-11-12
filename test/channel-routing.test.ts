@@ -22,7 +22,7 @@ import { EXIT } from "../src/exit.js";
 import { replayMessages } from "../src/operator/actions.js";
 import { AuditLog } from "../src/operator/audit.js";
 import { showCommand, statusCommand, type OperatorContext } from "../src/operator/commands.js";
-import type { MessageStore, Store } from "../src/storage/store.js";
+import { LeaseLostError, type MessageStore, type Store } from "../src/storage/store.js";
 import {
   available,
   closeAdmins,
@@ -734,6 +734,33 @@ destinations:
       expect((await messagesOf(store, "b")).map((message) => message.body)).toEqual([
         "SYNTHETIC-1",
       ]);
+    });
+
+    it("fences a hand-off by the engine lease's epoch, keeping nothing of one it refuses", async () => {
+      const root = await makeProject({});
+      const store = await (await testStorage(database, join(root, "pathways.db"))).open();
+      stores.push(store);
+      const { id } = await store.receive("a", bytes("SYNTHETIC-1"));
+      await store.completeTransform(id, [bytes("SYNTHETIC-OUT")], 1);
+      const [delivery] = await store.deliveries(id);
+      const claim = await store.acquireLease("engine", { node: "n1", host: "h1" }, 60_000);
+      if (!claim.acquired) throw new Error("the lease was not taken");
+      const handOff = {
+        channel: "b",
+        body: bytes("SYNTHETIC-OUT"),
+        maxPending: 10,
+        options: {
+          parent: { channel: "a", messageId: id, deliveryId: delivery?.id, generation: 0 },
+          hops: 1,
+        },
+      };
+      const from = { kind: "delivery" as const, deliveryId: delivery?.id ?? 0 };
+      await expect(store.handOff(from, [handOff], claim.epoch + 1)).rejects.toThrow(LeaseLostError);
+      expect(await store.messageCounts("b")).toMatchObject({ received: 0 });
+      const done = await store.handOff(from, [handOff], claim.epoch);
+      expect(done).toMatchObject({ ok: true, ids: [expect.any(Number) as unknown] });
+      expect((await store.deliveries(id))[0]?.status).toBe("delivered");
+      expect(await store.children(id, 10)).toHaveLength(1);
     });
 
     it("shows a route's parent, and at most twenty of a message's children", async () => {
