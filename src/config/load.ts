@@ -28,6 +28,9 @@ import {
   DEFAULT_POOL_MAX,
   DEFAULT_SECRET_TIMEOUT_MS,
   DEFAULT_SETTINGS,
+  DEFAULT_TCP_IDLE_TIMEOUT_MS,
+  DEFAULT_TCP_STALL_TIMEOUT_MS,
+  DEFAULT_TCP_TIMEOUT_MS,
   projectSchema,
   type ChannelConfig,
   type ClientTlsFiles,
@@ -53,6 +56,7 @@ import {
   type SftpConfig,
   type Settings,
   type StorageConfig,
+  type TcpFraming,
   type TransformConfigBlock,
 } from "./schema.js";
 
@@ -65,6 +69,7 @@ type HookYaml = NonNullable<ChannelYaml["hooks"]>[number];
 type HttpClientYaml = NonNullable<DestinationYaml["http"]>;
 type RetryYaml = NonNullable<ChannelYaml["retry"]>;
 type PollYaml = NonNullable<ChannelYaml["source"]["poll"]>;
+type TcpFramingYaml = NonNullable<ChannelYaml["source"]["tcp"]>["framing"];
 
 /**
  * A project that could not be loaded. `problems` name the file and the key at fault; they hold no
@@ -293,6 +298,17 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
     const missing = await missingModules(show(file), show, channelEnv, [
       ["source.module", source.kind === "module" ? source.module : undefined],
       ["source.mllp.ackBuilder", source.kind === "mllp" ? source.ackBuilder : undefined],
+      [
+        "source.tcp.reply.builder",
+        source.kind === "tcp" && source.reply?.kind === "builder" ? source.reply.module : undefined,
+      ],
+      ...destinations.map(
+        (destination, index) =>
+          [
+            `destinations.${index}.tcp.replyCheck`,
+            destination.kind === "tcp" ? destination.replyCheck : undefined,
+          ] as const,
+      ),
       ...destinations.map(
         (destination, index) =>
           [
@@ -307,6 +323,20 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
       continue;
     }
     environment.push(...references);
+    const format = channel.format ?? "hl7v2";
+    const tcp = [
+      ...(source.kind === "tcp" ? ["source.tcp"] : []),
+      ...destinations.flatMap((destination, index) =>
+        destination.kind === "tcp" ? [`destinations.${index}.tcp`] : [],
+      ),
+    ];
+    if (format === "hl7v2") {
+      for (const key of tcp) {
+        warnings.push(
+          `${show(file)}: ${key}: tcp sends no HL7 ACK and checks no MSH-10, and this channel's format is hl7v2; for HL7 v2 with ACKs use mllp, or set the format this feed carries`,
+        );
+      }
+    }
     const indexes = (channel.index ?? []).map((entry) =>
       typeof entry === "string"
         ? { key: entry, bits: DEFAULT_INDEX_BITS }
@@ -327,7 +357,7 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
     channels.push({
       name: folder,
       dir: channelDir,
-      format: channel.format ?? "hl7v2",
+      format,
       ...(channel.csv === undefined ? {} : { csv: channel.csv }),
       source,
       transform,
@@ -514,9 +544,31 @@ function resolveSource(
   dir: string,
   settings: Settings,
 ): ChannelConfig["source"] {
-  const { http, mllp } = source;
+  const { http, mllp, tcp } = source;
   const module = resolveModule(source, dir);
   if (module !== undefined) return module;
+  if (tcp !== undefined) {
+    const { reply } = tcp;
+    return {
+      kind: "tcp",
+      host: tcp.host ?? DEFAULT_HOST,
+      port: tcp.port,
+      tls: tcp.tls === undefined ? undefined : resolveServerTls(tcp.tls, dir),
+      plaintext: tcp.plaintext === true,
+      framing: resolveFraming(tcp.framing),
+      ...(tcp.maxConnections === undefined ? {} : { maxConnections: tcp.maxConnections }),
+      maxMessageSize: tcp.maxMessageSize ?? DEFAULT_MAX_BYTES,
+      idleTimeoutMs: tcp.idleTimeout ?? DEFAULT_TCP_IDLE_TIMEOUT_MS,
+      stallTimeoutMs: tcp.stallTimeout ?? DEFAULT_TCP_STALL_TIMEOUT_MS,
+      reply:
+        reply === undefined
+          ? undefined
+          : reply.builder === undefined
+            ? // The schema lets exactly one of hex and builder through.
+              { kind: "fixed", hex: (reply.hex as string).toLowerCase() }
+            : { kind: "builder", module: resolve(dir, reply.builder) },
+    };
+  }
   if (mllp !== undefined) {
     return {
       kind: "mllp",
@@ -600,6 +652,29 @@ function resolveSftp(sftp: SftpYaml | undefined, dir: string): SftpConfig | unde
   };
 }
 
+/** A tcp block's `framing:`, resolved: hex in lower case, and each default filled in. */
+function resolveFraming(framing: TcpFramingYaml): TcpFraming {
+  const { delimiter, lengthPrefix, startEnd } = framing;
+  if (delimiter !== undefined) return { kind: "delimiter", delimiter: delimiter.toLowerCase() };
+  if (lengthPrefix !== undefined) {
+    return {
+      kind: "lengthPrefix",
+      size: lengthPrefix.bytes,
+      endian: lengthPrefix.endian ?? "big",
+      inclusive: lengthPrefix.inclusive ?? false,
+    };
+  }
+  if (startEnd !== undefined) {
+    return {
+      kind: "startEnd",
+      start: startEnd.start.toLowerCase(),
+      end: startEnd.end.toLowerCase(),
+    };
+  }
+  // The schema lets exactly one framing through, so one that is none of the others is raw.
+  return { kind: "raw" };
+}
+
 /** A source's `poll:`, resolved: its schedule, and its deadline or the default. */
 function resolvePoll(poll: PollYaml): PollConfig {
   if (poll === "onStart")
@@ -651,9 +726,23 @@ function resolveConnector(
   dir: string,
   settings: Settings,
 ): ChannelConfig["destinations"][number] {
-  const { http, mllp } = destination;
+  const { http, mllp, tcp } = destination;
   const module = resolveModule(destination, dir);
   if (module !== undefined) return module;
+  if (tcp !== undefined) {
+    return {
+      kind: "tcp",
+      host: tcp.host,
+      port: tcp.port,
+      tls: tcp.tls === undefined ? undefined : resolveClientTls(tcp.tls, dir),
+      plaintext: tcp.plaintext === true,
+      framing: resolveFraming(tcp.framing),
+      maxMessageSize: tcp.maxMessageSize ?? DEFAULT_MAX_BYTES,
+      timeoutMs: tcp.timeout ?? DEFAULT_TCP_TIMEOUT_MS,
+      expectReply: tcp.expectReply === true,
+      replyCheck: tcp.replyCheck === undefined ? undefined : resolve(dir, tcp.replyCheck),
+    };
+  }
   if (mllp !== undefined) {
     return {
       kind: "mllp",
