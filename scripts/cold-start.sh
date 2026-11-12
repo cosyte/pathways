@@ -54,8 +54,10 @@ set -m
 
 # stop_engine <signal>: signals the engine's process group (npm and pathways under it), as Ctrl+C
 # in its terminal does, waits up to 60 seconds for it to exit, and kills what is left after that.
+# With a second argument, `pid`, it signals the engine's own process alone, so ENGINE_EXIT is the
+# exit code of pathways itself rather than of npm around it.
 stop_engine() {
-  kill "-$1" -- "-$ENGINE"
+  if [ "${2:-}" = pid ]; then kill "-$1" "$ENGINE"; else kill "-$1" -- "-$ENGINE"; fi
   local i
   for ((i = 0; i < 120; i++)); do
     if ! kill -0 "$ENGINE" 2>/dev/null; then
@@ -238,7 +240,7 @@ run 0 npx pathways validate --print
 run 0 npx pathways secrets check
 run 0 npx pathways secrets check --json
 run 0 npx pathways test
-npx pathways start >"$ROOT/engine-2.log" 2>&1 &
+./node_modules/.bin/pathways start >"$ROOT/engine-2.log" 2>&1 &
 ENGINE=$!
 check "the engine's probe listener answers within 20 seconds" \
   'wait_for "npx pathways probe >/dev/null 2>&1" 20'
@@ -269,8 +271,9 @@ run 0 npx pathways channel resume export-in
 run 0 npx pathways channel halt export-in --deadline 5s --json
 run 0 npx pathways channel resume export-in
 run 1 npx pathways start --once
-stop_engine TERM
+stop_engine TERM pid
 echo "pathways start exited $ENGINE_EXIT after SIGTERM; its log:"
+check "pathways start exits 0 on SIGTERM, as the command reference says" '[ "$ENGINE_EXIT" = 0 ]'
 cut -c1-300 "$ROOT/engine-2.log"
 check "the second engine logged no error" '! grep -q "\"level\":\"error\"" "$ROOT/engine-2.log"'
 run 1 npx pathways channel pause http-sink
@@ -282,7 +285,7 @@ run 0 npx pathways messages --channel adt-to-lab --status delivered --since 1d -
 run 0 npx pathways messages show 1
 run 0 npx pathways messages show 1 --content --json
 run 0 npx pathways replay 1
-run 0 npx pathways replay 1 --resend --json
+run 0 npx pathways replay 6 --resend --json
 run 0 npx pathways replay --status failed --yes
 run 1 npx pathways clear 1
 run 0 npx pathways retention --dry-run
@@ -303,7 +306,7 @@ run 0 npx pathways verify --channel adt-to-lab --ids 1 --json
 run 0 npx pathways test adt-to-lab --update
 run 0 npx pathways start --once --no-migrate
 run 0 npx pathways start --once --dry-run
-run 1 npx pathways start --standby
+run 3 npx pathways start --standby
 run 0 npx pathways -C . status adt-to-lab
 
 echo "## Upgrade from the release before the latest"
@@ -333,6 +336,16 @@ else
   check "after the upgrade both admissions are delivered" '[ "$(ls data/adt-to-lab/out | wc -l)" = 2 ]'
   run 0 npx pathways validate
   run 0 npx pathways test
+  # The way back, as "Back to Pathways 0.0.1" gives it: the old version refuses the upgraded
+  # database, and runs on the backup taken before the upgrade.
+  run 0 npm install "@cosyte/pathways@$PREVIOUS"
+  run 1 npx pathways start --once
+  check "$PREVIOUS refuses the upgraded database as the upgrade page says" \
+    'grep -q "the database schema could not be brought up to date" <<<"$LAST"'
+  cp "$ROOT/backup.db" .pathways/pathways.db
+  rm -f .pathways/pathways.db-wal .pathways/pathways.db-shm
+  run 0 npx pathways start --once
+  run 0 npx pathways status
 fi
 
 echo "## Stalls"
