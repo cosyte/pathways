@@ -505,6 +505,9 @@ export async function connectorsFor(
         drainTimeoutMs: context.drainTimeoutMs,
         maxMessageSize: source.maxMessageSize,
         keepOpen: source.keepOpen,
+        connect: source.connect,
+        replyTo: source.replyTo,
+        connectTimeoutMs: source.connectTimeoutMs,
         onStoreFailure: source.onStoreFailure,
         ...(source.ackBuilder === undefined
           ? {}
