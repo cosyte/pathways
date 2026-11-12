@@ -244,11 +244,14 @@ describe("rewriteNextRelease", () => {
   });
 
   it("refuses a README that mixes line endings", () => {
-    expect(rewriteNextRelease(README.replace("\n", "\r\n"), [], "0.0.4")).toEqual({
+    // Only the title line ends otherwise; every other line keeps its LF.
+    const crlfTitle = README.replace(/^# Synthetic\n/, "# Synthetic\r\n");
+    expect(rewriteNextRelease(crlfTitle, [], "0.0.4")).toEqual({
       ok: false,
       reason: "it mixes CRLF and LF line endings",
     });
-    expect(rewriteNextRelease(README.replace("\n", "\r"), [], "0.0.4").ok).toBe(false);
+    const crTitle = README.replace(/^# Synthetic\n/, "# Synthetic\r");
+    expect(rewriteNextRelease(crTitle, [], "0.0.4").ok).toBe(false);
   });
 
   it("refuses a version a replacement could read as a pattern", () => {
