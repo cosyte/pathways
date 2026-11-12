@@ -332,6 +332,11 @@ export interface ConnectorContext {
   readonly dryRun?: boolean | undefined;
   /** The secrets a start resolved; `env` alone without them. */
   readonly secrets?: Secrets | undefined;
+  /**
+   * How long a listening source lets the work in flight finish when it stops, in milliseconds:
+   * `drain.timeout`. Defaults to the source's own default, 30 seconds.
+   */
+  readonly drainTimeoutMs?: number | undefined;
 }
 
 /**
@@ -474,6 +479,8 @@ export async function connectorsFor(
             : loadMllpServerTls(source.tls, secretsOf(secrets), `${file}: source.mllp.tls`),
         maxConnections: source.maxConnections,
         receiveTimeoutMs: source.receiveTimeoutMs,
+        maxConnectionAgeMs: source.maxConnectionAgeMs,
+        drainTimeoutMs: context.drainTimeoutMs,
         maxMessageSize: source.maxMessageSize,
         keepOpen: source.keepOpen,
         onStoreFailure: source.onStoreFailure,
@@ -975,6 +982,13 @@ export class Engine {
    * a pass that ran beside it, which ends the run.
    */
   private schedule: { wake: AbortController; failure: { error: unknown } | undefined } | undefined;
+  /** Set once a run's signal aborts: no source opens again and no source's pass starts. */
+  private drainingRun = false;
+  /**
+   * Set once a run's drain reaches `drain.timeout`: no further message is transformed and no
+   * further delivery is sent, so the run ends after the transform in hand.
+   */
+  private cutOff = false;
 
   /** @param options The project, the store, the logger and, for tests, a clock and connectors. */
   constructor(options: EngineOptions) {
@@ -1048,7 +1062,14 @@ export class Engine {
         let connectors: ChannelConnectors;
         try {
           connectors = await (this.options.connectors?.(config) ??
-            connectorsFor(config, { now: this.now, logger, env, secrets, dryRun }));
+            connectorsFor(config, {
+              now: this.now,
+              logger,
+              env,
+              secrets,
+              dryRun,
+              drainTimeoutMs: this.drainTimeoutMs(),
+            }));
         } catch (error) {
           await hooks.stop();
           throw error;
@@ -1270,9 +1291,13 @@ export class Engine {
    * waits the poll interval between passes, or less when a source's pass is due sooner or one
    * ends. Retention runs after the first pass and then once every `retentionInterval`. A source's
    * `poll` that rejects before its deadline ends the run with that error, as it would a tick. Once
-   * `signal` aborts, a source's pass under way is cut off after what it is storing is stored, its
-   * `poll` call is waited for up to its deadline, and a last pass takes what the sources took in
-   * through the transform and delivery, as the end of a tick does.
+   * `signal` aborts, the run drains: every listening source closes (an MLLP connection after the
+   * message it is handling and its ACK), a source's pass under way is cut off after what it is
+   * storing is stored, its `poll` call is waited for up to its deadline, and a last pass takes what
+   * the sources took in through the transform and delivery, as the end of a tick does. All of that
+   * is bounded by `drain.timeout`: at the timeout, the sends under way are cut off (each stays
+   * pending, to be sent again flagged at the next start), no further message is transformed or
+   * sent, and the run ends once the transform in hand returns.
    */
   async run(signal: AbortSignal): Promise<void> {
     const { pollIntervalMs, retentionIntervalMs } = this.options.project.settings;
@@ -1280,11 +1305,22 @@ export class Engine {
     this.steppedAt = this.monotonic();
     const schedule = { wake: new AbortController(), failure: undefined };
     this.schedule = schedule;
+    this.cutOff = false;
+    this.drainingRun = false;
     const started = this.now();
     for (const channel of this.channels) {
       channel.nextPollAt = nextPollAt(this.pollOf(channel).schedule, started, true);
     }
     let ended = false;
+    // The drain starts the moment the signal aborts, not when the pass under way ends: the
+    // listeners close at once, and the timeout bounds that pass too.
+    const timer = new AbortController();
+    let closing: Promise<void> | undefined;
+    const begin = (): void => {
+      closing = this.beginDrain(timer.signal);
+    };
+    if (signal.aborted) begin();
+    else signal.addEventListener("abort", begin, { once: true });
     try {
       while (!signal.aborted) {
         await this.passes("due");
@@ -1303,14 +1339,60 @@ export class Engine {
         this.raise(schedule);
       }
       ended = true;
+      await closing;
+      faultPoint("drain-sources-closed");
       await this.endPasses();
       this.raise(schedule);
       await this.passes("none");
     } finally {
+      timer.abort();
+      signal.removeEventListener("abort", begin);
       this.steppedAt = undefined;
       this.schedule = undefined;
       if (!ended) await this.endPasses();
     }
+  }
+
+  /** How long a drain lets the work in flight finish: `drain.timeout`, or its default. */
+  private drainTimeoutMs(): number {
+    return this.options.project.drain.timeoutMs;
+  }
+
+  /**
+   * Starts a {@link run}'s drain, the moment its signal aborts: every listening source stops taking
+   * in, beside the pass under way, and at `drain.timeout` {@link cutAtTimeout} runs unless `timer`
+   * aborts first. Returns the closing of the sources, which never rejects.
+   */
+  private beginDrain(timer: AbortSignal): Promise<void> {
+    this.drainingRun = true;
+    void sleep(this.drainTimeoutMs(), undefined, { signal: timer }).then(
+      () => {
+        this.cutAtTimeout();
+      },
+      () => undefined,
+    );
+    return settled(Promise.all(this.channels.map((channel) => this.closeSource(channel))));
+  }
+
+  /**
+   * A drain past `drain.timeout`: each send under way is cut off, staying pending to be sent again
+   * (flagged) at the next start, and no further message is transformed or sent.
+   */
+  private cutAtTimeout(): void {
+    this.options.logger.warn({ event: "drain-timeout", timeoutMs: this.drainTimeoutMs() });
+    this.cutOff = true;
+    for (const channel of this.channels) {
+      channel.halt.abort();
+      channel.halt = new AbortController();
+    }
+  }
+
+  /** Closes the channel's source if it is open, after any start or stop of it under way. */
+  private async closeSource(channel: RunningChannel): Promise<void> {
+    await channel.sourcing;
+    if (!channel.open) return;
+    channel.open = false;
+    await channel.connectors.source.stop?.();
   }
 
   /**
@@ -1570,7 +1652,7 @@ export class Engine {
 
   /** One channel's part of a pass. */
   private async pass(channel: RunningChannel, polls: "all" | "due" | "none"): Promise<void> {
-    if (channel.state === "running" && polls !== "none") {
+    if (channel.state === "running" && polls !== "none" && !this.drainingRun) {
       if (channel.down !== undefined && channel.down.nextAt <= this.now()) {
         await this.syncSource(channel);
       }
@@ -1759,7 +1841,8 @@ export class Engine {
   /** Opens or closes the channel's source to match its state as it is now. */
   private async matchSource(channel: RunningChannel): Promise<void> {
     if (channel.state === "running") {
-      if (!channel.open) await this.startSource(channel);
+      // A draining run opens no source again, a resume's included.
+      if (!channel.open && !this.drainingRun) await this.startSource(channel);
       return;
     }
     // Paused or stopped: the source takes nothing more in. One that could not listen is not down
@@ -2139,8 +2222,9 @@ export class Engine {
     // the body moves to the worker rather than being copied, and the outputs are freed once stored.
     const owned = copiesBodies(store);
     for (;;) {
-      // A stop ends the pass between messages; a reload swaps the worker and settings between them.
-      if (channel.state === "stopped") return;
+      // A stop, or a drain past its timeout, ends the pass between messages; a reload swaps the
+      // worker and settings between them.
+      if (channel.state === "stopped" || this.cutOff) return;
       const { config, worker } = channel;
       this.options.fence?.check();
       this.step();
@@ -2319,7 +2403,7 @@ export class Engine {
       // tried once a pass, so a retry due at once waits for the next pass.
       const tried = new Set<number>();
       for (;;) {
-        if (channel.state === "stopped") return;
+        if (channel.state === "stopped" || this.cutOff) return;
         this.step();
         const delivery = await (policy.rotate
           ? store.nextDelivery(config.name, index, { dueBy: this.now() })

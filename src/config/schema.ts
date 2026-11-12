@@ -686,6 +686,19 @@ const receiveTimeout = envable(
     }),
 );
 
+/** How old an MLLP source's connection may grow before it is closed after its current message. */
+const maxConnectionAge = envable(
+  durationValue
+    .refine(
+      (value) => value >= 1 && value <= MAX_TIMER_MS,
+      'a duration from 1ms to about 24 days, such as "1h"',
+    )
+    .meta({
+      description:
+        "How old a connection may grow: once it is older, it is closed after the message it brings and that message's ACK, so the sender connects again, through a load balancer to any node behind it. A duration such as 1h, or a number of milliseconds. Default: no limit.",
+    }),
+);
+
 /** How many connections an MLLP source holds at once. */
 const maxConnections = envable(
   z.number().int().min(1).max(100_000).meta({
@@ -1137,6 +1150,7 @@ const mllpSource = restate(
       plaintext,
       maxConnections: maxConnections.optional(),
       receiveTimeout: receiveTimeout.optional(),
+      maxConnectionAge: maxConnectionAge.optional(),
       maxMessageSize: maxMessageSize.optional(),
       keepOpen: envable(
         z.boolean().meta({
@@ -2105,6 +2119,29 @@ const lease = z
       "The engine lease, which one engine per database holds, so a second is refused or waits as a standby.",
   });
 
+/** A drain's wait: a duration from 0 up to the longest a timer holds. */
+const drainWait = (description: string) =>
+  envable(
+    durationValue
+      .refine((value) => value <= MAX_TIMER_MS, 'a duration from 0 to about 24 days, such as "30s"')
+      .meta({ description }),
+  );
+
+/** How `pathways start` drains when it is told to stop. */
+const drain = z
+  .strictObject({
+    notReadyDelay: drainWait(
+      "How long the engine keeps taking messages in after it reports draining (readiness 503), so a load balancer stops sending it new connections first: a duration such as 10s, or a number of milliseconds. Default 0.",
+    ).optional(),
+    timeout: drainWait(
+      "How long the engine then lets the work in flight finish (each MLLP connection's current message and its ACK, the transforms and sends under way) before it cuts off what is left and exits: a duration such as 30s, or a number of milliseconds. Default 30s.",
+    ).optional(),
+  })
+  .meta({
+    description:
+      "How pathways start stops on SIGTERM or SIGINT: it reports draining, waits notReadyDelay, closes its listeners and stops polling, lets the work in flight finish up to timeout, releases its lease and exits 0. A second signal stops it at once.",
+  });
+
 /** How deep a `config:` value may nest. */
 const CONFIG_DEPTH = 32;
 
@@ -2199,6 +2236,7 @@ export const projectSchema = z
     health: health.optional(),
     probes: probes.optional(),
     lease: lease.optional(),
+    drain: drain.optional(),
     migrations: migrationsBlock.optional(),
     config: transformConfig.optional(),
   })
@@ -3173,6 +3211,18 @@ export const DEFAULT_SETTINGS: Settings = {
  */
 export const DEFAULT_LEASE_TTL_MS = 15_000;
 
+/**
+ * How long `pathways start` lets the work in flight finish once it is told to stop, by default: 30
+ * seconds. Past it, what is left is cut off: an MLLP message not yet stored gets no ACK, and a send
+ * under way stays pending, sent again (flagged) at the next start.
+ *
+ * @example
+ * ```ts
+ * const timeoutMs = project.drain?.timeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS;
+ * ```
+ */
+export const DEFAULT_DRAIN_TIMEOUT_MS = 30_000;
+
 /** How long a file must sit unchanged in a file source before it is read, by default. */
 export const DEFAULT_MIN_AGE_MS = 1_000;
 
@@ -3521,6 +3571,11 @@ export interface MllpSource {
   readonly maxConnections?: number | undefined;
   /** How long a connection may go without a whole message, in milliseconds; `undefined` for none. */
   readonly receiveTimeoutMs?: number | undefined;
+  /**
+   * How old a connection may grow, in milliseconds, before it is closed after its current message;
+   * `undefined` for no limit.
+   */
+  readonly maxConnectionAgeMs?: number | undefined;
   /** The largest message taken, in bytes, or `undefined` for the source's default (4 MiB). */
   readonly maxMessageSize?: number | undefined;
   /** `false` closes each connection once its ACK is sent; `undefined` keeps it open. */
@@ -3981,6 +4036,21 @@ export interface LeaseConfig {
 }
 
 /**
+ * How `pathways start` drains when told to stop, from `pathways.yaml`'s `drain` block.
+ *
+ * @example
+ * ```ts
+ * const drain: DrainConfig = { notReadyDelayMs: 10_000, timeoutMs: 30_000 };
+ * ```
+ */
+export interface DrainConfig {
+  /** How long it keeps taking messages in after it reports draining, in milliseconds. */
+  readonly notReadyDelayMs: number;
+  /** How long it then lets the work in flight finish, in milliseconds. */
+  readonly timeoutMs: number;
+}
+
+/**
  * A secret provider `pathways.yaml`'s `secrets:` names: a module whose default export builds it.
  *
  * @example
@@ -4034,6 +4104,8 @@ export interface ProjectConfig {
   readonly lease: LeaseConfig;
   /** How `pathways migrate` treats contract steps. */
   readonly migrations: MigrationsConfig;
+  /** How `pathways start` drains when told to stop. */
+  readonly drain: DrainConfig;
   /**
    * How stored messages are encrypted, or undefined when `pathways.yaml` does not say. `pathways
    * start` refuses to run without it; `pathways test` stores nothing and does not need it.
