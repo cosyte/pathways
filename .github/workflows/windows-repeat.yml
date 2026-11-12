@@ -1,0 +1,27 @@
+name: Windows repeat
+
+# Temporary: the Windows `verify` job twenty times over, as `systems` in ci.yml runs it, to show the
+# file-source options test holds there. Removed before this pull request merges.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  repeat:
+    strategy:
+      fail-fast: false
+      matrix:
+        run: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+    uses: cosyte/.github/.github/workflows/ci.yml@0be6757a773885cbd5165dbfa0f93772d907b3e8 # workflows-2026-11-10-0be6757a7738
+    with:
+      run-phi-scan: true
+      node-versions: '["24"]'
+      os: '["windows-latest"]'
+      expect-unpublished-deps: ""
+      run-actionlint: false
+      run-prepublish-manifest-lint: false
+      run-prepublish-install: false
