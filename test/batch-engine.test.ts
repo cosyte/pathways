@@ -325,7 +325,8 @@ destinations:
     const root = await makeProject({
       "channels/adt/channel.yaml": channel("{ split: hl7 }", "hl7v2"),
       "channels/adt/transform.ts": "export default (msg: unknown): unknown => msg;\n",
-      "channels/adt/tests/feed.hl7": `${adt(1)}PID|1\rMSH|^~\r`,
+      // Piece 1 is one ADT^A01, a note after its patient; piece 2 holds a header the parser refuses.
+      "channels/adt/tests/feed.hl7": `${adt(1)}NTE|1\rMSH|^~\r`,
     });
     const out: string[] = [];
     await runChannelTests((await loadProject(root)).channels, {

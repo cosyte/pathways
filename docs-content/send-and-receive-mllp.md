@@ -204,9 +204,15 @@ time, in order.
 
 A frame is one message. A frame that holds a second message is refused with `MULTIPLE_MESSAGES`,
 however its second header is written: a segment id of `MSH`, `FHS` or `BHS` in any case (`msh`,
-`Msh`), after any line ending the HL7 parser accepts (CR, LF, CR LF, mixed, or a blank line between).
-The parser would read it as one message with two MSH segments, the second message's segments counted
-as the first's. Send each message in its own frame.
+`Msh`), after any line ending the HL7 parser accepts (CR, LF, CR LF, mixed, or a blank line between),
+behind or inside the id any bytes that are not printable ASCII (a space, a tab, a NUL, a form feed, a
+byte order mark), and a whole header (`MSH|^~\&|`) anywhere on a line: joined to the end of the
+first message with no line break, or behind a printable byte (`-MSH|^~\&|`). The parser would read it
+as one message with two MSH segments, with an unknown segment where the second header stood, or with
+the second header inside the first message's last field, the second message's segments counted as
+the first's every way. A field that quotes a header escapes it (`\F\` for the field separator), as
+any field text must. A VT or an FS inside a frame never reaches the channel: the frame reader ends
+the frame at an FS and starts a new one at a VT. Send each message in its own frame.
 
 | The message                                                         | Stored         | Answer                                 |
 | ------------------------------------------------------------------- | -------------- | -------------------------------------- |

@@ -21,6 +21,64 @@ export const ADT_A08 = ADT_A01.replace("ADT^A01^ADT_A01", "ADT^A08^ADT_A01").rep
   "MSG00002",
 );
 
+/** A UTF-8 byte order mark, as the text a body read as latin1 holds. */
+const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf]).toString("latin1");
+
+/**
+ * Bodies holding {@link ADT_A01} and then {@link ADT_A08}, whose header stands behind bytes the HL7
+ * parser keeps as part of the segment id: it reads that line as an unknown segment and attaches the
+ * second message's segments to the first. Each is to be read as latin1, one byte per character.
+ */
+export const SECOND_HEADER_BEHIND: readonly (readonly [string, string])[] = [
+  ["a space", `${ADT_A01} ${ADT_A08}`],
+  ["a tab", `${ADT_A01}\t${ADT_A08}`],
+  ["a NUL", `${ADT_A01}\u0000${ADT_A08}`],
+  ["a form feed", `${ADT_A01}\f${ADT_A08}`],
+  ["a byte order mark", `${ADT_A01}${UTF8_BOM}${ADT_A08}`],
+  ["several, before a lowercase msh", `${ADT_A01}\r\n \t\u0000msh${ADT_A08.slice(3)}`],
+  ["a space, as a batch header", `${ADT_A01} BHS|^~\\&\r${ADT_A08.slice(ADT_A08.indexOf("EVN|"))}`],
+];
+
+/**
+ * A synthetic ORU^R01 for patient `patient`, control id `controlId`, with no CR after its last
+ * segment, so a test can join a second message to it with no line break. ORU^R01 repeats its patient
+ * group, so a second PID in it breaks no published structure: only the header scan can catch one.
+ */
+export function oruR01(controlId: string, patient: string): string {
+  return [
+    `MSH|^~\\&|SYNTH|TESTFAC|LAB|TESTFAC|20261107120000||ORU^R01^ORU_R01|${controlId}|P|2.5.1`,
+    `PID|1||${patient}^^^TESTFAC^MR||TESTPATIENT^ALPHA||19700101|U`,
+    "OBR|1||TESTORDER1|TESTCODE",
+    "OBX|1|ST|TESTCODE||TESTVALUE",
+  ].join("\r");
+}
+
+/** Two {@link oruR01} messages for two patients, joined by `joiner` and nothing else. */
+export function joinedResults(joiner: string): string {
+  return `${oruR01("MSG00001", "TEST000001")}${joiner}${oruR01("MSG00002", "TEST000002")}\r`;
+}
+
+/**
+ * Bodies holding two results with no line break between them, which the HL7 parser reads as one
+ * message: it removes the MLLP bytes VT and FS wherever they stand, and keeps a printable byte, so the
+ * second header lands inside the first message's last field, and the second patient's PID and results
+ * attach to the first patient's. Others put a byte the parser keeps in the id in front of or inside a
+ * header on a line of its own. Each is to be read as latin1, one byte per character.
+ */
+export const SECOND_HEADER_JOINED: readonly (readonly [string, string])[] = [
+  ["an FS with no line break", joinedResults("\u001c")],
+  ["a VT with no line break", joinedResults("\u000b")],
+  ["an FS and a VT with no line break", joinedResults("\u001c\u000b")],
+  ["a letter with no line break", joinedResults("A")],
+  ["a hyphen at the start of its line", joinedResults("\r-")],
+  ["a field separator at the start of its line", joinedResults("\r|")],
+  ["a space inside its id", joinedResults("\r").replace("\rMSH|^~\\&|SYNTH", "\rM SH|^~\\&|SYNTH")],
+  [
+    "a NUL inside its id",
+    joinedResults("\r").replace("\rMSH|^~\\&|SYNTH", "\rM\u0000SH|^~\\&|SYNTH"),
+  ],
+];
+
 /**
  * A synthetic FHIR R4 Patient, compact and spec-clean, so it round-trips byte for byte. The tokens are
  * the same declared synthetic ones the HL7 fixtures use (`scripts/phi-allow-list.txt`).

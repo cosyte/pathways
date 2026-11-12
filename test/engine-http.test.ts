@@ -19,6 +19,8 @@ import {
   cleanUp,
   LAB_TRANSFORM,
   makeProject,
+  SECOND_HEADER_BEHIND,
+  SECOND_HEADER_JOINED,
   type LogEvent,
 } from "./helpers.js";
 import {
@@ -135,7 +137,11 @@ async function setUp(
   );
 }
 
-function post(port: number, body = ADT_A01, token = TOKEN): ReturnType<typeof send> {
+function post(
+  port: number,
+  body: string | Uint8Array = ADT_A01,
+  token = TOKEN,
+): ReturnType<typeof send> {
   return send(port, {
     path: "/adt",
     headers: { Authorization: `Bearer ${token}` },
@@ -248,6 +254,52 @@ describe("an HTTP channel in the engine", () => {
     ).rejects.toThrow(
       "channels/adt/channel.yaml: source.http.response.headers.X-Receiver-Key: the environment variable RECEIVER_KEY is not set",
     );
+  });
+
+  it.each([...SECOND_HEADER_BEHIND, ...SECOND_HEADER_JOINED])(
+    "answers 422 to a body whose second header stands behind %s, storing it as failed",
+    async (_, text) => {
+      const { engine, store, lab, port, events, lines } = await setUp(200);
+      const body = Buffer.from(text, "latin1");
+      const answer = await post(port, body);
+      expect(answer.status).toBe(422);
+      expect(answer.headers["content-type"]).toBe("application/json");
+      expect(JSON.parse(answer.body)).toEqual({
+        error: "the message was refused; sending it again will not help",
+        code: "MULTIPLE_MESSAGES",
+        id: 1,
+      });
+      expect(await store.message(1)).toMatchObject({
+        status: "failed",
+        error: "inbound: MULTIPLE_MESSAGES",
+      });
+      await engine.tick();
+      expect(lab.received).toEqual([]);
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          event: "http-unreadable",
+          channel: "adt",
+          message: 1,
+          problem: "MULTIPLE_MESSAGES",
+        }),
+      );
+      expect(lines.join("")).not.toContain("TEST000001");
+    },
+  );
+
+  it("answers 422 to a refused body whatever its response, and 2xx to one message", async () => {
+    const tls = `tls: { cert: ${certs.files.serverCert}, key: ${certs.files.serverKey} }`;
+    const { port, store } = await setUp(200, {
+      source: (port) =>
+        `http: { port: ${String(port)}, path: /adt, response: { status: 200, body: OK }, ${tls} }`,
+    });
+    const refused = await post(port, `${ADT_A01}msh${ADT_A01.slice(3)}`);
+    expect(refused.status).toBe(422);
+    expect(JSON.parse(refused.body)).toMatchObject({ code: "MULTIPLE_MESSAGES", id: 1 });
+    expect(await store.message(1)).toMatchObject({ status: "failed" });
+    const taken = await post(port);
+    expect(taken.status).toBe(200);
+    expect(taken.body).toBe("OK");
   });
 
   it("logs a refused request with its status only", async () => {

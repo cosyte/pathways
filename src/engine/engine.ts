@@ -560,6 +560,7 @@ export async function connectorsFor(
         maxBytes: source.maxBytes,
         contextHeaders: source.contextHeaders,
         ...(source.batch === undefined ? {} : { batch: source.batch }),
+        refuses: (body) => refusalOf(channel.format, body),
         tls,
         token,
         onRefused: (status) => {
@@ -3840,11 +3841,20 @@ function errorName(error: unknown): string {
  * transform or a destination.
  */
 function oneMessage(format: Format, body: Uint8Array, options: ReceiveOptions): ReceiveOptions {
-  if (format !== "hl7v2" || options.failure !== undefined || !holdsSecondMessage(body)) {
-    return options;
-  }
+  if (options.failure !== undefined) return options;
+  const problem = refusalOf(format, body);
+  if (problem === undefined) return options;
   // No duplicate key, as for any message a source could not read: its header is not one message's.
-  return { ...options, duplicateKey: undefined, failure: "inbound: MULTIPLE_MESSAGES" };
+  return { ...options, duplicateKey: undefined, failure: `inbound: ${problem}` };
+}
+
+/**
+ * Why a channel of `format` refuses a body as it enters, as a code, or undefined when it takes it:
+ * `MULTIPLE_MESSAGES` for an `hl7v2` body that holds a second message. An HTTP source asks it first,
+ * so it can answer such a body with 422 rather than 2xx.
+ */
+function refusalOf(format: Format, body: Uint8Array): string | undefined {
+  return format === "hl7v2" && holdsSecondMessage(body) ? MULTIPLE_MESSAGES_CODE : undefined;
 }
 
 /**

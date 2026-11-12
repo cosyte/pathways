@@ -672,14 +672,242 @@ function readHl7(
     assumeCharset === undefined || !msh18Blank(first)
       ? first
       : library.parseHL7(body, { charset: assumeCharset });
-  if (OPENERS.reduce((count, id) => count + message.segments(id).length, 0) > 1) {
-    throw new MultipleMessagesError();
+  if (holdsSecondMessage(body)) throw new MultipleMessagesError();
+  if (message.segments("PID").length > 1 && patientRepeated(library, message)) {
+    throw new MultiplePatientsError();
   }
   return message;
 }
 
-/** Segment ids that open a message or a batch: one message holds exactly one, its MSH. */
-const OPENERS = ["MSH", "FHS", "BHS"] as const;
+/**
+ * Whether a message holding more than one PID breaks the structure HL7 publishes for its type at a
+ * PID: one PID too many, or one where the structure does not let a patient start again. ADT^A17,
+ * which swaps two patients, and ORU^R01, which repeats its patient group, hold two PIDs and pass. A
+ * message type the published structures do not cover passes too: there is nothing to tell a second
+ * patient from a structure that repeats one, and a query response such as RSP^K22 lists many.
+ */
+function patientRepeated(library: typeof Hl7, message: Hl7.Hl7Message): boolean {
+  const { findings } = library.validateMessageStructure(message);
+  return findings.some(
+    (finding) =>
+      finding.locus.segment === "PID" &&
+      (finding.code === "STRUCTURE_SEGMENT_CARDINALITY" ||
+        finding.code === "STRUCTURE_SEGMENT_OUT_OF_ORDER"),
+  );
+}
+
+/**
+ * A parsed `hl7v2` message with a second PID where the structure HL7 publishes for its type allows
+ * one: a second patient's segments that would reach the transform as the first's.
+ */
+class MultiplePatientsError extends Error {
+  readonly code = "MULTIPLE_PATIENTS";
+
+  constructor() {
+    super("the message holds a second PID where its type allows one patient: send one per message");
+    this.name = "MultiplePatientsError";
+  }
+}
+
+const CR = 0x0d;
+const LF = 0x0a;
+/** The MLLP start and end bytes, which `@cosyte/hl7` removes wherever they stand before it splits segments. */
+const VT = 0x0b;
+const FS = 0x1c;
+/** The segment ids that open a message (MSH) or a batch (FHS, BHS), as bytes, in upper case. */
+const M = 0x4d;
+const S = 0x53;
+const H = 0x48;
+const F = 0x46;
+const B = 0x42;
+
+/**
+ * Whether an HL7 v2 body holds a second message: its first segment is not a batch header (FHS or
+ * BHS), and a later one opens a message or a batch. Read the way `@cosyte/hl7` reads segments, so
+ * every body it would parse as one message holding a second message's segments is caught:
+ *
+ * - A segment starts after any CR or LF (CR, LF, CR LF, mixed, blank lines between), and a segment id
+ *   is matched in any case, as the parser upper-cases it.
+ * - The MLLP start and end bytes, VT and FS, count for nothing inside an id, as the parser removes
+ *   them wherever they stand. After other bytes on a line they start a segment here: the parser
+ *   removes them and joins what follows to that line, so a second message sent after a VT or an FS
+ *   with no line break lands its header in the first message's last field and its later segments
+ *   after it.
+ * - Bytes that are not printable ASCII (a space, a tab, a NUL, a form feed, a byte order mark) are
+ *   passed over before an id, inside one, and between an id and its separator: the parser keeps them
+ *   as part of the id and reads the line as an unknown segment, so the next segments attach to the
+ *   first message's. An id is a header only when a printable byte other than a letter or a digit,
+ *   its field separator, or the line's end follows it, so `MSH in a note` opens nothing.
+ * - A header signature anywhere after the first segment's id is a second message too, wherever it
+ *   stands on its line: MSH, FHS or BHS, a separator, four or five distinct encoding characters that
+ *   are neither letters, digits, white space nor the separator, and the separator again
+ *   (`MSH|^~\&|`). The parser keeps a byte in front of an id (`-MSH|^~\&|`, `|MSH|^~\&|`) in the
+ *   id, and keeps a header joined to a line with no break as text in that line's last field, and
+ *   either way the second message's segments that follow attach to the first's. Text in a field
+ *   never holds this: the field separator would end the field, so content carries it escaped.
+ *
+ * A body that opens with FHS or BHS is a batch, which is not one message either: the parser refuses
+ * it with its own code (`NO_MSH_SEGMENT`). One pass over the bytes, holding the last ten.
+ *
+ * Here, in the worker, which imports no module of its own, and imported by the MLLP and HTTP
+ * sources and the engine, so every check reads a body the same way.
+ *
+ * @example
+ * ```ts
+ * holdsSecondMessage(Buffer.from("MSH|^~\\&|A\rPID|1\r")); // false
+ * holdsSecondMessage(Buffer.from("MSH|^~\\&|A\r msh|^~\\&|B\r")); // true
+ * holdsSecondMessage(Buffer.from("MSH|^~\\&|A\rOBX|1\x1cMSH|^~\\&|B\r")); // true
+ * ```
+ */
+export function holdsSecondMessage(bytes: Uint8Array): boolean {
+  /** The id bytes read on this line so far, upper-cased, and how many (3 once the id is whole). */
+  let idA = 0;
+  let idB = 0;
+  let idC = 0;
+  let idLength = 0;
+  /** Whether a byte was passed over inside this line's id: such an id is a header only before a separator. */
+  let idSpaced = false;
+  /** On a line whose id is still being read: no printable byte past a whole header id yet. */
+  let readingId = true;
+  /** Whether the first segment's id has been read (or its line ended), so any header later is a second. */
+  let pastFirst = false;
+  /** The bytes the parser keeps (VT and FS dropped), counted, the last sixteen in a ring. */
+  const ring = new Uint8Array(16);
+  let kept = 0;
+  /** The kept-byte count where this line began: a signature lies within one line. */
+  let lineAt = 0;
+  /** The kept-byte count at the first segment id's first byte: a signature starting there is the first header. */
+  let firstAt = -1;
+
+  /** What the id read on this line opens, once it is whole. */
+  const lineOpens = (): "message" | "batch" | undefined =>
+    idLength === 3 ? opener(idA, idB, idC) : undefined;
+  /** What a whole id that ends its line opens: one with a byte passed over inside opens nothing. */
+  const lineEndOpens = (): "message" | "batch" | undefined =>
+    readingId && !idSpaced ? lineOpens() : undefined;
+
+  for (let at = 0; at < bytes.length; at += 1) {
+    const byte = bytes[at] as number;
+    if (byte === CR || byte === LF || ((byte === VT || byte === FS) && !readingId)) {
+      // The end of a line, or a VT or FS after text on one: a header id still waiting for its
+      // separator is a header at the line's end, as the parser reads an id that ends its line,
+      // unless a byte was passed over inside it (`Ms H` in a line of text).
+      const opens = lineEndOpens();
+      if (opens !== undefined && pastFirst) return true;
+      if (opens === "batch") return false;
+      if (readingId && idLength > 0) pastFirst = true;
+      idLength = 0;
+      idSpaced = false;
+      readingId = true;
+      if (byte === CR || byte === LF) lineAt = kept;
+      continue;
+    }
+    if (byte === VT || byte === FS) continue;
+    // A byte the parser keeps on this line.
+    ring[kept & 15] = byte;
+    kept += 1;
+    if (readingId) {
+      if (!isPrintable(byte)) {
+        // Passed over before an id, inside one, and between an id and its separator.
+        if (idLength > 0 && idLength < 3) idSpaced = true;
+      } else if (idLength < 3) {
+        if (idLength === 0 && firstAt === -1) firstAt = kept - 1;
+        const upperByte = upper(byte) as number;
+        if (idLength === 0) idA = upperByte;
+        else if (idLength === 1) idB = upperByte;
+        else idC = upperByte;
+        idLength += 1;
+        if (idLength === 3 && lineOpens() === undefined) {
+          readingId = false;
+          pastFirst = true;
+        }
+      } else {
+        // The byte after a whole header id: a separator makes it a header, a letter or digit text.
+        const opens = isWordByte(byte) ? undefined : lineOpens();
+        readingId = false;
+        if (opens !== undefined && pastFirst) return true;
+        if (opens === "batch") return false;
+        pastFirst = true;
+      }
+    }
+    // Only a separator closes a signature, so most bytes, letters, digits and spaces, end here.
+    if (
+      firstAt !== -1 &&
+      kept - lineAt >= 9 &&
+      isPrintable(byte) &&
+      !isWordByte(byte) &&
+      signatureEndsAt(ring, kept, Math.max(firstAt + 1, lineAt))
+    ) {
+      return true;
+    }
+  }
+  return pastFirst && lineEndOpens() !== undefined;
+}
+
+/**
+ * Whether the last kept byte, a printable byte other than a letter or digit, closes a header
+ * signature that starts at or after `from`: an opener id, a separator, four or five encoding
+ * characters, the separator again.
+ */
+function signatureEndsAt(ring: Uint8Array, kept: number, from: number): boolean {
+  const separator = ring[(kept - 1) & 15] as number;
+  for (let characters = 4; characters <= 5; characters += 1) {
+    const length = characters + 5;
+    const start = kept - length;
+    if (start < from || ring[(start + 3) & 15] !== separator) continue;
+    let distinct = true;
+    for (let one = start + 4; one < kept - 1 && distinct; one += 1) {
+      const character = ring[one & 15] as number;
+      if (!isPrintable(character) || isWordByte(character) || character === separator) {
+        distinct = false;
+      }
+      for (let other = start + 4; other < one && distinct; other += 1) {
+        if (ring[other & 15] === character) distinct = false;
+      }
+    }
+    if (!distinct) continue;
+    const id = opener(
+      upper(ring[start & 15]),
+      upper(ring[(start + 1) & 15]),
+      upper(ring[(start + 2) & 15]),
+    );
+    if (id !== undefined) return true;
+  }
+  return false;
+}
+
+/** What a segment whose id starts with these three bytes opens, matched without regard to case. */
+function opener(
+  a: number | undefined,
+  b: number | undefined,
+  c: number | undefined,
+): "message" | "batch" | undefined {
+  const first = upper(a);
+  const second = upper(b);
+  const third = upper(c);
+  if (first === M && second === S && third === H) return "message";
+  if (second === H && third === S && (first === F || first === B)) return "batch";
+  return undefined;
+}
+
+/** An ASCII letter in upper case; any other byte as it is, and `undefined` past the end. */
+function upper(byte: number | undefined): number | undefined {
+  return byte !== undefined && byte >= 0x61 && byte <= 0x7a ? byte - 0x20 : byte;
+}
+
+/** An ASCII letter or digit. */
+function isWordByte(byte: number): boolean {
+  return (
+    (byte >= 0x30 && byte <= 0x39) ||
+    (byte >= 0x41 && byte <= 0x5a) ||
+    (byte >= 0x61 && byte <= 0x7a)
+  );
+}
+
+/** A printable ASCII byte other than the space: one a segment id can start with. */
+function isPrintable(byte: number | undefined): boolean {
+  return byte !== undefined && byte > 0x20 && byte < 0x7f;
+}
 
 /**
  * An `hl7v2` body that parsed as one message with a second header in it: the second message's
