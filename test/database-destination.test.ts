@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -112,7 +113,7 @@ async function destination(
 ): Promise<DatabaseDestination> {
   const made = new DatabaseDestination({
     kind: storage.kind,
-    dialect: options.dialect ?? (await dialectFor(storage, { env })),
+    dialect: options.dialect ?? (await dialectFor(storage, { env, openLazily: true })),
     statement: parseStatement(text, storage.kind),
     expectRows: options.expectRows,
     statementTimeoutMs: options.statementTimeoutMs ?? 10_000,
@@ -599,15 +600,15 @@ describe("a database destination's failures", () => {
   });
 
   it("rejects an output that is not UTF-8 before it opens a connection", async () => {
-    const sink = await destination(
-      { kind: "sqlite", file: join(await makeProject({}), "never.db") },
-      {},
-      INSERT,
-    );
+    const file = join(await makeProject({}), "never.db");
+    const sink = await destination({ kind: "sqlite", file }, {}, INSERT);
     const failed = await rejection(
       sink.deliver({ messageId: 1, seq: 0, body: new Uint8Array([0xff, 0xfe]) }),
     );
     expect(failed).toEqual(new DeliveryRejected("output is not UTF-8"));
+    // Nothing was opened, so nothing is left open when it stops: Windows could not delete it.
+    await sink.stop();
+    expect(existsSync(file)).toBe(false);
   });
 
   it("rejects a statement whose parameter has no value", async () => {
@@ -617,7 +618,7 @@ describe("a database destination's failures", () => {
     };
     const sink = new DatabaseDestination({
       kind: "sqlite",
-      dialect: await dialectFor(storage, { env: {} }),
+      dialect: await dialectFor(storage, { env: {}, openLazily: true }),
       statement: parseStatement("select :mrn", "sqlite", ["mrn"]),
       statementTimeoutMs: 1_000,
     });

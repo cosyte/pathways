@@ -96,6 +96,11 @@ export interface DialectOptions {
   readonly where?: string | undefined;
   /** On SQL Server, how long one request may run before the driver gives it up. Default 15s. */
   readonly requestTimeoutMs?: number | undefined;
+  /**
+   * SQLite only: open the file on the first query rather than now, so a dialect that is never used
+   * holds no file open (Kysely closes only a database it opened). Default false.
+   */
+  readonly openLazily?: boolean | undefined;
 }
 
 /** The URL schemes each database server's connection URL may use; the first is the one errors name. */
@@ -130,7 +135,11 @@ export async function dialectFor(
   storage: DatabaseStorage,
   options: DialectOptions,
 ): Promise<Dialect> {
-  if (storage.kind === "sqlite") return sqliteDialect(storage.file);
+  if (storage.kind === "sqlite") {
+    if (options.openLazily !== true) return sqliteDialect(storage.file);
+    const { file } = storage;
+    return new SqliteDialect({ database: () => openSqlite(file) });
+  }
   const where = options.where ?? `pathways.yaml: storage.${storage.kind}`;
   const url = readUrl(storage, options.env, `${where}.url`);
   const tls =
@@ -162,6 +171,11 @@ export async function dialectFor(
 }
 
 async function sqliteDialect(file: string): Promise<Dialect> {
+  return new SqliteDialect({ database: await openSqlite(file) });
+}
+
+/** Opens a SQLite file as {@link sqliteDialect} describes. */
+async function openSqlite(file: string): Promise<KyselySqliteDatabase> {
   if (file !== ":memory:") await mkdir(dirname(file), { recursive: true });
   const sqlite = new SqliteDatabase(file);
   sqlite.pragma("journal_mode = WAL");
@@ -170,7 +184,7 @@ async function sqliteDialect(file: string): Promise<Dialect> {
   // deleted leaves none of its old bytes in the file. The write-ahead log keeps them until it is
   // emptied (`emptySqliteLog`).
   sqlite.pragma("secure_delete = ON");
-  return new SqliteDialect({ database: cachedStatements(sqlite) });
+  return cachedStatements(sqlite);
 }
 
 /**

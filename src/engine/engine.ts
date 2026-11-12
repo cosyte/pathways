@@ -534,6 +534,8 @@ export async function connectorsFor(
               where: `${where}.${database.kind}`,
               // A second past the server's own limit, so its timeout, with its code, comes first.
               requestTimeoutMs: destination.statementTimeoutMs + 1_000,
+              // A destination that never delivers then holds no SQLite file open after it stops.
+              openLazily: true,
             }),
             statement,
             expectRows: destination.expectRows,
