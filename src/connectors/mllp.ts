@@ -71,13 +71,20 @@ export interface HeaderReading {
 
 const CR = 0x0d;
 const LF = 0x0a;
-/** Segment ids that open a message or a batch. One after the first segment means a frame holds more than one message. */
+/** The MLLP start and end bytes, which `@cosyte/hl7` removes wherever they stand before it splits segments. */
+const VT = 0x0b;
+const FS = 0x1c;
+/**
+ * Segment ids that open a message or a batch, in upper case. One after the first segment means a
+ * body holds more than one message.
+ */
 const OPENERS = ["MSH", "FHS", "BHS"].map((id) => Buffer.from(id, "latin1"));
 
 /**
  * Reads the header of an HL7 v2 message: parses its first segment, which must be an MSH with an
- * MSH-10 control ID, and checks that no later segment opens another message or a batch. It reads
- * nothing past the header except the first three bytes of each segment.
+ * MSH-10 control ID, and checks that no later segment opens another message or a batch
+ * (`MULTIPLE_MESSAGES`): MSH, FHS or BHS in any case, after any CR or LF, as `@cosyte/hl7` would
+ * read it. It reads nothing past the header except the first three bytes of each segment.
  *
  * @example
  * ```ts
@@ -104,11 +111,7 @@ export function readHeader(payload: Uint8Array): HeaderReading {
   } catch (error) {
     return unusable(undefined, error instanceof Hl7ParseError ? error.code : "UNREADABLE_HEADER");
   }
-  for (let at = end; at < bytes.length; at += 1) {
-    if (isBreak(bytes[at]) && OPENERS.some((id) => id.equals(bytes.subarray(at + 1, at + 4)))) {
-      return unusable(header, "MULTIPLE_MESSAGES");
-    }
-  }
+  if (opensLater(bytes, end)) return unusable(header, "MULTIPLE_MESSAGES");
   const msh = header.part("MSH");
   /* v8 ignore next -- the parse found an MSH, and a field it lacks reads as empty text */
   const controlId = msh?.field(10)?.text ?? "";
@@ -119,6 +122,65 @@ export function readHeader(payload: Uint8Array): HeaderReading {
 
 function isBreak(byte: number | undefined): boolean {
   return byte === CR || byte === LF;
+}
+
+/**
+ * Whether an HL7 v2 body holds a second message: its first segment is not a batch header (FHS or
+ * BHS), and a later segment opens a message or a batch. Read the way `@cosyte/hl7` reads segments,
+ * so every body it would parse as one message with two headers is caught: a segment starts after
+ * any CR or LF (CR, LF, CR LF, mixed, blank lines between), the MLLP start and end bytes count for
+ * nothing, and a segment id is matched in any case, as the parser upper-cases it. A body that opens
+ * with FHS or BHS is a batch, which is not one message either: the parser refuses it with its own
+ * code (`NO_MSH_SEGMENT`).
+ *
+ * @example
+ * ```ts
+ * holdsSecondMessage(Buffer.from("MSH|^~\\&|A\rPID|1\r")); // false
+ * holdsSecondMessage(Buffer.from("MSH|^~\\&|A\rmsh|^~\\&|B\r")); // true
+ * ```
+ */
+export function holdsSecondMessage(payload: Uint8Array): boolean {
+  const bytes = Buffer.from(payload.buffer, payload.byteOffset, payload.byteLength);
+  let start = 0;
+  while (start < bytes.length && (isBreak(bytes[start]) || isFraming(bytes[start]))) start += 1;
+  const first = openerAt(bytes, start);
+  if (first !== undefined && first !== 0) return false;
+  let end = start;
+  while (end < bytes.length && !isBreak(bytes[end])) end += 1;
+  return opensLater(bytes, end);
+}
+
+/** Whether a segment after `from`, the end of the first segment, opens a message or a batch. */
+function opensLater(bytes: Buffer, from: number): boolean {
+  for (let at = from; at < bytes.length; at += 1) {
+    if (isBreak(bytes[at]) && openerAt(bytes, at + 1) !== undefined) return true;
+  }
+  return false;
+}
+
+/**
+ * Which of {@link OPENERS} the segment starting at `at` opens with, as its index, matched without
+ * regard to case and skipping the MLLP start and end bytes; `undefined` for none.
+ */
+function openerAt(bytes: Buffer, at: number): number | undefined {
+  const id = [0, 0, 0];
+  let read = 0;
+  for (let next = at; read < 3 && next < bytes.length; next += 1) {
+    const byte = bytes[next] as number;
+    if (isFraming(byte)) continue;
+    // Upper-case an ASCII letter; leave every other byte as it is.
+    id[read] = byte >= 0x61 && byte <= 0x7a ? byte - 0x20 : byte;
+    read += 1;
+  }
+  if (read < 3) return undefined;
+  const found = OPENERS.findIndex(
+    (opener) => opener[0] === id[0] && opener[1] === id[1] && opener[2] === id[2],
+  );
+  return found === -1 ? undefined : found;
+}
+
+function isFraming(byte: number | undefined): boolean {
+  return byte === VT || byte === FS;
 }
 
 /** The most connections an MLLP source holds at once when its block sets no `maxConnections`. */
