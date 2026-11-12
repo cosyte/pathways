@@ -1,7 +1,6 @@
-import { Cron } from "croner";
-
 import type { ChannelConfig, PollConfig, PollSchedule } from "../config/schema.js";
 import { DEFAULT_POLL_DEADLINE_MS } from "../config/schema.js";
+import { cronClass } from "../config/cron.js";
 
 /**
  * When a polled source's next pass is due, in epoch milliseconds, given the time `from`: the time
@@ -25,6 +24,7 @@ export function nextPollAt(schedule: PollSchedule, from: number, first: boolean)
     case "onStart":
       return first ? from : Number.POSITIVE_INFINITY;
     case "cron": {
+      const Cron = cronClass();
       const next = new Cron(schedule.expression, {
         timezone: schedule.timezone,
         mode: "5-part",

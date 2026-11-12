@@ -40,25 +40,26 @@ A `transform-failed` line's `kind` is `load`, `parse`, `transform`, `output`, `t
 
 ### Sources and endpoints
 
-| Event                                                              | Meaning                                                                                                                                         |
-| ------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `source-start-failed`                                              | a source could not listen (`code`, such as `EADDRINUSE`); tried again after `retryInMs`                                                         |
-| `source-started`                                                   | a source that was down is listening again                                                                                                       |
-| `source-lost`                                                      | a running source said it lost its connection (`code`, `attempt`); it should try again after `retryInMs`                                         |
-| `source-regained`                                                  | a source that said it lost its connection has it again                                                                                          |
-| `poll-deadline`                                                    | a polled source's pass ran past its `deadlineMs` and was cut off; the source took nothing more in that pass                                     |
-| `poll-overlap`                                                     | a polled source's pass came due while its last `poll` call had not returned, and was skipped                                                    |
-| `source-read-failed`                                               | a file source could not claim or read a file; it stays for the next pass                                                                        |
-| `source-file-set-aside`                                            | a file source will not take a file, by `reason` (`too-large` or `unreadable`); `moved` says whether it went into `errorDir`, and `code` why not |
-| `http-refused`                                                     | an HTTP source or the health endpoint refused a request, with its `status`                                                                      |
-| `http-unreadable`                                                  | an HTTP source answering with ACKs stored a message as failed, with its `problem`                                                               |
-| `mllp-listening`                                                   | an MLLP source is listening, on `port`, with `tls` true or false                                                                                |
-| `mllp-store-failed`                                                | an MLLP message could not be stored; `onStoreFailure` says what was answered                                                                    |
-| `mllp-unreadable`                                                  | an MLLP message was stored as failed, with its `problem`                                                                                        |
-| `mllp-tls-refused`                                                 | a TLS handshake on an MLLP source failed, such as a client without a certificate                                                                |
-| `mllp-ack-builder-failed`                                          | a custom ACK builder threw or ran out of time; the default ACK was sent                                                                         |
-| `mllp-ack-unsendable`                                              | an ACK held an MLLP framing byte, so none was sent                                                                                              |
-| `mllp-source-error`, `mllp-source-failed`, `mllp-security-warning` | the MLLP server reported an error or a warning, by name and code                                                                                |
+| Event                                                              | Meaning                                                                                                                                               |
+| ------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `source-start-failed`                                              | a source could not listen (`code`, such as `EADDRINUSE`); tried again after `retryInMs`                                                               |
+| `source-started`                                                   | a source that was down is listening again                                                                                                             |
+| `source-lost`                                                      | a running source said it lost its connection (`code`, `attempt`); it should try again after `retryInMs`                                               |
+| `source-regained`                                                  | a source that said it lost its connection has it again                                                                                                |
+| `poll-deadline`                                                    | a polled source's pass ran past its `deadlineMs` and was cut off; the source took nothing more in that pass                                           |
+| `poll-failed-after-cut`                                            | a polled source's `poll` call rejected after its pass was cut off, with an error of its own rather than the cut's (`code`); the cut goes on as before |
+| `poll-overlap`                                                     | a polled source's pass came due while its last `poll` call had not returned, and was skipped                                                          |
+| `source-read-failed`                                               | a file source could not claim or read a file; it stays for the next pass                                                                              |
+| `source-file-set-aside`                                            | a file source will not take a file, by `reason` (`too-large` or `unreadable`); `moved` says whether it went into `errorDir`, and `code` why not       |
+| `http-refused`                                                     | an HTTP source or the health endpoint refused a request, with its `status`                                                                            |
+| `http-unreadable`                                                  | an HTTP source answering with ACKs stored a message as failed, with its `problem`                                                                     |
+| `mllp-listening`                                                   | an MLLP source is listening, on `port`, with `tls` true or false                                                                                      |
+| `mllp-store-failed`                                                | an MLLP message could not be stored; `onStoreFailure` says what was answered                                                                          |
+| `mllp-unreadable`                                                  | an MLLP message was stored as failed, with its `problem`                                                                                              |
+| `mllp-tls-refused`                                                 | a TLS handshake on an MLLP source failed, such as a client without a certificate                                                                      |
+| `mllp-ack-builder-failed`                                          | a custom ACK builder threw or ran out of time; the default ACK was sent                                                                               |
+| `mllp-ack-unsendable`                                              | an ACK held an MLLP framing byte, so none was sent                                                                                                    |
+| `mllp-source-error`, `mllp-source-failed`, `mllp-security-warning` | the MLLP server reported an error or a warning, by name and code                                                                                      |
 
 ### Configuration and storage
 

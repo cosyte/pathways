@@ -1,5 +1,5 @@
 import { mkdir, writeFile } from "node:fs/promises";
-import { createServer as createNetServer, type Server } from "node:net";
+import { createServer as createNetServer, type AddressInfo, type Server } from "node:net";
 import { join } from "node:path";
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -28,10 +28,13 @@ import {
   type Peer,
 } from "./mllp-helpers.js";
 import {
-  freePort,
   makeCertificates,
+  onPickedPorts,
+  pickPorts,
   removeCertificates,
+  sourceListening,
   type Certificates,
+  type PickOptions,
 } from "./net-helpers.js";
 
 const engines: Engine[] = [];
@@ -97,13 +100,32 @@ async function startEngine(
   return { root, engine, store, events, lines, clock };
 }
 
+/**
+ * {@link startEngine} with the channel's source on a port picked for it, picked again when a listener
+ * in another test file's worker takes it first.
+ */
+async function startOnPort(
+  files: (port: number) => Record<string, string>,
+  wrapStore?: (store: Store) => MessageStore,
+  pick?: PickOptions["pick"],
+): Promise<Running & { readonly port: number }> {
+  return onPickedPorts(
+    1,
+    async ([port = 0]) => {
+      const running = await startEngine(files(port), wrapStore);
+      await sourceListening(running.engine, "adt");
+      return { ...running, port };
+    },
+    pick === undefined ? {} : { pick },
+  );
+}
+
 describe("an MLLP channel", () => {
   it("stores and acknowledges each message, then transforms and delivers it", async () => {
     const receiver = await peer(answering);
-    const port = await freePort();
-    const { engine, store, events, lines } = await startEngine({
+    const { port, engine, store, events, lines } = await startOnPort((port) => ({
       "channels/adt/channel.yaml": plaintextChannel(port, receiver.port),
-    });
+    }));
 
     const { replies } = await exchange(port, [ADT_A01, ADT_A08], { replies: 2 });
     expect(replies.map(msaOf)).toEqual([
@@ -139,12 +161,33 @@ describe("an MLLP channel", () => {
     expect(log).not.toContain("MSH");
   });
 
+  it("is set up on another port when the one picked is taken before the source listens", async () => {
+    const receiver = await peer(answering);
+    // A listener in another test file's worker, which drops every connection, takes the port
+    // between its picking and the source binding it.
+    const taken = createNetServer((socket) => socket.destroy());
+    await new Promise<void>((resolve) => taken.listen(0, "127.0.0.1", resolve));
+    try {
+      const { port: held } = taken.address() as AddressInfo;
+      const picks = [[held]];
+      const { port } = await startOnPort(
+        (port) => ({ "channels/adt/channel.yaml": plaintextChannel(port, receiver.port) }),
+        undefined,
+        (count) => Promise.resolve(picks.shift() ?? pickPorts(count)),
+      );
+      expect(port).not.toBe(held);
+      const { replies } = await exchange(port, [ADT_A01], { replies: 1 });
+      expect(replies.map(msaOf)).toEqual([["AA", "MSG00001"]]);
+    } finally {
+      await new Promise<void>((resolve) => taken.close(() => resolve()));
+    }
+  });
+
   it("flags a repeated control ID from the same sender as a possible duplicate, and still delivers it", async () => {
     const receiver = await peer(answering);
-    const port = await freePort();
-    const { engine, store, events, lines } = await startEngine({
+    const { port, engine, store, events, lines } = await startOnPort((port) => ({
       "channels/adt/channel.yaml": plaintextChannel(port, receiver.port),
-    });
+    }));
     await exchange(port, [ADT_A01], { replies: 1 });
     await exchange(port, [ADT_A01], { replies: 1 });
     await engine.tick();
@@ -162,10 +205,9 @@ describe("an MLLP channel", () => {
 
   it("stores a message with no usable header as failed, answers AR, and never transforms it", async () => {
     const receiver = await peer(answering);
-    const port = await freePort();
-    const { engine, store, events } = await startEngine({
+    const { port, engine, store, events } = await startOnPort((port) => ({
       "channels/adt/channel.yaml": plaintextChannel(port, receiver.port),
-    });
+    }));
     const { replies } = await exchange(port, ["TESTPATIENT, not HL7"], { replies: 1 });
     await engine.tick();
 
@@ -193,9 +235,10 @@ describe("an MLLP channel", () => {
 
   it("answers as the channel's onStoreFailure says when storing fails", async () => {
     const receiver = await peer(answering);
-    const port = await freePort();
-    const { events } = await startEngine(
-      { "channels/adt/channel.yaml": plaintextChannel(port, receiver.port, "onStoreFailure: AE") },
+    const { port, events } = await startOnPort(
+      (port) => ({
+        "channels/adt/channel.yaml": plaintextChannel(port, receiver.port, "onStoreFailure: AE"),
+      }),
       (store) => ({
         ...bind(store),
         receive: () =>
@@ -222,10 +265,9 @@ describe("an MLLP channel", () => {
     const receiver = await peer((text, index) =>
       ackText(answers[index] ?? "AA", controlIdOf(text)),
     );
-    const port = await freePort();
-    const { engine, store, events } = await startEngine({
+    const { port, engine, store, events } = await startOnPort((port) => ({
       "channels/adt/channel.yaml": plaintextChannel(port, receiver.port),
-    });
+    }));
     await exchange(port, [ADT_A01, ADT_A01.replace("MSG00001", "MSG00003")], { replies: 2 });
     await engine.tick();
 
@@ -361,9 +403,9 @@ describe.skipIf(!OPENSSL)(`an MLLP channel ${TLS_TESTS}`, () => {
       key: certs.serverKey,
       ca: certs.ca,
     });
-    const port = await freePort();
-    const root = await makeProject({
-      "channels/adt/channel.yaml": `
+    const { port, engine, events, lines } = await onPickedPorts(1, async ([port = 0]) => {
+      const root = await makeProject({
+        "channels/adt/channel.yaml": `
 source:
   mllp:
     port: ${String(port)}
@@ -375,26 +417,29 @@ destinations:
       port: ${String(receiver.port)}
       tls: { ca: ./certs/ca.pem, cert: ./certs/client.pem, key: ./certs/client.key }
 `,
-      "channels/adt/transform.ts": LAB_TRANSFORM,
+        "channels/adt/transform.ts": LAB_TRANSFORM,
+      });
+      const dir = join(root, "channels/adt/certs");
+      await mkdir(dir, { recursive: true });
+      for (const [name, contents] of Object.entries({
+        "ca.pem": certs.ca,
+        "server.pem": certs.serverCert,
+        "server.key": certs.serverKey,
+        "client.pem": certs.clientCert,
+        "client.key": certs.clientKey,
+      })) {
+        await writeFile(join(dir, name), contents);
+      }
+      const project = await loadProject(root);
+      const store = await Store.open(project.databaseFile);
+      stores.push(store);
+      const { logger, events, lines } = captureLogger();
+      const engine = new Engine({ project, store, logger });
+      engines.push(engine);
+      await engine.start();
+      await sourceListening(engine, "adt");
+      return { port, engine, events, lines };
     });
-    const dir = join(root, "channels/adt/certs");
-    await mkdir(dir, { recursive: true });
-    for (const [name, contents] of Object.entries({
-      "ca.pem": certs.ca,
-      "server.pem": certs.serverCert,
-      "server.key": certs.serverKey,
-      "client.pem": certs.clientCert,
-      "client.key": certs.clientKey,
-    })) {
-      await writeFile(join(dir, name), contents);
-    }
-    const project = await loadProject(root);
-    const store = await Store.open(project.databaseFile);
-    stores.push(store);
-    const { logger, events, lines } = captureLogger();
-    const engine = new Engine({ project, store, logger });
-    engines.push(engine);
-    await engine.start();
 
     const { replies } = await exchange(port, [ADT_A01], {
       replies: 1,

@@ -16,7 +16,16 @@ import {
   LAB_TRANSFORM,
   makeProject,
 } from "./helpers.js";
-import { freePort, receiver, send, status } from "./net-helpers.js";
+import {
+  CLOSED_PORT,
+  onPickedPorts,
+  orTaken,
+  pickPorts,
+  receiver,
+  send,
+  status,
+  type PickOptions,
+} from "./net-helpers.js";
 
 afterEach(cleanUp);
 
@@ -241,31 +250,95 @@ describe("pathways start", () => {
 describe("pathways start with HTTP and health", () => {
   const HEALTH_TOKEN = "synthetic-health-token-0123456789";
 
+  /** A run of `pathways start` with a health endpoint. */
+  interface HealthRun {
+    readonly port: number;
+    readonly running: ReturnType<typeof runCli>;
+    readonly stop: AbortController;
+  }
+
+  /**
+   * Starts `pathways start` with a health endpoint on a port picked for it and runs `checks` on it,
+   * then stops it. When a listener in another test file's worker took the port first, it does it
+   * all again on another port. Resolves to the port it ran on.
+   */
+  const healthOnPort = (
+    checks: (run: HealthRun) => Promise<void>,
+    pick?: PickOptions["pick"],
+  ): Promise<number> =>
+    onPickedPorts(
+      1,
+      async ([port = 0]) => {
+        const root = await project({
+          "pathways.yaml": `${KEYS}defaults:\n  pollInterval: 20ms\nhealth: { port: ${port}, plaintext: true }\n`,
+        });
+        const stop = new AbortController();
+        const running = runCli(["start", "-C", root], {
+          signal: stop.signal,
+          env: { PATHWAYS_HEALTH_TOKEN: HEALTH_TOKEN },
+        });
+        await orTaken(
+          () => checks({ port, running, stop }),
+          async () => {
+            stop.abort();
+            return (await running).err;
+          },
+        );
+        stop.abort();
+        await running;
+        return port;
+      },
+      pick === undefined ? {} : { pick },
+    );
+
   it("serves health while running, and stops it with the engine", async () => {
-    const port = await freePort();
-    const root = await project({
-      "pathways.yaml": `${KEYS}defaults:\n  pollInterval: 20ms\nhealth: { port: ${port}, plaintext: true }\n`,
+    await healthOnPort(async ({ port, running, stop }) => {
+      const auth = { Authorization: `Bearer ${HEALTH_TOKEN}` };
+      let answer = await send(port, { method: "GET", headers: auth }).catch(() => undefined);
+      for (let i = 0; i < 100 && answer === undefined; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        answer = await send(port, { method: "GET", headers: auth }).catch(() => undefined);
+      }
+      expect(answer?.status).toBe(200);
+      expect(JSON.parse(answer?.body ?? "{}")).toMatchObject({
+        status: "ok",
+        channels: { adt: { status: "ok", source: "up" } },
+      });
+      expect((await send(port, { method: "GET" })).status).toBe(401);
+      stop.abort();
+      expect((await running).code).toBe(EXIT.ok);
+      await expect(send(port, { method: "GET", headers: auth })).rejects.toThrow();
     });
-    const stop = new AbortController();
-    const running = runCli(["start", "-C", root], {
-      signal: stop.signal,
-      env: { PATHWAYS_HEALTH_TOKEN: HEALTH_TOKEN },
-    });
-    const auth = { Authorization: `Bearer ${HEALTH_TOKEN}` };
-    let answer = await send(port, { method: "GET", headers: auth }).catch(() => undefined);
-    for (let i = 0; i < 100 && answer === undefined; i += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      answer = await send(port, { method: "GET", headers: auth }).catch(() => undefined);
+  });
+
+  it("serves health on another port when the one picked is taken before it listens", async () => {
+    // A listener in another test file's worker, which answers 200 to anything, takes the port
+    // between its picking and the health endpoint binding it.
+    const holder = await receiver(status(200));
+    try {
+      const picks = [[holder.port]];
+      const port = await healthOnPort(
+        async ({ port, running }) => {
+          let ended = false;
+          void running.then(() => {
+            ended = true;
+          });
+          const auth = { Authorization: `Bearer ${HEALTH_TOKEN}` };
+          let answer = await send(port, { method: "GET", headers: auth }).catch(() => undefined);
+          for (let i = 0; i < 100 && answer === undefined; i += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            answer = await send(port, { method: "GET", headers: auth }).catch(() => undefined);
+          }
+          expect(JSON.parse(answer?.body ?? "{}")).toMatchObject({ status: "ok" });
+          // The answer came from the engine, still running, not from the listener on the port.
+          expect(ended).toBe(false);
+        },
+        (count) => Promise.resolve(picks.shift() ?? pickPorts(count)),
+      );
+      expect(port).not.toBe(holder.port);
+    } finally {
+      await holder.close();
     }
-    expect(answer?.status).toBe(200);
-    expect(JSON.parse(answer?.body ?? "{}")).toMatchObject({
-      status: "ok",
-      channels: { adt: { status: "ok", source: "up" } },
-    });
-    expect((await send(port, { method: "GET" })).status).toBe(401);
-    stop.abort();
-    expect((await running).code).toBe(EXIT.ok);
-    await expect(send(port, { method: "GET", headers: auth })).rejects.toThrow();
   });
 
   it("does not serve health for a single pass", async () => {
@@ -297,7 +370,8 @@ describe("pathways start with HTTP and health", () => {
   });
 
   it("refuses to start without a token it needs, as a configuration error", async () => {
-    const port = await freePort();
+    // Refused before anything listens: nothing binds the port.
+    const port = CLOSED_PORT;
     const root = await project({
       "pathways.yaml": `${KEYS}health: { port: ${port}, plaintext: true }\n`,
     });

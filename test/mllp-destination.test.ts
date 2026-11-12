@@ -12,7 +12,7 @@ import { DeliveryRejected } from "../src/connectors/types.js";
 import { ADT_A01 } from "./helpers.js";
 import { ackText, controlIdOf, OPENSSL, startPeer, TLS_TESTS, type Peer } from "./mllp-helpers.js";
 import {
-  freePort,
+  CLOSED_PORT,
   makeCertificates,
   removeCertificates,
   type Certificates,
@@ -132,7 +132,7 @@ describe("MllpDestination", () => {
   });
 
   it("asks for a retry when nothing listens", async () => {
-    const error = await outcome(destination(await freePort()).deliver(message(1)));
+    const error = await outcome(destination(CLOSED_PORT).deliver(message(1)));
     expect(error).toMatchObject({ name: "MllpDeliveryError", code: "ECONNREFUSED" });
   });
 
