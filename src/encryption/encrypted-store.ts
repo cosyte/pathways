@@ -209,6 +209,7 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
   /** Ids and states only, so straight through, present only when the store underneath has both. */
   readonly settle?: (messageId: number) => Promise<SettledMessage | undefined>;
   readonly unsettled?: (channel: string, after: number, limit: number) => Promise<number[]>;
+  readonly requeuedUnsettled?: (channel: string, limit: number) => Promise<number[]>;
   /**
    * The retention steps: ids and counts, and rows changed whole or emptied, so straight through,
    * present only when the store underneath has all four; the rows an archive holds come back
@@ -244,6 +245,9 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
     if (inner.settle !== undefined && inner.unsettled !== undefined) {
       this.settle = inner.settle.bind(inner);
       this.unsettled = inner.unsettled.bind(inner);
+      if (inner.requeuedUnsettled !== undefined) {
+        this.requeuedUnsettled = inner.requeuedUnsettled.bind(inner);
+      }
     }
     const steps = retentionStore(inner);
     if (steps !== undefined) {

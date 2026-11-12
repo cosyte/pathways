@@ -384,6 +384,7 @@ const CURRENT_SCHEMA = [
   `CREATE INDEX "deliveries_by_message" on "deliveries" ("message_id", "status")`,
   `CREATE INDEX "messages_by_channel_dedup_key" on "messages" ("channel", "dedup_key", "id")`,
   `CREATE INDEX "messages_by_channel_idempotency_key" on "messages" ("channel", "idempotency_key", "id")`,
+  `CREATE INDEX "messages_by_channel_settled" on "messages" ("channel", "settled_generation", "status")`,
   `CREATE INDEX "messages_by_channel_status" on "messages" ("channel", "status", "id")`,
   `CREATE INDEX "meta_index_by_message" on "meta_index" ("message_id")`,
   `CREATE INDEX "meta_index_by_tag" on "meta_index" ("channel", "index_name", "tag", "message_id")`,

@@ -1,6 +1,6 @@
 import type { Logger } from "pino";
 
-import type { AuditDetail, MessageStore } from "../storage/store.js";
+import type { AuditDetail, AuditEntry, MessageStore } from "../storage/store.js";
 import type { AuditLog } from "./audit.js";
 
 /**
@@ -20,8 +20,10 @@ export interface EngineParticulars {
 
 /**
  * Records that the engine started: first, when the run before it left an `engine-start` and no
- * `engine-stop` after it, an `unclean-shutdown` entry naming that start's entry (`since`) and its
- * version and node; then the `engine-start` entry itself. Rejects when the audit log cannot be read
+ * `engine-stop` of its own node after it, an `unclean-shutdown` entry naming that start's entry
+ * (`since`) and its version and node; then the `engine-start` entry itself. A stop is paired with a
+ * start by node id, which each process draws afresh, so a late stop from another node (one that lost
+ * its lease while the last run took over) hides no crash. Rejects when the audit log cannot be read
  * or written.
  *
  * @example
@@ -35,17 +37,14 @@ export async function recordEngineStart(
   particulars: EngineParticulars,
 ): Promise<void> {
   const [started] = (await store.auditEntries({ action: "engine-start", limit: 1 })).items;
-  if (started !== undefined) {
-    const [stopped] = (await store.auditEntries({ action: "engine-stop", limit: 1 })).items;
-    if (stopped === undefined || stopped.id < started.id) {
-      const named = Object.entries(started.detail).filter(
-        ([key]) => key === "version" || key === "node",
-      );
-      await audit.record({
-        action: "unclean-shutdown",
-        detail: { since: started.id, ...Object.fromEntries(named) },
-      });
-    }
+  if (started !== undefined && !(await stoppedSince(store, started))) {
+    const named = Object.entries(started.detail).filter(
+      ([key]) => key === "version" || key === "node",
+    );
+    await audit.record({
+      action: "unclean-shutdown",
+      detail: { since: started.id, ...Object.fromEntries(named) },
+    });
   }
   await audit.record({ action: "engine-start", detail: particularsDetail(particulars) });
 }
@@ -75,6 +74,23 @@ export async function recordEngineStop(
       code: typeof code === "string" ? code : undefined,
     });
   }
+}
+
+/** How many `engine-stop` entries a start reads at a time, newest first, to find its run's own. */
+const STOP_PAGE = 50;
+
+/** Whether an `engine-stop` of `started`'s node was written after it. */
+async function stoppedSince(store: MessageStore, started: AuditEntry): Promise<boolean> {
+  let before: number | undefined;
+  do {
+    const page = await store.auditEntries({ action: "engine-stop", before, limit: STOP_PAGE });
+    for (const stopped of page.items) {
+      if (stopped.id < started.id) return false;
+      if (stopped.detail["node"] === started.detail["node"]) return true;
+    }
+    before = page.next;
+  } while (before !== undefined);
+  return false;
 }
 
 function particularsDetail(particulars: EngineParticulars): AuditDetail {

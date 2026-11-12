@@ -584,4 +584,49 @@ describe("recordEngineStart", () => {
       ["engine-start", run("0c")],
     ]);
   });
+
+  it("pairs a stop with its own node's start: a late stop from another node hides no crash", async () => {
+    const store = new MemoryStore();
+    const audit = new AuditLog(store);
+    const { logger } = captureLogger();
+    const run = (node: string) => ({ version: "0.0.0", channels: 2, node });
+    // Node 0a runs; it loses its lease, 0b takes over, and 0a's late stop lands after 0b's start.
+    // 0b is then killed, and 0c starts.
+    await recordEngineStart(audit, store, run("0a"));
+    await recordEngineStart(audit, store, run("0b"));
+    await recordEngineStop(audit, run("0a"), logger);
+    await recordEngineStart(audit, store, run("0c"));
+    // 0c stops cleanly, and 0d finds nothing to record.
+    await recordEngineStop(audit, run("0c"), logger);
+    await recordEngineStart(audit, store, run("0d"));
+    expect(store.auditRows.map((row) => [row.action, row.detail])).toEqual([
+      ["engine-start", run("0a")],
+      ["unclean-shutdown", { since: store.auditRows[0]?.id, version: "0.0.0", node: "0a" }],
+      ["engine-start", run("0b")],
+      ["engine-stop", run("0a")],
+      ["unclean-shutdown", { since: store.auditRows[2]?.id, version: "0.0.0", node: "0b" }],
+      ["engine-start", run("0c")],
+      ["engine-stop", run("0c")],
+      ["engine-start", run("0d")],
+    ]);
+  });
+
+  it("reads past a page of other nodes' stops to find its run's own", async () => {
+    const store = new MemoryStore();
+    const audit = new AuditLog(store);
+    const { logger } = captureLogger();
+    const run = (node: string) => ({ version: "0.0.0", channels: 1, node });
+    const lateStops = async (): Promise<void> => {
+      for (let i = 0; i < 60; i += 1) await recordEngineStop(audit, run("ff"), logger);
+    };
+    await recordEngineStart(audit, store, run("0a"));
+    await recordEngineStop(audit, run("0a"), logger);
+    await lateStops();
+    await recordEngineStart(audit, store, run("0b"));
+    await lateStops();
+    await recordEngineStart(audit, store, run("0c"));
+    expect(
+      store.auditRows.filter((row) => row.action !== "engine-stop").map((row) => row.action),
+    ).toEqual(["engine-start", "engine-start", "unclean-shutdown", "engine-start"]);
+  });
 });

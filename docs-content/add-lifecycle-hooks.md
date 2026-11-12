@@ -126,7 +126,9 @@ else, or no answer within the hook's time limit, is logged and the event is not 
 
 `settled` comes once per message, when nothing more will happen to it: its last delivery was
 delivered or failed for good, it was filtered, or its transform failed. A replay or a resend settles
-again, once, when its own deliveries end. It carries the message's id and, for each destination in the
+again, once, when its own deliveries end; a replay whose transform filters the message or fails again
+queues no delivery, and the running engine settles it at its next pass, though the replay ran in
+another process. It carries the message's id and, for each destination in the
 channel's list, `{ index, name, state }`: `name` is the destination's kind (`mllp`, `http`, `module`
 and so on), and `state` is `delivered`, `failed`, `filtered`, `cleared` or `dry-run`. A message whose
 transform failed is `failed` for every destination.

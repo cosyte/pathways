@@ -877,7 +877,7 @@ export interface ChannelCommandReport {
   readonly failure?: string;
 }
 
-/** How many unsettled messages a start reads at a time. */
+/** How many unsettled messages a start, or a pass, reads at a time. */
 const SETTLE_BATCH = 500;
 
 /**
@@ -1663,6 +1663,7 @@ export class Engine {
     }
     await this.transformAll(channel);
     await this.deliverAll(channel);
+    await this.settleRequeued(channel);
   }
 
   /**
@@ -2341,6 +2342,19 @@ export class Engine {
       ids = await store.unsettled(name, Math.max(...ids), SETTLE_BATCH)
     ) {
       for (const id of ids) await this.settle(channel, id);
+    }
+  }
+
+  /**
+   * Settles what a replay or a resend, run in another process, left filtered or failed: it queued
+   * no delivery, so neither the transform nor the delivery pass ends it here. One batch a pass, read
+   * through an index; the rest at the passes after.
+   */
+  private async settleRequeued(channel: RunningChannel): Promise<void> {
+    const { store } = this.options;
+    if (store.requeuedUnsettled === undefined) return;
+    for (const id of await store.requeuedUnsettled(channel.config.name, SETTLE_BATCH)) {
+      await this.settle(channel, id);
     }
   }
 

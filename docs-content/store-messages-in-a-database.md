@@ -251,8 +251,14 @@ Migration `0012-settled` adds a `settled_generation` column to `messages`: the g
 [settled event](./add-lifecycle-hooks.md#the-settled-event) was recorded, so it is sent once. It marks
 every message that had ended already as settled, so no event is sent for a message that ended before
 it. It only adds a column that may be null, which an older Pathways never reads, and has no rollback
-step: to remove it, stop every engine and drop the column. A custom store may implement `settle` and
-`unsettled`; one without them sends no settled events.
+step: to remove it, stop every engine and drop the column. It also adds the index
+`messages_by_channel_settled` on `channel`, `settled_generation` and `status`, which serves what the
+engine reads on every pass: the messages a replay left filtered or failed and not yet settled. At
+each start the engine also looks, a channel at a time, for messages that ended and were not recorded
+as settled (what a crash left); that read cannot use an index for every row it checks, so on a large
+`messages` table it reads each channel's rows once per start. A custom store may implement `settle`,
+`unsettled` and `requeuedUnsettled`; one without the first two sends no settled events, and one
+without `requeuedUnsettled` settles such a replay at the next start.
 
 If the database becomes unreachable while the engine runs, the engine stops with exit code 1 and the
 driver's error code, for a supervisor (systemd, Docker, Kubernetes) to restart it. Nothing is lost: a

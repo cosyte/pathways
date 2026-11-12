@@ -3278,6 +3278,32 @@ same transaction, whichever way it goes.
 
 `Promise`\<[`RequeueResult`](#requeueresult)\>
 
+##### requeuedUnsettled()?
+
+> `optional` **requeuedUnsettled**(`channel`, `limit`): `Promise`\<`number`[]\>
+
+The ids of a channel's messages a replay or a resend left filtered or failed (no delivery
+queued) and not yet recorded as settled, lowest first, at most `limit`. A replay runs in its own
+process, so the engine reads these on every pass and settles each: such a message gets its
+settled event while the engine runs, not at its next start. `requeue` marks the new generation
+unsettled by clearing `settled_generation`, and an index on the channel, that column and the
+status serves this read, so it reads only the rows it returns. Optional, beside [settle](#settle):
+without it such a message settles at the next start.
+
+###### Parameters
+
+###### channel
+
+`string`
+
+###### limit
+
+`number`
+
+###### Returns
+
+`Promise`\<`number`[]\>
+
 ##### retryingDeliveries()
 
 > **retryingDeliveries**(`channel`): `Promise`\<`number`\>

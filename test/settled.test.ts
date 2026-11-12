@@ -260,6 +260,74 @@ for (const database of TEST_DATABASES) {
       expect((await settled()).map((event) => event.messageId)).toEqual([1, 1]);
     });
 
+    it("is sent while the engine runs for a replay from another process that filters", async () => {
+      const { inbox, store, engine, settled } = await setUp(database);
+      const running = await engine();
+      inbox.push("one");
+      await running.tick();
+      // As `pathways replay` records it from its own process after a transform that returns null:
+      // the message is filtered for its new generation, and no delivery is queued.
+      const replayed = await store.requeue(
+        1,
+        { mode: "replay", expected: "transformed", outputs: [], destinations: 2 },
+        "tester",
+      );
+      expect(replayed.done).toBe(true);
+      await running.tick();
+      expect(await store.unsettled("adt", 0, 10)).toEqual([]);
+      await running.tick();
+      await stop(running);
+      expect((await settled()).map(shape)).toEqual([
+        {
+          channel: "adt",
+          messageId: 1,
+          destinations: [
+            { index: 0, name: "file", state: "delivered" },
+            { index: 1, name: "module", state: "delivered" },
+          ],
+        },
+        {
+          channel: "adt",
+          messageId: 1,
+          destinations: [
+            { index: 0, name: "file", state: "filtered" },
+            { index: 1, name: "module", state: "filtered" },
+          ],
+        },
+      ]);
+    });
+
+    it("is sent while the engine runs for a replay from another process that fails", async () => {
+      const { inbox, store, engine, settled } = await setUp(database);
+      const running = await engine();
+      inbox.push("throw please");
+      await running.tick();
+      const replayed = await store.requeue(
+        1,
+        {
+          mode: "replay",
+          expected: "failed",
+          outputs: [],
+          failure: "transform: RangeError: synthetic",
+          destinations: 2,
+        },
+        "tester",
+      );
+      expect(replayed.done).toBe(true);
+      await running.tick();
+      expect(await store.unsettled("adt", 0, 10)).toEqual([]);
+      await stop(running);
+      const failed = {
+        channel: "adt",
+        messageId: 1,
+        destinations: [
+          { index: 0, name: "file", state: "failed" },
+          { index: 1, name: "module", state: "failed" },
+        ],
+      };
+      expect((await settled()).map(shape)).toEqual([failed, failed]);
+    });
+
     it("is recorded while a hook's queue is full: the event is dropped, the record stands", async () => {
       const { inbox, store, engine, logs } = await setUp(database, STUCK_HOOK);
       const running = await engine();
