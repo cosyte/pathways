@@ -56,6 +56,15 @@ destinations:
   - channel: { name: b, carryMeta: [mrn] }
 `;
 
+/**
+ * An engine-wide hook that takes every event and keeps none: with a hook, the engine builds each
+ * lifecycle event it would otherwise skip.
+ */
+const WITH_HOOK = {
+  "pathways.yaml": "hooks:\n  - module: ./hook.ts\n",
+  "hook.ts": "export default () => ({ onEvent() {} });\n",
+};
+
 /** A channel fed by others, which writes what it takes into a folder. */
 const target = (block = "{}"): string => `
 format: text
@@ -360,6 +369,7 @@ for (const database of TEST_DATABASES) {
       const { root, project, engine, store } = await setUp(
         database,
         {
+          ...WITH_HOOK,
           "channels/a/channel.yaml": FEEDER,
           "channels/b/channel.yaml": target(),
         },
@@ -552,6 +562,7 @@ export default (msg: string, ctx: { route(name: string, message: string): void }
 
     it("fails a message past maxHops, which catches a loop made through ctx.route", async () => {
       const { root, engine, store } = await setUp(database, {
+        ...WITH_HOOK,
         "channels/in/channel.yaml": `
 format: text
 source:
@@ -635,6 +646,7 @@ export default (msg: string, ctx: { route(name: string, message: string): void }
       const { root, engine, store } = await setUp(
         database,
         {
+          ...WITH_HOOK,
           "channels/in/channel.yaml": `
 format: text
 source:
