@@ -1006,6 +1006,12 @@ export class FileSource implements SourceConnector {
         },
       );
     } catch (error) {
+      // A channel that stores nothing refused a piece for good: the pieces before it were sent and
+      // nothing of them is stored, so a next read would send them again. The file is set aside.
+      if (error instanceof PassFailed && error.permanent) {
+        await this.setAsideRejectedBatch(file, parts);
+        return;
+      }
       // A read that failed part way: the pieces stored are kept, and the next pass reads the file
       // again, with resumed, so each is stored once. A sink that refused rejects past here.
       if (!(error instanceof ReadFailed)) throw error;
@@ -1027,6 +1033,44 @@ export class FileSource implements SourceConnector {
       warnings: [...warnings],
     });
     await this.finish(file, parts, Number(received.ids[0]));
+  }
+
+  /**
+   * Moves a claimed batch file that a channel storing nothing refused a piece of for good into
+   * `errorDir`, as {@link setAsideRejected} does; or, with none or one that cannot take it, into the
+   * claim folder's `failed/` under its claimed name, as a batch failed whole goes. Either way no pass
+   * reads it again, so the pieces before the refused one, sent already, are not sent twice.
+   */
+  private async setAsideRejectedBatch(file: SourceFile, parts: readonly string[]): Promise<void> {
+    const { dir, channel, errorDir, onFileFault } = this.options;
+    const { fs } = this;
+    if (errorDir !== undefined) {
+      try {
+        const folder = fs.join(errorDir, ...parts.slice(0, -1));
+        await fs.mkdir(folder);
+        let target = fs.join(folder, String(parts.at(-1)));
+        const taken = await fs.stat(target).then(
+          () => true,
+          () => false,
+        );
+        if (taken) target = fs.join(folder, file.name);
+        await this.relocate(file.path, target, (await fs.stat(file.path)).id);
+        onFileFault?.({ reason: "rejected", moved: true });
+        return;
+      } catch (error) {
+        unlessDown(error);
+      }
+    }
+    try {
+      const failed = fs.join(dir, CLAIMED_DIR, channel, FAILED_DIR);
+      await fs.mkdir(failed);
+      await this.relocate(file.path, fs.join(failed, file.name), (await fs.stat(file.path)).id);
+    } catch (error) {
+      unlessDown(error);
+      onFileFault?.({ reason: "rejected", moved: false, error });
+      return;
+    }
+    onFileFault?.({ reason: "rejected", moved: true });
   }
 
   /**

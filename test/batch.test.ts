@@ -13,7 +13,12 @@ import {
 } from "../src/connectors/batch.js";
 import { CLAIMED_DIR, FAILED_DIR, FileSource } from "../src/connectors/file.js";
 import { HttpSource, type HttpSourceOptions } from "../src/connectors/http.js";
-import type { MessageSink, ReceivedPiece, ReceiveOptions } from "../src/connectors/types.js";
+import {
+  type MessageSink,
+  PassFailed,
+  type ReceivedPiece,
+  type ReceiveOptions,
+} from "../src/connectors/types.js";
 import { FakeLocation } from "./fake-location.js";
 import { ADT_A01, cleanUp, dropFile, makeProject } from "./helpers.js";
 import { makeCertificates, removeCertificates, send, type Certificates } from "./net-helpers.js";
@@ -447,6 +452,147 @@ describe("A file source with batch", () => {
     expect(await readdir(join(dir, CLAIMED_DIR, channel))).toEqual(["by-hand.hl7"]);
   });
 
+  describe("on a sink that refuses a piece for good, as a channel that stores nothing does", () => {
+    /**
+     * A sink that stores nothing: it takes each piece at once, as delivered, and refuses for good
+     * the one whose control ID is MSG00003.
+     */
+    function passingSink(): { sink: MessageSink; delivered: string[] } {
+      const delivered: string[] = [];
+      let pass = 0;
+      const sink: MessageSink = {
+        receive: (body) => {
+          const text = latin1(body);
+          if (text.includes("|MSG00003|")) {
+            return Promise.reject(new PassFailed("TRANSFORM_FAILED", true));
+          }
+          delivered.push(text);
+          pass += 1;
+          return Promise.resolve(pass);
+        },
+      };
+      return { sink, delivered };
+    }
+
+    const feed = `BHS|^~\\&\r${adt(1)}${adt(2)}${adt(3)}${adt(4)}BTS|4\r`;
+
+    it("sends the pieces before it once, and sets the file aside in errorDir", async () => {
+      const root = await makeProject({});
+      const dir = join(root, "inbox");
+      const errorDir = join(root, "errors");
+      await dropFile(join(dir, "feed.hl7"), feed);
+      const faults: unknown[] = [];
+      const source = new FileSource({
+        dir,
+        channel,
+        minAgeMs: 0,
+        errorDir,
+        batch: { split: "hl7" },
+        onFileFault: (fault) => faults.push(fault),
+      });
+      const { sink, delivered } = passingSink();
+      for (let pass = 0; pass < 3; pass += 1) await source.poll(sink);
+      expect(delivered).toEqual([adt(1), adt(2)]);
+      expect(await readdir(join(dir, CLAIMED_DIR, channel))).toEqual([]);
+      expect(await readFile(join(errorDir, "feed.hl7"), "latin1")).toBe(feed);
+      expect(faults).toEqual([{ reason: "rejected", moved: true }]);
+
+      // A second file of that name goes in under its claimed name, over nothing.
+      await dropFile(join(dir, "feed.hl7"), feed);
+      for (let pass = 0; pass < 2; pass += 1) await source.poll(sink);
+      expect(delivered).toHaveLength(4);
+      expect(await readdir(errorDir)).toHaveLength(2);
+    });
+
+    it("sends the pieces before it once, and sets the file aside in failed/ with no errorDir", async () => {
+      const dir = await inbox();
+      await dropFile(join(dir, "feed.hl7"), feed);
+      const faults: unknown[] = [];
+      const source = new FileSource({
+        dir,
+        channel,
+        minAgeMs: 0,
+        batch: { split: "hl7" },
+        onFileFault: (fault) => faults.push(fault),
+      });
+      const { sink, delivered } = passingSink();
+      for (let pass = 0; pass < 3; pass += 1) await source.poll(sink);
+      expect(delivered).toEqual([adt(1), adt(2)]);
+      const failed = await readdir(join(dir, CLAIMED_DIR, channel, FAILED_DIR));
+      expect(failed).toHaveLength(1);
+      expect(failed[0]).toMatch(/-feed\.hl7$/);
+      expect(await readdir(join(dir, CLAIMED_DIR, channel))).toEqual([FAILED_DIR]);
+      expect(faults).toEqual([{ reason: "rejected", moved: true }]);
+    });
+
+    it("sets the file aside in failed/ when errorDir cannot be made", async () => {
+      const root = await makeProject({});
+      const dir = join(root, "inbox");
+      const blocked = join(root, "blocked");
+      await writeFile(blocked, "a file, not a folder");
+      await dropFile(join(dir, "feed.hl7"), feed);
+      const source = new FileSource({
+        dir,
+        channel,
+        minAgeMs: 0,
+        errorDir: join(blocked, "errors"),
+        batch: { split: "hl7" },
+      });
+      const { sink, delivered } = passingSink();
+      for (let pass = 0; pass < 3; pass += 1) await source.poll(sink);
+      expect(delivered).toEqual([adt(1), adt(2)]);
+      expect(await readdir(join(dir, CLAIMED_DIR, channel, FAILED_DIR))).toHaveLength(1);
+    });
+
+    it("leaves the file claimed and says so when even failed/ cannot take it", async () => {
+      const location = new FakeLocation();
+      location.put("/in/feed.hl7", feed);
+      const faults: unknown[] = [];
+      const source = new FileSource({
+        dir: "/in",
+        channel,
+        minAgeMs: 0,
+        location,
+        batch: { split: "hl7" },
+        onFileFault: (fault) => faults.push(fault),
+      });
+      const { sink } = passingSink();
+      const refusing: MessageSink = {
+        receive: async (body, options) => {
+          try {
+            return await sink.receive(body, options);
+          } catch (error) {
+            // The move into failed/ is the next rename.
+            location.fail = (op) => op === "rename";
+            throw error;
+          }
+        },
+      };
+      await source.poll(refusing);
+      expect(faults).toEqual([
+        expect.objectContaining({
+          reason: "rejected",
+          moved: false,
+          error: expect.anything() as unknown,
+        }),
+      ]);
+      expect(
+        [...location.files.keys()].filter((path) => path.startsWith(`/in/${CLAIMED_DIR}/`)),
+      ).toHaveLength(1);
+    });
+
+    it("keeps the file claimed when the refusal may pass, for the next pass", async () => {
+      const dir = await inbox();
+      await dropFile(join(dir, "feed.hl7"), feed);
+      const source = new FileSource({ dir, channel, minAgeMs: 0, batch: { split: "hl7" } });
+      const sink: MessageSink = {
+        receive: () => Promise.reject(new PassFailed("PASS_TIMEOUT", false)),
+      };
+      await expect(source.poll(sink)).rejects.toThrow(PassFailed);
+      expect(await readdir(join(dir, CLAIMED_DIR, channel))).toHaveLength(1);
+    });
+  });
+
   it("reads a location that cannot stream whole, and keeps a file it fails to read for the next pass", async () => {
     const location = new FakeLocation();
     location.put("/in/notes.txt", "one\ntwo\n");
@@ -561,6 +707,35 @@ describe("An HTTP source with batch", () => {
       [2, 0],
       [0, 2],
     ]);
+  });
+
+  it("answers 422 when a channel that stores nothing refuses a piece for good, and 503 when it may pass", async () => {
+    // A sink that stores nothing: the first piece goes through, the second is refused.
+    let refusal = new PassFailed("TRANSFORM_FAILED", true);
+    const delivered: string[] = [];
+    const sink: MessageSink = {
+      receive: (body) => {
+        const text = latin1(body);
+        if (text.includes("|MSG00002|")) return Promise.reject(refusal);
+        delivered.push(text);
+        return Promise.resolve(delivered.length);
+      },
+    };
+    const port = await listening(sink);
+    const body = `${adt(1)}${adt(2)}${adt(3)}`;
+    const rejected = await send(port, { path: "/batch", headers: AUTH, body, ca: certs.ca });
+    // Sending it again cannot help, so a sender does not send the first piece twice.
+    expect(rejected.status).toBe(422);
+    expect(JSON.parse(rejected.body)).toMatchObject({ code: "TRANSFORM_FAILED" });
+    expect(rejected.headers["retry-after"]).toBeUndefined();
+    expect(rejected.body).not.toContain("MSH");
+
+    refusal = new PassFailed("DESTINATION_FAILED", false, 2_000);
+    const deferred = await send(port, { path: "/batch", headers: AUTH, body, ca: certs.ca });
+    expect(deferred.status).toBe(503);
+    expect(JSON.parse(deferred.body)).toMatchObject({ code: "DESTINATION_FAILED" });
+    expect(deferred.headers["retry-after"]).toBe("2");
+    expect(delivered).toEqual([adt(1), adt(1)]);
   });
 
   it("keys each piece by the body's hash without an Idempotency-Key", async () => {

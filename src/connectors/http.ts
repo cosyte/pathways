@@ -254,7 +254,8 @@ export class HttpSource implements SourceConnector {
    * an `Idempotency-Key` that is not one; 422 for a body with no piece, an incomplete HL7 batch
    * unless `onIncomplete: accept`, or an `Idempotency-Key` used before for another body, with the
    * code and nothing stored; 503 when a piece could not be stored, so the sender sends it again
-   * under the same key.
+   * under the same key. On a channel that stores nothing, a piece refused for good answers 422 with
+   * its code, and one that may pass later 503 with `Retry-After`, as a single message does.
    */
   private async receiveBatch(
     batch: BatchOptions,
@@ -302,7 +303,14 @@ export class HttpSource implements SourceConnector {
         ...(named === undefined ? {} : { origin }),
         facts: (index) => ({ ...source, batch: { piece: index, hash: scan.hash } }),
       });
-    } catch {
+    } catch (error) {
+      // On a channel that stores nothing, the pieces before a refused one were sent: one refused for
+      // good is answered so, as a single message is, and the sender does not send them again.
+      if (error instanceof PassFailed) {
+        if (error.permanent) reply(response, 422, { error: PASS_REJECTED, code: error.code });
+        else reply(response, 503, { error: PASS_DEFERRED, code: error.code }, retryAfter(error));
+        return;
+      }
       reply(response, 503, { error: STORE_FAILED });
       return;
     } finally {

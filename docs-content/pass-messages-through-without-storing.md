@@ -51,6 +51,14 @@ and nothing when it filters the message; the pass counts as filtered only when e
 transform filtered it. When one destination's transform throws, the others are still sent the
 message, and the sender is answered as for a channel transform that throws.
 
+A batch, a file or an HTTP body cut into pieces with `batch:`, passes one piece at a time, in order,
+and is answered as one message is by its first piece that does not pass. The pieces before that one
+were already sent to every destination, and are not undone. A piece refused for good stops the
+batch: the rest of it is not sent, an HTTP sender is answered 422, and the file moves into
+`errorDir`, or into the claim folder's `failed/` when `errorDir` cannot take it, so no pass reads it
+again and no piece is sent twice. A failure that may pass leaves the whole batch to be sent again, so
+the pieces before it are sent again too: a destination should take a repeated message.
+
 `Retry-After` is the wait the receiver asked for, when it asked, or else the channel's first retry
 wait (`retry.first`, 1 second by default), in whole seconds.
 
