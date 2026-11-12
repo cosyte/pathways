@@ -540,3 +540,59 @@ describe("A file source killed while it moves a refused file back", () => {
     );
   }, 120_000);
 });
+
+describe("A channel that stores nothing, killed between its sends and its answer", () => {
+  const sqlite = TEST_DATABASES.find((database) => database.kind === "sqlite") as TestDatabase;
+
+  it("loses nothing the sender was answered for, and the restart sends the rest again", async () => {
+    const setup = await project(sqlite);
+    const log = join(setup.root, "sent.jsonl");
+    await writeFile(
+      join(setup.root, "channels/notes/channel.yaml"),
+      "format: text\nstorage: { content: none }\n" +
+        "source:\n  file: { dir: ../../data/inbox, errorDir: ../../data/error, minAge: 0 }\n" +
+        "transform: ./transform.ts\ndestinations:\n" +
+        DESTINATIONS.map(
+          (name) =>
+            `  - module: ../../destination.ts\n` +
+            `    options: { log: ${JSON.stringify(log)}, name: ${name} }\n`,
+        ).join(""),
+    );
+    const notes = Array.from({ length: NOTES }, (_, i) => `synthetic note ${String(i + 1)}`);
+    const killed = await killAt(setup, ["start", "--once"], "pass-sent-before-answer@2");
+    expect(killed.code === 0 && killed.signal === null).toBe(false);
+    // The second note reached both destinations, and its file was not deleted: the sender, here
+    // the folder, was never answered for it. The first was answered for, and is gone.
+    const before = await setup.sent();
+    expect(before.map((s) => [s.to, s.body])).toEqual([
+      ["a", notes[0]],
+      ["b", notes[0]],
+      ["a", notes[1]],
+      ["b", notes[1]],
+    ]);
+    const inbox = join(setup.root, "data/inbox");
+    expect((await readdir(inbox)).filter((name) => !name.startsWith("."))).toEqual([]);
+    expect(await readdir(join(inbox, ".claimed/notes"))).toHaveLength(2);
+
+    await cleanly(run(setup, ["start", "--once"]));
+    // The second note again, a duplicate from the source's own retry, then the third.
+    const after = (await setup.sent()).slice(before.length);
+    expect(after.map((s) => [s.to, s.body])).toEqual([
+      ["a", notes[1]],
+      ["b", notes[1]],
+      ["a", notes[2]],
+      ["b", notes[2]],
+    ]);
+    expect(await readdir(join(inbox, ".claimed/notes"))).toEqual([]);
+    // Nothing was stored, by either run.
+    await inStore(setup, async (store) => {
+      expect(await store.messageCounts("notes")).toEqual({
+        received: 0,
+        transformed: 0,
+        filtered: 0,
+        failed: 0,
+        cleared: 0,
+      });
+    });
+  }, 120_000);
+});

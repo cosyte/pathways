@@ -255,6 +255,9 @@ a hash. A custom store needs `markDeliveredAndDropContent` for this; `pathways s
 channel that asks for it on a store without it. What each database still holds after the delete is
 on [Store messages in a database server](./store-messages-in-a-database.md#what-a-database-keeps-after-a-delete).
 
+To store no message at all, a channel sets `storage.content: none`: see [Pass messages through
+without storing them](./pass-messages-through-without-storing.md).
+
 ## What retention does not reach
 
 - Files a file source keeps with `keepProcessed: true`, in its `processed/` folder.

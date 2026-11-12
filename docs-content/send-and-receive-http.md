@@ -64,6 +64,12 @@ The source answers once it knows what became of the message, and never echoes th
 | 415    | the body is compressed (`Content-Encoding` other than `identity`) |
 | 503    | the message could not be stored; the sender should send it again  |
 
+On a channel that stores nothing (`storage.content: none`), 202 means every destination accepted the
+message, and its `id` is the message's pass id, which no command can look up. A destination that failed in a way that may pass
+gets 503 with `Retry-After`, and a transform that failed or a destination that rejected the message
+for good gets 422 (with `response: ack`, 200 and an `AE` ACK). See [Pass messages through without
+storing them](./pass-messages-through-without-storing.md).
+
 ### How a request's path is matched
 
 Each request's path is read by one rule, and the paths you configure pass the same rule when the
