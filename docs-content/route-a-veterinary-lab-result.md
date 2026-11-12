@@ -137,6 +137,8 @@ CI runs these on every change to Pathways, on synthetic messages only:
 ## Related
 
 - [Example: a veterinary lab result to FHIR](./example-vet-lab-to-fhir.md), the project to copy.
+- [Send a lab result as v2 XML over HTTPS](./send-a-lab-result-as-v2-xml.md): the same kind of
+  result in the HL7 v2 XML encoding, settled by the XML acknowledgement.
 - [Transform and filter messages](./transform-and-filter-messages.md): what a transform can return.
 - [Make sample messages](./make-sample-messages.md) with `@cosyte/synth`.
 - [Test a channel](./test-a-channel.md) with its sample messages.

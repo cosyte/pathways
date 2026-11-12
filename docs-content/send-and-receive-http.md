@@ -300,6 +300,8 @@ destinations:
   is refused at load with `ack: xml`, since what it sends is not an HL7 v2 message.
 - **The body is sent as the transform returned it.** Writing the message in the v2 XML encoding is
   the transform's work; `ack: xml` reads the answer only.
+  [Send a lab result as v2 XML over HTTPS](./send-a-lab-result-as-v2-xml.md) writes it with
+  `toHl7Xml` from `@cosyte/hl7`, in a project to copy.
 
 ### For the animal diagnostic lab network
 

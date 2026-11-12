@@ -152,3 +152,28 @@ ID 73688379
 ID 77039870
 ID 999137940216763
 ID 999716294519549
+
+# --- The v2 XML example, examples/vet-lab-to-v2-xml ---
+# Its HL7 v2 messages come from @cosyte/synth 0.1.10 (generateOru with subject
+# "animal" and the seeds 4831 to 4834), and its expected v2 XML documents are
+# written from them: invented pet and owner name words, the pets' dates of birth,
+# record numbers, and 15-digit microchip numbers that begin 999, declared here
+# one by one. Name words declared above are not repeated.
+NAME CORPUSWORTH
+NAME FABRICA
+NAME FIXTUREPAW
+NAME MOCKWHISKER
+NAME PLACEHOLT
+NAME TESTBISCUIT
+DOB 20050810
+DOB 20070630
+DOB 20130720
+DOB 20170808
+ID 19189187
+ID 20040387
+ID 84910503
+ID 90158063
+ID 999135338116760
+ID 999740221020013
+ID 999773370184489
+ID 999862338928059
