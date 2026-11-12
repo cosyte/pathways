@@ -7,6 +7,13 @@
       "@cosyte/pathways": ["./src/index.ts"]
     }
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "templates/**/*.ts", "*.config.ts"],
+  "include": [
+    "src/**/*.ts",
+    "test/**/*.ts",
+    "scripts/**/*.ts",
+    "templates/**/*.ts",
+    "examples/**/*.ts",
+    "*.config.ts"
+  ],
   "exclude": ["node_modules", "dist", "coverage"]
 }

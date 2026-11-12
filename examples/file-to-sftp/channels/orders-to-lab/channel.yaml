@@ -1,0 +1,26 @@
+# yaml-language-server: $schema=../../node_modules/@cosyte/pathways/schema/channel.json
+
+# Read HL7 v2 orders dropped into a folder, keep the lab orders, address each to the reference lab,
+# and write it to a folder on the lab's SFTP server.
+name: orders-to-lab
+format: hl7v2
+
+# Each file dropped here is one message. Once it is stored, encrypted, the file is deleted.
+source:
+  file:
+    dir: ../../data/orders-to-lab/in
+
+transform: ./transform.ts
+
+destinations:
+  - file:
+      # The folder on the server, an absolute path there.
+      dir: { env: SFTP_DIR, default: /upload/orders }
+      sftp:
+        host: { env: SFTP_HOST, default: 127.0.0.1 }
+        port: { env: SFTP_PORT, default: 2222 }
+        user: { env: SFTP_USER, default: pathways }
+        # The private key to log in with, read at start. Paths are relative to this file.
+        key: { file: ../../secrets/sftp-key }
+        # The server's host key must be in this file: there is no setting that skips the check.
+        knownHosts: ../../secrets/known_hosts
