@@ -2,7 +2,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import fc from "fast-check";
-import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 
 import { loadProject } from "../src/config/load.js";
 import type { ChannelConfig, HealthConfig } from "../src/config/schema.js";
@@ -22,6 +22,7 @@ import {
   escapeLabel,
   METRIC_FAMILIES,
   METRICS_STORE_CACHE_MS,
+  METRICS_STORE_TIMEOUT_MS,
   OPENMETRICS_CONTENT_TYPE,
   type MetricsSnapshot,
 } from "../src/engine/metrics.js";
@@ -806,5 +807,54 @@ describe("the engine's metrics store reads", () => {
     clock.monotonic += METRICS_STORE_CACHE_MS;
     await engine.metricsSnapshot();
     expect(reads).toBe(2);
+  });
+
+  it("reads a store that never answers as down within the timeout, and as up once it answers", async () => {
+    const root = await makeProject({
+      "channels/adt/channel.yaml": CHANNEL,
+      "channels/adt/transform.ts": LAB_TRANSFORM,
+    });
+    const project = await loadProject(root);
+    const { logger } = captureLogger();
+    const store = new MemoryStore();
+    const clock = { monotonic: 1_000 };
+    const metrics = new EngineMetrics();
+    const engine = new Engine({
+      project,
+      store,
+      logger,
+      monotonic: () => clock.monotonic,
+      metrics,
+      connectors: (): ChannelConnectors => ({
+        source: { start: () => Promise.resolve() },
+        destinations: [failing, failing],
+      }),
+    });
+    engines.push(engine);
+    await engine.start();
+    const counts = store.messageCounts.bind(store);
+    // A database that hangs: the read neither answers nor fails.
+    store.messageCounts = () => new Promise(() => undefined);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      let answered = false;
+      const scrape = engine.metricsSnapshot().finally(() => {
+        answered = true;
+      });
+      await vi.advanceTimersByTimeAsync(METRICS_STORE_TIMEOUT_MS - 1);
+      expect(answered).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      const down = await scrape;
+      expect(down.store).toEqual({ up: false, latencySeconds: METRICS_STORE_TIMEOUT_MS / 1000 });
+      expect(down.channels).toEqual([{ channel: "adt", sourceUp: true }]);
+      expect(metrics.render(down)).toMatch(/^pathways_store_up 0$/m);
+
+      // It answers again: the next set of reads, after the cache, finds it up.
+      store.messageCounts = counts;
+      clock.monotonic += METRICS_STORE_CACHE_MS;
+      expect((await engine.metricsSnapshot()).store?.up).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

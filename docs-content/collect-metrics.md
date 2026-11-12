@@ -69,7 +69,10 @@ scrape_configs:
 
 One set of store gauges costs four counting reads of the database per channel, and
 `pathways_store_latency_seconds` reports how long they took. A set serves every scrape of the next 5
-seconds, so several collectors, or one that retries, read the database once.
+seconds, so several collectors, or one that retries, read the database once. A scrape waits at most
+5 seconds for them: a database that hangs, neither answering nor failing, reads as
+`pathways_store_up 0` within that time, so the scrape does not hang with it and the
+`PathwaysStoreDown` alert below can fire.
 
 ## Read them right
 
@@ -91,6 +94,11 @@ seconds, so several collectors, or one that retries, read the database once.
   `pathways_deliveries_failed` and `pathways_messages_failed` are read from the database (at most
   once every 5 seconds), so they survive a restart, and every node on the same database reports the same values.
   Take `max` over nodes, never `sum`.
+- **The oldest pending age counts from the message's last update.**
+  `pathways_oldest_pending_age_seconds` counts from when the oldest pending delivery's message was
+  transformed, replayed or resent, or had a failed delivery cleared, whichever came last. Clearing a
+  message's failed delivery to one destination restarts the age of its deliveries still pending at
+  the others.
 - **A standby serves no gauges.** Until it takes the engine lease, a standby
   (`pathways start --standby`) serves its counters, all 0, and nothing else.
 - **Labels are bounded.** Each series is labelled by `channel`, `destination` (the destination's

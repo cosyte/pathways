@@ -191,10 +191,10 @@ pathways_source_up{channel="orders"} 0
 # HELP pathways_open_connections Connections an MLLP or tcp source holds open.
 pathways_open_connections{channel="adt-to-lab"} 3
 # TYPE pathways_store_up gauge
-# HELP pathways_store_up 1 when the store answered its latest reads, 0 when it did not.
+# HELP pathways_store_up 1 when the store answered its latest reads within 5 seconds, 0 when one failed or it did not answer in time.
 pathways_store_up 1
 # TYPE pathways_store_latency_seconds gauge
 # UNIT pathways_store_latency_seconds seconds
-# HELP pathways_store_latency_seconds How long the store took to answer its latest reads.
+# HELP pathways_store_latency_seconds How long the store took to answer its latest reads; at least 5 when it did not answer within 5 seconds.
 pathways_store_latency_seconds 0.0125
 # EOF

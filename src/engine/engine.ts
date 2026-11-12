@@ -107,6 +107,7 @@ import type { EngineFence } from "./lease.js";
 import { channelStatus, type ChannelHealth, type EngineHealth, type PassCounts } from "./health.js";
 import {
   METRICS_STORE_CACHE_MS,
+  METRICS_STORE_TIMEOUT_MS,
   type ChannelGauges,
   type DeliveryOutcome,
   type EngineMetrics,
@@ -247,6 +248,9 @@ function nextPassId(nowMs: number): number {
 }
 /** A storage read for readiness that takes longer than this counts as storage unreachable. */
 const STORAGE_CHECK_TIMEOUT_MS = 5_000;
+
+/** {@link METRICS_STORE_TIMEOUT_MS} in seconds: the least a set of store reads that timed out took. */
+const METRICS_TIMEOUT_SECONDS = METRICS_STORE_TIMEOUT_MS / 1000;
 
 /**
  * The file extension a file destination writes for each format, from the format registry.
@@ -1867,24 +1871,38 @@ export class Engine {
 
   /**
    * One set of the store reads behind {@link metricsSnapshot}, in the project's channel order, and
-   * how long they took. Never rejects: a failed read leaves `channels` undefined.
+   * how long they took. Never rejects: a failed read leaves `channels` undefined, and so do reads
+   * that have not all answered within {@link METRICS_STORE_TIMEOUT_MS}, as the readiness check
+   * counts a read that hangs: a database that hangs reads as down, never as a scrape that hangs.
+   * Its latency is then the timeout, the least it took.
    */
   private async readStoreGauges(): Promise<StoreGauges> {
     const { project, store } = this.options;
     const began = this.monotonic();
+    const took = (): number => Math.max(0, this.monotonic() - began) / 1000;
+    let timer: NodeJS.Timeout | undefined;
+    const timedOut = new Promise<StoreGauges>((resolve) => {
+      timer = setTimeout(() => {
+        resolve({ channels: undefined, latencySeconds: Math.max(took(), METRICS_TIMEOUT_SECONDS) });
+      }, METRICS_STORE_TIMEOUT_MS);
+      timer.unref();
+    });
+    const reads = Promise.all(
+      project.channels.map(async ({ name }) => {
+        const [messages, queues] = await Promise.all([
+          store.messageCounts(name),
+          store.destinationQueues?.(name),
+        ]);
+        return { messagesFailed: messages.failed, queues };
+      }),
+    ).then(
+      (channels): StoreGauges => ({ channels, latencySeconds: took() }),
+      (): StoreGauges => ({ channels: undefined, latencySeconds: took() }),
+    );
     try {
-      const channels = await Promise.all(
-        project.channels.map(async ({ name }) => {
-          const [messages, queues] = await Promise.all([
-            store.messageCounts(name),
-            store.destinationQueues?.(name),
-          ]);
-          return { messagesFailed: messages.failed, queues };
-        }),
-      );
-      return { channels, latencySeconds: Math.max(0, this.monotonic() - began) / 1000 };
-    } catch {
-      return { channels: undefined, latencySeconds: Math.max(0, this.monotonic() - began) / 1000 };
+      return await Promise.race([reads, timedOut]);
+    } finally {
+      clearTimeout(timer);
     }
   }
 
