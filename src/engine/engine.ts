@@ -24,6 +24,7 @@ import {
   resolveHeaders,
   type Env,
 } from "../connectors/endpoint.js";
+import { DatabaseDestination, destinationDialect } from "../connectors/database.js";
 import { FileDestination, FileSource } from "../connectors/file.js";
 import { KnownHosts, pinnedKey } from "../connectors/known-hosts.js";
 import { SftpLocation } from "../connectors/sftp.js";
@@ -31,6 +32,7 @@ import { HttpDestination, HttpSource } from "../connectors/http.js";
 import { RedirectHeld, RetryableError } from "../connectors/http-core.js";
 import { MllpDestination, MllpSource } from "../connectors/mllp.js";
 import { loadMllpClientTls, loadMllpServerTls } from "../connectors/mllp-tls.js";
+import { readStatement, StatementError } from "../connectors/sql-statement.js";
 import { loadClientTls } from "../connectors/tls.js";
 import {
   DeliveryRejected,
@@ -81,7 +83,7 @@ export const LIVE_GRACE_MS = 60_000;
  * How long one delivery to `destination` may take in all (connecting, sending and waiting for the
  * receiver to confirm) before the engine cuts it off and counts the attempt as failed, to be
  * retried: an HTTP destination's `timeout` plus a second, twice an MLLP destination's `ackTimeout`
- * (one to connect, one for the ACK) plus a second, and a file or module destination's `timeout`,
+ * (one to connect, one for the ACK) plus a second, and a file, database or module destination's `timeout`,
  * 30 seconds by default. The second of grace lets the destination's own timeout, with its code,
  * come first.
  *
@@ -310,6 +312,11 @@ export interface ConnectorContext {
   readonly dryRun?: boolean | undefined;
   /** The secrets a start resolved; `env` alone without them. */
   readonly secrets?: Secrets | undefined;
+  /**
+   * The project's folder. A database destination's statement file must be inside it, once its
+   * symbolic links are followed, when it is read here; without it, a database destination is refused.
+   */
+  readonly root?: string | undefined;
 }
 
 /**
@@ -522,6 +529,38 @@ export async function connectorsFor(
           }),
         );
         break;
+      case "database": {
+        const where = `${file}: destinations.${index}.database`;
+        const { database } = destination;
+        let statement;
+        try {
+          // Checked again here, on the read whose SQL runs: a link on its path may have moved since
+          // the project loaded.
+          if (context.root === undefined) {
+            throw new StatementError(
+              "the project's folder is not known, so the file cannot be checked to be inside it",
+            );
+          }
+          statement = await readStatement(destination.statement, database.kind, context.root);
+        } catch (error) {
+          // Only a StatementError, whose text names a line and never the SQL.
+          throw new ConfigError([`${where}.statement: ${(error as StatementError).message}`]);
+        }
+        destinations.push(
+          new DatabaseDestination({
+            kind: database.kind,
+            dialect: await destinationDialect(database, {
+              env: secrets,
+              where: `${where}.${database.kind}`,
+              statementTimeoutMs: destination.statementTimeoutMs,
+            }),
+            statement,
+            expectRows: destination.expectRows,
+            statementTimeoutMs: destination.statementTimeoutMs,
+          }),
+        );
+        break;
+      }
       case "module":
         destinations.push(
           await customDestination(
@@ -849,7 +888,14 @@ export class Engine {
         let connectors: ChannelConnectors;
         try {
           connectors = await (this.options.connectors?.(config) ??
-            connectorsFor(config, { now: this.now, logger, env, secrets, dryRun }));
+            connectorsFor(config, {
+              now: this.now,
+              logger,
+              env,
+              secrets,
+              dryRun,
+              root: project.root,
+            }));
         } catch (error) {
           await hooks.stop();
           throw error;
@@ -1323,7 +1369,11 @@ export class Engine {
       logger.warn({ event: "plaintext-copies", channel: config.name, endpoint: "source" });
     }
     for (const [index, destination] of config.destinations.entries()) {
-      if ((destination.kind === "http" || destination.kind === "mllp") && destination.plaintext) {
+      const plaintext =
+        destination.kind === "database"
+          ? destination.database.kind !== "sqlite" && destination.database.plaintext
+          : (destination.kind === "http" || destination.kind === "mllp") && destination.plaintext;
+      if (plaintext) {
         logger.warn({
           event: "plaintext",
           channel: config.name,

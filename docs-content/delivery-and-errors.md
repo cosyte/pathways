@@ -84,7 +84,7 @@ so a receiver fed by two prefixes the pair with which one sent it.
 
 Each attempt, connecting, sending and waiting for the receiver to confirm, is cut off at a deadline:
 an HTTP destination's `timeout` and a second, twice an MLLP destination's `ackTimeout` and a second,
-and a file or module destination's `timeout` (30 seconds unless its block sets one). An attempt cut
+and a file, database or module destination's `timeout` (30 seconds unless its block sets one). An attempt cut
 off is retried as any other failure, with the code `DELIVERY_TIMEOUT`, and the destination was handed
 an aborted `signal`. A delivery cut off at its deadline may still arrive: the receiver may have it
 by then, and a destination that does not honour the `signal` may finish its send after the cut. The

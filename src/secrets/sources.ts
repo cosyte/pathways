@@ -137,6 +137,13 @@ function channelUses(channel: ChannelConfig, skipDry: DrySkip | undefined): Secr
     if (destination.kind === "file" && !dry) {
       uses.push(...sftpUses(destination.sftp, `${file}: destinations.${index}.file.sftp`));
     }
+    if (destination.kind === "database" && !dry && destination.database.kind !== "sqlite") {
+      const { database } = destination;
+      uses.push({
+        source: database.url,
+        where: `${file}: destinations.${index}.database.${database.kind}.url`,
+      });
+    }
   }
   uses.push(...hookUses(channel.hooks, file));
   return uses;
