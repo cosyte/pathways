@@ -1158,7 +1158,7 @@ const restateKinds =
   };
 
 const SOURCE_KINDS = ["file", "http", "mllp", "module"] as const;
-const DESTINATION_KINDS = ["file", "http", "mllp", "module"] as const;
+const DESTINATION_KINDS = ["file", "http", "mllp", "database", "module"] as const;
 const HOOK_KINDS = ["module", "webhook"] as const;
 
 /**
@@ -1181,6 +1181,92 @@ export const STORAGE_KINDS = ["sqlite", "postgres", "mysql", "sqlserver"] as con
  * ```
  */
 export type StorageKind = (typeof STORAGE_KINDS)[number];
+
+/** A database destination's connection pool: smaller than storage's, one per destination. */
+const destinationPool = z
+  .strictObject({
+    max: envable(
+      z
+        .number()
+        .int()
+        .min(1)
+        .max(1_000)
+        .meta({ description: "The most connections the pool opens, 1 to 1000. Default 2." }),
+    ).optional(),
+    idleTimeout: duration(
+      "How long an idle connection stays open: a duration such as 30s, or a number of milliseconds. Default 30s.",
+    ).optional(),
+  })
+  .meta({ description: "The destination's own connection pool, closed when the channel stops." });
+
+/** A database destination's server: a storage server block, with the URL required. */
+const destinationServer = restate(
+  z
+    .strictObject({
+      url: urlFromSecret.meta({
+        description:
+          "Where the connection URL is read at start: { env: NAME }, { file: path } or { secret: { provider, name } }.",
+      }),
+      tls: clientTls.optional(),
+      plaintext,
+      pool: destinationPool.optional(),
+      connectTimeout: duration(
+        "How long connecting may take: a duration such as 10s, or a number of milliseconds. Default 10s.",
+      ).optional(),
+    })
+    .superRefine((value, ctx) =>
+      tlsOrPlaintext(
+        value,
+        ctx,
+        "required: set tls: {} to verify the server against Node's built-in roots, tls: { ca } to trust your own CA, or plaintext: true to connect without TLS",
+      ),
+    ),
+  (json) => Object.assign(json, TLS_OR_PLAINTEXT),
+);
+
+/** A `database:` destination: exactly one database, and the statement run once per delivery. */
+const databaseDestination = restate(
+  z
+    .strictObject({
+      sqlite: z
+        .strictObject({
+          file: path.meta({ description: "The database file, relative to this file." }),
+        })
+        .meta({ description: "A SQLite database file, opened by the bundled driver." })
+        .optional(),
+      postgres: destinationServer
+        .meta({ description: "PostgreSQL. Needs the pg driver." })
+        .optional(),
+      mysql: destinationServer
+        .meta({ description: "MySQL or MariaDB. Needs the mysql2 driver." })
+        .optional(),
+      sqlserver: destinationServer
+        .meta({ description: "SQL Server. Needs the tedious and tarn drivers." })
+        .optional(),
+      statement: path.meta({
+        description:
+          "The SQL file run once per delivery, in a transaction of its own, relative to this file and inside the project: one statement, whose :messageId, :seq and :output are bound as parameters.",
+      }),
+      expectRows: envable(
+        z.number().int().min(0).meta({
+          description:
+            "How many rows the statement must change; any other count rejects the delivery. Default: any.",
+        }),
+      ).optional(),
+      statementTimeout: duration(
+        "How long the statement may run, or wait for a lock, on the server: a duration such as 10s, or a number of milliseconds. Default 10s.",
+        { ms: 1, message: 'a duration of at least 1ms, such as "10s"' },
+      ).optional(),
+    })
+    .meta({
+      description:
+        "Run one parameterised statement per output in a database: exactly one of sqlite, postgres, mysql or sqlserver, and statement.",
+    })
+    .superRefine(oneKind(STORAGE_KINDS)),
+  (json) => {
+    json.oneOf = exactlyOneOf(STORAGE_KINDS);
+  },
+);
 
 /** What a `storage:` block names: one of the databases, or a custom store's module. */
 const STORAGE_BLOCK_KINDS = [...STORAGE_KINDS, "module"] as const;
@@ -1895,11 +1981,12 @@ const destination = restate(
         .optional(),
       http: httpDestination.optional(),
       mllp: mllpDestination.optional(),
+      database: databaseDestination.optional(),
       module: modulePath.optional(),
       options: moduleOptions.optional(),
       retry: settingsShape.retry,
       timeout: duration(
-        "How long one delivery to a file or module destination may take in all before it is cut off and retried: a duration such as 30s, or a number of milliseconds. Default 30s. An http destination sets its own timeout, and an mllp one its ackTimeout.",
+        "How long one delivery to a file, database or module destination may take in all before it is cut off and retried: a duration such as 30s, or a number of milliseconds. Default 30s. An http destination sets its own timeout, and an mllp one its ackTimeout.",
         { ms: 1, message: 'a duration of at least 1ms, such as "30s"' },
       ).optional(),
       dryRun: envable(
@@ -1911,7 +1998,7 @@ const destination = restate(
     })
     .meta({
       description:
-        "One destination: exactly one of file, http, mllp or module, its own retry settings, and dryRun.",
+        "One destination: exactly one of file, http, mllp, database or module, its own retry settings, and dryRun.",
     })
     .superRefine(oneKind(DESTINATION_KINDS))
     .superRefine(optionsWithModule)
@@ -1923,7 +2010,7 @@ const destination = restate(
         code: "custom",
         path: ["timeout"],
         message:
-          "goes with file or module: an http destination sets timeout in its block, and an mllp one ackTimeout",
+          "goes with file, database or module: an http destination sets timeout in its block, and an mllp one ackTimeout",
       });
     }),
   restateKinds(DESTINATION_KINDS),
@@ -2533,6 +2620,31 @@ export interface MllpDestination {
   readonly ackTimeoutMs: number;
 }
 
+/**
+ * A database destination: the database it writes to, with its own small pool, and the statement
+ * file run once per delivery, resolved to an absolute path inside the project.
+ *
+ * @example
+ * ```ts
+ * const destination: DatabaseDestination = {
+ *   kind: "database",
+ *   database: { kind: "sqlite", file: "/srv/project/data/results.db" },
+ *   statement: "/srv/project/channels/results/insert.sql",
+ *   expectRows: 1,
+ *   statementTimeoutMs: 10_000,
+ * };
+ * ```
+ */
+export interface DatabaseDestination {
+  readonly kind: "database";
+  readonly database: DatabaseStorage;
+  readonly statement: string;
+  /** The number of rows the statement must change, or undefined for any. */
+  readonly expectRows: number | undefined;
+  /** How long the statement may run, or wait for a lock, on the server, in milliseconds. */
+  readonly statementTimeoutMs: number;
+}
+
 /** The health endpoint, from `pathways.yaml`. */
 export type HealthConfig = ListenerConfig;
 
@@ -2627,11 +2739,11 @@ export type HookConfig =
  * ```
  */
 export type DestinationConfig = (
-  FileDestination | HttpDestination | MllpDestination | ModuleConnector
+  FileDestination | HttpDestination | MllpDestination | DatabaseDestination | ModuleConnector
 ) & {
   readonly retry?: RetryPolicy;
   /**
-   * For a file or module destination whose block sets `timeout`: how long one delivery may take in
+   * For a file, database or module destination whose block sets `timeout`: how long one delivery may take in
    * all, in milliseconds. Unset, it is {@link DEFAULT_DELIVERY_TIMEOUT_MS}. An HTTP destination's
    * `timeoutMs` is its own.
    */
@@ -2671,7 +2783,7 @@ export interface PollConfig {
 /** How long one pass of a polled source may run by default before it is cut off: 5 minutes. */
 export const DEFAULT_POLL_DEADLINE_MS = 300_000;
 
-/** How long one delivery to a file or module destination may take by default: 30 seconds. */
+/** How long one delivery to a file, database or module destination may take by default: 30 seconds. */
 export const DEFAULT_DELIVERY_TIMEOUT_MS = 30_000;
 
 /** One channel, loaded, validated and resolved. */

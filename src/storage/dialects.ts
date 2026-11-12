@@ -89,6 +89,13 @@ export interface DialectOptions {
   readonly env: SecretReader;
   /** Imports a driver package. Defaults to a plain `import()`. */
   readonly importDriver?: DriverImport;
+  /**
+   * The file and key errors name, such as `channels/results/channel.yaml: destinations.0.database.postgres`.
+   * Defaults to `pathways.yaml: storage.<kind>`.
+   */
+  readonly where?: string | undefined;
+  /** On SQL Server, how long one request may run before the driver gives it up. Default 15s. */
+  readonly requestTimeoutMs?: number | undefined;
 }
 
 /** The URL schemes each database server's connection URL may use; the first is the one errors name. */
@@ -124,7 +131,7 @@ export async function dialectFor(
   options: DialectOptions,
 ): Promise<Dialect> {
   if (storage.kind === "sqlite") return sqliteDialect(storage.file);
-  const where = `pathways.yaml: storage.${storage.kind}`;
+  const where = options.where ?? `pathways.yaml: storage.${storage.kind}`;
   const url = readUrl(storage, options.env, `${where}.url`);
   const tls =
     storage.tls === undefined
@@ -142,7 +149,14 @@ export async function dialectFor(
     }
     case "sqlserver": {
       const [tedious, tarn] = await loadDrivers(storage.kind, load, where);
-      return sqlServerDialect(tedious as Tedious, tarn as Tarn, storage, url, tls);
+      return sqlServerDialect(
+        tedious as Tedious,
+        tarn as Tarn,
+        storage,
+        url,
+        tls,
+        options.requestTimeoutMs,
+      );
     }
   }
 }
@@ -272,6 +286,7 @@ function sqlServerDialect(
   storage: ServerStorage,
   url: URL,
   tls: TlsOptions | undefined,
+  requestTimeoutMs?: number,
 ): Dialect {
   const { host, port, user, password, database } = address(url, DEFAULT_PORTS.sqlserver);
   const Connection = quietConnection(tedious);
@@ -304,6 +319,7 @@ function sqlServerDialect(
             trustServerCertificate: false,
             cryptoCredentialsDetails: { ...tls },
             connectTimeout: storage.connectTimeoutMs,
+            ...(requestTimeoutMs === undefined ? {} : { requestTimeout: requestTimeoutMs }),
           },
         }),
     },

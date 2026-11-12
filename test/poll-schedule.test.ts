@@ -131,7 +131,7 @@ describe("timeout: on a destination", () => {
     "  - mllp: { host: lab.example.test, port: 2575, plaintext: true }\n    timeout: 5s\n",
   ])("refuses it on an http or mllp destination: %j", async (destination) => {
     expect(await problems(channel("", destination))).toEqual([
-      "channels/a/channel.yaml: destinations.0.timeout: goes with file or module: an http destination sets timeout in its block, and an mllp one ackTimeout",
+      "channels/a/channel.yaml: destinations.0.timeout: goes with file, database or module: an http destination sets timeout in its block, and an mllp one ackTimeout",
     ]);
   });
 

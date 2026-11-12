@@ -5,6 +5,7 @@ import { parse as parseYaml, YAMLParseError } from "yaml";
 import type { z } from "zod";
 
 import { normalisePath } from "../connectors/http-path.js";
+import { readStatement, type StatementError } from "../connectors/sql-statement.js";
 import { secretSourceOf, secretUses, type SecretSourceYaml } from "../secrets/sources.js";
 import { referencesIn, resolvingEnv, variableAt, type EnvReference } from "./env-ref.js";
 import { DEFAULT_INDEX_BITS, isLowEntropyKey } from "./meta-index.js";
@@ -32,6 +33,7 @@ import {
   type ChannelConfig,
   type ClientTlsFiles,
   type ContentPolicy,
+  type DatabaseDestination,
   type EncryptionConfig,
   type EndpointAuth,
   type HeaderValue,
@@ -291,6 +293,11 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
     ]);
     if (missing.length > 0) {
       problems.push(...missing);
+      continue;
+    }
+    const badStatements = await statementProblems(show(file), projectRoot, destinations);
+    if (badStatements.length > 0) {
+      problems.push(...badStatements);
       continue;
     }
     environment.push(...references);
@@ -635,6 +642,7 @@ function resolveConnector(
       ackTimeoutMs: mllp.ackTimeout ?? settings.ackTimeoutMs,
     };
   }
+  if (destination.database !== undefined) return resolveDatabase(destination.database, dir);
   if (http === undefined) {
     // The schema lets exactly one kind through, so a destination that is not HTTP is a file one.
     const file = destination.file as NonNullable<typeof destination.file>;
@@ -647,6 +655,77 @@ function resolveConnector(
     timeoutMs: http.timeout ?? DEFAULT_HTTP_TIMEOUT_MS,
     resendHeader: http.resendHeader,
   };
+}
+
+/** The most connections a database destination's pool opens, by default. */
+const DEFAULT_DESTINATION_POOL_MAX = 2;
+
+/** How long a database destination's statement may run on the server, by default. */
+const DEFAULT_STATEMENT_TIMEOUT_MS = 10_000;
+
+/**
+ * A `database:` destination, resolved: its SQLite file, TLS files and statement against `dir`, and
+ * every default filled in. The connection URL stays a secret reference until startup reads it.
+ */
+function resolveDatabase(
+  database: NonNullable<DestinationYaml["database"]>,
+  dir: string,
+): DatabaseDestination {
+  const settings = {
+    statement: resolve(dir, database.statement),
+    expectRows: database.expectRows,
+    statementTimeoutMs: database.statementTimeout ?? DEFAULT_STATEMENT_TIMEOUT_MS,
+  };
+  if (database.sqlite !== undefined) {
+    return {
+      kind: "database",
+      database: { kind: "sqlite", file: resolve(dir, database.sqlite.file) },
+      ...settings,
+    };
+  }
+  // The schema lets exactly one kind through.
+  const kind =
+    (["postgres", "mysql"] as const).find((each) => database[each] !== undefined) ?? "sqlserver";
+  const server = database[kind] as NonNullable<(typeof database)[typeof kind]>;
+  return {
+    kind: "database",
+    database: {
+      kind,
+      url: secretSourceOf(server.url, dir),
+      tls: server.tls === undefined ? undefined : resolveClientTls(server.tls, dir),
+      plaintext: server.plaintext === true,
+      pool: {
+        max: server.pool?.max ?? DEFAULT_DESTINATION_POOL_MAX,
+        idleTimeoutMs: server.pool?.idleTimeout ?? DEFAULT_POOL_IDLE_TIMEOUT_MS,
+      },
+      connectTimeoutMs: server.connectTimeout ?? DEFAULT_DATABASE_CONNECT_TIMEOUT_MS,
+    },
+    ...settings,
+  };
+}
+
+/**
+ * What is wrong with each database destination's statement file: missing, outside the project, or
+ * not one statement whose parameters Pathways binds.
+ */
+async function statementProblems(
+  file: string,
+  root: string,
+  destinations: readonly ChannelConfig["destinations"][number][],
+): Promise<string[]> {
+  const problems: string[] = [];
+  for (const [index, destination] of destinations.entries()) {
+    if (destination.kind !== "database") continue;
+    try {
+      await readStatement(destination.statement, destination.database.kind, root);
+    } catch (error) {
+      // Only a StatementError, whose text names a line and never the SQL.
+      problems.push(
+        `${file}: destinations.${index}.database.statement: ${(error as StatementError).message}`,
+      );
+    }
+  }
+  return problems;
 }
 
 /** An HTTP source's `response:`, resolved: headers marked as written or read at start. */

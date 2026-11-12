@@ -132,7 +132,7 @@ seconds, plus the poll interval, plus the longest time one step can take: the lo
 channel's transform `timeout` and each destination's
 [delivery deadline](./configuration-reference.md#every-delivery-has-a-deadline) (an HTTP
 destination's `timeout` plus a second, twice an MLLP destination's `ackTimeout` plus a second, and a
-file or module destination's `timeout`, 30 seconds by default). A polled source's pass runs beside
+file, database or module destination's `timeout`, 30 seconds by default). A polled source's pass runs beside
 the loop and is cut off at its own deadline, so it holds no step up. A source that is down or a
 destination that is down never makes the engine stalled, since the loop keeps stepping while it
 retries them and a restart would not bring them back; a standby, and an engine still starting or

@@ -24,12 +24,14 @@ import {
   resolveHeaders,
   type Env,
 } from "../connectors/endpoint.js";
+import { DatabaseDestination } from "../connectors/database.js";
 import { FileDestination, FileSource } from "../connectors/file.js";
 import { KnownHosts, pinnedKey } from "../connectors/known-hosts.js";
 import { SftpLocation } from "../connectors/sftp.js";
 import { HttpDestination, HttpSource } from "../connectors/http.js";
 import { RedirectHeld, RetryableError } from "../connectors/http-core.js";
 import { MllpDestination, MllpSource } from "../connectors/mllp.js";
+import { readStatement, type StatementError } from "../connectors/sql-statement.js";
 import { loadClientTls, loadServerTls } from "../connectors/tls.js";
 import {
   DeliveryRejected,
@@ -45,6 +47,7 @@ import type { ChannelContext } from "../extensions/types.js";
 import { AuditLog, auditEvent } from "../operator/audit.js";
 import { resolveSecrets, type Secrets, secretsOf } from "../secrets/resolve.js";
 import { recordRetention, runRetention, type RetentionReport } from "../operator/retention.js";
+import { dialectFor } from "../storage/dialects.js";
 import { copiesBodies, markCopiesBodies, release } from "../storage/ownership.js";
 import {
   channelStateStore,
@@ -80,7 +83,7 @@ export const LIVE_GRACE_MS = 60_000;
  * How long one delivery to `destination` may take in all (connecting, sending and waiting for the
  * receiver to confirm) before the engine cuts it off and counts the attempt as failed, to be
  * retried: an HTTP destination's `timeout` plus a second, twice an MLLP destination's `ackTimeout`
- * (one to connect, one for the ACK) plus a second, and a file or module destination's `timeout`,
+ * (one to connect, one for the ACK) plus a second, and a file, database or module destination's `timeout`,
  * 30 seconds by default. The second of grace lets the destination's own timeout, with its code,
  * come first.
  *
@@ -513,6 +516,32 @@ export async function connectorsFor(
           }),
         );
         break;
+      case "database": {
+        const where = `${file}: destinations.${index}.database`;
+        const { database } = destination;
+        let statement;
+        try {
+          statement = await readStatement(destination.statement, database.kind);
+        } catch (error) {
+          // Only a StatementError, whose text names a line and never the SQL.
+          throw new ConfigError([`${where}.statement: ${(error as StatementError).message}`]);
+        }
+        destinations.push(
+          new DatabaseDestination({
+            kind: database.kind,
+            dialect: await dialectFor(database, {
+              env: secrets,
+              where: `${where}.${database.kind}`,
+              // A second past the server's own limit, so its timeout, with its code, comes first.
+              requestTimeoutMs: destination.statementTimeoutMs + 1_000,
+            }),
+            statement,
+            expectRows: destination.expectRows,
+            statementTimeoutMs: destination.statementTimeoutMs,
+          }),
+        );
+        break;
+      }
       case "module":
         destinations.push(
           await customDestination(
@@ -1301,7 +1330,11 @@ export class Engine {
       logger.warn({ event: "plaintext-copies", channel: config.name, endpoint: "source" });
     }
     for (const [index, destination] of config.destinations.entries()) {
-      if ((destination.kind === "http" || destination.kind === "mllp") && destination.plaintext) {
+      const plaintext =
+        destination.kind === "database"
+          ? destination.database.kind !== "sqlite" && destination.database.plaintext
+          : (destination.kind === "http" || destination.kind === "mllp") && destination.plaintext;
+      if (plaintext) {
         logger.warn({
           event: "plaintext",
           channel: config.name,

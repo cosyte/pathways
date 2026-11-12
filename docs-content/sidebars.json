@@ -17,6 +17,7 @@
         "read-and-write-files",
         "send-and-receive-mllp",
         "send-and-receive-http",
+        "write-to-a-database",
         "work-with-formats",
         "store-messages-in-a-database",
         "encrypt-stored-messages",

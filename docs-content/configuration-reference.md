@@ -414,7 +414,7 @@ an API key header included.
 
 ### Destinations
 
-Each entry is exactly one of `file`, `http`, `mllp` or `module`, and may add a [`retry`](#retry)
+Each entry is exactly one of `file`, `http`, `mllp`, `database` or `module`, and may add a [`retry`](#retry)
 block of its own and `dryRun`, beside that key:
 
 ```yaml title="channels/results-out/channel.yaml"
@@ -429,7 +429,7 @@ destinations:
 | -------- | ------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `dryRun` | boolean | `false` | transform and record each output, mark its delivery `dry-run`, and never send it: no connector is built, so no TLS file is read and no connection opened, and none of its secrets is read or resolved at start, a provider's (`secret:`) included, so a missing or expired one does not stop the start. Takes an environment reference. When `dryRun` is read from an environment variable, setting that variable to `false` makes the destination send for real, and the audit log does not record that change |
 
-A `file` or `module` destination may also set `timeout`, a duration (`30s` by default): how long one
+A `file`, `database` or `module` destination may also set `timeout`, a duration (`30s` by default): how long one
 delivery may take in all before it is cut off and retried. See
 [Every delivery has a deadline](#every-delivery-has-a-deadline).
 
@@ -449,6 +449,7 @@ the attempt as failed with the code `DELIVERY_TIMEOUT`: it is retried by the des
 | `http`      | its `timeout` and one second                                            |
 | `mllp`      | twice its `ackTimeout` (one to connect, one for the ACK) and one second |
 | `file`      | its `timeout`, `30s` by default                                         |
+| `database`  | its `timeout`, `30s` by default                                         |
 | `module`    | its `timeout`, `30s` by default                                         |
 
 The second of grace lets an HTTP or MLLP destination's own timeout, with its own code, come first.
@@ -524,6 +525,24 @@ answer after it, and is retried when none comes within `timeout` or the connecti
 | `tls`        | [client TLS](#tls) | required unless `plaintext`; `{}` uses Node.js's built-in roots |
 | `plaintext`  | boolean            | `false`                                                         |
 | `ackTimeout` | duration           | the channel's                                                   |
+
+#### Database destination
+
+Exactly one of `postgres`, `mysql` (MySQL or MariaDB), `sqlserver` and `sqlite`, and `statement`:
+
+| Key                | Type                                                             | Default  |
+| ------------------ | ---------------------------------------------------------------- | -------- |
+| `postgres`         | a [database server](#database-server) block, with `url` required | none     |
+| `mysql`            | a [database server](#database-server) block, with `url` required | none     |
+| `sqlserver`        | a [database server](#database-server) block, with `url` required | none     |
+| `sqlite`           | `{ file: path }`, relative to the channel's folder               | none     |
+| `statement`        | path to a `.sql` file inside the project: one statement          | required |
+| `expectRows`       | 0 or more: the rows the statement must change                    | any      |
+| `statementTimeout` | duration                                                         | `10s`    |
+
+A server block's `pool.max` is `2` by default. The statement binds `:messageId`, `:seq` and
+`:output`; any other `:name` is refused when the project loads. A data or constraint error rejects
+the delivery; anything else is retried. See [Write outputs to a database](./write-to-a-database.md).
 
 #### Module destination
 
