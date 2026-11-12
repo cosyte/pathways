@@ -24,7 +24,7 @@ run() {
   shift
   printf '::group::$ %s (in %s)\n' "$*" "${PWD#"$ROOT"/}"
   local out code
-  out="$("$@" 2>&1)"
+  out="$(timeout -k 5 180 "$@" 2>&1 </dev/null)"
   code=$?
   printf '%s\n' "$out" | head -c 8000
   printf '\nexit %s\n::endgroup::\n' "$code"
@@ -47,6 +47,24 @@ wait_for() {
 }
 
 old_file() { touch -d '-1 minute' "$@"; }
+
+# stop_engine <signal>: signals the engine started in the background, waits up to 60 seconds for
+# it to exit, and kills what is left of it after that.
+stop_engine() {
+  kill "-$1" "$ENGINE"
+  local i
+  for ((i = 0; i < 120; i++)); do
+    if ! kill -0 "$ENGINE" 2>/dev/null; then
+      wait "$ENGINE"
+      ENGINE_EXIT=$?
+      return 0
+    fi
+    sleep 0.5
+  done
+  stall "the engine did not exit within 60 seconds of SIG$1"
+  pkill -KILL -f "pathways start" || true
+  ENGINE_EXIT=killed
+}
 
 echo "## The registry"
 mkdir -p "$ROOT/registry" && cd "$ROOT/registry" || exit 1
@@ -78,9 +96,8 @@ check "within 15 seconds the admission is data/adt-to-lab/out/1-1.hl7" \
 check "1-1.hl7 matches tests/a01.expected.hl7" \
   'cmp -s data/adt-to-lab/out/1-1.hl7 channels/adt-to-lab/tests/a01.expected.hl7'
 check "the inbox is empty again" '[ -z "$(ls -A data/adt-to-lab/in | grep -v "^\.")" ]'
-kill -INT "$ENGINE"
-wait "$ENGINE"
-echo "npm start exited $? after SIGINT; its log:"
+stop_engine INT
+echo "npm start exited $ENGINE_EXIT after SIGINT; its log:"
 cut -c1-300 "$ROOT/engine-1.log"
 check "the log has received, transformed, filtered and delivered lines" \
   'grep -q received "$ROOT/engine-1.log" && grep -q transformed "$ROOT/engine-1.log" && grep -q filtered "$ROOT/engine-1.log" && grep -q delivered "$ROOT/engine-1.log"'
@@ -236,9 +253,8 @@ run 0 npx pathways channel resume export-in
 run 0 npx pathways channel halt export-in --deadline 5s --json
 run 0 npx pathways channel resume export-in
 run 1 npx pathways start --once
-kill -TERM "$ENGINE"
-wait "$ENGINE"
-echo "pathways start exited $? after SIGTERM; its log, levels and events:"
+stop_engine TERM
+echo "pathways start exited $ENGINE_EXIT after SIGTERM; its log:"
 cut -c1-300 "$ROOT/engine-2.log"
 check "the second engine logged no error" '! grep -q "\"level\":\"error\"" "$ROOT/engine-2.log"'
 run 1 npx pathways channel pause http-sink
