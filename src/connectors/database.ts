@@ -132,19 +132,27 @@ export class DatabaseDestination implements DestinationConnector {
     // the limit goes first in the statement's own batch.
     const inBatch = kind === "sqlserver";
     const text = inBatch ? `${String(limit)};\n${statement.sql}` : statement.sql;
+    // What failed inside the transaction: a rollback that fails after it (SQL Server ends the
+    // transaction itself on some errors, such as a failed conversion) does not hide it.
+    let failure: { readonly thrown: unknown } | undefined;
     try {
       await this.#db.transaction().execute(async (trx) => {
-        if (limit !== undefined && !inBatch) await trx.executeQuery(CompiledQuery.raw(limit));
-        const result = await trx.executeQuery(CompiledQuery.raw(text, values));
-        const rows = result.numAffectedRows;
-        if (expectRows !== undefined && (rows === undefined || Number(rows) !== expectRows)) {
-          throw new DeliveryRejected(
-            `expectRows ${expectRows}, changed ${rows === undefined ? "none" : String(rows)}`,
-          );
+        try {
+          if (limit !== undefined && !inBatch) await trx.executeQuery(CompiledQuery.raw(limit));
+          const result = await trx.executeQuery(CompiledQuery.raw(text, values));
+          const rows = result.numAffectedRows;
+          if (expectRows !== undefined && (rows === undefined || Number(rows) !== expectRows)) {
+            throw new DeliveryRejected(
+              `expectRows ${expectRows}, changed ${rows === undefined ? "none" : String(rows)}`,
+            );
+          }
+        } catch (thrown) {
+          failure = { thrown };
+          throw thrown;
         }
       });
     } catch (error) {
-      throw databaseFailure(kind, error);
+      throw databaseFailure(kind, failure === undefined ? error : failure.thrown);
     }
   }
 
