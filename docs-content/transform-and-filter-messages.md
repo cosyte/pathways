@@ -239,7 +239,7 @@ export default ((msg) => {
 - **A logger that takes ids only.** `ctx.logger.info`, `warn` and `error` take a code of lower-case
   words joined by hyphens and numbers by name, and nothing else, so no message content, patient
   detail or secret reaches the log through them. Each line is a `channel-script` event with the
-  channel's name.
+  channel's name. See [what is safe to log from a channel](./logs-and-codes.md#what-is-safe-to-log-from-a-channel).
 
 ```yaml title="channels/results-to-ehr/channel.yaml"
 source:

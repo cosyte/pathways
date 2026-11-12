@@ -1,0 +1,15 @@
+{
+  "examplePrint": {
+    "required": true,
+    "accessors": [
+      "source.name",
+      "source.headers",
+      "source.facts",
+      "remoteAddress",
+      "tlsPeerSubject",
+      "ctx.config",
+      "ctx.source"
+    ],
+    "wholeValues": ["body", "content", "raw", "output", "outputs", "ack", "ctx", "input"]
+  }
+}

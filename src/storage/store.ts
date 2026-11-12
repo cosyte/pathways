@@ -1049,7 +1049,7 @@ export type RefusalReason = "not-found" | "changed" | "pending" | "not-failed" |
  *
  * @example
  * ```ts
- * const result: RequeueResult = await store.requeue(12, request, "noah");
+ * const result: RequeueResult = await store.requeue(12, request, "ops");
  * if (!result.done) console.log(result.reason);
  * ```
  */
@@ -1080,8 +1080,8 @@ export type RequeueResult =
  *
  * @example
  * ```ts
- * const result: ClearResult = await store.clear(12, "noah");
- * if (result.done) console.log(result.messages, result.deliveries);
+ * const result: ClearResult = await store.clear(12, "ops");
+ * const cleared = result.done ? result.deliveries : 0; // a count of deliveries
  * ```
  */
 export type ClearResult =
@@ -1394,7 +1394,7 @@ export type AuditDetail = Readonly<Record<string, string | number | boolean>>;
  *
  * @example
  * ```ts
- * await store.appendAudit("noah", [{ action: "content-view", channel: "adt", messageId: 12 }]);
+ * await store.appendAudit("ops", [{ action: "content-view", channel: "adt", messageId: 12 }]);
  * ```
  */
 export interface AuditInput {

@@ -788,7 +788,7 @@ An audit entry to append. The store adds the time and the actor.
 #### Example
 
 ```ts
-await store.appendAudit("noah", [{ action: "content-view", channel: "adt", messageId: 12 }]);
+await store.appendAudit("ops", [{ action: "content-view", channel: "adt", messageId: 12 }]);
 ```
 
 #### Properties
@@ -7435,8 +7435,8 @@ Its deliveries that had failed for good.
 #### Example
 
 ```ts
-const result: ClearResult = await store.clear(12, "noah");
-if (result.done) console.log(result.messages, result.deliveries);
+const result: ClearResult = await store.clear(12, "ops");
+const cleared = result.done ? result.deliveries : 0; // a count of deliveries
 ```
 
 ***
@@ -8263,7 +8263,7 @@ Earlier deliveries that had failed for good, now cleared.
 #### Example
 
 ```ts
-const result: RequeueResult = await store.requeue(12, request, "noah");
+const result: RequeueResult = await store.requeue(12, request, "ops");
 if (!result.done) console.log(result.reason);
 ```
 

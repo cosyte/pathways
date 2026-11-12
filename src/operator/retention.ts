@@ -156,7 +156,7 @@ function codeOf(error: unknown): string {
  * @example
  * ```ts
  * const report = await runRetention(store, project, { now: Date.now(), dryRun: true });
- * console.log(report.messages, report.deliveries);
+ * const changed = report.messages + report.deliveries; // counts of rows, never their content
  * ```
  */
 export async function runRetention(
