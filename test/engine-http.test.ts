@@ -49,6 +49,9 @@ const IDENTITY = {
   draining: false,
 } as const;
 
+/** The health block's metrics as `pathways.yaml` leaves them by default. */
+const METRICS_ON = { enabled: true, allowUnauthenticated: false } as const;
+
 let certs: Certificates;
 beforeAll(() => {
   certs = makeCertificates();
@@ -515,7 +518,14 @@ describe("health", () => {
     const report = (): Promise<HealthReport> =>
       Promise.resolve({ ...IDENTITY, status: "ok", storage: "ok", channels: {} });
     const open = healthEndpointFor(
-      { host: "127.0.0.1", port: 1, tls: undefined, plaintext: true, auth: { kind: "none" } },
+      {
+        host: "127.0.0.1",
+        port: 1,
+        tls: undefined,
+        plaintext: true,
+        auth: { kind: "none" },
+        metrics: METRICS_ON,
+      },
       report,
       {},
       logger,
@@ -524,6 +534,7 @@ describe("health", () => {
     expect(events).toEqual([
       expect.objectContaining({ level: 40, event: "plaintext", endpoint: "health" }),
       expect.objectContaining({ level: 40, event: "unauthenticated", endpoint: "health" }),
+      expect.objectContaining({ level: 40, event: "metrics-refused", endpoint: "health" }),
     ]);
     expect(() =>
       healthEndpointFor(
@@ -533,6 +544,7 @@ describe("health", () => {
           tls: { cert: certs.files.serverCert, key: certs.files.serverKey, ca: undefined },
           plaintext: false,
           auth: { kind: "bearer", env: "PATHWAYS_HEALTH_TOKEN" },
+          metrics: METRICS_ON,
         },
         report,
         {},
@@ -549,6 +561,7 @@ describe("health", () => {
         tls: { cert: certs.files.serverCert, key: certs.files.serverKey, ca: undefined },
         plaintext: false,
         auth: { kind: "bearer", env: "PATHWAYS_HEALTH_TOKEN" },
+        metrics: METRICS_ON,
       },
       report,
       { PATHWAYS_HEALTH_TOKEN: HEALTH_TOKEN },

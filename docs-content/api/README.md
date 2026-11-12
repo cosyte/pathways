@@ -1650,6 +1650,53 @@ Releases what the destination keeps open between deliveries, such as connections
 
 ***
 
+### DestinationQueue
+
+One destination's queue, as `/metrics` reports it: counts and a time, never content.
+
+#### Example
+
+```ts
+const queue: DestinationQueue = {
+  destination: 0, pending: 3, retrying: 1, failed: 0, oldestPendingSince: "2026-11-10T07:52:16.000Z",
+};
+```
+
+#### Properties
+
+##### destination
+
+> `readonly` **destination**: `number`
+
+The destination's index in the channel's `destinations:` list.
+
+##### failed
+
+> `readonly` **failed**: `number`
+
+Its deliveries that failed for good and are not cleared.
+
+##### oldestPendingSince
+
+> `readonly` **oldestPendingSince**: `string` \| `undefined`
+
+When the oldest of its pending deliveries was queued (its message transformed, replayed or
+resent, as the message's last update), ISO 8601 in UTC; undefined when none is pending.
+
+##### pending
+
+> `readonly` **pending**: `number`
+
+Its deliveries pending, those waiting for a retry among them.
+
+##### retrying
+
+> `readonly` **retrying**: `number`
+
+Its pending deliveries that failed at least once and wait for a retry.
+
+***
+
 ### ExpireResult
 
 What retention deleted, or would delete, from one channel.
@@ -2791,6 +2838,24 @@ How many deliveries of a channel stand at each status; `dry-run` only when some 
 
 `Promise`\<[`DeliveryCounts`](#deliverycounts-1)\>
 
+##### destinationQueues()?
+
+> `optional` **destinationQueues**(`channel`): `Promise`\<[`DestinationQueue`](#destinationqueue)[]\>
+
+Each destination of a channel with a delivery pending or failed: its counts, and when its
+oldest pending delivery was queued. A destination with neither is left out. Optional: without
+it, `/metrics` serves no queue gauges for the store's channels.
+
+###### Parameters
+
+###### channel
+
+`string`
+
+###### Returns
+
+`Promise`\<[`DestinationQueue`](#destinationqueue)[]\>
+
 ##### expire()
 
 > **expire**(`channel`, `cutoff`, `dryRun`): `Promise`\<[`ExpireResult`](#expireresult)\>
@@ -3571,6 +3636,42 @@ const tag: MetaTag = { index: "mrn", keyId: "prod-2026", tag: "a3f0" };
 ##### tag
 
 > `readonly` **tag**: `string`
+
+***
+
+### MetricFamily
+
+One metric family: its name (without the `_total` a counter's sample adds), its type, its unit
+when it has one (the name then ends with it), what it counts and its labels.
+
+#### Example
+
+```ts
+const family: MetricFamily = METRIC_FAMILIES[0];
+console.log(family.name, family.type, family.labels.join(","));
+```
+
+#### Properties
+
+##### help
+
+> `readonly` **help**: `string`
+
+##### labels
+
+> `readonly` **labels**: readonly (`"channel"` \| `"destination"` \| `"outcome"`)[]
+
+##### name
+
+> `readonly` **name**: `string`
+
+##### type
+
+> `readonly` **type**: [`MetricType`](#metrictype)
+
+##### unit
+
+> `readonly` **unit**: `"seconds"` \| `undefined`
 
 ***
 
@@ -6319,6 +6420,20 @@ type Claim = MessageTypes["x12"]; // X12Interchange
 
 ***
 
+### MetricType
+
+> **MetricType** = `"counter"` \| `"gauge"` \| `"histogram"`
+
+The type of one metric family, as OpenMetrics names it.
+
+#### Example
+
+```ts
+const type: MetricType = "counter";
+```
+
+***
+
 ### RefusalReason
 
 > **RefusalReason** = `"not-found"` \| `"changed"` \| `"pending"` \| `"not-failed"` \| `"content-dropped"`
@@ -6843,6 +6958,35 @@ the YAML names some of these to receive only those.
 
 ```ts
 LIFECYCLE_EVENTS.includes("delivered"); // true
+```
+
+***
+
+### METRIC\_FAMILIES
+
+> `const` **METRIC\_FAMILIES**: readonly [`MetricFamily`](#metricfamily)[]
+
+Every metric family `/metrics` serves, in the order it serves them. The names are a stable
+contract: alarms and dashboards read them, so a name is never changed or reused, only added.
+
+#### Example
+
+```ts
+METRIC_FAMILIES.map((family) => family.name).includes("pathways_queue_depth"); // true
+```
+
+***
+
+### OPENMETRICS\_CONTENT\_TYPE
+
+> `const` **OPENMETRICS\_CONTENT\_TYPE**: `"application/openmetrics-text; version=1.0.0; charset=utf-8"` = `"application/openmetrics-text; version=1.0.0; charset=utf-8"`
+
+The media type `/metrics` answers with: OpenMetrics 1.0.0 text.
+
+#### Example
+
+```ts
+response.setHeader("Content-Type", OPENMETRICS_CONTENT_TYPE);
 ```
 
 ***

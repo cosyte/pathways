@@ -207,7 +207,13 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
   const health =
     project.health === undefined
       ? undefined
-      : resolveListener(project.health, projectRoot, DEFAULT_HEALTH_TOKEN_ENV);
+      : {
+          ...resolveListener(project.health, projectRoot, DEFAULT_HEALTH_TOKEN_ENV),
+          metrics: {
+            enabled: project.health.metrics?.enabled ?? true,
+            allowUnauthenticated: project.health.metrics?.allowUnauthenticated ?? false,
+          },
+        };
   const probes =
     project.probes === undefined
       ? undefined

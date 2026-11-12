@@ -19,6 +19,7 @@ import {
   projectSchema,
 } from "../src/config/schema.js";
 import { ChannelWorker } from "../src/engine/channel-worker.js";
+import { METRIC_FAMILIES } from "../src/engine/metrics.js";
 import type { CsvSettings } from "../src/engine/worker-entry.js";
 import { generateKey } from "../src/encryption/keys.js";
 import {
@@ -242,6 +243,28 @@ describe("the settings tables", () => {
       }
       expect(shown, name).toEqual(engine);
     }
+  });
+});
+
+describe("the metrics table of the configuration reference", () => {
+  it("names every family /metrics serves, in order, with its type and labels", () => {
+    const rows = page("configuration-reference.md")
+      .split("\n")
+      .filter((line) => line.startsWith("| `pathways_"))
+      .map((line) => line.split("|").map((cell) => cell.trim()));
+    expect(
+      rows.map(([, name = "", type = "", labels = ""]) => [
+        name.replaceAll("`", ""),
+        type,
+        labels === "none" ? "" : labels.replaceAll(" ", ""),
+      ]),
+    ).toEqual(
+      METRIC_FAMILIES.map((family) => [
+        family.type === "counter" ? `${family.name}_total` : family.name,
+        family.type,
+        family.labels.join(","),
+      ]),
+    );
   });
 });
 
@@ -930,6 +953,10 @@ describe("check status and health", () => {
                 "live\n",
               );
               expect(cli(["probe", "--ready"], dir)).toMatchObject({ code: 0, out: "ready\n" });
+              // Plaintext with auth: none, as here, refuses /metrics, as the metrics page says.
+              const metrics = await fetch(`http://127.0.0.1:${port}/metrics`);
+              expect(metrics.status).toBe(403);
+              expect(await metrics.text()).toContain("allowUnauthenticated");
             } finally {
               const code = await engine.stop();
               // Windows: ended at once, so its exit code says nothing (test/engine-stop.test.ts).

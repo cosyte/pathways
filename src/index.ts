@@ -9,8 +9,8 @@
  * wrap, and a fake secret provider for tests. The engine itself runs through the `pathways` command.
  *
  * Nothing here loads the engine, the transports or a database driver: apart from `DeliveryRejected`,
- * `EncryptionError`, `SecretError`, `defaultAckBuilder`, `fakeSecretProvider`, `LIFECYCLE_EVENTS` and
- * `VERSION`, every export is a type.
+ * `EncryptionError`, `SecretError`, `defaultAckBuilder`, `fakeSecretProvider`, `LIFECYCLE_EVENTS`,
+ * `METRIC_FAMILIES`, `OPENMETRICS_CONTENT_TYPE` and `VERSION`, every export is a type.
  */
 export { VERSION } from "./version.js";
 export type { Format } from "./config/schema.js";
@@ -130,6 +130,7 @@ export type {
   DeliveryCounts,
   DeliveryStatus,
   DeliveryTally,
+  DestinationQueue,
   ExpireResult,
   LeaseStore,
   MessageQuery,
@@ -171,6 +172,12 @@ export {
   type LeaseHolder,
 } from "./storage/lease.js";
 export type { AuditListener } from "./operator/audit.js";
+export {
+  METRIC_FAMILIES,
+  OPENMETRICS_CONTENT_TYPE,
+  type MetricFamily,
+  type MetricType,
+} from "./engine/metrics.js";
 export type {
   ArchivedDelivery,
   ArchivedMessage,

@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import SqliteDatabase from "better-sqlite3";
 
 import { EXIT, run } from "../src/cli.js";
+import { OPENMETRICS_CONTENT_TYPE } from "../src/engine/metrics.js";
 import { generateKey } from "../src/encryption/keys.js";
 import { VERSION } from "../src/index.js";
 import {
@@ -305,6 +306,13 @@ describe("pathways start with HTTP and health", () => {
         channels: { adt: { status: "ok", source: "up" } },
       });
       expect((await send(port, { method: "GET" })).status).toBe(401);
+      // The metrics, behind the same token: the engine's counters and its gauges.
+      const metrics = await send(port, { method: "GET", path: "/metrics", headers: auth });
+      expect(metrics.status).toBe(200);
+      expect(metrics.headers["content-type"]).toBe(OPENMETRICS_CONTENT_TYPE);
+      expect(metrics.body).toMatch(/^pathways_source_up\{channel="adt"\} 1$/m);
+      expect(metrics.body).toMatch(/^pathways_store_up 1$/m);
+      expect((await send(port, { method: "GET", path: "/metrics" })).status).toBe(401);
       stop.abort();
       expect((await running).code).toBe(EXIT.ok);
       await expect(send(port, { method: "GET", headers: auth })).rejects.toThrow();

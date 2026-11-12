@@ -30,6 +30,7 @@ import {
 } from "./engine/engine.js";
 import {
   healthEndpointFor,
+  metricsMode,
   type EngineIdentity,
   type HealthEndpoint,
   type HealthReport,
@@ -48,6 +49,7 @@ import {
   type EngineState,
   type ProbeEndpoint,
 } from "./engine/probes.js";
+import { EngineMetrics } from "./engine/metrics.js";
 import { EXIT } from "./exit.js";
 import { faultPoint } from "./fault-points.js";
 import { HookSet } from "./extensions/hooks.js";
@@ -759,6 +761,16 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
   const audit = auditFor(store, io, (error) => {
     logger.warn({ event: "audit-listener-failed", code: errorCode(error) });
   });
+  // Counted only when the health endpoint serves them; a single pass serves no endpoint.
+  const metrics =
+    !once && project.health !== undefined && metricsMode(project.health) === "serve"
+      ? new EngineMetrics(
+          project.channels.map(({ name, destinations }) => ({
+            name,
+            destinations: destinations.length,
+          })),
+        )
+      : undefined;
   const engine = new Engine({
     project,
     store,
@@ -769,6 +781,7 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
     keys: opened.keys,
     dryRun: mode.dryRun,
     ...(lease === undefined ? {} : { fence: lease }),
+    ...(metrics === undefined ? {} : { metrics }),
   });
   let active = !standby;
   const report = async (): Promise<HealthReport> => {
@@ -789,7 +802,13 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
   if (!once) {
     try {
       if (project.health !== undefined) {
-        health = healthEndpointFor(project.health, report, secrets, logger, probes);
+        // A standby serves its counters, all 0, and no gauges until it takes the lease.
+        const scrape =
+          metrics === undefined
+            ? undefined
+            : async (): Promise<string> =>
+                metrics.render(active ? await engine.metricsSnapshot() : { channels: [] });
+        health = healthEndpointFor(project.health, report, secrets, logger, probes, scrape);
       }
       if (project.probes !== undefined) probeListener = probeEndpointFor(project.probes, probes);
     } catch (error) {

@@ -113,6 +113,8 @@ describe("an MLLP source's bounds", () => {
     const second = await hold(port);
     await until(() => source.refusedConnections > 0, 200);
     expect(source.refusedConnections).toBe(0);
+    // A count only, for /metrics: the two it holds.
+    expect(source.openConnections).toBe(2);
 
     const third = await hold(port);
     await third.closed;
@@ -144,6 +146,9 @@ describe("an MLLP source's bounds", () => {
     const fourth = await exchange(port, [MSG(4)], { replies: 1 });
     expect(msaOf(fourth.replies[0] ?? "")).toEqual(["AA", "MSG00004"]);
     second.socket.destroy();
+    await source.stop();
+    // Stopped, it holds none.
+    expect(source.openConnections).toBe(0);
   });
 
   it("caps connections at 100 and messages at 4 MiB when the block sets neither", () => {

@@ -225,8 +225,50 @@ The event names are `received`, `receive-failed`, `transformed`, `filtered`, `tr
 
 ### Health endpoint
 
-A [listener](#listener). Its token is read from `PATHWAYS_HEALTH_TOKEN` when `auth` is not set. See
-[Check status and health](./check-status-and-health.md).
+A [listener](#listener), with `metrics`. Its token is read from `PATHWAYS_HEALTH_TOKEN` when `auth`
+is not set. See [Check status and health](./check-status-and-health.md).
+
+| Key                            | Type    | Default |
+| ------------------------------ | ------- | ------- |
+| `metrics.enabled`              | boolean | `true`  |
+| `metrics.allowUnauthenticated` | boolean | `false` |
+
+`GET /metrics` serves the [metrics](#metrics) in the OpenMetrics text format, behind the endpoint's
+token or mutual TLS. On a listener with `plaintext: true` and `auth: none`, where anyone who can
+reach the port could read it, `/metrics` answers 403 and `metrics-refused` is logged at start,
+unless `metrics.allowUnauthenticated` is `true`. With `metrics.enabled: false`, `/metrics` answers
+with the health body, as any other path does. See [Collect metrics](./collect-metrics.md).
+
+#### Metrics
+
+What `/metrics` serves, as `application/openmetrics-text; version=1.0.0`. These names are a stable
+contract: alarms and dashboards read them, so a name is never renamed or reused, only added. The
+labels are only `channel` (the channel's name), `destination` (its index in `destinations:`) and
+`outcome` (one of the values listed), never a message id, a metadata key, an error's text or a host.
+A counter starts at 0 when the engine starts, with its `_created` time; a gauge marked _store_ is
+read from the database at each scrape, so it holds across a restart and is the same on every node.
+
+| Name                                  | Type      | Labels                        | What it is                                                                                                                                         |
+| ------------------------------------- | --------- | ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pathways_messages_received_total`    | counter   | channel, outcome              | messages a source handed in: `stored`, `failed` (stored as failed) or `not_stored` (storage refused it, so it was not acknowledged)                |
+| `pathways_transforms_total`           | counter   | channel, outcome              | transforms run: `transformed`, `filtered` or `failed`                                                                                              |
+| `pathways_deliveries_total`           | counter   | channel, destination, outcome | delivery attempts: `delivered`, `retry`, `redirected`, `rejected`, `exhausted` or `dry_run`                                                        |
+| `pathways_delivery_duration_seconds`  | histogram | channel, destination          | how long each attempt took, from its hand-over until the destination answered or failed; buckets from 0.005 to 60 seconds, and `+Inf`              |
+| `pathways_queue_depth`                | gauge     | channel, destination          | _store_: deliveries pending                                                                                                                        |
+| `pathways_oldest_pending_age_seconds` | gauge     | channel, destination          | _store_: how long the oldest pending delivery has waited since it was queued (its message transformed, replayed or resent); 0 when none is pending |
+| `pathways_deliveries_retrying`        | gauge     | channel, destination          | _store_: pending deliveries that failed at least once and wait for a retry                                                                         |
+| `pathways_deliveries_failed`          | gauge     | channel, destination          | _store_: deliveries that failed for good and are not cleared                                                                                       |
+| `pathways_messages_failed`            | gauge     | channel                       | _store_: messages that failed and are not cleared                                                                                                  |
+| `pathways_source_up`                  | gauge     | channel                       | 1 while the source listens or polls, 0 while it cannot                                                                                             |
+| `pathways_open_connections`           | gauge     | channel                       | connections an MLLP or tcp source holds open; absent for any other source                                                                          |
+| `pathways_store_up`                   | gauge     | none                          | 1 when the database answered this scrape's reads, 0 when it did not                                                                                |
+| `pathways_store_latency_seconds`      | gauge     | none                          | how long the database took to answer this scrape's reads                                                                                           |
+
+The histogram's samples are `_bucket` (with `le`), `_count`, `_sum` and `_created`, and each
+counter's are `_total` and `_created`. When the database cannot be read, `pathways_store_up` is 0
+and the _store_ gauges are left out of that scrape. A standby serves its counters, all 0, and no
+gauges until it takes the engine lease. The _store_ gauges for a destination come from the built-in
+stores; a custom store serves them when it has `destinationQueues`.
 
 ### Probe listener
 

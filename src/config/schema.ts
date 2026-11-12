@@ -2061,10 +2061,33 @@ const secretProviders = restate(
   },
 );
 
-/** The health endpoint: a listener. */
+/** What the health endpoint's `/metrics` does. */
+const healthMetrics = z
+  .strictObject({
+    enabled: z
+      .boolean()
+      .meta({
+        description:
+          "Whether GET /metrics serves the engine's metrics in the OpenMetrics text format. Default true.",
+      })
+      .optional(),
+    allowUnauthenticated: z
+      .boolean()
+      .meta({
+        description:
+          "Serve /metrics on a listener with plaintext: true and auth: none, where anyone who can reach the port reads it. Default false: such a listener answers /metrics with 403.",
+      })
+      .optional(),
+  })
+  .meta({
+    description:
+      "GET /metrics: on by default, behind the endpoint's token or mutual TLS. Refused on a plaintext listener without authentication unless allowUnauthenticated is true.",
+  });
+
+/** The health endpoint: a listener, with its metrics. */
 const health = restate(
   z
-    .strictObject(listenerShape)
+    .strictObject({ ...listenerShape, metrics: healthMetrics.optional() })
     .meta({
       description:
         "The health endpoint, served while the engine runs. Its token is read from PATHWAYS_HEALTH_TOKEN unless auth says otherwise.",
@@ -3723,8 +3746,19 @@ export const DEFAULT_TCP_STALL_TIMEOUT_MS = 30_000;
 /** How long a tcp destination waits to connect, and then for the send and its reply: 10 seconds. */
 export const DEFAULT_TCP_TIMEOUT_MS = 10_000;
 
+/**
+ * What the health endpoint's `/metrics` does: whether it serves the metrics, and whether it may on
+ * a plaintext listener without authentication.
+ */
+export interface HealthMetricsConfig {
+  readonly enabled: boolean;
+  readonly allowUnauthenticated: boolean;
+}
+
 /** The health endpoint, from `pathways.yaml`. */
-export type HealthConfig = ListenerConfig;
+export interface HealthConfig extends ListenerConfig {
+  readonly metrics: HealthMetricsConfig;
+}
 
 /**
  * The probe listener, from `pathways.yaml`'s `probes` block: where it listens. It serves plain HTTP

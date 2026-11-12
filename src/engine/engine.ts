@@ -77,6 +77,7 @@ import type { SourceFacts } from "../transform.js";
 import { ChannelWorker, TransformLoadError, type TransformOutcome } from "./channel-worker.js";
 import type { EngineFence } from "./lease.js";
 import { channelStatus, type ChannelHealth, type EngineHealth } from "./health.js";
+import type { ChannelGauges, DeliveryOutcome, EngineMetrics, MetricsSnapshot } from "./metrics.js";
 import { formatTable, type FailureSummary } from "./worker-entry.js";
 import { DeadlineTimer } from "./deadline.js";
 import { nextPollAt, pollOf } from "./schedule.js";
@@ -759,6 +760,11 @@ export interface EngineOptions {
    * Node's timers; tests pass their own clock's, with `now` from the same clock.
    */
   readonly wait?: EngineWait;
+  /**
+   * The metrics `/metrics` serves: the engine counts each message received, transform run and
+   * delivery attempt in them, and how long each attempt took. Without them it counts nothing.
+   */
+  readonly metrics?: EngineMetrics;
 }
 
 interface RunningChannel {
@@ -1558,6 +1564,71 @@ export class Engine {
   }
 
   /**
+   * The gauges a scrape of `/metrics` reads: whether each channel's source is up, the connections
+   * an MLLP or tcp source holds, and from the store, each channel's failed messages and each
+   * destination's queue. How long the store took is measured over all its reads; when one fails,
+   * the store reads as down and its gauges are left out. Counts and times, never content.
+   */
+  async metricsSnapshot(): Promise<MetricsSnapshot> {
+    const { project, store } = this.options;
+    const down = new Set(this.channels.filter(isDown).map((c) => c.config.name));
+    const live = (name: string): Omit<ChannelGauges, "messagesFailed" | "destinations"> => {
+      const source = this.channels.find((c) => c.config.name === name)?.connectors.source;
+      return {
+        channel: name,
+        sourceUp: !down.has(name),
+        ...(source instanceof MllpSource || source instanceof TcpSource
+          ? { openConnections: source.openConnections }
+          : {}),
+      };
+    };
+    const began = this.monotonic();
+    try {
+      const channels = await Promise.all(
+        project.channels.map(async ({ name, destinations }): Promise<ChannelGauges> => {
+          const [messages, queues] = await Promise.all([
+            store.messageCounts(name),
+            store.destinationQueues?.(name),
+          ]);
+          const now = this.now();
+          return {
+            ...live(name),
+            messagesFailed: messages.failed,
+            ...(queues === undefined
+              ? {}
+              : {
+                  destinations: destinations.map((_, destination) => {
+                    const queue = queues.find((q) => q.destination === destination);
+                    const since =
+                      queue?.oldestPendingSince === undefined
+                        ? Number.NaN
+                        : Date.parse(queue.oldestPendingSince);
+                    return {
+                      destination,
+                      queueDepth: queue?.pending ?? 0,
+                      oldestPendingAgeSeconds: Number.isNaN(since)
+                        ? 0
+                        : Math.max(0, now - since) / 1000,
+                      retrying: queue?.retrying ?? 0,
+                      failed: queue?.failed ?? 0,
+                    };
+                  }),
+                }),
+          };
+        }),
+      );
+      const latencySeconds = Math.max(0, this.monotonic() - began) / 1000;
+      return { store: { up: true, latencySeconds }, channels };
+    } catch {
+      const latencySeconds = Math.max(0, this.monotonic() - began) / 1000;
+      return {
+        store: { up: false, latencySeconds },
+        channels: project.channels.map(({ name }) => live(name)),
+      };
+    }
+  }
+
+  /**
    * How many connections a channel's MLLP or tcp source closed at accept for being over its cap, for
    * the health body; nothing for any other source. A count only, never who connected.
    */
@@ -1978,12 +2049,14 @@ export class Engine {
   }
 
   /**
-   * Hands an event to the channel's hooks and the engine-wide ones. Never waits, never throws. The
-   * event is built only when some hook will be handed it.
+   * Hands an event to the metrics, the channel's hooks and the engine-wide ones. Never waits, never
+   * throws. The event is built only when the metrics or some hook will be handed it.
    */
   private emit(channel: RunningChannel, event: () => LifecycleEvent): void {
-    if (channel.hooks.empty && (this.hooks?.empty ?? true)) return;
+    const { metrics } = this.options;
+    if (channel.hooks.empty && (this.hooks?.empty ?? true) && metrics === undefined) return;
     const built = event();
+    metrics?.observe(built);
     channel.hooks.emit(built);
     this.hooks?.emit(built);
   }
@@ -2290,6 +2363,7 @@ export class Engine {
             destination: index,
             delivery: delivery.id,
           });
+          this.options.metrics?.deliveryAttempt(config.name, index, "dry_run");
           continue;
         }
         // Still marked: an attempt was handed over and its outcome never recorded, so it counts.
@@ -2349,9 +2423,17 @@ export class Engine {
           expired = true;
           cutOff.abort();
         });
+        // How long the attempt took, from its hand-over until the destination answered or failed,
+        // counted under its outcome once that is recorded.
+        const began = this.monotonic();
+        let tookMs = 0;
         const ended = (): void => {
+          tookMs = Math.max(0, this.monotonic() - began);
           deadline.clear();
           halt.removeEventListener("abort", onHalt);
+        };
+        const counted = (outcome: DeliveryOutcome): void => {
+          this.options.metrics?.deliveryAttempt(config.name, index, outcome, tookMs / 1000);
         };
         try {
           await untilAborted(
@@ -2390,6 +2472,7 @@ export class Engine {
               delivery: delivery.id,
               reason: error.reason,
             });
+            counted("rejected");
             this.emit(channel, () => ({
               type: "delivery-rejected",
               at: this.at(),
@@ -2430,6 +2513,7 @@ export class Engine {
               reason: exhausted,
               code,
             });
+            counted("exhausted");
             this.emit(channel, () => ({
               type: "delivery-exhausted",
               at: this.at(),
@@ -2459,6 +2543,7 @@ export class Engine {
               status,
               locationHost,
             });
+            counted("redirected");
             this.emit(channel, () => ({
               type: "delivery-redirected",
               at: this.at(),
@@ -2478,6 +2563,7 @@ export class Engine {
               retryInMs: wait,
               code,
             });
+            counted("retry");
             this.emit(channel, () => ({
               type: "delivery-retry",
               at: this.at(),
@@ -2518,6 +2604,7 @@ export class Engine {
           delivery: delivery.id,
           ...(resend === undefined ? {} : { resend }),
         });
+        counted("delivered");
         this.emit(channel, () => ({ type: "delivered", at: this.at(), ...about }));
       }
     }

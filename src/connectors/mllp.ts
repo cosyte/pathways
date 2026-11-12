@@ -227,6 +227,11 @@ export class MllpSource implements SourceConnector {
     return this.refused;
   }
 
+  /** How many connections the source holds open now: a count only, never who connected. */
+  get openConnections(): number {
+    return this.server?.getStats().connections ?? 0;
+  }
+
   /** The port the source listens on, or undefined when it is not listening. */
   get port(): number | undefined {
     return this.server?.getStats().port ?? undefined;
