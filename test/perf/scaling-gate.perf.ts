@@ -39,6 +39,19 @@ import { decode } from "../../src/engine/worker-entry.js";
 const CR = 0x0d;
 /** The bytes of one ORU^R01 OBX segment, near enough to turn a segment count into a size. */
 const OBX_BYTES = 70;
+/**
+ * A synthetic comment each OBX on the size axis carries in OBX-10, which makes a segment about four
+ * times as long. `readHeader` reads every byte to find each segment's start, so its cost follows the
+ * bytes; the quadratic self-check's cost follows the segment count. Longer segments lengthen the
+ * clean phase without making the self-check's quadratic pass, which already takes seconds, longer
+ * by as much.
+ */
+const OBX_NOTE = "SYNTHETIC RESULT COMMENT ".repeat(9);
+
+/** An ORU^R01 with `segments` OBX segments, each holding {@link OBX_NOTE}. */
+function longOru(i: number, segments: number): Uint8Array {
+  return bytesOf(oruMessage(i, segments * OBX_BYTES).replaceAll("|N|||F|", `|N||${OBX_NOTE}|F|`));
+}
 /** The bytes of one JSON lab record in `jsonRecords`, near enough to turn a count into a size. */
 const RECORD_BYTES = 125;
 
@@ -86,14 +99,16 @@ const headerOptions: ScalingGateOptions<Uint8Array, HeaderReading> = {
   name: "@cosyte/pathways readHeader",
   parse: (payload) => readHeader(payload),
   weigh: (reading) => (reading.problem === undefined ? 1 : 0),
-  // 2,000 headers measured a clean base phase of 20.9 ms and 24 reports 16.5 ms on a runner, both
-  // over 10 ms. At 48 reports the self-check's quadratic pass took over a second, and its warmup did
-  // not settle inside its 5 s bound on a busy machine, so the size axis stays at 24.
+  // 2,000 headers measured a clean base phase of 20.9 ms on a runner, over 10 ms. At 48 reports the
+  // self-check's quadratic pass took over a second, and its warmup did not settle inside its 5 s
+  // bound on a busy machine, so the size axis stays at 24. Once the scan for a second header stopped
+  // allocating for each segment, 24 reports of plain OBX segments measured 2.9 ms on a runner, under
+  // the 4 ms floor: each OBX carries a comment, about four times the bytes, for 10 ms or more.
   count: { n: 2_000, generate: (i) => bytesOf(adtMessage(i)) },
   size: {
     inputs: 24,
     size: 1_000,
-    generate: (i, segments) => bytesOf(oruMessage(i, segments * OBX_BYTES)),
+    generate: (i, segments) => longOru(i, segments),
   },
 };
 
@@ -136,7 +151,7 @@ describe("the scaling gate: readHeader", () => {
   });
 
   it("has fixtures large enough for that gate to fail", () => {
-    const sample = bytesOf(oruMessage(0, 50 * OBX_BYTES));
+    const sample = longOru(0, 50);
     expect(Buffer.from(resegmentQuadratically(sample)).equals(Buffer.from(sample))).toBe(true);
     const report = assertScalingGateFires(headerOptions, {
       regressedParse: (payload) => readHeader(resegmentQuadratically(payload)),

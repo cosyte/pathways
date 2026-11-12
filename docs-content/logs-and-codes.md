@@ -190,7 +190,9 @@ a tcp destination's framing cannot carry.
 
 When an MLLP source stores a message as failed, the reason is one of `@cosyte/hl7`'s parse codes (such
 as `NO_MSH_SEGMENT`), `NO_CONTROL_ID`, `MULTIPLE_MESSAGES` or `MLLP_TRAILING_BYTES`. An ACK builder
-receives it as `problem`.
+receives it as `problem`. `MULTIPLE_MESSAGES` means the frame held a second message header (`MSH`,
+`FHS` or `BHS`, in any case): a frame is one message. On an `hl7v2` channel the engine stores a body
+from any other source that holds one as failed with `inbound: MULTIPLE_MESSAGES` too.
 
 ## File source codes
 
