@@ -76,7 +76,9 @@ health:
   request headers reach a transform stays in the file, where a credential header is refused at load.
   Nor is a channel's `index:` block: which `ctx.meta` keys are stored as searchable tags, and how
   many bits each keeps, stays in the file, where the audit sees it. Nor is an SFTP block's
-  `weakAlgorithms`: turning a SHA-1 algorithm back on stays in the file too. Nor is a `csv` channel's
+  `weakAlgorithms`: turning a SHA-1 algorithm back on stays in the file too. Nor are a channel
+  destination's `name` and `carryMeta`: the links between channels, which start checks for loops, and
+  the identifiers a message carries across them, stay in the file. Nor is a `csv` channel's
   `csv:` block: how its bodies are read and written belongs with its `format`.
 - `pathways validate --print` prints the configuration as `start` reads it, with every setting the
   environment gave and the variable it named; see

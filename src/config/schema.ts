@@ -2779,7 +2779,9 @@ const source = restate(
         code: "custom",
         path: ["poll"],
         message:
-          "goes with file or module: http, mllp and tcp listen, and channel is handed messages",
+          value.channel === undefined
+            ? "goes with file or module: http, mllp and tcp listen rather than poll"
+            : "goes with file or module: a channel source is handed its messages",
       });
     }),
   restateKinds(SOURCE_KINDS),
