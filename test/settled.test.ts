@@ -49,14 +49,33 @@ export default (options: { file: string }) => ({
 });
 `;
 
-/** An engine-wide hook that holds each event until its time limit, so its queue fills. */
+/**
+ * An engine-wide hook that holds each event until the test calls {@link releaseStuckHook} (or its
+ * time limit), so its queue fills, and frees no slot while the test runs: with a time limit longer
+ * than the test, no slot frees between the last delivery and the settle, however slow the database.
+ */
 const STUCK_HOOK = `
+const gate = globalThis as { syntheticHookGate?: Promise<void>; releaseSyntheticHook?: () => void };
+const released = (gate.syntheticHookGate ??= new Promise<void>((resolve) => {
+  gate.releaseSyntheticHook = resolve;
+}));
 export default () => ({
   onEvent(_event: unknown, signal: AbortSignal): Promise<void> {
-    return new Promise((resolve) => signal.addEventListener("abort", () => resolve()));
+    return new Promise((resolve) => {
+      signal.addEventListener("abort", () => resolve());
+      void released.then(resolve);
+    });
   },
 });
 `;
+
+/** Lets {@link STUCK_HOOK} take each event at once, so an engine stopped after it stops quickly. */
+function releaseStuckHook(): void {
+  const gate = globalThis as { releaseSyntheticHook?: () => void; syntheticHookGate?: unknown };
+  gate.releaseSyntheticHook?.();
+  delete gate.releaseSyntheticHook;
+  delete gate.syntheticHookGate;
+}
 
 /**
  * Bodies starting `null` are filtered, `throw` fail their transform, `many` give 600 outputs; any
@@ -83,7 +102,11 @@ interface Setup {
   readonly logs: LogEvent[];
 }
 
-async function setUp(database: TestDatabase, hook = RECORDING_HOOK): Promise<Setup> {
+async function setUp(
+  database: TestDatabase,
+  hook = RECORDING_HOOK,
+  hookTimeout = "1s",
+): Promise<Setup> {
   const root = await makeProject({
     "hooks/hook.ts": hook,
     "channels/adt/channel.yaml":
@@ -95,7 +118,7 @@ async function setUp(database: TestDatabase, hook = RECORDING_HOOK): Promise<Set
   const hookFile = join(root, "events.jsonl");
   await writeFile(
     join(root, "pathways.yaml"),
-    `hooks:\n  - module: ./hooks/hook.ts\n    options: { file: ${JSON.stringify(hookFile)} }\n    timeout: 1s\n`,
+    `hooks:\n  - module: ./hooks/hook.ts\n    options: { file: ${JSON.stringify(hookFile)} }\n    timeout: ${hookTimeout}\n`,
   );
   const project = await loadProject(root);
   const store = await (await testStorage(database, project.databaseFile)).open();
@@ -141,6 +164,24 @@ async function setUp(database: TestDatabase, hook = RECORDING_HOOK): Promise<Set
 async function stop(engine: Engine): Promise<void> {
   engines.splice(engines.indexOf(engine), 1);
   await engine.stop();
+}
+
+/**
+ * `store`, waiting 1.5 seconds before it records a message settled: longer than a 1 second hook
+ * limit, as a slow database can take between a message's last delivery and its settle.
+ */
+function slowToSettle(store: Store): MessageStore {
+  return new Proxy(store, {
+    get(target, property) {
+      const value: unknown = Reflect.get(target, property, target);
+      if (typeof value !== "function") return value;
+      if (property !== "settle") return (value as (...args: unknown[]) => unknown).bind(target);
+      return async (...args: unknown[]): Promise<unknown> => {
+        await new Promise((resolve) => setTimeout(resolve, 1_500));
+        return (value as (...args: unknown[]) => Promise<unknown>).apply(target, args);
+      };
+    },
+  });
 }
 
 const shape = (event: SettledEvent): unknown => ({
@@ -337,17 +378,23 @@ for (const database of TEST_DATABASES) {
     });
 
     it("is recorded while a hook's queue is full: the event is dropped, the record stands", async () => {
-      const { inbox, store, engine, logs } = await setUp(database, STUCK_HOOK);
-      const running = await engine();
-      inbox.push("many outputs");
-      await running.tick();
-      // 1,200 delivered events wait behind the stuck hook's first: the settled event was dropped,
-      // and logged as such, and the message is recorded as settled all the same.
-      expect(logs).toContainEqual(
-        expect.objectContaining({ event: "hook-dropped", on: "settled" }),
-      );
-      expect(await store.unsettled("adt", 0, 10)).toEqual([]);
-      expect(await store.settle(1)).toBeUndefined();
+      // The hook's limit outlasts the test, and the settle comes later than a 1 second limit
+      // would: no slot frees before it, so the event is dropped on every database.
+      const { inbox, store, engine, logs } = await setUp(database, STUCK_HOOK, "10m");
+      try {
+        const running = await engine({ store: slowToSettle(store) });
+        inbox.push("many outputs");
+        await running.tick();
+        // 1,200 delivered events wait behind the stuck hook's first: the settled event was
+        // dropped, and logged as such, and the message is recorded as settled all the same.
+        expect(logs).toContainEqual(
+          expect.objectContaining({ event: "hook-dropped", on: "settled" }),
+        );
+        expect(await store.unsettled("adt", 0, 10)).toEqual([]);
+        expect(await store.settle(1)).toBeUndefined();
+      } finally {
+        releaseStuckHook();
+      }
     }, 60_000);
   });
 }
