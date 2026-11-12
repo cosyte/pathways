@@ -21,6 +21,9 @@ import { connectorsFor } from "../src/engine/engine.js";
 import { captureLogger, cleanUp, dropFile, makeProject, usePlatform } from "./helpers.js";
 
 afterEach(cleanUp);
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 /**
  * What a sink was handed, in order: each body as text, its idempotency key, the source facts the file
@@ -75,6 +78,27 @@ async function pass(source: FileSource): Promise<string[]> {
   return received.map((r) => r.body);
 }
 
+/**
+ * Runs every include and exclude pattern with no time limit, for a test that says what one pass
+ * takes and is not about the limit. The limit is time on the clock, so a host that leaves the test's
+ * thread waiting past it, as a busy Windows runner can, stops a harmless run, and the source leaves
+ * that file for the next pass, as it means to: one pass takes one file fewer, for the host's sake.
+ * The tests of the limit force their timeouts through node:vm below, and the two that run a pattern
+ * built to run long keep the real limit.
+ */
+function patternsUntimed(): void {
+  // The real method, called below on the script it was asked of, so `this` is bound there.
+  // eslint-disable-next-line @typescript-eslint/unbound-method
+  const run = Script.prototype.runInContext;
+  vi.spyOn(Script.prototype, "runInContext").mockImplementation(function (
+    this: Script,
+    context,
+    options,
+  ): unknown {
+    return run.call(this, context, { ...options, timeout: undefined });
+  });
+}
+
 /** Every file under `dir`, by its path from it with `/`, sorted, `.claimed/` left out. */
 async function tree(dir: string): Promise<string[]> {
   const entries = await readdir(dir, { recursive: true, withFileTypes: true });
@@ -110,6 +134,7 @@ describe.each([
   beforeEach(() => usePlatform(platform));
 
   it("takes only files whose path matches include and none of exclude, by glob", async () => {
+    patternsUntimed();
     const dir = await inbox();
     for (const name of ["a.hl7", "b.txt", "sub/c.hl7", "sub/deep/d.hl7", "sub/skip.hl7"]) {
       await dropFile(join(dir, name), name);
@@ -124,6 +149,7 @@ describe.each([
   });
 
   it("matches a regex on the path with / on every platform, and needs only one include to match", async () => {
+    patternsUntimed();
     const dir = await inbox();
     for (const name of ["ADT_1.hl7", "ADT_x.hl7", "in/ADT_2.hl7", "ORU_3.hl7", "keep.me"]) {
       await dropFile(join(dir, name), name);
@@ -526,7 +552,9 @@ describe.each([
   );
 
   it("passes each file it takes its path from dir and its size, through each option that takes one", async () => {
+    patternsUntimed();
     const dir = await inbox();
+    const errors: unknown[] = [];
     for (const [name, body] of [
       ["a.hl7", "1"],
       ["sub/b.hl7", "22"],
@@ -547,8 +575,12 @@ describe.each([
       minSize: 1,
       maxSize: 6,
       keepProcessed: true,
+      onReadError: (error) => errors.push(error),
     });
-    expect(await factsOf(source)).toEqual([
+    const facts = await factsOf(source);
+    // First, so a file a pass left for a reason of the host's fails with that reason's code.
+    expect(errors).toEqual([]);
+    expect(facts).toEqual([
       { source: { name: ".dot/d.hl7" }, size: 4 },
       { source: { name: "a.hl7" }, size: 1 },
       { source: { name: "sub/b.hl7" }, size: 2 },
@@ -590,6 +622,7 @@ describe.each([
   });
 
   it("hands in nothing, so no facts, for a file it sets aside or leaves", async () => {
+    patternsUntimed();
     const dir = await inbox();
     const errorDir = join(dir, "errors");
     await dropFile(join(dir, "a", "big.hl7"), "12345");
@@ -1059,6 +1092,7 @@ describe("a file source built from channel.yaml", () => {
   });
 
   it("takes the options the channel names, and logs a file set aside without naming it", async () => {
+    patternsUntimed();
     const root = await makeProject({
       "channels/adt/channel.yaml": [
         "source:",
