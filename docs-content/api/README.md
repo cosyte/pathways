@@ -8902,7 +8902,7 @@ The code a transform fails with when `ctx.route` names no channel with a `channe
 
 ### VERSION
 
-> `const` **VERSION**: `"0.0.4"` = `"0.0.4"`
+> `const` **VERSION**: `"0.0.5"` = `"0.0.5"`
 
 The version of `@cosyte/pathways`, kept equal to `package.json#version` (a test fails when they
 differ).
