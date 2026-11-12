@@ -2,7 +2,7 @@
 id: stop-and-upgrade-a-node
 title: Stop and upgrade a node
 sidebar_label: Stop and upgrade a node
-description: "Stop a Pathways node behind a load balancer without losing or cutting off a message: it turns not ready, waits for the balancer, finishes the work in flight within a bound, releases its lease, and exits 0. Recipes for an AWS Network Load Balancer, Kubernetes and Azure Container Apps."
+description: "Stop a Pathways node behind a load balancer without losing a message, on an AWS Network Load Balancer, Kubernetes or Azure Container Apps."
 ---
 
 # Stop and upgrade a node

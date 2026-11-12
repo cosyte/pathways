@@ -10,8 +10,9 @@ description: "A code-first healthcare integration engine for Node.js. Channels a
 A code-first healthcare integration engine for Node.js. Channels are YAML files in git, transforms
 are TypeScript functions, and both are tested like any other code.
 
-> **Pathways is early.** We are building it in the open, and it is not released yet. The package is
-> not on npm, and nothing here is ready to run.
+Pathways is published on npm as `@cosyte/pathways`. It is early: the version is 0.0.x, and a
+release may still change a key or an API, which its changelog says. [Install it](./installation.md)
+and follow the [quickstart](./quickstart.md) to a delivered message.
 
 ## What it does
 
@@ -26,8 +27,11 @@ so a restart loses nothing.
   several messages, or `null` to filter it out. Node.js runs it as it is, with no build step, in a
   worker thread of the channel's own.
 - **Formats.** HL7 v2, FHIR R4 JSON, X12, and C-CDA arrive parsed, through our open-source
-  `@cosyte/*` libraries. JSON arrives as a value and anything else as text.
-- **Connectors.** MLLP, HTTP, TCP with your own framing, and files, in and out, over TLS by default.
+  `@cosyte/*` libraries. JSON arrives as a value and anything else as text. CSV and fixed-width text
+  land in the next release.
+- **Connectors.** MLLP, HTTP, and files in a folder or on an SFTP server, in and out, over TLS by
+  default. TCP with your own framing, SMTP, and files on Amazon S3 and Azure Blob Storage land in
+  the next release.
 - **Storage.** SQLite with no setup, or PostgreSQL, MySQL or MariaDB, and SQL Server, with every
   stored message encrypted at rest.
 - **Operations from the command line.** `pathways status`, `messages`, `replay`, `clear`,
