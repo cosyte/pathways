@@ -86,6 +86,7 @@ describe("the smtp: block", () => {
       subject: "Pathways message {{ messageId }}-{{ seq }}",
       body: "Channel {{ channel }} sent message {{ messageId }}, output {{ seq }}.",
       attach: false,
+      onPartialRefusal: "rejected",
       maxBytes: 10_485_760,
       connectTimeoutMs: 10_000,
       greetingTimeoutMs: 10_000,
@@ -103,6 +104,7 @@ describe("the smtp: block", () => {
         'subject: "Result {{ meta.kind }}"',
         'body: "Message {{ messageId }}"',
         "attach: true",
+        "onPartialRefusal: delivered",
         "maxSize: 64KB",
         "connectTimeout: 2s",
         "greetingTimeout: 3s",
@@ -119,6 +121,7 @@ describe("the smtp: block", () => {
       subject: "Result {{ meta.kind }}",
       body: "Message {{ messageId }}",
       attach: true,
+      onPartialRefusal: "delivered",
       maxBytes: 65_536,
       connectTimeoutMs: 2_000,
       greetingTimeoutMs: 3_000,
@@ -250,7 +253,6 @@ describe("start, building an SMTP destination", () => {
   it("reads the login, and sends with it", async () => {
     const server = await peer({
       auth: { user: "pathways", password: "synthetic-password", mechanisms: ["PLAIN"] },
-      rcpt: (address) => (address === "ward@example.test" ? 550 : 250),
     });
     const root = await project([
       "  - smtp:",
@@ -260,7 +262,6 @@ describe("start, building an SMTP destination", () => {
       "      plaintext: true",
       "      from: pathways@example.test",
       "      to: [lab@example.test]",
-      "      cc: [ward@example.test]",
     ]);
     const [config] = (await loadProject(root)).channels;
     const { logger, events } = captureLogger();
@@ -277,18 +278,60 @@ describe("start, building an SMTP destination", () => {
     });
     expect(server.taken[0]?.to).toEqual(["lab@example.test"]);
     expect(server.taken[0]?.data).not.toContain("filename=");
-    expect(events).toEqual([
-      expect.objectContaining({
-        level: 40,
-        event: "smtp-recipients-refused",
-        channel: "adt",
-        destination: 0,
-        message: 3,
+    expect(events).toEqual([]);
+  });
+
+  it("rejects a partial refusal by default, delivers it when asked, and logs the count either way", async () => {
+    for (const [setting, outcome] of [
+      [[], "rejected"],
+      [["      onPartialRefusal: delivered"], "delivered"],
+    ] as const) {
+      const server = await peer({
+        rcpt: (address) => (address === "ward@example.test" ? 550 : 250),
+      });
+      const root = await project([
+        "  - smtp:",
+        "      host: 127.0.0.1",
+        `      port: ${String(server.port)}`,
+        "      plaintext: true",
+        "      from: pathways@example.test",
+        "      to: [lab@example.test]",
+        "      cc: [ward@example.test]",
+        ...setting,
+      ]);
+      const [config] = (await loadProject(root)).channels;
+      const { logger, events } = captureLogger();
+      const { destinations } = await connectorsFor(config as ChannelConfig, {
+        now: Date.now,
+        logger,
+        env: {},
+      });
+      const sent = destinations[0]?.deliver({
+        messageId: 3,
         seq: 1,
-        refused: 1,
-      }),
-    ]);
-    expect(JSON.stringify(events)).not.toContain("ward@example.test");
+        body: new TextEncoder().encode(ADT_A01),
+      });
+      if (outcome === "rejected") {
+        await expect(sent).rejects.toMatchObject({ reason: "SMTP_RCPT_PARTIAL" });
+      } else {
+        await sent;
+      }
+      // The server took the message for the recipient it accepted either way.
+      expect(server.taken[0]?.to).toEqual(["lab@example.test"]);
+      expect(events).toEqual([
+        expect.objectContaining({
+          level: 40,
+          event: "smtp-recipients-refused",
+          channel: "adt",
+          destination: 0,
+          message: 3,
+          seq: 1,
+          refused: 1,
+          outcome,
+        }),
+      ]);
+      expect(JSON.stringify(events)).not.toContain("ward@example.test");
+    }
   });
 
   it("refuses to start without the login's secret, naming the file and key", async () => {

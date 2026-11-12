@@ -49,7 +49,9 @@ destinations:
 - **`tls: {}`** runs TLS from the first byte, on port 465 unless `port` says otherwise. This is the
   way to run SMTP we recommend.
 - **`tls: { mode: starttls }`** connects on port 587 and upgrades with STARTTLS. A server that does
-  not offer STARTTLS fails the attempt; the email is never sent without TLS.
+  not take STARTTLS fails the attempt; the email is never sent without TLS. Anything the server
+  sends between its answer to STARTTLS and the handshake is thrown away, never read as if it came
+  over TLS.
 - **`tls.ca`** names a CA to trust in place of Node.js's built-in roots, for a server with a
   certificate from your own CA. The server's certificate is always verified, and TLS 1.2 is the
   oldest version used.
@@ -57,7 +59,8 @@ destinations:
   your own network. The engine logs `plaintext` for the destination at every start, and a block with
   `plaintext: true` cannot log in: a password is never sent without TLS.
 - **`user` and `password`** are [secrets](./read-secrets.md), read when the engine starts, and go
-  together. Pathways logs in with `AUTH PLAIN`, or `AUTH LOGIN` where the server offers only that.
+  together. Pathways logs in only once TLS is up, with the first of `AUTH PLAIN`, `AUTH LOGIN` and
+  `AUTH CRAM-MD5` the server offers.
 - **`from`, `to` and `cc`** are plain addresses, such as `lab-desk@example.test`, written in the
   block. Recipients never come from the message.
 
@@ -111,26 +114,35 @@ takes.
 An email is delivered only when the server answers 250 to its data. Everything else is read by
 where it came and its reply code:
 
-| What happened                                                                                                                                                                                                | Outcome                                                                                                         |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------- |
-| a 4xx anywhere, such as a 421 greeting or a 452 to a recipient                                                                                                                                               | retried, by the destination's [retry](./configuration-reference.md#retry) settings                              |
-| the connection could not be made, was lost, or sat idle past a time limit                                                                                                                                    | retried                                                                                                         |
-| a 530, 534 or 535 (a missing or refused login), any other 5xx before the sender is named, a certificate that does not verify, no STARTTLS where `mode: starttls` needs it, no login mechanism Pathways knows | held: tried again at the longest retry wait, `retry.max`, 5 minutes by default, while you fix the configuration |
-| a 5xx to the sender, a recipient or the data, such as 550 or 552                                                                                                                                             | rejected: the delivery fails for good                                                                           |
-| the server takes some recipients and refuses others                                                                                                                                                          | delivered; the engine logs `smtp-recipients-refused` with how many were refused, never which                    |
-| every recipient refused                                                                                                                                                                                      | retried when any refusal was a 4xx, otherwise rejected                                                          |
+| What happened                                                                                                                                                                                                 | Outcome                                                                                                         |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| a 4xx anywhere, such as a 421 greeting or a 452 to a recipient                                                                                                                                                | retried, by the destination's [retry](./configuration-reference.md#retry) settings                              |
+| the connection could not be made, was lost, or sat idle past a time limit                                                                                                                                     | retried                                                                                                         |
+| a 530, 534 or 535 (a missing or refused login), any other 5xx before the sender is named, a certificate that does not verify, STARTTLS refused where `mode: starttls` needs it, a server that offers no login | held: tried again at the longest retry wait, `retry.max`, 5 minutes by default, while you fix the configuration |
+| a 5xx to the sender, a recipient or the data, such as 550 or 552                                                                                                                                              | rejected: the delivery fails for good                                                                           |
+| the server takes some recipients and refuses others                                                                                                                                                           | rejected (`SMTP_RCPT_PARTIAL`), or delivered with `onPartialRefusal: delivered`; see below                      |
+| every recipient refused                                                                                                                                                                                       | retried when any refusal was a 4xx, otherwise rejected                                                          |
 
 Codes name the stage and the reply, such as `SMTP_AUTH_535` or `SMTP_RCPT_452`, never the server's
 own words, which can echo an address. [Logs, errors and codes](./logs-and-codes.md#smtp-codes) lists
 them.
 
+## When some recipients are refused
+
+When the server takes the email for some recipients and refuses it for others, the recipients it
+took have the email, and the others never get it. By default the delivery is marked rejected, with
+the reason `SMTP_RCPT_PARTIAL`, so it shows among the failed deliveries for an operator to look at;
+a resend goes to every recipient again, with the same `Message-ID`. Set `onPartialRefusal:
+delivered` to mark it delivered instead. Either way the engine logs `smtp-recipients-refused` with
+how many were refused and which outcome was taken, never an address.
+
 ## Time limits
 
-| Key               | Default | How long                                                     |
-| ----------------- | ------- | ------------------------------------------------------------ |
-| `connectTimeout`  | `10s`   | the connection may take, with implicit TLS its handshake too |
-| `greetingTimeout` | `10s`   | the server may take to greet once connected                  |
-| `socketTimeout`   | `20s`   | the connection may sit idle waiting for an answer            |
+| Key               | Default | How long                                                                                                                      |
+| ----------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `connectTimeout`  | `10s`   | setting the session up may take: the connection, with implicit TLS its handshake, the greeting, and with STARTTLS the upgrade |
+| `greetingTimeout` | `10s`   | the server may take to greet once connected, within `connectTimeout`                                                          |
+| `socketTimeout`   | `20s`   | the connection may sit idle waiting for an answer                                                                             |
 
 The whole attempt runs under the destination's `timeout`, `30s` by default, set beside `smtp:`. Each
 of the three must fit inside it: a longer one stops the engine at start, and a default longer than

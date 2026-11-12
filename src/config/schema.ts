@@ -1151,6 +1151,9 @@ const emailAddress = (description: string) =>
 /** How an `smtp:` block's TLS starts: on connecting (port 465), or by STARTTLS (port 587). */
 export const SMTP_TLS_MODES = ["implicit", "starttls"] as const;
 
+/** What an email some of whose recipients the server refused is marked. */
+export const SMTP_PARTIAL_REFUSALS = ["rejected", "delivered"] as const;
+
 /** A subject or body template: placeholders name messageId, seq, channel or meta.<key> only. */
 const mailTemplate = (description: string) =>
   envable(
@@ -1182,7 +1185,7 @@ const smtpDestination = restate(
           mode: envable(
             z.enum(SMTP_TLS_MODES).meta({
               description:
-                "implicit: TLS from the first byte (port 465, the default, preferred); starttls: upgrade by STARTTLS, and fail when the server does not offer it (port 587).",
+                "implicit: TLS from the first byte (port 465, the default, preferred); starttls: upgrade by STARTTLS, and fail when the server does not take it (port 587).",
             }),
           ).optional(),
           ca: path
@@ -1228,6 +1231,12 @@ const smtpDestination = restate(
             "Attach each output as a file. Default false: the email carries the filled templates only, never the message.",
         }),
       ).optional(),
+      onPartialRefusal: envable(
+        z.enum(SMTP_PARTIAL_REFUSALS).meta({
+          description:
+            "When the server takes some recipients and refuses others: rejected (the default) marks the message rejected so an operator sees it; delivered marks it delivered. The recipients it took have the email either way, and the refused count is logged.",
+        }),
+      ).optional(),
       maxSize: bytes
         .meta({
           description:
@@ -1235,10 +1244,10 @@ const smtpDestination = restate(
         })
         .optional(),
       connectTimeout: smtpTimeout(
-        "How long the connection, and with implicit TLS its handshake, may take. Default 10s.",
+        "How long setting the session up may take: the connection, with implicit TLS its handshake, the greeting, and with STARTTLS the upgrade. Default 10s.",
       ).optional(),
       greetingTimeout: smtpTimeout(
-        "How long the server may take to greet once connected. Default 10s.",
+        "How long the server may take to greet once connected, within connectTimeout. Default 10s.",
       ).optional(),
       socketTimeout: smtpTimeout(
         "How long the connection may sit idle waiting for a reply. Default 20s.",
@@ -2908,7 +2917,8 @@ export interface MllpDestination {
  *   kind: "smtp", host: "smtp.example.test", port: 465, tls: "implicit", ca: undefined, plaintext: false,
  *   user: { env: "SMTP_USER" }, password: { env: "SMTP_PASSWORD" },
  *   from: "pathways@example.test", to: ["lab@example.test"], cc: [],
- *   subject: "Message {{ messageId }}", body: "A message is ready.", attach: false, maxBytes: 10_485_760,
+ *   subject: "Message {{ messageId }}", body: "A message is ready.", attach: false,
+ *   onPartialRefusal: "rejected", maxBytes: 10_485_760,
  *   connectTimeoutMs: 10_000, greetingTimeoutMs: 10_000, socketTimeoutMs: 20_000,
  * };
  * ```
@@ -2929,6 +2939,8 @@ export interface SmtpDestination {
   readonly subject: string;
   readonly body: string;
   readonly attach: boolean;
+  /** What a message some of whose recipients were refused is marked. */
+  readonly onPartialRefusal: (typeof SMTP_PARTIAL_REFUSALS)[number];
   readonly maxBytes: number;
   readonly connectTimeoutMs: number;
   readonly greetingTimeoutMs: number;

@@ -137,6 +137,8 @@ function converse(start: Socket, options: PeerOptions, taken: Taken[], commands:
     if (verb === "EHLO") {
       if ((options.ehlo ?? 250) === 250) ehlo();
       else send(`${String(options.ehlo)} no`);
+    } else if (verb === "STAR" && options.starttls === undefined) {
+      send("502 not here");
     } else if (verb === "STAR") {
       // An injected reply goes in the same write as the 220, so the client has both at once.
       socket.write(
@@ -153,6 +155,11 @@ function converse(start: Socket, options: PeerOptions, taken: Taken[], commands:
       upgraded.on("data", onData);
       socket = upgraded;
       secure = true;
+    } else if (
+      line.startsWith("AUTH ") &&
+      options.auth?.mechanisms.includes(line.split(" ")[1] as string) !== true
+    ) {
+      send("504 not offered");
     } else if (line.startsWith("AUTH PLAIN ")) {
       const [, user, password] = decode(line.slice("AUTH PLAIN ".length)).split("\0");
       send(

@@ -560,8 +560,10 @@ export async function connectorsFor(
             attach: destination.attach ? { extension: EXTENSIONS[channel.format] } : undefined,
             maxBytes: destination.maxBytes,
             now,
-            // How many recipients the server refused while it took others: a count, never an address.
-            onRefused: (message, refused) => {
+            onPartialRefusal: destination.onPartialRefusal,
+            // How many recipients the server refused while it took others: a count, never an
+            // address, and whether the message is marked rejected or delivered for it.
+            onRefused: (message, refused, outcome) => {
               logger.warn({
                 event: "smtp-recipients-refused",
                 channel: channel.name,
@@ -569,6 +571,7 @@ export async function connectorsFor(
                 message: message.messageId,
                 seq: message.seq,
                 refused,
+                outcome,
               });
             },
           }),

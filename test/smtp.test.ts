@@ -6,8 +6,6 @@ import { RetryableError } from "../src/connectors/http-core.js";
 import {
   classifyReply,
   composeMessage,
-  dotStuff,
-  errorCode,
   sendMail,
   SmtpFailure,
   stripLineBreaks,
@@ -162,12 +160,6 @@ describe("the status classes", () => {
     expect(classifyReply("mail", 600)).toBe("retry");
   });
 
-  it("reads an error's code, or ERROR when it has none", () => {
-    expect(errorCode(Object.assign(new Error("x"), { code: "ECONNRESET" }))).toBe("ECONNRESET");
-    expect(errorCode(Object.assign(new Error("x"), { code: 5 }))).toBe("ERROR");
-    expect(errorCode(new Error("x"))).toBe("ERROR");
-  });
-
   it("names a failure by its stage and reply, never the server's words", () => {
     const failure = new SmtpFailure("rcpt", 452);
     expect(failure).toMatchObject({ stage: "rcpt", reply: 452, outcome: "retry" });
@@ -287,11 +279,6 @@ describe("the composed message", () => {
     expect(data).not.toContain(
       "Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\nPID",
     );
-  });
-
-  it("dot-stuffs every line that starts with a dot", () => {
-    expect(dotStuff(".a\r\nb\r\n.c\r\n..d")).toBe("..a\r\nb\r\n..c\r\n...d");
-    expect(dotStuff("a.b")).toBe("a.b");
   });
 });
 
@@ -471,15 +458,33 @@ describe("delivery without TLS", () => {
     expect(full.commands).not.toContain("DATA");
   });
 
-  it("delivers when some recipients are refused, and counts them", async () => {
+  it("rejects a message some recipients refused, by default, and counts them", async () => {
     const server = await peer({ rcpt: (address) => (address === WARD ? 550 : 250) });
-    const told: [number, number][] = [];
+    const told: [number, number, string][] = [];
+    expectRejected(
+      await outcome(
+        destination(server.port, {
+          cc: [WARD, "desk@example.test"],
+          onRefused: (sent, refused, marked) => told.push([sent.messageId, refused, marked]),
+        }).deliver(message(9)),
+      ),
+      "SMTP_RCPT_PARTIAL",
+    );
+    // The server has it for the recipients it took: rejected marks it for an operator to see.
+    expect(server.taken[0]?.to).toEqual([LAB, "desk@example.test"]);
+    expect(told).toEqual([[9, 1, "rejected"]]);
+  });
+
+  it("delivers a message some recipients refused when asked, and counts them", async () => {
+    const server = await peer({ rcpt: (address) => (address === WARD ? 550 : 250) });
+    const told: [number, number, string][] = [];
     await destination(server.port, {
       cc: [WARD, "desk@example.test"],
-      onRefused: (sent, refused) => told.push([sent.messageId, refused]),
+      onPartialRefusal: "delivered",
+      onRefused: (sent, refused, marked) => told.push([sent.messageId, refused, marked]),
     }).deliver(message(9));
     expect(server.taken[0]?.to).toEqual([LAB, "desk@example.test"]);
-    expect(told).toEqual([[9, 1]]);
+    expect(told).toEqual([[9, 1, "delivered"]]);
     // A 251 (will forward) is taken, and with every recipient taken nothing is told.
     const forwarding = await peer({ rcpt: () => 251 });
     const none: number[] = [];
@@ -488,15 +493,20 @@ describe("delivery without TLS", () => {
     );
     expect(forwarding.taken).toHaveLength(1);
     expect(none).toEqual([]);
-    // Without a listener, a partial delivery is still delivered.
+    // Without a listener, a partial refusal is still marked as set.
     const quiet = await peer({ rcpt: (address) => (address === WARD ? 550 : 250) });
-    await destination(quiet.port, { cc: [WARD] }).deliver(message());
+    await destination(quiet.port, { cc: [WARD], onPartialRefusal: "delivered" }).deliver(message());
     expect(quiet.taken).toHaveLength(1);
+    const strict = await peer({ rcpt: (address) => (address === WARD ? 550 : 250) });
+    expectRejected(
+      await outcome(destination(strict.port, { cc: [WARD] }).deliver(message())),
+      "SMTP_RCPT_PARTIAL",
+    );
   });
 
   it("retries an RCPT reply that is neither taken nor refused", async () => {
     const odd = await peer({ rcpt: () => 354 });
-    expectRetry(await outcome(destination(odd.port).deliver(message())), "SMTP_RCPT_PROTOCOL");
+    expectRetry(await outcome(destination(odd.port).deliver(message())), "SMTP_RCPT_354");
   });
 
   it("rejects a 552 after the data, and retries a 452 or 451 there", async () => {
@@ -544,24 +554,17 @@ describe("delivery without TLS", () => {
     }
   });
 
-  it("reads a reply that came early in turn, and fails on a line that breaks the protocol after one", async () => {
-    for (const [after, code] of [
-      ["554 go away\r\n", "SMTP_EHLO_554"],
-      ["not a reply\r\n", "SMTP_GREETING_PROTOCOL"],
-    ] as const) {
-      const server = createServer((socket) => {
-        socket.on("error", () => undefined);
-        // Both in one write, so the client reads the second before it sends EHLO.
-        socket.write(`220 peer\r\n${after}`);
-      });
-      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-      try {
-        const { port } = server.address() as { port: number };
-        const error = await outcome(destination(port).deliver(message()));
-        expect((error as { code?: string }).code).toBe(code);
-      } finally {
-        server.close();
-      }
+  it("retries a server that hangs up before its greeting", async () => {
+    const server = createServer((socket) => {
+      socket.on("error", () => undefined);
+      socket.end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const { port } = server.address() as { port: number };
+      expectRetry(await outcome(destination(port).deliver(message())), "SMTP_GREETING_CLOSED");
+    } finally {
+      server.close();
     }
   });
 
@@ -702,6 +705,7 @@ describe("login", () => {
   });
 
   it("holds a server that offers no mechanism it knows, or none at all", async () => {
+    // nodemailer tries PLAIN where it knows none of the mechanisms offered: refused, held.
     const other = await peer({ auth: { ...auth, mechanisms: ["XOAUTH2"] } });
     expectHeld(
       await outcome(
@@ -709,13 +713,25 @@ describe("login", () => {
           message(),
         ),
       ),
-      "SMTP_AUTH_NOT_OFFERED",
+      "SMTP_AUTH_504",
     );
     const none = await peer();
     expectHeld(
       await outcome(destination(none.port, {}, { user: auth.user }).deliver(message())),
       "SMTP_AUTH_NOT_OFFERED",
     );
+  });
+
+  it("holds a login nodemailer cannot send, sending no AUTH", async () => {
+    // An empty password: nodemailer refuses it before a word goes to the server.
+    const server = await peer({ auth });
+    expectHeld(
+      await outcome(
+        destination(server.port, {}, { user: auth.user, password: "" }).deliver(message()),
+      ),
+      "SMTP_AUTH_ERROR",
+    );
+    expect(server.commands.some((line) => line.startsWith("AUTH"))).toBe(false);
   });
 });
 
@@ -768,15 +784,16 @@ describe.skipIf(!OPENSSL)(`delivery ${TLS_TESTS}`, () => {
     ]);
   });
 
-  it("holds a server that does not offer STARTTLS, sending nothing", async () => {
+  it("holds a server that does not take STARTTLS, sending no message", async () => {
+    // requireTLS: STARTTLS is asked for even when it is not offered, and the refusal ends it.
     const plain = await peer();
     expectHeld(
       await outcome(
         destination(plain.port, {}, { tls: "starttls", ca: certificates.ca }).deliver(message()),
       ),
-      "SMTP_STARTTLS_NOT_OFFERED",
+      "SMTP_STARTTLS_502",
     );
-    expect(plain.commands).toEqual(["EHLO [127.0.0.1]"]);
+    expect(plain.commands).toEqual(["EHLO [127.0.0.1]", "STARTTLS"]);
   });
 
   it("retries a 454 to STARTTLS, and holds a 5xx", async () => {
@@ -796,17 +813,40 @@ describe.skipIf(!OPENSSL)(`delivery ${TLS_TESTS}`, () => {
     );
   });
 
-  it("refuses replies sent before the STARTTLS handshake", async () => {
-    const injecting = await peer({ starttls: server(), injectAfterStarttls: "250 injected\r\n" });
-    expectRetry(
-      await outcome(
-        destination(injecting.port, {}, { tls: "starttls", ca: certificates.ca }).deliver(
-          message(),
-        ),
-      ),
-      "SMTP_STARTTLS_PROTOCOL",
-    );
-    expect(injecting.taken).toHaveLength(0);
+  it("never reads reply lines injected before the STARTTLS handshake as the server's", async () => {
+    // Sent in plaintext straight after the 220 to STARTTLS, in the same write. A whole reply, or a
+    // line not yet ended, is thrown away at the handshake, and the message goes over TLS with the
+    // extensions the server names over TLS. A reply not yet ended (a continuation line) is waited
+    // for, and the wait ends at the socket timeout: retried, and never read as the EHLO over TLS,
+    // where SIZE 1 would refuse the message for good.
+    for (const [injected, expected] of [
+      ["250 injected\r\n", undefined],
+      ["250-SIZE 1", undefined],
+      ["250-x\r\n250-SIZE 1\r\n", "SMTP_STARTTLS_ETIMEDOUT"],
+      ["250-SIZE 1\r\n", "SMTP_STARTTLS_ETIMEDOUT"],
+    ] as const) {
+      const injecting = await peer({ starttls: server(), injectAfterStarttls: injected });
+      const error = await outcome(
+        destination(
+          injecting.port,
+          {},
+          { tls: "starttls", ca: certificates.ca, socketTimeoutMs: 300 },
+        ).deliver(message()),
+      );
+      if (expected === undefined) {
+        expect(error).toBeUndefined();
+        expect(injecting.taken).toHaveLength(1);
+        expect(injecting.taken[0]?.secure).toBe(true);
+        expect(injecting.commands.slice(0, 3)).toEqual([
+          "EHLO [127.0.0.1]",
+          "STARTTLS",
+          "EHLO [127.0.0.1]",
+        ]);
+      } else {
+        expectRetry(error, expected);
+        expect(injecting.taken).toHaveLength(0);
+      }
+    }
   });
 
   it("holds a certificate that does not verify, over implicit TLS and STARTTLS", async () => {

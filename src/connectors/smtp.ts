@@ -67,11 +67,23 @@ export interface SmtpDestinationOptions {
   /** Epoch milliseconds now, for the Date header. Defaults to `Date.now`. */
   readonly now?: () => number;
   /**
-   * Told of a message the server took for some recipients and refused for others: how many it
-   * refused, never which.
+   * What a message the server took for some recipients and refused for others is: `rejected` (the
+   * default), so an operator sees it, or `delivered`. Either way the recipients it took have it.
    */
-  readonly onRefused?: (message: OutgoingMessage, refused: number) => void;
+  readonly onPartialRefusal?: SmtpPartialRefusal | undefined;
+  /**
+   * Told of a message the server took for some recipients and refused for others: how many it
+   * refused, never which, and what the message is marked.
+   */
+  readonly onRefused?: (
+    message: OutgoingMessage,
+    refused: number,
+    outcome: SmtpPartialRefusal,
+  ) => void;
 }
+
+/** What a message some of whose recipients were refused is marked: rejected, or delivered. */
+export type SmtpPartialRefusal = "rejected" | "delivered";
 
 /**
  * Sends each output as an email over SMTP, one connection a message. By default the email holds
@@ -79,11 +91,12 @@ export interface SmtpDestinationOptions {
  *
  * It is delivered only on the 250 that follows the data. A failure is read by its stage and reply
  * code: a 4xx, a lost connection or a timeout throws an error to retry; a 530, 534 or 535, any 5xx
- * before MAIL, a certificate that does not verify, or a server that does not offer STARTTLS where it
+ * before MAIL, a certificate that does not verify, or a server that does not take STARTTLS where it
  * is required throws an {@link SmtpHeld}; a 5xx at MAIL, RCPT or DATA throws a `DeliveryRejected`,
  * and so does a message larger than `maxBytes` or than the server's SIZE. When the server takes some
- * recipients and refuses others, the message is delivered and `onRefused` is told how many it
- * refused. Codes and counts only: never an address, the server's text, or the content.
+ * recipients and refuses others, `onRefused` is told how many it refused, and the message is
+ * rejected (`SMTP_RCPT_PARTIAL`) unless `onPartialRefusal` is `delivered`; the recipients it took
+ * have it either way. Codes and counts only: never an address, the server's text, or the content.
  *
  * @example
  * ```ts
@@ -134,7 +147,10 @@ export class SmtpDestination implements DestinationConnector {
     } catch (error) {
       throw failureOf(error);
     }
-    if (refused > 0) this.options.onRefused?.(message, refused);
+    if (refused === 0) return;
+    const outcome = this.options.onPartialRefusal ?? "rejected";
+    this.options.onRefused?.(message, refused, outcome);
+    if (outcome === "rejected") throw new DeliveryRejected("SMTP_RCPT_PARTIAL");
   }
 }
 

@@ -16,25 +16,25 @@ text or a source file's name. Commands whose standard output is their report (`s
 
 ### Messages
 
-| Event                     | Level | Fields                                                                                 | Meaning                                                                                                                         |
-| ------------------------- | ----- | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `received`                | info  | `channel`, `message`, `bytes`, `failed`                                                | a message is stored; `failed` when the source stored it as failed                                                               |
-| `already-stored`          | info  | `channel`, `message`                                                                   | a source handed in again a message it had stored before a stop                                                                  |
-| `possible-duplicate`      | warn  | `channel`, `message`, `duplicateOf`                                                    | same sender and control ID as an earlier message                                                                                |
-| `possible-duplicate`      | warn  | `channel`, `message`, `delivery`, `destination`, `reason`, `interruptedAttempt`        | a delivery was found cut off after its send (`reason` `send-interrupted`), and is sent again, flagged                           |
-| `receive-failed`          | error | `channel`, `code`                                                                      | a message could not be stored, and was not acknowledged                                                                         |
-| `transformed`             | info  | `channel`, `message`, `outputs`                                                        | the transform returned outputs                                                                                                  |
-| `filtered`                | info  | `channel`, `message`, `outputs`                                                        | the transform returned none                                                                                                     |
-| `transform-failed`        | warn  | `channel`, `message`, `kind`, `name`, `code`, `where`                                  | the message is marked failed; `kind` is the stage                                                                               |
-| `delivered`               | info  | `channel`, `destination`, `delivery`, `resend`                                         | a destination accepted an output; `resend` only on a flagged resend                                                             |
-| `content-dropped`         | info  | `channel`, `message`, `delivery`                                                       | the last delivery was delivered, and the message's content dropped (`storage.content: dropAfterDelivery`)                       |
-| `dry-run`                 | info  | `channel`, `destination`, `delivery`                                                   | a destination that runs dry recorded an output and sent nothing                                                                 |
-| `delivery-retry`          | warn  | `channel`, `destination`, `delivery`, `attempt`, `retryInMs`, `code`                   | it is tried again after `retryInMs`                                                                                             |
-| `delivery-redirected`     | warn  | `channel`, `destination`, `delivery`, `attempt`, `retryInMs`, `status`, `locationHost` | an HTTP destination answered a 3xx; held, never followed, and tried again after `retryInMs` (`retry.max`, 5 minutes by default) |
-| `delivery-rejected`       | warn  | `channel`, `destination`, `delivery`, `reason`                                         | the destination rejected it for good                                                                                            |
-| `delivery-exhausted`      | warn  | `channel`, `destination`, `delivery`, `attempt`, `reason`, `code`                      | out of retries (`reason` `limit` or `maxAge`): marked failed, its body kept for a resend                                        |
-| `delivery-halted`         | warn  | `channel`, `destination`, `delivery`, `attempt`                                        | `pathways channel halt` cut the send off; it stays pending and is sent again, flagged, after a resume                           |
-| `smtp-recipients-refused` | warn  | `channel`, `destination`, `message`, `seq`, `refused`                                  | an SMTP server took the email for some recipients and refused `refused` of them; it is delivered, and no address is logged      |
+| Event                     | Level | Fields                                                                                 | Meaning                                                                                                                                                                |
+| ------------------------- | ----- | -------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `received`                | info  | `channel`, `message`, `bytes`, `failed`                                                | a message is stored; `failed` when the source stored it as failed                                                                                                      |
+| `already-stored`          | info  | `channel`, `message`                                                                   | a source handed in again a message it had stored before a stop                                                                                                         |
+| `possible-duplicate`      | warn  | `channel`, `message`, `duplicateOf`                                                    | same sender and control ID as an earlier message                                                                                                                       |
+| `possible-duplicate`      | warn  | `channel`, `message`, `delivery`, `destination`, `reason`, `interruptedAttempt`        | a delivery was found cut off after its send (`reason` `send-interrupted`), and is sent again, flagged                                                                  |
+| `receive-failed`          | error | `channel`, `code`                                                                      | a message could not be stored, and was not acknowledged                                                                                                                |
+| `transformed`             | info  | `channel`, `message`, `outputs`                                                        | the transform returned outputs                                                                                                                                         |
+| `filtered`                | info  | `channel`, `message`, `outputs`                                                        | the transform returned none                                                                                                                                            |
+| `transform-failed`        | warn  | `channel`, `message`, `kind`, `name`, `code`, `where`                                  | the message is marked failed; `kind` is the stage                                                                                                                      |
+| `delivered`               | info  | `channel`, `destination`, `delivery`, `resend`                                         | a destination accepted an output; `resend` only on a flagged resend                                                                                                    |
+| `content-dropped`         | info  | `channel`, `message`, `delivery`                                                       | the last delivery was delivered, and the message's content dropped (`storage.content: dropAfterDelivery`)                                                              |
+| `dry-run`                 | info  | `channel`, `destination`, `delivery`                                                   | a destination that runs dry recorded an output and sent nothing                                                                                                        |
+| `delivery-retry`          | warn  | `channel`, `destination`, `delivery`, `attempt`, `retryInMs`, `code`                   | it is tried again after `retryInMs`                                                                                                                                    |
+| `delivery-redirected`     | warn  | `channel`, `destination`, `delivery`, `attempt`, `retryInMs`, `status`, `locationHost` | an HTTP destination answered a 3xx; held, never followed, and tried again after `retryInMs` (`retry.max`, 5 minutes by default)                                        |
+| `delivery-rejected`       | warn  | `channel`, `destination`, `delivery`, `reason`                                         | the destination rejected it for good                                                                                                                                   |
+| `delivery-exhausted`      | warn  | `channel`, `destination`, `delivery`, `attempt`, `reason`, `code`                      | out of retries (`reason` `limit` or `maxAge`): marked failed, its body kept for a resend                                                                               |
+| `delivery-halted`         | warn  | `channel`, `destination`, `delivery`, `attempt`                                        | `pathways channel halt` cut the send off; it stays pending and is sent again, flagged, after a resume                                                                  |
+| `smtp-recipients-refused` | warn  | `channel`, `destination`, `message`, `seq`, `refused`, `outcome`                       | an SMTP server took the email for some recipients and refused `refused` of them; `outcome` is `rejected` or `delivered` (`onPartialRefusal`), and no address is logged |
 
 A `transform-failed` line's `kind` is `load`, `parse`, `transform`, `output`, `timeout`, `memory` or
 `crash`. `where` is `file:line:column` in the transform, when it threw.
@@ -179,16 +179,17 @@ An SMTP destination's code names the stage and the server's reply code, or what 
 delivery logs it as `code`; a rejected one stores it as its reason. Besides reply codes and the
 operating system's codes:
 
-| Code                        | Meaning                                                                         |
-| --------------------------- | ------------------------------------------------------------------------------- |
-| `SMTP_STARTTLS_NOT_OFFERED` | `mode: starttls`, and the server does not offer STARTTLS; held                  |
-| `SMTP_AUTH_NOT_OFFERED`     | the server offers neither `AUTH PLAIN` nor `AUTH LOGIN`; held                   |
-| `SMTP_TLS_<code>`           | the TLS handshake failed, such as `SMTP_TLS_ERR_TLS_CERT_ALTNAME_INVALID`; held |
-| `SMTP_<stage>_ETIMEDOUT`    | the connection, the greeting or an answer took longer than its time limit       |
-| `SMTP_<stage>_CLOSED`       | the server closed the connection before the email was delivered                 |
-| `SMTP_<stage>_PROTOCOL`     | the server sent something that is not an SMTP reply                             |
-| `SMTP_MAIL_TOO_LARGE`       | the email is larger than the size the server takes; rejected                    |
-| `SMTP_TOO_LARGE`            | the email is larger than `maxSize`; rejected without connecting                 |
+| Code                     | Meaning                                                                         |
+| ------------------------ | ------------------------------------------------------------------------------- |
+| `SMTP_AUTH_NOT_OFFERED`  | a login is set, and the server offers no AUTH at all; held                      |
+| `SMTP_AUTH_ERROR`        | the login could not be sent, such as an empty password; held                    |
+| `SMTP_RCPT_PARTIAL`      | some recipients refused and others taken, with `onPartialRefusal: rejected`     |
+| `SMTP_TLS_<code>`        | the TLS handshake failed, such as `SMTP_TLS_ERR_TLS_CERT_ALTNAME_INVALID`; held |
+| `SMTP_<stage>_ETIMEDOUT` | the connection, the greeting or an answer took longer than its time limit       |
+| `SMTP_<stage>_CLOSED`    | the server closed the connection before the email was delivered                 |
+| `SMTP_<stage>_PROTOCOL`  | the server sent something that is not an SMTP reply, or a reply over 64 KB      |
+| `SMTP_MAIL_TOO_LARGE`    | the email is larger than the size the server takes; rejected                    |
+| `SMTP_TOO_LARGE`         | the email is larger than `maxSize`; rejected without connecting                 |
 
 ## Encryption errors
 

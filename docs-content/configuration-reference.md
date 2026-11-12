@@ -537,24 +537,25 @@ answer after it, and is retried when none comes within `timeout` or the connecti
 
 #### SMTP destination
 
-| Key               | Type                                               | Default                                         |
-| ----------------- | -------------------------------------------------- | ----------------------------------------------- |
-| `host`            | host name or address                               | required                                        |
-| `port`            | 1 to 65535                                         | `465`; `587` with `starttls`; `25` plaintext    |
-| `tls`             | `{ mode, ca }`: `mode` is `implicit` or `starttls` | required unless `plaintext`; `{}` is `implicit` |
-| `plaintext`       | boolean; cannot go with `user` and `password`      | `false`                                         |
-| `user`            | a [secret](#secrets), with `password`              | none                                            |
-| `password`        | a [secret](#secrets), with `user`                  | none                                            |
-| `from`            | an address                                         | required                                        |
-| `to`              | a list of addresses, at least one                  | required                                        |
-| `cc`              | a list of addresses                                | none                                            |
-| `subject`         | a template                                         | `Pathways message {{ messageId }}-{{ seq }}`    |
-| `body`            | a template                                         | a line naming the channel, message and seq      |
-| `attach`          | boolean: attach the output as a file               | `false`                                         |
-| `maxSize`         | a size such as `10MB`, or a number of bytes        | `10MB`                                          |
-| `connectTimeout`  | duration, at most the destination's `timeout`      | `10s`                                           |
-| `greetingTimeout` | duration, at most the destination's `timeout`      | `10s`                                           |
-| `socketTimeout`   | duration, at most the destination's `timeout`      | `20s`                                           |
+| Key                | Type                                                                                      | Default                                         |
+| ------------------ | ----------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| `host`             | host name or address                                                                      | required                                        |
+| `port`             | 1 to 65535                                                                                | `465`; `587` with `starttls`; `25` plaintext    |
+| `tls`              | `{ mode, ca }`: `mode` is `implicit` or `starttls`                                        | required unless `plaintext`; `{}` is `implicit` |
+| `plaintext`        | boolean; cannot go with `user` and `password`                                             | `false`                                         |
+| `user`             | a [secret](#secrets), with `password`                                                     | none                                            |
+| `password`         | a [secret](#secrets), with `user`                                                         | none                                            |
+| `from`             | an address                                                                                | required                                        |
+| `to`               | a list of addresses, at least one                                                         | required                                        |
+| `cc`               | a list of addresses                                                                       | none                                            |
+| `subject`          | a template                                                                                | `Pathways message {{ messageId }}-{{ seq }}`    |
+| `body`             | a template                                                                                | a line naming the channel, message and seq      |
+| `attach`           | boolean: attach the output as a file                                                      | `false`                                         |
+| `onPartialRefusal` | `rejected` or `delivered`: some recipients refused                                        | `rejected`                                      |
+| `maxSize`          | a size such as `10MB`, or a number of bytes                                               | `10MB`                                          |
+| `connectTimeout`   | duration, at most the destination's `timeout`; covers the greeting and a STARTTLS upgrade | `10s`                                           |
+| `greetingTimeout`  | duration, at most the destination's `timeout`                                             | `10s`                                           |
+| `socketTimeout`    | duration, at most the destination's `timeout`                                             | `20s`                                           |
 
 An address is plain, such as `lab@example.test`, with no display name. A template's placeholders
 are `{{ messageId }}`, `{{ seq }}`, `{{ channel }}` and `{{ meta.<key> }}`. The server's certificate is

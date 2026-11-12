@@ -704,6 +704,7 @@ function resolveSmtp(smtp: SmtpYaml, dir: string, totalMs: number): SmtpDestinat
     subject: smtp.subject ?? DEFAULT_SMTP_SUBJECT,
     body: smtp.body ?? DEFAULT_SMTP_BODY,
     attach: smtp.attach ?? false,
+    onPartialRefusal: smtp.onPartialRefusal ?? "rejected",
     maxBytes: smtp.maxSize ?? DEFAULT_MAX_BYTES,
     connectTimeoutMs: within(smtp.connectTimeout, DEFAULT_SMTP_CONNECT_TIMEOUT_MS),
     greetingTimeoutMs: within(smtp.greetingTimeout, DEFAULT_SMTP_GREETING_TIMEOUT_MS),

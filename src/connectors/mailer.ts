@@ -1,16 +1,16 @@
-// The one mailer Pathways sends email with: a small SMTP client (RFC 5321) on node:net and
-// node:tls, with STARTTLS (RFC 3207), AUTH PLAIN and LOGIN (RFC 4954) and SIZE (RFC 1870), and the
-// composer that builds the message it sends. The SMTP destination sends with it, and so will
-// anything else that sends email. Internal: the package entry exports none of it.
+// The one mailer Pathways sends email with: nodemailer's SMTP connection (RFC 5321, with STARTTLS,
+// SMTP AUTH and SIZE) behind one function, `sendMail`, and the composer that builds the message it
+// sends. The SMTP destination sends with it, and so will anything else that sends email. Internal:
+// the package entry exports none of it.
 //
-// It speaks only what a relay needs: one message per connection, no pipelining, a 7-bit message
-// whose text and attachment are base64, so no line of it is long or starts with a dot. A failure
-// carries a code made of the stage and the reply code (or the network's code), never the server's
-// own text, which can echo an address back.
+// It sends one message per connection, a 7-bit message whose text and attachment are base64. A
+// failure carries a code made of the stage and the reply code (or the network's code), never the
+// server's own text, which can echo an address back. nodemailer logs only to a function here that
+// notes which command went last, and keeps nothing it is told.
 
 import { randomBytes } from "node:crypto";
-import { isIP, connect as netConnect, type Socket } from "node:net";
-import { connect as tlsConnect, type TLSSocket } from "node:tls";
+
+import SMTPConnection from "nodemailer/lib/smtp-connection";
 
 /** How the connection is protected: TLS from the start, upgraded by STARTTLS, or not at all. */
 export type SmtpTls = "implicit" | "starttls" | "none";
@@ -108,6 +108,7 @@ function codeOf(text: string): string {
  */
 const NETWORK_CODES: ReadonlySet<string> = new Set([
   "ABORTED",
+  "CLOSED",
   "ECONNRESET",
   "ECONNREFUSED",
   "ECONNABORTED",
@@ -129,9 +130,12 @@ export interface MailerOptions {
   /** The user to log in as; with `password`, or neither for a relay that takes no login. */
   readonly user?: string | undefined;
   readonly password?: string | undefined;
-  /** The longest the connection, and with implicit TLS its handshake, may take. */
+  /**
+   * The longest setting the session up may take: the connection, with implicit TLS its handshake,
+   * the greeting, and with STARTTLS the upgrade.
+   */
   readonly connectTimeoutMs: number;
-  /** The longest the server may take to greet once connected. */
+  /** The longest the server may take to greet once connected, within `connectTimeoutMs`. */
   readonly greetingTimeoutMs: number;
   /** The longest the connection may sit idle waiting for a reply. */
   readonly socketTimeoutMs: number;
@@ -151,412 +155,200 @@ export interface SendResult {
   readonly refused: number;
 }
 
-/** One reply: its code and the text of each line, after the code. */
-interface Reply {
-  readonly code: number;
-  readonly lines: readonly string[];
-}
-
-/** The most bytes of reply kept before a reply ends: a server that sends more is not one. */
+/** The largest reply the mailer reads: a server that sends more is not one. */
 const MAX_REPLY_BYTES = 65_536;
 
-/** A reply line: three digits, then a space, a hyphen, or nothing. */
-const REPLY_LINE = /^(\d{3})([ -]|$)(.*)$/;
-
-/** One SMTP connection, read a reply at a time. */
-class Session {
-  private socket: Socket;
-  private buffered = "";
-  private lines: string[] = [];
-  private readonly replies: Reply[] = [];
-  private waiting: ((reply: Reply | Error) => void) | undefined;
-  private failure: Error | undefined;
-  /** The stage a lost connection or a timeout is put down to. */
-  stage: SmtpStage = "greeting";
-
-  private readonly socketTimeoutMs: number;
-
-  constructor(socket: Socket, socketTimeoutMs: number) {
-    this.socket = socket;
-    this.socketTimeoutMs = socketTimeoutMs;
-    this.attach(socket);
-  }
-
-  /** Reads replies from `socket` and fails the session when it errs, closes or idles. */
-  private attach(socket: Socket): void {
-    socket.setEncoding("latin1");
-    socket.setTimeout(this.socketTimeoutMs, () => this.fail("ETIMEDOUT"));
-    socket.on("data", this.onData);
-    socket.on("error", this.onError);
-    socket.on("close", this.onClose);
-  }
-
-  private detach(socket: Socket): void {
-    socket.setTimeout(0);
-    socket.off("data", this.onData);
-    socket.off("error", this.onError);
-    socket.off("close", this.onClose);
-  }
-
-  private readonly onData = (chunk: string): void => {
-    this.buffered += chunk;
-    for (;;) {
-      const end = this.buffered.indexOf("\n");
-      if (end === -1) break;
-      const line = this.buffered.slice(0, end).replace(/\r$/, "");
-      this.buffered = this.buffered.slice(end + 1);
-      this.line(line);
-    }
-    if (this.buffered.length > MAX_REPLY_BYTES) this.fail("PROTOCOL");
-  };
-
-  private readonly onError = (error: Error): void => {
-    this.fail(errorCode(error));
-  };
-
-  private readonly onClose = (): void => {
-    this.fail("CLOSED");
-  };
-
-  private line(text: string): void {
-    const match = REPLY_LINE.exec(text);
-    if (match === null) {
-      this.fail("PROTOCOL");
-      return;
-    }
-    const [, code, separator, rest] = match as unknown as [string, string, string, string];
-    this.lines.push(rest);
-    if (separator === "-") return;
-    const reply = { code: Number(code), lines: this.lines };
-    this.lines = [];
-    const waiting = this.waiting;
-    this.waiting = undefined;
-    if (waiting === undefined) this.replies.push(reply);
-    else waiting(reply);
-  }
-
-  /** Ends the session with a failure at the current stage: the next read rejects with it. */
-  fail(what: string, outcome?: SmtpOutcome): void {
-    if (this.failure !== undefined) return;
-    this.failure = new SmtpFailure(this.stage, what, outcome);
-    this.socket.destroy();
-    const waiting = this.waiting;
-    this.waiting = undefined;
-    waiting?.(this.failure);
-  }
-
-  /** The next reply, or the failure that ended the session. */
-  reply(): Promise<Reply> {
-    const failure = this.failure;
-    if (failure !== undefined) return Promise.reject(failure);
-    const next = this.replies.shift();
-    if (next !== undefined) return Promise.resolve(next);
-    return new Promise((resolve, reject) => {
-      this.waiting = (reply) => {
-        if (reply instanceof Error) reject(reply);
-        else resolve(reply);
-      };
-    });
-  }
-
-  /** Sends `line` and reads the reply, whatever its code. */
-  ask(stage: SmtpStage, line: string): Promise<Reply> {
-    this.stage = stage;
-    this.socket.write(`${line}\r\n`);
-    return this.reply();
-  }
-
-  /** Sends `line` and reads the reply; rejects unless its code is one of `expected`. */
-  async command(stage: SmtpStage, line: string, expected: readonly number[]): Promise<Reply> {
-    this.stage = stage;
-    this.socket.write(`${line}\r\n`);
-    return this.expect(expected);
-  }
-
-  /** Reads the next reply; rejects, ending the session, unless its code is one of `expected`. */
-  async expect(expected: readonly number[]): Promise<Reply> {
-    const reply = await this.reply();
-    if (!expected.includes(reply.code)) throw this.end(new SmtpFailure(this.stage, reply.code));
-    return reply;
-  }
-
-  /** Ends the session with `failure`, which it returns. */
-  end(failure: SmtpFailure): SmtpFailure {
-    this.failure ??= failure;
-    this.socket.destroy();
-    return failure;
-  }
-
-  /** Writes `data` as it is, then reads the reply. */
-  async write(data: string, expected: readonly number[]): Promise<Reply> {
-    this.socket.write(data, "latin1");
-    return this.expect(expected);
-  }
-
-  /**
-   * Upgrades the connection to TLS after a 220 to STARTTLS. Anything the server sent after that 220
-   * and before the handshake is refused: it would be read as if it came over TLS (RFC 3207).
-   */
-  async upgrade(options: MailerOptions): Promise<void> {
-    if (this.buffered !== "" || this.replies.length > 0) throw this.end(protocol("starttls"));
-    const plain = this.socket;
-    this.detach(plain);
-    // The TLS socket reports what goes wrong underneath; this only keeps an error from going unheard.
-    plain.on("error", ignore);
-    this.stage = "tls";
-    const secure = tlsConnect({ ...tlsOptions(options), socket: plain });
-    this.socket = secure;
-    secure.setTimeout(this.socketTimeoutMs, () => {
-      secure.destroy(Object.assign(new Error("timed out"), { code: "ETIMEDOUT" }));
-    });
-    await handshake(secure, (code) => this.end(tlsFailure(code)));
-    this.attach(secure);
-  }
-
-  /** Says goodbye without waiting for the answer, and closes. */
-  quit(): void {
-    const socket = this.socket;
-    this.detach(socket);
-    socket.on("error", ignore);
-    socket.setTimeout(this.socketTimeoutMs, () => socket.destroy());
-    socket.end("QUIT\r\n");
-  }
-
-  /** Closes the connection at once, as an abort does. */
-  destroy(): void {
-    this.fail("ABORTED");
-  }
+/** What nodemailer adds to an error it fails with: its own code, the reply and the command. */
+interface NodemailerFailure {
+  readonly code?: unknown;
+  /** The network's or TLS's own code, such as `ECONNRESET`, when nodemailer replaced it. */
+  readonly originalCode?: unknown;
+  readonly responseCode?: unknown;
+  readonly command?: unknown;
+  /** Each refused recipient's error, when every recipient was refused. */
+  readonly rejectedErrors?: readonly { readonly responseCode?: unknown }[];
 }
 
+/** The commands that start a stage, as the transaction log writes them; any other line keeps it. */
+const COMMAND_STAGES: readonly (readonly [RegExp, SmtpStage])[] = [
+  [/^(EHLO|HELO) /, "ehlo"],
+  [/^STARTTLS$/, "starttls"],
+  [/^AUTH /, "auth"],
+  [/^MAIL FROM:/, "mail"],
+  [/^RCPT TO:/, "rcpt"],
+  [/^DATA$/, "data"],
+];
+
+/** The stage a command line starts, or undefined for a line that does not start one. */
+function stageOfCommand(line: string): SmtpStage | undefined {
+  return COMMAND_STAGES.find(([pattern]) => pattern.test(line))?.[1];
+}
+
+/** The stage each command nodemailer names on a failure belongs to. */
+const FAILURE_STAGES: Readonly<Record<string, SmtpStage>> = {
+  EHLO: "ehlo",
+  HELO: "ehlo",
+  STARTTLS: "starttls",
+  "MAIL FROM": "mail",
+  "RCPT TO": "rcpt",
+  DATA: "data",
+};
+
 /**
- * Takes an error a socket emits after the session is done with it, such as a reset after QUIT, so
- * it is not thrown: the outcome is known by then.
+ * The reply a failure carries: nodemailer's `responseCode`, or when every recipient was refused,
+ * the first 4xx among them, so the send is tried again, or else the first refusal.
  */
-/* v8 ignore next 3 -- called only when a server resets a connection the session has finished with */
-function ignore(): void {
-  // Nothing to do.
-}
-
-/** A reply that breaks the protocol: a retry, at `stage`. */
-function protocol(stage: SmtpStage): SmtpFailure {
-  return new SmtpFailure(stage, "PROTOCOL");
-}
-
-/** A failed TLS handshake: the network's fault retries; a certificate or protocol fault is held. */
-function tlsFailure(code: string): SmtpFailure {
-  return new SmtpFailure("tls", code, NETWORK_CODES.has(code) ? "retry" : "held");
+function replyOf(failure: NodemailerFailure): number | undefined {
+  const replies = (failure.rejectedErrors ?? [])
+    .map(({ responseCode }) => responseCode)
+    .filter((code): code is number => typeof code === "number");
+  const chosen = replies.find((code) => code < 500) ?? replies[0];
+  if (chosen !== undefined) return chosen;
+  return typeof failure.responseCode === "number" ? failure.responseCode : undefined;
 }
 
 /**
- * The TLS options every connection uses: the server's certificate always verified, against `ca`
- * when set, for the configured host (an address is checked against the certificate's addresses),
- * and TLS 1.2 or later.
+ * Reads a nodemailer failure as an {@link SmtpFailure}: its stage from the command it names, or
+ * else `stage`, where the session was; its reply code, or the network's code, a timeout, a closed
+ * connection (`CLOSED`) or a reply that breaks the protocol (`PROTOCOL`); never its text, which can
+ * hold the server's words and an address.
  */
-function tlsOptions(options: MailerOptions): {
-  host: string;
-  servername?: string;
-  ca: Buffer | undefined;
-  minVersion: "TLSv1.2";
-  rejectUnauthorized: true;
-} {
-  const { host, ca } = options;
-  // Server Name Indication carries a host name only, never an address (RFC 6066 section 3).
-  return {
-    host,
-    ...(isIP(host) === 0 ? { servername: host } : {}),
-    ca,
-    minVersion: "TLSv1.2",
-    rejectUnauthorized: true,
-  };
+function failureOf(error: Error, stage: SmtpStage, implicit: boolean): SmtpFailure {
+  const failure = error as NodemailerFailure;
+  const { code, originalCode, command } = failure;
+  const named = String(command);
+  const reply = replyOf(failure);
+  if (reply !== undefined) {
+    const at = named.startsWith("AUTH") ? "auth" : (FAILURE_STAGES[named] ?? stage);
+    return new SmtpFailure(at, reply);
+  }
+  if (code === "EMESSAGE" && named === "MAIL FROM") {
+    // Larger than the SIZE the server offered: no attempt can send it.
+    return new SmtpFailure("mail", "TOO_LARGE", "rejected");
+  }
+  if (code === "EAUTH") return new SmtpFailure("auth", "ERROR", "held");
+  const what =
+    typeof originalCode === "string"
+      ? originalCode
+      : code === "ETIMEDOUT"
+        ? "ETIMEDOUT"
+        : code === "ECONNECTION" || code === "ETLS"
+          ? "CLOSED"
+          : "PROTOCOL";
+  // A TLS handshake that fails for a reason other than the network's: the certificate or the
+  // protocol version is wrong, which another attempt does not change.
+  const handshake = stage === "tls" || (stage === "connect" && implicit);
+  if (handshake && !NETWORK_CODES.has(what)) return new SmtpFailure("tls", what, "held");
+  return new SmtpFailure(stage, what);
 }
 
 /**
- * Waits for `socket`'s TLS handshake; on an error before it, calls `fail` and rejects. A server
- * that hangs up during the handshake is an error too (`ECONNRESET`).
- */
-function handshake(socket: TLSSocket, fail: (code: string) => Error): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const onError = (error: Error): void => {
-      reject(fail(errorCode(error)));
-    };
-    socket.once("error", onError);
-    socket.once("secureConnect", () => {
-      socket.off("error", onError);
-      resolve();
-    });
-  });
-}
-
-/**
- * An error's code, as Node's network and TLS errors carry one, or `ERROR`.
+ * Sends one message with nodemailer's SMTP connection: connects, greets, upgrades to TLS by
+ * STARTTLS when asked (and fails when the server will not), logs in when a user is set, names the
+ * sender and each recipient, and sends `data`, a whole message as {@link composeMessage} builds
+ * it. Resolves on the 250 after the data, and only then, with how many recipients the server took
+ * and how many it refused. Rejects with an {@link SmtpFailure}: when every recipient is refused,
+ * its reply is the first 4xx among them, so the send is tried again, or else the first refusal.
  *
- * @example
- * ```ts
- * socket.on("error", (error) => fail(errorCode(error)));
- * ```
- */
-export function errorCode(error: Error): string {
-  const { code } = error as { code?: unknown };
-  return typeof code === "string" ? code : "ERROR";
-}
-
-/** Opens the connection, with implicit TLS completing its handshake, within the connect timeout. */
-async function open(options: MailerOptions, signal: AbortSignal | undefined): Promise<Socket> {
-  const { host, port, tls, connectTimeoutMs } = options;
-  const implicit = tls === "implicit";
-  const socket = implicit
-    ? tlsConnect({ ...tlsOptions(options), port })
-    : netConnect({ host, port });
-  // With implicit TLS, a failure that is not the network's is the handshake's: held.
-  const failure = (code: string): SmtpFailure =>
-    implicit && !NETWORK_CODES.has(code) ? tlsFailure(code) : new SmtpFailure("connect", code);
-  const timer = setTimeout(() => socket.destroy(failure("ETIMEDOUT")), connectTimeoutMs);
-  const onAbort = (): void => {
-    socket.destroy(failure("ABORTED"));
-  };
-  signal?.addEventListener("abort", onAbort, { once: true });
-  try {
-    await new Promise<void>((resolve, reject) => {
-      const onError = (error: Error): void => {
-        reject(error instanceof SmtpFailure ? error : failure(errorCode(error)));
-      };
-      socket.once("error", onError);
-      socket.once(implicit ? "secureConnect" : "connect", () => {
-        socket.off("error", onError);
-        resolve();
-      });
-    });
-  } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener("abort", onAbort);
-  }
-  return socket;
-}
-
-/** The extensions an EHLO reply names, by keyword in upper case, each with its parameters. */
-function extensions(reply: Reply): Map<string, string[]> {
-  const found = new Map<string, string[]>();
-  for (const line of reply.lines.slice(1)) {
-    const [keyword = "", ...parameters] = line.trim().split(/\s+/);
-    found.set(
-      keyword.toUpperCase(),
-      parameters.map((parameter) => parameter.toUpperCase()),
-    );
-  }
-  return found;
-}
-
-/**
- * Sends one message: connects, greets, upgrades to TLS by STARTTLS when asked (and fails when the
- * server does not offer it), logs in when a user is set, names the sender and each recipient, and
- * sends `data`, a whole message as {@link composeMessage} builds it. Resolves on the 250 after the
- * data, and only then, with how many recipients the server took and how many it refused. Rejects
- * with an {@link SmtpFailure}: when every recipient is refused, its reply is the first 4xx among
- * them, so the send is tried again, or else the first refusal.
- *
- * `signal` aborts the send: the connection is closed at once.
+ * The certificate is always verified, against `ca` when set, and TLS is 1.2 or later. Anything the
+ * server sends between its 220 to STARTTLS and the handshake is thrown away, never read as if it
+ * came over TLS (RFC 3207 section 6). `signal` aborts the send: the connection is closed at once.
  *
  * @example
  * ```ts
  * const { accepted, refused } = await sendMail(options, { from, to: [lab] }, composeMessage(mail));
  * ```
  */
-export async function sendMail(
+export function sendMail(
   options: MailerOptions,
   envelope: Envelope,
   data: string,
   signal?: AbortSignal,
 ): Promise<SendResult> {
-  if (signal?.aborted === true) throw new SmtpFailure("connect", "ABORTED");
-  const socket = await open(options, signal);
-  const session = new Session(socket, options.socketTimeoutMs);
-  const onAbort = (): void => {
-    session.destroy();
-  };
-  signal?.addEventListener("abort", onAbort, { once: true });
-  const greeting = setTimeout(() => session.fail("ETIMEDOUT"), options.greetingTimeoutMs);
-  try {
-    try {
-      await session.expect([220]);
-    } finally {
-      clearTimeout(greeting);
-    }
-    const name = options.clientName ?? "[127.0.0.1]";
-    let offered = extensions(await session.command("ehlo", `EHLO ${name}`, [250]));
-    if (options.tls === "starttls") {
-      if (!offered.has("STARTTLS")) {
-        throw session.end(new SmtpFailure("starttls", "NOT_OFFERED", "held"));
-      }
-      await session.command("starttls", "STARTTLS", [220]);
-      await session.upgrade(options);
-      offered = extensions(await session.command("ehlo", `EHLO ${name}`, [250]));
-    }
-    if (options.user !== undefined) {
-      await login(session, offered, options.user, options.password ?? "");
-    }
-    const limit = Number(offered.get("SIZE")?.[0] ?? 0);
-    if (limit > 0 && data.length > limit) {
-      throw session.end(new SmtpFailure("mail", "TOO_LARGE", "rejected"));
-    }
-    const size = offered.has("SIZE") ? ` SIZE=${String(data.length)}` : "";
-    await session.command("mail", `MAIL FROM:<${envelope.from}>${size}`, [250]);
-    const refusals: number[] = [];
-    for (const recipient of envelope.to) {
-      const { code } = await session.ask("rcpt", `RCPT TO:<${recipient}>`);
-      if (code >= 400) refusals.push(code);
-      else if (code !== 250 && code !== 251) throw session.end(protocol("rcpt"));
-    }
-    const accepted = envelope.to.length - refusals.length;
-    if (accepted === 0) {
-      // The first 4xx, so the send is tried again, or else the first refusal. There is at least one
-      // recipient, so at least one refusal.
-      const reply = refusals.reduce((chosen, code) =>
-        chosen >= 500 && code < 500 ? code : chosen,
+  if (signal?.aborted === true) return Promise.reject(new SmtpFailure("connect", "ABORTED"));
+  const implicit = options.tls === "implicit";
+  // The stage of the last command sent, read from nodemailer's transaction log, which this keeps
+  // to itself: it holds addresses, so none of it is logged or kept.
+  let commanded: SmtpStage = "greeting";
+  const connection = new SMTPConnection({
+    host: options.host,
+    port: options.port,
+    secure: implicit,
+    requireTLS: options.tls === "starttls",
+    ignoreTLS: options.tls === "none",
+    tls: {
+      ...(options.ca === undefined ? {} : { ca: options.ca }),
+      minVersion: "TLSv1.2",
+      rejectUnauthorized: true,
+    },
+    name: options.clientName ?? "[127.0.0.1]",
+    connectionTimeout: options.connectTimeoutMs,
+    greetingTimeout: options.greetingTimeoutMs,
+    socketTimeout: options.socketTimeoutMs,
+    maxResponseSize: MAX_REPLY_BYTES,
+    transactionLog: true,
+    logger: {
+      debug: (entry: { readonly tnx?: unknown }, line: unknown): void => {
+        if (entry.tnx === "client" && typeof line === "string") {
+          commanded = stageOfCommand(line) ?? commanded;
+        }
+      },
+    },
+  });
+  // Where the session is now: still connecting, in a TLS handshake, or at the last command.
+  const where = (): SmtpStage =>
+    connection.stage === "init" ? "connect" : connection.upgrading === true ? "tls" : commanded;
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const fail = (error: Error): void => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", onAbort);
+      connection.close();
+      reject(error instanceof SmtpFailure ? error : failureOf(error, where(), implicit));
+    };
+    const onAbort = (): void => {
+      fail(new SmtpFailure(where(), "ABORTED"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    // A failure in the session, or after it ends (a QUIT left unanswered): only the first counts.
+    connection.on("error", fail);
+    const send = (): void => {
+      connection.send(
+        { from: envelope.from, to: [...envelope.to], size: data.length },
+        data,
+        (error, info) => {
+          if (error !== null) {
+            fail(error);
+            return;
+          }
+          settled = true;
+          signal?.removeEventListener("abort", onAbort);
+          connection.quit();
+          resolve({ accepted: info.accepted.length, refused: info.rejected.length });
+        },
       );
-      throw session.end(new SmtpFailure("rcpt", reply));
-    }
-    await session.command("data", "DATA", [354]);
-    await session.write(`${dotStuff(data)}\r\n.\r\n`, [250]);
-    session.quit();
-    return { accepted, refused: refusals.length };
-  } finally {
-    signal?.removeEventListener("abort", onAbort);
-  }
-}
-
-/** Logs in by PLAIN where the server offers it, else by LOGIN; held when it offers neither. */
-async function login(
-  session: Session,
-  offered: ReadonlyMap<string, readonly string[]>,
-  user: string,
-  password: string,
-): Promise<void> {
-  const mechanisms = offered.get("AUTH") ?? [];
-  const base64 = (text: string): string => Buffer.from(text, "utf8").toString("base64");
-  if (mechanisms.includes("PLAIN")) {
-    await session.command("auth", `AUTH PLAIN ${base64(`\0${user}\0${password}`)}`, [235]);
-    return;
-  }
-  if (!mechanisms.includes("LOGIN")) {
-    session.stage = "auth";
-    throw session.end(new SmtpFailure("auth", "NOT_OFFERED", "held"));
-  }
-  await session.command("auth", "AUTH LOGIN", [334]);
-  await session.command("auth", base64(user), [334]);
-  await session.command("auth", base64(password), [235]);
-}
-
-/**
- * `data` with a dot added before every line that starts with one, so no line of it ends the data
- * early (RFC 5321 section 4.5.2).
- *
- * @example
- * ```ts
- * dotStuff("a\r\n.b"); // "a\r\n..b"
- * ```
- */
-export function dotStuff(data: string): string {
-  return data.replace(/(^|\n)\./g, "$1..");
+    };
+    connection.connect((error) => {
+      if (error !== undefined) {
+        fail(error);
+        return;
+      }
+      const { user, password } = options;
+      if (user === undefined) {
+        send();
+        return;
+      }
+      if (!connection.allowsAuth) {
+        fail(new SmtpFailure("auth", "NOT_OFFERED", "held"));
+        return;
+      }
+      connection.login({ user, pass: password }, (failed) => {
+        if (failed === null) send();
+        else fail(failed);
+      });
+    });
+  });
 }
 
 /**
