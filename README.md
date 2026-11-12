@@ -155,11 +155,75 @@ What follows is in 0.0.3, the version on npm:
 
 These are on `main` and land in the next release, not in 0.0.3:
 
-- The package description on npm no longer says Pathways is not yet out.
-  <!-- changesets: release-status -->
-- An `xml` format: any XML body reaches the transform as a DOM document, read by `@cosyte/ccda`'s
-  hardened reader, with size and shape caps, and an untouched document leaves byte for byte.
+- **Batch files and bodies.** A file or HTTP source with `batch:` cuts one file or request body into
+  many messages (`split: hl7`, `lines` or `delimiter`), each stored on its own as exactly the bytes
+  it held. An HTTP batch takes an `Idempotency-Key` header, so a retry stores no piece twice.
+  <!-- changesets: batch-splitting -->
+- **Channel to channel.** A `channel:` destination, or `ctx.route` in a transform, hands a message
+  to another channel of the same project through the store, and the message names its parent. Start
+  refuses a loop of channel destinations, and a hop limit catches one made through `ctx.route`.
+  <!-- changesets: channel-routing -->
+- **A transform and a filter per destination.** A destination takes its own `transform:`, `name:`
+  and `format:`, and one whose transform returns nothing for a message is `filtered`. Each delivery
+  now records the destination it was made for, so a channel with two unnamed destinations of one
+  kind and target is refused until each has a `name:`, and a delivery queued before this release is
+  marked failed with `delivery: destination-unknown`, its message ready to replay.
+  <!-- changesets: destination-transforms -->
+- **Start and stop scripts, and a settled event.** A transform module may export `onStart` and
+  `onStop`, a hook gets one `settled` event per message once it is delivered, filtered or failed for
+  good, and the audit log records each engine start and stop. A hook that switches on every
+  lifecycle event or audit action adds cases for the new ones.
+  <!-- changesets: channel-scripts -->
+- **Metrics.** The health endpoint serves `GET /metrics` in the OpenMetrics text format, behind its
+  bearer token or mutual TLS, with labels that never carry a message's content. `/metrics` used to
+  answer with the health body, so a monitor that read the body there now reads it from another
+  path, such as `/`.
+  <!-- changesets: metrics-endpoint -->
+- **HTTP destination options.** An HTTP destination takes a `method:`, a `query:` and URL
+  placeholders that name a message metadata key, and can send an `idempotencyHeader:`. Message
+  metadata is still empty in this release, so a URL with a placeholder fails each delivery until
+  it can be set. It checks every
+  address it connects to, so one whose host is or resolves to a loopback, link-local or private
+  address now needs `allowNetworks:` naming the network; until then its deliveries wait with
+  `ADDRESS_REFUSED`.
+  <!-- changesets: http-destination-options -->
+- **An XML format.** A channel with `format: xml` hands its transform any UTF-8 XML body as a DOM
+  document, read by `@cosyte/ccda`'s hardened reader under size and shape caps, and a document the
+  transform leaves untouched goes out byte for byte.
   <!-- changesets: xml-format -->
+- **HL7 v2 XML acknowledgements.** With `ack: xml`, an HTTP destination settles each delivery by the
+  HL7 v2 XML acknowledgement in the answer: `AA` or `CA` is delivered, `AE` or `CE` retried, and
+  `AR` or `CR` failed. A new example and how-to show a veterinary lab result sent as v2 XML over
+  HTTPS with a client certificate.
+  <!-- changesets: http-xml-ack, v2-xml-example -->
+- **One HL7 v2 message per frame or body.** On an `hl7v2` channel, a frame or body holding a second
+  `MSH`, `FHS` or `BHS` header, in any letter case, behind bytes that are not printable ASCII, or
+  joined to the first with no line break, is now refused with `MULTIPLE_MESSAGES` on every source,
+  and so is a field holding a raw header (`MSH|^~\&|`) that is not escaped. A message with more than
+  one PID, where the structure HL7 publishes for its type allows one, now fails with
+  `MULTIPLE_PATIENTS`, and an HTTP source without `response: ack` answers a refused body with 422
+  where it answered 202.
+  <!-- changesets: one-message-per-frame, second-header-leading-bytes -->
+- **Declared character sets in HL7 v2.** An `hl7v2` message a transform returns is written in the
+  character set its MSH-18 declares, where it was always written as UTF-8, so a Latin-1 message
+  nothing changed leaves byte for byte. When a sender leaves MSH-18 blank and sends bytes that are
+  not ASCII, a transform that edits a segment holding one now fails that output with
+  `UNENCODABLE_CHARACTER`: have the sender declare MSH-18, or set the channel's
+  `hl7v2: { assumeCharset }`.
+  <!-- changesets: hl7v2-declared-charset -->
+- **One message per idempotency key.** When two hand-ins of one message under one idempotency key
+  arrive at the same moment, on two connections or two nodes, a resumed one finds the first and nothing new is stored on SQLite, PostgreSQL, MySQL,
+  MariaDB and SQL Server, through a claim that a new schema step adds when the engine starts.
+  <!-- changesets: idempotency-claims -->
+- **Docker Compose.** `pathways init` now also writes `compose.yaml`, which runs the project's
+  channels on the published image beside PostgreSQL, and a `.env.example` that lists the variables
+  Pathways reads by a fixed name. A new page walks through the same files in
+  `examples/docker-compose/`.
+  <!-- changesets: compose-example -->
+- **Examples.** Seven example projects in `examples/`, each running on synthetic messages with its
+  tests and a docs page, and CI runs each on every change. The package description on npm now says
+  only what Pathways is, and the README that more than one engine can share a database.
+  <!-- changesets: examples-folder, vet-lab-example, release-status, delivery-file-names -->
 
 The changelog lists each once it is released.
 
