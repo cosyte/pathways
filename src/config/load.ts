@@ -6,6 +6,7 @@ import type { z } from "zod";
 
 import { normalisePath } from "../connectors/http-path.js";
 import { secretSourceOf, secretUses, type SecretSourceYaml } from "../secrets/sources.js";
+import { processEnv } from "../env.js";
 import { referencesIn, resolvingEnv, variableAt, type EnvReference } from "./env-ref.js";
 import { DEFAULT_INDEX_BITS, isLowEntropyKey } from "./meta-index.js";
 import {
@@ -134,7 +135,7 @@ export interface LoadOptions {
  * ```
  */
 export async function loadProject(root: string, options: LoadOptions = {}): Promise<ProjectConfig> {
-  const env = options.env ?? process.env;
+  const env = options.env ?? processEnv();
   const projectRoot = resolve(root);
   const problems: string[] = [];
   // The project folder itself shows as ".", so a problem never repeats the path the caller typed.

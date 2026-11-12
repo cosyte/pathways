@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { normalisePath } from "../connectors/http-path.js";
+import type { EngineVariable } from "../env.js";
 import { unknownPlaceholders } from "../connectors/smtp-template.js";
 import { FORMATS, type CsvSettings } from "../engine/worker-entry.js";
 import { LIFECYCLE_EVENTS, type LifecycleEventType } from "../extensions/events.js";
@@ -3343,7 +3344,7 @@ export const DEFAULT_DATABASE_FILE = ".pathways/pathways.db";
  * process.env[DEFAULT_DATABASE_URL_ENV]; // "postgres://pathways:...@db.internal/pathways"
  * ```
  */
-export const DEFAULT_DATABASE_URL_ENV = "PATHWAYS_DATABASE_URL";
+export const DEFAULT_DATABASE_URL_ENV = "PATHWAYS_DATABASE_URL" satisfies EngineVariable;
 
 /**
  * The most connections a database server's pool opens, by default.
@@ -3385,10 +3386,10 @@ export const DEFAULT_MAX_BYTES = 10 * 1_048_576;
 export const DEFAULT_HTTP_TIMEOUT_MS = 30_000;
 
 /** The environment variable an HTTP source reads its bearer token from when `auth` is not set. */
-export const DEFAULT_HTTP_TOKEN_ENV = "PATHWAYS_HTTP_TOKEN";
+export const DEFAULT_HTTP_TOKEN_ENV = "PATHWAYS_HTTP_TOKEN" satisfies EngineVariable;
 
 /** The environment variable the health endpoint reads its bearer token from when `auth` is not set. */
-export const DEFAULT_HEALTH_TOKEN_ENV = "PATHWAYS_HEALTH_TOKEN";
+export const DEFAULT_HEALTH_TOKEN_ENV = "PATHWAYS_HEALTH_TOKEN" satisfies EngineVariable;
 
 /**
  * How long one call to a hook may run by default, in milliseconds.

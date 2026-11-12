@@ -1,11 +1,11 @@
 /**
  * The `.env.example` files and the Docker Compose example, held to the code.
  *
- * - Every environment variable Pathways' own code reads by name is listed in the repository's
- *   `.env.example`, the Compose example's, and the starter's, each under a comment of its own, with
- *   a placeholder in place of any secret. A new read that none of them lists fails here, and so
- *   does a read whose name test/env-reads.ts cannot see, unless it is one of the few that read a
- *   name from configuration.
+ * - The repository's `.env.example`, the Compose example's, and the starter's list exactly the
+ *   environment variables Pathways reads by a fixed name, `ENGINE_VARIABLES` in src/env.ts, each
+ *   under a comment of its own, with a placeholder in place of any secret. src/env.ts is the only
+ *   file in src/ that reads the environment (the lint rule test/env-access.test.ts checks holds the
+ *   rest to it), so a new variable is a new entry there, and an entry no file lists fails here.
  * - The Compose example lists every variable its `compose.yaml` and its configuration name.
  * - The starter carries the same `compose.yaml` and `.env.example` as the example, and the example's
  *   channel is the starter's.
@@ -22,8 +22,7 @@ import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
 
 import { projectSchema } from "../src/config/schema.js";
-
-import { type EnvReads, scanEnvReads } from "./env-reads.js";
+import { ENGINE_VARIABLES } from "../src/env.js";
 
 const ROOT = join(import.meta.dirname, "..");
 const EXAMPLE = "examples/docker-compose";
@@ -44,30 +43,8 @@ function filesUnder(dir: string): string[] {
 
 const NAME = "[A-Za-z_][A-Za-z0-9_]*";
 
-/** The code in `src/`, which test/env-reads.ts scans for the environment variables it reads. */
-const engineReads = (): EnvReads =>
-  scanEnvReads(
-    filesUnder("src")
-      .filter((path) => path.endsWith(".ts"))
-      .map((path) => ({ path, text: read(path) })),
-  );
-
-const engineVariables = (): readonly string[] => engineReads().names;
-
-/**
- * The reads in `src/` whose name comes from configuration, so no `.env.example` can list it: a
- * `{ env: NAME }` reference in a YAML file, a transform's config, or the `env` secret provider. Any
- * other read the scan cannot name fails the test until its name is visible or it is added here.
- */
-const DYNAMIC_READS = [
-  { path: "src/cli.ts", read: "env[reference.variable]" },
-  { path: "src/config/env-ref.ts", read: "env[reference.env]" },
-  { path: "src/config/transform-config.ts", read: "env[reference.name]" },
-  { path: "src/secrets/provider.ts", read: "env[ref.name]" },
-] as const;
-
-const isDynamic = (found: { readonly path: string; readonly read: string }): boolean =>
-  DYNAMIC_READS.some((entry) => entry.path === found.path && entry.read === found.read);
+/** The variables the Compose example adds for Compose itself, which the engine never reads. */
+const COMPOSE_VARIABLES = ["PATHWAYS_VERSION", "POSTGRES_PASSWORD", "PATHWAYS_KEY"];
 
 /** One variable a `.env.example` lists, set (`NAME=value`) or shown commented out (`# NAME=value`). */
 interface Listed {
@@ -128,39 +105,14 @@ interface Compose {
 const compose = (): Compose => parse(read(`${EXAMPLE}/compose.yaml`)) as Compose;
 
 describe("the environment variables Pathways reads", () => {
-  // If the scan stopped finding these, it would find nothing new either.
-  it("are found in src/, the ones known today among them", () => {
-    expect(engineVariables()).toEqual(
-      expect.arrayContaining([
-        "PATHWAYS_DATABASE_URL",
-        "PATHWAYS_HEALTH_TOKEN",
-        "PATHWAYS_HTTP_TOKEN",
-        "PATHWAYS_TEST_FAULT_POINT",
-        "PATHWAYS_TEST_FAULT_POINT_RESUME",
-        "XDG_RUNTIME_DIR",
-      ]),
-    );
-  });
-
-  it("are each read by a name the scan sees, but at the reads whose name configuration gives", () => {
-    expect(engineReads().unresolved.filter((found) => !isDynamic(found))).toEqual([]);
-  });
-
-  // An entry left after its read is gone would let a new read at the same place pass unseen.
-  it("allow no dynamic read that src/ no longer makes", () => {
-    const { unresolved } = engineReads();
-    expect(
-      DYNAMIC_READS.filter(
-        (entry) => !unresolved.some((f) => f.path === entry.path && f.read === entry.read),
-      ),
-    ).toEqual([]);
-  });
-
   for (const file of ENV_FILES) {
     describe(file, () => {
-      it("lists every one of them", () => {
-        const names = new Set(listed(read(file)).map((entry) => entry.name));
-        expect(engineVariables().filter((name) => !names.has(name))).toEqual([]);
+      it("lists every one of them, and no variable the engine does not read", () => {
+        const names = listed(read(file)).map((entry) => entry.name);
+        const known = new Set<string>(ENGINE_VARIABLES);
+        expect(ENGINE_VARIABLES.filter((name) => !names.includes(name))).toEqual([]);
+        const others = file === ".env.example" ? [] : COMPOSE_VARIABLES;
+        expect(names.filter((name) => !known.has(name))).toEqual(others);
       });
 
       it("gives each variable a comment, once, and reads as a .env file", () => {

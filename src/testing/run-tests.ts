@@ -6,6 +6,7 @@ import { transformConfigFor } from "../config/transform-config.js";
 import type { Env } from "../connectors/endpoint.js";
 import { ChannelWorker, TransformLoadError } from "../engine/channel-worker.js";
 import type { FailureSummary } from "../engine/worker-entry.js";
+import { processEnv } from "../env.js";
 
 /** Options for {@link runChannelTests}. */
 export interface ChannelTestOptions {
@@ -80,7 +81,7 @@ export async function runChannelTests(
     const config = transformConfigFor(
       { config: options.project?.config ?? {} },
       channel,
-      options.env ?? process.env,
+      options.env ?? processEnv(),
     );
     if (!("resolved" in config)) {
       options.out(`FAIL ${channel.name}: ${describeFailure(config, channel)}`);

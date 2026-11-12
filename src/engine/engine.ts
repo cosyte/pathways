@@ -67,6 +67,7 @@ import type { ChannelContext } from "../extensions/types.js";
 import { AuditLog, auditEvent } from "../operator/audit.js";
 import { resolveSecrets, type Secrets, secretsOf } from "../secrets/resolve.js";
 import type { KeyProvider } from "../encryption/keys.js";
+import { processEnv } from "../env.js";
 import { recordRetention, runRetention, type RetentionReport } from "../operator/retention.js";
 import { copiesBodies, markCopiesBodies, release } from "../storage/ownership.js";
 import {
@@ -969,7 +970,7 @@ export class Engine {
   /** The engine-wide hooks, from `pathways.yaml`, once started. */
   private hooks: HookSet | undefined;
   /** The environment the engine started with: a reload reads the transform's configuration from it. */
-  private env: Env = process.env;
+  private env: Env = processEnv();
   private readonly wait: EngineWait;
   /**
    * Set while {@link run} runs: aborted to wake its loop when a pass ends, and the first failure of
@@ -1013,7 +1014,7 @@ export class Engine {
    */
   async start(): Promise<void> {
     const { project, logger } = this.options;
-    const env = this.options.env ?? process.env;
+    const env = this.options.env ?? processEnv();
     this.env = env;
     const dryRun = this.options.dryRun === true;
     if (this.options.store.markDryRun === undefined) {

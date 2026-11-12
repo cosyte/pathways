@@ -11,6 +11,7 @@ import {
 } from "../engine/channel-worker.js";
 import type { FailureSummary, MessageContext } from "../engine/worker-entry.js";
 import { EXIT } from "../exit.js";
+import { processEnv } from "../env.js";
 import type { MessageStore, MessageSummary } from "../storage/store.js";
 import { describeFailure, expectedName, joinOutputs } from "../testing/run-tests.js";
 import type { AuditLog } from "./audit.js";
@@ -93,7 +94,7 @@ export async function verifyCommand(
     channel === undefined
       ? context.project.channels
       : context.project.channels.filter((c) => c.name === channel);
-  const runner = new Runner(context.project, context.env ?? process.env);
+  const runner = new Runner(context.project, context.env ?? processEnv());
   const results = new Map<string, Result[]>(channels.map((c) => [c.name, []]));
   let skipped = 0;
   let missing = 0;
