@@ -70,7 +70,7 @@ health:
 - Secrets keep their own meaning of `{ env: NAME }`: a token, a credential header, a connection URL
   or a master key is a [secret reference](#secrets), read when a command starts and never printed,
   and it takes no `default`. `plaintext`,
-  `encryption: none`, `auth: none`, a channel's `name` and `format`, and a block (`tls`, `options`)
+  `encryption: none`, `auth: none`, a channel's or a destination's `name` and `format`, and a block (`tls`, `options`)
   are not read from the environment: turning TLS, encryption or authentication off stays in the
   file, where the audit sees it. Nor are the names in an HTTP source's `contextHeaders`: which
   request headers reach a transform stays in the file, where a credential header is refused at load.
