@@ -2,7 +2,7 @@
 id: read-and-write-azure-blob-storage
 title: Read and write Azure Blob Storage
 sidebar_label: Azure Blob Storage
-description: "Take each blob dropped under a prefix in an Azure Blob Storage container as one message, and write each output as a blob, with each blob stored once even with two engines reading."
+description: "Take each blob under a prefix in an Azure Blob Storage container as one message and write each output as a blob, each stored once with two engines."
 ---
 
 # Read and write Azure Blob Storage

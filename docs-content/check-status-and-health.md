@@ -2,7 +2,7 @@
 id: check-status-and-health
 title: Check status and health
 sidebar_label: Status and health
-description: "See each channel's counts, retrying deliveries and failed messages from the command line, serve a health endpoint a monitor can poll, and answer a load balancer's or an orchestrator's liveness and readiness probes."
+description: "See each channel's counts, retrying deliveries and failed messages, and serve a health endpoint and the probes a monitor or load balancer asks."
 ---
 
 # Check status and health
