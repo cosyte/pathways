@@ -214,7 +214,8 @@ These are on `main` and land in the next release, not in 0.0.4:
 - **Empty bodies on SQL Server.** A message one channel hands to another with an empty body, a
   transform output that is empty, and an empty body that `pathways rekey` replaces or writes are
   now stored on SQL Server, as on every other database. SQL Server refused them before, and the
-  write failed. <!-- changesets: sqlserver-empty-body -->
+  write failed.
+  <!-- changesets: sqlserver-empty-body -->
 
 ---
 
