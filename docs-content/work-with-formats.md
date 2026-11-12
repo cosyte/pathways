@@ -257,16 +257,27 @@ A body that cannot be read fails with a code, and the error names nothing the bo
   `&lt;`, `&gt;`, `&quot;`, `&apos;`); character references such as `&#233;` are read;
 - `INPUT_SIZE_LIMIT_EXCEEDED`, `ELEMENT_DEPTH_LIMIT_EXCEEDED`, `NODE_COUNT_LIMIT_EXCEEDED`: the body
   is over `maxBytes`, `maxDepth` or `maxElements`;
-- `NOT_WELL_FORMED_XML`: the body is not well-formed XML, has no root element, or holds a character
-  XML 1.0 forbids;
+- `NOT_WELL_FORMED_XML`: the body is not well-formed XML, has no root element, has text outside its
+  root element (only whitespace, comments and processing instructions may stand there), or holds a
+  character XML 1.0 forbids, as it is or as a character reference such as `&#1;`;
 - `ERR_ENCODING_INVALID_ENCODED_DATA`: the body is not UTF-8. Send a body in another character set
   through a `text` or `json` channel, or have the sender write UTF-8.
 
 A document the transform returns as it was read goes out byte for byte as it arrived: its XML
 declaration, quoting, spacing, line endings and byte order mark included. A changed document, or one
-the transform builds, is written as UTF-8 by the DOM serializer and read back before it is sent; when
-it does not read back the same, such as a text that holds a character XML forbids or a carriage
-return, the output fails with `XML_NOT_WRITABLE`, which names nothing the document holds.
+the transform builds, is written as UTF-8 by the DOM serializer, and its XML declaration, if it has
+one, is written naming `UTF-8` whatever encoding it named before. The written text is read back with
+the same reader and compared with the document node by node: kinds, names, namespaces, attributes,
+text, comments, processing instructions and their order. When the two differ, the output fails with
+`XML_NOT_WRITABLE`, which names nothing the document holds. So do these, before anything is written:
+
+- a comment that holds `--` or ends in `-`, a processing instruction whose data holds `?>`, and a
+  CDATA section that holds `]]>`, since each would end early and turn the rest into markup;
+- a processing instruction named `xml`, other than the XML declaration at the start;
+- a text that holds a character XML forbids or a carriage return, which would not read back the same;
+- an element made with `createElement` inside a default namespace: it has no namespace, and written
+  out it would take the parent's. Make a new element with `createElementNS` and the namespace it
+  belongs in.
 
 ## Turn one format into another
 

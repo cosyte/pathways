@@ -123,6 +123,60 @@ describe("format: xml, read", () => {
     expect((await refusal(read(large))).code).toBe("INPUT_SIZE_LIMIT_EXCEEDED");
   });
 
+  it("refuses a character XML 1.0 forbids, as it is or as a character reference", async () => {
+    for (const body of [
+      "<order>TEST-VALUE\u0001</order>",
+      "<order>TEST-VALUE&#1;</order>",
+      "<order>TEST-VALUE&#x1F;</order>",
+      "<order note='TEST-VALUE&#x8;'/>",
+      "<order><![CDATA[TEST-VALUE\u0002]]></order>",
+      "<order><!--TEST-VALUE\u0003--></order>",
+      "<order>TEST-VALUE&#xFFFE;</order>",
+      "<order>TEST-VALUE&#xD800;</order>",
+    ]) {
+      const refused = await refusal(read(body));
+      expect(refused.code).toBe("NOT_WELL_FORMED_XML");
+      expect(refused.text).not.toContain("TEST-VALUE");
+    }
+    // Tab, line feed, carriage return and characters past the controls are allowed.
+    const allowed = await read("<order>&#9;&#10;&#13;&#x85;&#xE9;&#x1F600;</order>");
+    expect(allowed.documentElement?.textContent).toBe("\t\n\r\u0085é\u{1f600}");
+    // A reference inside a CDATA section is text, not a reference.
+    await expect(read("<order><![CDATA[&#1;]]></order>")).resolves.toBeDefined();
+  });
+
+  it("refuses text outside the root element, and reads comments and whitespace there", async () => {
+    for (const body of [
+      "<order/>TEST-VALUE",
+      "TEST-VALUE<order/>",
+      "<order/><!--c-->TEST-VALUE<?p x?>",
+      "<?xml version='1.0'?>TEST-VALUE\n<order/>",
+      "<order/><![CDATA[TEST-VALUE]]>",
+      "<order/>?>",
+      "<order a='>'/>TEST-VALUE",
+      "<order><![CDATA[</order>]]></order>TEST-VALUE",
+    ]) {
+      const refused = await refusal(read(body));
+      expect(refused.code).toBe("NOT_WELL_FORMED_XML");
+      expect(refused.text).not.toContain("TEST-VALUE");
+    }
+    for (const body of [
+      "<?xml version='1.0'?>\r\n<!--c-->\n<?p x?>\t<order a='>'><![CDATA[</order>]]></order>\r\n<!--d--> <?q?>\n",
+      "<order><!-- </order> --><?p </order>?><a/></order>",
+    ]) {
+      expect(await write(await read(body))).toBe(body);
+    }
+  });
+
+  it("refuses a body over maxBytes before it decodes it", async () => {
+    const latin1 = new Uint8Array([...bytes("<order>"), 0xe9, ...bytes("</order>")]);
+    const refused = await refusal(read(latin1, { maxBytes: latin1.byteLength - 1 }));
+    expect(refused.code).toBe("INPUT_SIZE_LIMIT_EXCEEDED");
+    const bom = new Uint8Array([0xef, 0xbb, 0xbf, ...bytes("<order/>")]);
+    await expect(read(bom, { maxBytes: 8 })).resolves.toBeDefined();
+    expect((await refusal(read(bom, { maxBytes: 7 }))).code).toBe("INPUT_SIZE_LIMIT_EXCEEDED");
+  });
+
   it("refuses nesting deeper than maxDepth and more elements than maxElements", async () => {
     const nested = "<a><b><c><d/></c></b></a>";
     await expect(read(nested, { maxDepth: 4 })).resolves.toBeDefined();
@@ -227,6 +281,98 @@ describe("format: xml, write", () => {
   it("leaves a plain object shaped like a document to the channel's format", async () => {
     const shaped = { nodeType: 9, documentElement: null };
     expect(text(await encode("json", shaped))).toBe('{"nodeType":9,"documentElement":null}');
+  });
+
+  it("refuses a comment or processing instruction that would write as other markup", async () => {
+    const changes: ((document: XmlDocument) => unknown)[] = [
+      (d) => d.documentElement?.appendChild(d.createComment("TEST-VALUE --> <b/> <!-- y")),
+      (d) => d.documentElement?.appendChild(d.createComment("TEST-VALUE -- y")),
+      (d) => d.documentElement?.appendChild(d.createComment("TEST-VALUE-")),
+      (d) =>
+        d.documentElement?.appendChild(
+          d.createProcessingInstruction("p", "TEST-VALUE ?> <b/> <?q y"),
+        ),
+      (d) =>
+        d.documentElement?.appendChild(d.createProcessingInstruction("p?><b/><?q", "TEST-VALUE")),
+      (d) => d.documentElement?.appendChild(d.createProcessingInstruction("xml", "TEST-VALUE")),
+      (d) => d.documentElement?.appendChild(d.createProcessingInstruction("XmL", "TEST-VALUE")),
+      (d) => d.appendChild(d.createProcessingInstruction("xml", 'version="1.0"')),
+      (d) =>
+        d.insertBefore(
+          d.createProcessingInstruction("xml", 'version="1.0"?><b/><?q TEST-VALUE'),
+          d.documentElement,
+        ),
+      (d) => d.appendChild(d.createTextNode("TEST-VALUE")),
+      (d) => d.appendChild(d.createCDATASection("TEST-VALUE")),
+    ];
+    for (const change of changes) {
+      const document = await read("<a/>");
+      change(document);
+      const refused = await refusal(write(document));
+      expect(refused.code).toBe("XML_NOT_WRITABLE");
+      expect(refused.text).not.toContain("TEST-VALUE");
+    }
+  });
+
+  it("writes comments, processing instructions and split text that read back the same", async () => {
+    const document = await read("<a/>");
+    const root = document.documentElement;
+    root?.appendChild(document.createComment(" a - b "));
+    root?.appendChild(document.createProcessingInstruction("p", "x ? > y"));
+    root?.appendChild(document.createTextNode("one "));
+    root?.appendChild(document.createTextNode(""));
+    root?.appendChild(document.createCDATASection(""));
+    root?.appendChild(document.createTextNode("two"));
+    root?.appendChild(document.createElementNS("urn:example:other", "p:b"));
+    const written = await write(document);
+    expect(written).toBe(
+      '<a><!-- a - b --><?p x ? > y?>one <![CDATA[]]>two<p:b xmlns:p="urn:example:other"/></a>',
+    );
+  });
+
+  it("refuses a document that reads back with other names, namespaces or data", async () => {
+    // createElement makes an element in no namespace, which a default namespace would take in.
+    const namespaced = await read("<order xmlns='urn:example:orders'/>");
+    namespaced.documentElement?.appendChild(namespaced.createElement("note"));
+    expect((await refusal(write(namespaced))).code).toBe("XML_NOT_WRITABLE");
+    const same = await read("<order xmlns='urn:example:orders'/>");
+    same.documentElement?.appendChild(same.createElementNS("urn:example:orders", "note"));
+    expect(await write(same)).toBe('<order xmlns="urn:example:orders"><note/></order>');
+    // A CDATA section whose data is changed to hold the end of a section after it was made.
+    const section = await read("<a/>");
+    const cdata = section.createCDATASection("TEST-VALUE");
+    section.documentElement?.appendChild(cdata);
+    cdata.appendData("]]><b/>");
+    const refused = await refusal(write(section));
+    expect(refused.code).toBe("XML_NOT_WRITABLE");
+    expect(refused.text).not.toContain("TEST-VALUE");
+  });
+
+  it("writes a changed document's declaration as UTF-8, whatever it named", async () => {
+    for (const [declared, written] of [
+      ['<?xml version="1.0" encoding="ISO-8859-1"?>', '<?xml version="1.0" encoding="UTF-8"?>'],
+      [
+        "<?xml version='1.0' encoding='UTF-16' standalone='yes'?>",
+        "<?xml version='1.0' encoding='UTF-8' standalone='yes'?>",
+      ],
+      ['<?xml version="1.0" encoding="utf-8"?>', '<?xml version="1.0" encoding="utf-8"?>'],
+      ['<?xml version="1.0"?>', '<?xml version="1.0"?>'],
+    ] as const) {
+      const body = `${declared}\n<a/>`;
+      const untouched = await read(body);
+      expect(await write(untouched)).toBe(body);
+      const document = await read(body);
+      document.documentElement?.setAttribute("n", "TESTÉ");
+      const out = await encode("xml", document, {});
+      expect(text(out)).toBe(`${written}\n<a n="TESTÉ"/>`);
+      expect(out).toEqual(bytes(`${written}\n<a n="TESTÉ"/>`));
+    }
+    const built = await read("<a/>");
+    built.insertBefore(
+      built.createProcessingInstruction("xml", 'version="1.0" encoding="UTF-16"'),
+      built.documentElement,
+    );
+    expect(await write(built)).toBe('<?xml version="1.0" encoding="UTF-8"?><a/>');
   });
 
   it("writes a document a transform builds on a channel of another format", async () => {

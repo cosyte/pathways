@@ -1416,10 +1416,12 @@ function fixedText(
 }
 
 /**
- * An `xml` document that cannot be written as XML that reads back as the same document. Its text
- * names no part of the document, since any of it can carry a patient's details.
+ * An `xml` body Pathways refuses itself, or a document that cannot be written as XML that reads back
+ * as the same document. Its text is fixed and names no part of the body, since any of it can carry a
+ * patient's details.
  *
- * Code: `XML_NOT_WRITABLE`.
+ * Codes: `NOT_WELL_FORMED_XML` and `INPUT_SIZE_LIMIT_EXCEEDED` on reading, as `@cosyte/ccda`'s reader
+ * uses them; `XML_NOT_WRITABLE` on writing.
  */
 class XmlError extends Error {
   readonly code: string;
@@ -1451,27 +1453,174 @@ function ignoreWarning(): void {
  * reference (`ENTITY_EXPANSION_LIMIT`, its cap held at none, since with no DTD none can be
  * declared); a body over `maxBytes` (`INPUT_SIZE_LIMIT_EXCEEDED`), nested deeper than `maxDepth`
  * (`ELEMENT_DEPTH_LIMIT_EXCEEDED`) or holding more than `maxElements` elements
- * (`NODE_COUNT_LIMIT_EXCEEDED`); and a body that is not well-formed (`NOT_WELL_FORMED_XML`). Each
- * error's text is fixed and names nothing of the body. The body must be UTF-8.
+ * (`NODE_COUNT_LIMIT_EXCEEDED`); and a body that is not well-formed (`NOT_WELL_FORMED_XML`), which
+ * {@link readCheckedXml} widens to what that reader lets through. Each error's text is fixed and
+ * names nothing of the body. The body must be UTF-8, and its size is held to `maxBytes` before it is
+ * decoded.
  *
  * The document is kept against its bytes and its serialization as read, so {@link writeXml} can
  * send an untouched one as the bytes it arrived as.
  */
 function readXml(library: typeof Ccda, body: Uint8Array, settings: XmlSettings): XmlDocument {
+  const maxBytes = settings.maxBytes ?? XML_DEFAULTS.maxBytes;
+  // Counted as the reader counts: the bytes after a UTF-8 byte order mark.
+  const mark = body[0] === 0xef && body[1] === 0xbb && body[2] === 0xbf ? 3 : 0;
+  if (body.byteLength - mark > maxBytes) {
+    throw new XmlError("INPUT_SIZE_LIMIT_EXCEEDED", "Input exceeds the byte cap.");
+  }
   const limits = library.resolveLimits({
-    maxInputBytes: settings.maxBytes ?? XML_DEFAULTS.maxBytes,
+    maxInputBytes: maxBytes,
     maxDepth: settings.maxDepth ?? XML_DEFAULTS.maxDepth,
     maxNodeCount: settings.maxElements ?? XML_DEFAULTS.maxElements,
     maxEntityExpansions: 0,
   });
-  const document = library.parseSecureXml(
-    strictUtf8.decode(body),
-    limits,
-    ignoreWarning,
-    ignoreWarning,
-  );
+  const document = readCheckedXml(library, strictUtf8.decode(body), limits);
   xmlOrigins.set(document, { body, written: serializeXml(document) });
   return document;
+}
+
+/**
+ * Reads XML text with `@cosyte/ccda`'s hardened reader, then refuses as `NOT_WELL_FORMED_XML` what
+ * that reader (`@cosyte/ccda` 0.1.6, on `@xmldom/xmldom`) lets through though XML 1.0 forbids it: a
+ * character XML forbids, as it is or as a character reference, and text or a CDATA section outside
+ * the root element, which the reader drops without a word. Both reading a body and reading back a
+ * written document go through here.
+ */
+function readCheckedXml(
+  library: typeof Ccda,
+  source: string,
+  limits: ReturnType<typeof Ccda.resolveLimits>,
+): XmlDocument {
+  const document = library.parseSecureXml(source, limits, ignoreWarning, ignoreWarning);
+  if (
+    FORBIDDEN_XML_CHARACTER.test(source) ||
+    !markupOnlyOutsideRoot(source) ||
+    holdsForbiddenData(document)
+  ) {
+    throw new XmlError("NOT_WELL_FORMED_XML", "Input is not well-formed XML.");
+  }
+  return document;
+}
+
+/**
+ * Whether XML text holds only whitespace, comments and processing instructions outside its root
+ * element. It runs on text the reader has already taken as well-formed, so it only has to find
+ * where the root starts and ends: it steps over comments, processing instructions, CDATA sections
+ * and tags (a quoted attribute value may hold `>`), counting how deep it is.
+ */
+function markupOnlyOutsideRoot(source: string): boolean {
+  let at = 0;
+  let depth = 0;
+  while (at < source.length) {
+    if (source[at] !== "<") {
+      const next = source.indexOf("<", at);
+      const end = next === -1 ? source.length : next;
+      if (depth === 0 && !XML_WHITESPACE.test(source.slice(at, end))) return false;
+      at = end;
+    } else if (source.startsWith("<!--", at)) {
+      at = past(source, "-->", at + 4);
+    } else if (source.startsWith("<?", at)) {
+      at = past(source, "?>", at + 2);
+    } else if (source.startsWith("<![CDATA[", at)) {
+      if (depth === 0) return false;
+      at = past(source, "]]>", at + 9);
+    } else if (source.startsWith("</", at)) {
+      depth -= 1;
+      at = past(source, ">", at + 2);
+    } else {
+      let quote = "";
+      let end = at + 1;
+      for (; end < source.length; end += 1) {
+        const char = source[end];
+        if (quote !== "") {
+          if (char === quote) quote = "";
+        } else if (char === '"' || char === "'") {
+          quote = char;
+        } else if (char === ">") {
+          break;
+        }
+      }
+      if (source[end - 1] !== "/") depth += 1;
+      at = end + 1;
+    }
+  }
+  return true;
+}
+
+/** Only XML's whitespace: space, tab, line feed and carriage return. */
+const XML_WHITESPACE = /^[ \t\r\n]*$/;
+
+/** The index just past the next `end` from `from`, or the text's length when there is none. */
+function past(source: string, end: string, from: number): number {
+  const found = source.indexOf(end, from);
+  /* v8 ignore next -- the reader has refused text whose comment, instruction, section or tag never ends */
+  return found === -1 ? source.length : found + end.length;
+}
+
+/**
+ * The parts of a DOM node the writer and its checks read: `@xmldom/xmldom`'s nodes, as plain
+ * properties, so a node of any kind is read the same way.
+ */
+interface XmlNode {
+  readonly nodeType: number;
+  readonly nodeName: string;
+  readonly localName?: string | null;
+  readonly namespaceURI?: string | null;
+  readonly data?: string;
+  readonly target?: string;
+  readonly firstChild: XmlNode | null;
+  readonly nextSibling: XmlNode | null;
+  readonly attributes?: ArrayLike<XmlAttribute>;
+}
+
+/** The parts of a DOM attribute the writer and its checks read. */
+interface XmlAttribute {
+  readonly nodeName: string;
+  readonly namespaceURI: string | null;
+  readonly value: string;
+}
+
+const ELEMENT_NODE = 1;
+const TEXT_NODE = 3;
+const CDATA_SECTION_NODE = 4;
+const PROCESSING_INSTRUCTION_NODE = 7;
+const COMMENT_NODE = 8;
+const DOCUMENT_NODE = 9;
+
+/** Every node under `root`, `root` included, in document order, without recursion. */
+function* nodesOf(root: XmlNode): Generator<XmlNode> {
+  const pending: XmlNode[] = [root];
+  for (let node = pending.pop(); node !== undefined; node = pending.pop()) {
+    yield node;
+    const children: XmlNode[] = [];
+    for (let child = node.firstChild; child !== null; child = child.nextSibling) {
+      children.push(child);
+    }
+    pending.push(...children.reverse());
+  }
+}
+
+/** The attributes of an element that are not namespace declarations. */
+function ownAttributes(element: XmlNode): XmlAttribute[] {
+  return Array.from(element.attributes as ArrayLike<XmlAttribute>).filter(
+    ({ nodeName }) => nodeName !== "xmlns" && !nodeName.startsWith("xmlns:"),
+  );
+}
+
+/**
+ * Whether a document holds a character XML forbids in a text, an attribute value, a CDATA section, a
+ * comment or a processing instruction: the reader turns a character reference such as `&#1;` into
+ * the character it names, so this finds what a look at the text alone cannot.
+ */
+function holdsForbiddenData(document: XmlNode): boolean {
+  for (const node of nodesOf(document)) {
+    if (FORBIDDEN_XML_CHARACTER.test(node.data ?? "")) return true;
+    if (node.nodeType !== ELEMENT_NODE) continue;
+    for (const attribute of ownAttributes(node)) {
+      if (FORBIDDEN_XML_CHARACTER.test(attribute.value)) return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -1495,11 +1644,23 @@ function isXmlDocument(value: object): value is XmlDocument {
 
 /**
  * Writes an XML document. One that serializes as it did when it was read goes out as the bytes it
- * arrived as, declaration, quoting, spacing, line endings and byte order mark included. Any other is
- * serialized, then read back with the same reader (its size and shape caps lifted), and refused with
- * `XML_NOT_WRITABLE` unless that reads back to the same text and holds no character XML forbids: a
- * control character, or a carriage return the reader would turn into a line feed, never leaves in a
- * changed document.
+ * arrived as, declaration, quoting, spacing, line endings and byte order mark included.
+ *
+ * Any other is checked, serialized, read back and compared, and refused with `XML_NOT_WRITABLE` at
+ * the first doubt:
+ *
+ * - first, what XML cannot carry is refused outright: a comment holding `--` or ending in `-`, a
+ *   processing instruction whose data holds `?>`, a CDATA section holding `]]>`, and a processing
+ *   instruction named `xml` in any case, other than an XML declaration of the right form at the
+ *   start;
+ * - it is written as UTF-8, so an XML declaration that names another encoding is written naming
+ *   UTF-8 (one that names none means UTF-8 already);
+ * - the text is read back with the same reader and its checks (its size and shape caps lifted), and
+ *   the two documents are compared node by node: kinds, names, namespaces, attributes, text,
+ *   comment and processing-instruction data, and order. A text fixed point is not enough: a
+ *   comment holding `-->` writes as markup that reads back as itself.
+ *
+ * Every error from the DOM library is caught here, so its text never reaches the failure.
  */
 function writeXml(library: typeof Ccda, document: XmlDocument): Written {
   let written: string;
@@ -1510,30 +1671,188 @@ function writeXml(library: typeof Ccda, document: XmlDocument): Written {
   }
   const origin = xmlOrigins.get(document);
   if (origin !== undefined && origin.written === written) return origin.body;
-  let again: string;
   try {
-    again = serializeXml(library.parseSecureXml(written, openLimits(library), ignoreWarning));
+    const root = document as unknown as XmlNode;
+    const declaration = writableDeclaration(root);
+    let declared: string | undefined;
+    if (declaration !== undefined) {
+      const data = declaration.data as string;
+      const as = `<?xml ${data}?>`;
+      /* v8 ignore next -- the serializer writes the first node first, as <?target data?> */
+      if (!written.startsWith(as)) throw notWritable(undefined);
+      declared = utf8Declaration(data);
+      written = `<?xml ${declared}?>${written.slice(as.length)}`;
+    }
+    const again = readCheckedXml(library, written, openLimits(library));
+    if (holdsForbiddenCharacter(written)) throw notWritable(undefined);
+    if (!sameDocument(root, again, declaration, declared)) {
+      throw notWritable(undefined);
+    }
   } catch (error) {
-    throw notWritable(error);
+    throw error instanceof XmlError && error.code === "XML_NOT_WRITABLE"
+      ? error
+      : notWritable(error);
   }
-  if (again !== written || holdsForbiddenCharacter(written)) throw notWritable(undefined);
   return written;
+}
+
+/**
+ * An XML declaration's data: `version`, then `encoding` and `standalone` if given, quoted with `"`
+ * or `'`. The encoding name's place is captured, so it can be set to UTF-8.
+ */
+const XML_DECLARATION =
+  /^version[ \t\r\n]*=[ \t\r\n]*(["'])1\.[0-9]+\1(?:[ \t\r\n]+encoding[ \t\r\n]*=[ \t\r\n]*(["'])([A-Za-z][A-Za-z0-9._-]*)\2)?(?:[ \t\r\n]+standalone[ \t\r\n]*=[ \t\r\n]*(["'])(?:yes|no)\4)?[ \t\r\n]*$/d;
+
+/**
+ * Refuses, as `XML_NOT_WRITABLE`, a node XML cannot carry (see {@link writeXml}), and returns the
+ * document's XML declaration: a processing instruction named `xml`, first in the document, whose
+ * data is a declaration's.
+ */
+function writableDeclaration(document: XmlNode): XmlNode | undefined {
+  let declaration: XmlNode | undefined;
+  for (const node of nodesOf(document)) {
+    const data = node.data ?? "";
+    if (node.nodeType === COMMENT_NODE && (data.includes("--") || data.endsWith("-"))) {
+      throw notWritable(undefined);
+    }
+    if (node.nodeType === CDATA_SECTION_NODE && data.includes("]]>")) throw notWritable(undefined);
+    if (node.nodeType !== PROCESSING_INSTRUCTION_NODE) continue;
+    if (data.includes("?>")) throw notWritable(undefined);
+    if ((node.target as string).toLowerCase() !== "xml") continue;
+    if (node.target !== "xml" || node !== document.firstChild || !XML_DECLARATION.test(data)) {
+      throw notWritable(undefined);
+    }
+    declaration = node;
+  }
+  return declaration;
+}
+
+/** An XML declaration's data with its encoding, if it names one other than UTF-8, set to UTF-8. */
+function utf8Declaration(data: string): string {
+  const name = XML_DECLARATION.exec(data)?.indices?.[3];
+  if (name === undefined || data.slice(name[0], name[1]).toUpperCase() === "UTF-8") return data;
+  return `${data.slice(0, name[0])}UTF-8${data.slice(name[1])}`;
+}
+
+/**
+ * A node as it is compared: itself, or for a run of text nodes the first of them with their joined
+ * text, since the reader joins adjacent text nodes into one.
+ */
+interface ComparedNode {
+  readonly node: XmlNode;
+  readonly text: string;
+}
+
+/**
+ * The children of a node as they read back: adjacent text joined, empty text and empty CDATA
+ * sections dropped (neither writes anything), and at the document level whitespace text dropped,
+ * since the reader keeps it only before the root.
+ */
+function comparedChildren(parent: XmlNode): ComparedNode[] {
+  const children: ComparedNode[] = [];
+  let run: { node: XmlNode; text: string } | undefined;
+  const flush = (): void => {
+    if (run === undefined) return;
+    const atDocument = parent.nodeType === DOCUMENT_NODE;
+    if (run.text !== "" && !(atDocument && XML_WHITESPACE.test(run.text))) children.push(run);
+    run = undefined;
+  };
+  for (let child = parent.firstChild; child !== null; child = child.nextSibling) {
+    if (child.nodeType === TEXT_NODE) {
+      run ??= { node: child, text: "" };
+      run.text += child.data as string;
+      continue;
+    }
+    if (child.nodeType === CDATA_SECTION_NODE && child.data === "") continue;
+    flush();
+    children.push({ node: child, text: child.data ?? "" });
+  }
+  flush();
+  return children;
+}
+
+/**
+ * Whether a document and the one its written text read back as are the same, node by node: each
+ * pair, in order, has the same {@link signature}, and the same number of children.
+ * `declaration` is the written document's XML declaration and `declared` the data it was written
+ * with, set to UTF-8.
+ */
+function sameDocument(
+  written: XmlNode,
+  read: XmlNode,
+  declaration: XmlNode | undefined,
+  declared: string | undefined,
+): boolean {
+  const pending: [ComparedNode, ComparedNode][] = [
+    [
+      { node: written, text: "" },
+      { node: read, text: "" },
+    ],
+  ];
+  for (let pair = pending.pop(); pair !== undefined; pair = pending.pop()) {
+    const [left, right] = pair;
+    if (signature(left, declaration, declared) !== signature(right, declaration, declared)) {
+      return false;
+    }
+    const ones = comparedChildren(left.node);
+    const others = comparedChildren(right.node);
+    if (ones.length !== others.length) return false;
+    ones.forEach((child, index) => pending.push([child, others[index] as ComparedNode]));
+  }
+  return true;
+}
+
+/**
+ * What a node is compared by: its kind, and for an element its namespace, its name and its
+ * attributes other than namespace declarations, in any order; for a processing instruction its
+ * target and data (the declaration's data as written); for any other its text. A node of a kind no
+ * read document holds, such as an entity reference, has a kind the read-back one cannot match.
+ */
+function signature(
+  compared: ComparedNode,
+  declaration: XmlNode | undefined,
+  declared: string | undefined,
+): string {
+  const { node } = compared;
+  switch (node.nodeType) {
+    case ELEMENT_NODE:
+      return JSON.stringify([
+        node.nodeType,
+        node.namespaceURI,
+        node.nodeName,
+        ownAttributes(node)
+          .map(({ namespaceURI, nodeName, value }) =>
+            JSON.stringify([namespaceURI, nodeName, value]),
+          )
+          .sort(),
+      ]);
+    case PROCESSING_INSTRUCTION_NODE:
+      return JSON.stringify([
+        node.nodeType,
+        node.target,
+        node === declaration ? declared : node.data,
+      ]);
+    default:
+      return JSON.stringify([node.nodeType, compared.text]);
+  }
 }
 
 /**
  * A character XML 1.0 forbids (section 2.2): a C0 control other than tab, line feed and carriage
  * return, an unpaired surrogate (the `u` flag reads a pair as one character, so only an unpaired
- * one matches the surrogate range), U+FFFE or U+FFFF. The serializer writes one as it is, and the
- * reader of `@cosyte/ccda` 0.1.6 takes it back, so the writer looks for it itself.
+ * one matches the surrogate range), U+FFFE or U+FFFF. The reader of `@cosyte/ccda` 0.1.6 takes one
+ * in, as it is or as a character reference, so {@link readCheckedXml} looks for it itself.
  */
 const FORBIDDEN_XML_CHARACTER = /[\0-\x08\x0B\x0C\x0E-\x1F\uD800-\uDFFF￾￿]/u;
 
 /** A character reference, `&#...;` or `&#x...;`, as the serializer may write one. */
 const CHARACTER_REFERENCE = /&#(?:x([0-9a-fA-F]+)|([0-9]+));/g;
 
-/** Whether written XML holds a character XML forbids, as it is or as a character reference. */
+/**
+ * Whether written XML holds a character reference to a character XML forbids anywhere, a CDATA
+ * section or a comment included: stricter than the reader, so a changed document never carries one.
+ */
 function holdsForbiddenCharacter(written: string): boolean {
-  if (FORBIDDEN_XML_CHARACTER.test(written)) return true;
   for (const [, hex, decimal] of written.matchAll(CHARACTER_REFERENCE)) {
     const code = hex === undefined ? Number(decimal) : Number.parseInt(hex, 16);
     if (code > 0x10ffff || FORBIDDEN_XML_CHARACTER.test(String.fromCodePoint(code))) return true;
@@ -1551,17 +1870,21 @@ function openLimits(library: typeof Ccda): ReturnType<typeof Ccda.resolveLimits>
   });
 }
 
-/** The refusal of a document that cannot be written; the reader's own error stays out of it. */
+/**
+ * The refusal of a document that cannot be written. Only a reader's code goes into it: the text of
+ * the cause, which a DOM library may build from the document, stays out.
+ */
 function notWritable(cause: unknown): XmlError {
   const code =
     typeof cause === "object" &&
     cause !== null &&
-    typeof (cause as { code?: unknown }).code === "string"
+    typeof (cause as { code?: unknown }).code === "string" &&
+    /^[A-Z_]+$/.test((cause as { code: string }).code)
       ? ` (${(cause as { code: string }).code})`
       : "";
   return new XmlError(
     "XML_NOT_WRITABLE",
-    `the transform's document cannot be written as XML that reads back the same${code}: it holds a character XML does not allow, a carriage return, or a node the serializer cannot write`,
+    `the transform's document cannot be written as XML that reads back the same${code}: it holds a character XML does not allow, a carriage return, a comment or processing instruction XML cannot carry, or a node the serializer cannot write`,
   );
 }
 
