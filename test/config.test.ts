@@ -605,7 +605,7 @@ destinations:
     });
     expect(problems).toEqual([
       "channels/a/channel.yaml: source: name exactly one of: file, http, mllp, tcp, module",
-      "channels/a/channel.yaml: destinations.0: name exactly one of: file, http, mllp, tcp, module",
+      "channels/a/channel.yaml: destinations.0: name exactly one of: file, http, mllp, tcp, smtp, module",
     ]);
   });
 
@@ -903,7 +903,7 @@ describe("loadProject: extensions", () => {
       "pathways.yaml: hooks.7.options: goes with module: it is what the module's factory is given",
       'pathways.yaml: hooks.8: Unrecognized key: "colour"',
       "channels/a/channel.yaml: source.options: goes with module: it is what the module's factory is given",
-      "channels/a/channel.yaml: destinations.0: name exactly one of: file, http, mllp, tcp, module",
+      "channels/a/channel.yaml: destinations.0: name exactly one of: file, http, mllp, tcp, smtp, module",
     ]);
   });
 });

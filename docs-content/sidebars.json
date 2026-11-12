@@ -21,6 +21,7 @@
         "send-and-receive-mllp",
         "send-and-receive-tcp",
         "send-and-receive-http",
+        "send-email-over-smtp",
         "work-with-formats",
         "store-messages-in-a-database",
         "encrypt-stored-messages",

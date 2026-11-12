@@ -42,6 +42,7 @@ import {
   type TcpReplyBuilder,
   type TcpReplyCheck,
 } from "../connectors/tcp.js";
+import { SmtpDestination } from "../connectors/smtp.js";
 import { framingOf } from "../connectors/tcp-framing.js";
 import { loadClientTls, loadServerTls } from "../connectors/tls.js";
 import {
@@ -608,6 +609,61 @@ export async function connectorsFor(
           }),
         );
         break;
+      case "smtp": {
+        const where = `${file}: destinations.${index}.smtp`;
+        const read = secretsOf(secrets);
+        destinations.push(
+          new SmtpDestination({
+            mailer: {
+              host: destination.host,
+              port: destination.port,
+              tls: destination.tls ?? "none",
+              ca:
+                destination.ca === undefined
+                  ? undefined
+                  : loadClientTls(
+                      { ca: destination.ca, cert: undefined, key: undefined },
+                      `${where}.tls`,
+                    ).ca,
+              user:
+                destination.user === undefined
+                  ? undefined
+                  : read.read(destination.user, `${where}.user`),
+              password:
+                destination.password === undefined
+                  ? undefined
+                  : read.read(destination.password, `${where}.password`),
+              connectTimeoutMs: destination.connectTimeoutMs,
+              greetingTimeoutMs: destination.greetingTimeoutMs,
+              socketTimeoutMs: destination.socketTimeoutMs,
+            },
+            channel: channel.name,
+            from: destination.from,
+            to: destination.to,
+            cc: destination.cc,
+            subject: destination.subject,
+            body: destination.body,
+            attach: destination.attach ? { extension: EXTENSIONS[channel.format] } : undefined,
+            maxBytes: destination.maxBytes,
+            now,
+            onPartialRefusal: destination.onPartialRefusal,
+            // How many recipients the server refused while it took others: a count, never an
+            // address, and whether the message is marked rejected or delivered for it.
+            onRefused: (message, refused, outcome) => {
+              logger.warn({
+                event: "smtp-recipients-refused",
+                channel: channel.name,
+                destination: index,
+                message: message.messageId,
+                seq: message.seq,
+                refused,
+                outcome,
+              });
+            },
+          }),
+        );
+        break;
+      }
       case "tcp": {
         const where = `${file}: destinations.${index}.tcp`;
         destinations.push(
@@ -1450,8 +1506,20 @@ export class Engine {
       logger.warn({ event: "plaintext-copies", channel: config.name, endpoint: "source" });
     }
     for (const [index, destination] of config.destinations.entries()) {
+      if (destination.kind === "smtp" && destination.attach) {
+        // Each email carries the message itself, which every mail server on its way can read.
+        logger.warn({
+          event: "smtp-attach",
+          channel: config.name,
+          endpoint: "destination",
+          destination: index,
+        });
+      }
       const connects =
-        destination.kind === "http" || destination.kind === "mllp" || destination.kind === "tcp";
+        destination.kind === "http" ||
+        destination.kind === "mllp" ||
+        destination.kind === "tcp" ||
+        destination.kind === "smtp";
       if (connects && destination.plaintext) {
         logger.warn({
           event: "plaintext",

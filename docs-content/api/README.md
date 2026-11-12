@@ -315,6 +315,12 @@ The output it carried, in base64; `null` once its message's content was dropped.
 
 Its last error text, which can quote the message.
 
+##### failedAt
+
+> `readonly` **failedAt**: `string` \| `null`
+
+When it failed for good, when it did and the store recorded it.
+
 ##### generation
 
 > `readonly` **generation**: `number`
@@ -517,7 +523,7 @@ const line = (entry: AuditEntry): string => `${entry.at} ${entry.actor} ${entry.
 
 ##### action
 
-> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"archive"` \| `"batch"`
+> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"bulk-replay"` \| `"archive"` \| `"batch"`
 
 ##### actor
 
@@ -637,7 +643,7 @@ await store.appendAudit("noah", [{ action: "content-view", channel: "adt", messa
 
 ##### action
 
-> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"archive"` \| `"batch"`
+> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"bulk-replay"` \| `"archive"` \| `"batch"`
 
 ##### channel?
 
@@ -673,7 +679,7 @@ const views = await store.auditEntries({ action: "content-view", since: "2026-11
 
 ##### action?
 
-> `readonly` `optional` **action?**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"archive"` \| `"batch"`
+> `readonly` `optional` **action?**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"bulk-replay"` \| `"archive"` \| `"batch"`
 
 ##### before?
 
@@ -4216,6 +4222,13 @@ How many destinations the channel has now.
 
 The status the caller read before transforming.
 
+##### expectedGeneration?
+
+> `readonly` `optional` **expectedGeneration?**: `number`
+
+The generation the caller read. When set, storage also refuses with `changed` when the message
+was replayed or resent since, so a bulk replay never replays a message twice.
+
 ##### failure?
 
 > `readonly` `optional` **failure?**: `string`
@@ -4901,6 +4914,13 @@ const waiting = (await store.deliveries(12)).filter((d: StoredDelivery) => d.sta
 
 The last failure, as stored: a stage and a code, such as `delivery: ECONNREFUSED`.
 
+##### failedAt?
+
+> `readonly` `optional` **failedAt?**: `string`
+
+When it failed for good (ISO 8601, UTC), by the store's clock. Unset until then, and on a
+delivery an older Pathways failed or a store that does not record it.
+
 ##### generation
 
 > `readonly` **generation**: `number`
@@ -4970,6 +4990,12 @@ const old = (row: StoredDeliveryRow, current: number): boolean => row.generation
 > `readonly` **error**: `string` \| `null`
 
 Its last error text, as stored: can quote the message.
+
+##### failedAt?
+
+> `readonly` `optional` **failedAt?**: `string` \| `null`
+
+When it failed for good; unset on a store that does not record it.
 
 ##### generation
 
@@ -5766,7 +5792,7 @@ const detail: AuditDetail = { status: "transformed", queued: 2 };
 
 ### AuditEventAction
 
-> **AuditEventAction** = `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"archive"` \| `"batch"`
+> **AuditEventAction** = `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"bulk-replay"` \| `"archive"` \| `"batch"`
 
 Every action the audit log records, as an [AuditEvent](#auditevent)'s `action`: `search` (messages
 listed), `view` (one message's details, without content), `content-view`, `replay`, `resend`,
@@ -5774,7 +5800,8 @@ listed), `view` (one message's details, without content), `content-view`, `repla
 the engine started), `lease-release` (the engine lease freed by force), `migrate` (schema steps
 applied by `pathways migrate`), `channel-pause`, `channel-resume`, `channel-stop`,
 `channel-halt` and `channel-reload` (a `pathways channel` command), `verify` (a stored
-message read by `pathways verify`), and `archive` (a sealed archive retention wrote and checked
+message read by `pathways verify`), `bulk-replay` (a run of `pathways replay --status failed`:
+its scope, each batch and a summary), and `archive` (a sealed archive retention wrote and checked
 before changing what it holds). Kept equal to the audit log's own list by a test.
 
 #### Example
