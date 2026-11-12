@@ -301,9 +301,9 @@ export const CSV_DEFAULTS = Object.freeze({
  */
 export interface Hl7v2Settings {
   /**
-   * The character set to read and write a message in when its MSH-18 is blank or absent, one of
-   * {@link ASSUMABLE_CHARSETS}. A message that declares MSH-18 is read and written in the set it
-   * declares. Unset, a blank MSH-18 means ASCII, read as its UTF-8 superset: bytes that are not
+   * The character set to read and write a message in when its MSH-18 is blank or absent: `8859/1`
+   * to `8859/8`, `8859/10`, `8859/13` to `8859/16`, or `WINDOWS-1252`. A message that declares
+   * MSH-18 is read and written in the set it declares. Unset, a blank MSH-18 means ASCII, read as its UTF-8 superset: bytes that are not
    * UTF-8 are kept as they arrived, and a segment a transform edits must then be ASCII.
    */
   readonly assumeCharset?: string | undefined;
