@@ -260,16 +260,28 @@ A body that cannot be read fails with a code, and the error names nothing the bo
 - `NOT_WELL_FORMED_XML`: the body is not well-formed XML, has no root element, has text outside its
   root element (only whitespace, comments and processing instructions may stand there), or holds a
   character XML 1.0 forbids, as it is or as a character reference such as `&#1;`;
-- `ERR_ENCODING_INVALID_ENCODED_DATA`: the body is not UTF-8. Send a body in another character set
-  through a `text` or `json` channel, or have the sender write UTF-8.
+- `XML_ENCODING_UNSUPPORTED`: the body says it is not UTF-8. Its XML declaration names an encoding
+  other than `UTF-8` (in any case), such as `ISO-8859-1`, `windows-1252`, `US-ASCII`, `Shift_JIS`
+  or `UTF-16`, or it starts with a UTF-16 or UTF-32 byte order mark, or with `<` in UTF-16, UTF-32
+  or EBCDIC. It is refused even when its bytes happen to be valid UTF-8, since read as UTF-8 they
+  would reach the transform as other characters. The error names the encoding when the name looks
+  like one, and nothing else. Decoding other encodings is not supported yet; a body with no XML
+  declaration, or a declaration that names no encoding, is read as UTF-8;
+- `ERR_ENCODING_INVALID_ENCODED_DATA`: the body is not valid UTF-8. Send a body in another character
+  set through a `text` channel, or have the sender write UTF-8.
+
+A body refused this way is refused whether or not the transform changes it: Pathways never forwards
+a body it could not read.
 
 A document the transform returns as it was read goes out byte for byte as it arrived: its XML
 declaration, quoting, spacing, line endings and byte order mark included. A changed document, or one
 the transform builds, is written as UTF-8 by the DOM serializer, and its XML declaration, if it has
-one, is written naming `UTF-8` whatever encoding it named before. The written text is read back with
-the same reader and compared with the document node by node: kinds, names, namespaces, attributes,
+one, is written naming `UTF-8` whatever encoding the transform set it to name. The written text is
+read back with the same reader, under the channel's own `xml:` caps, and compared with the document
+node by node: kinds, names, namespaces, attributes,
 text, comments, processing instructions and their order. When the two differ, the output fails with
-`XML_NOT_WRITABLE`, which names nothing the document holds. So do these, before anything is written:
+`XML_NOT_WRITABLE`, which names nothing the document holds; so does a written document over the
+channel's `maxBytes`, `maxDepth` or `maxElements`, with that cap's code in its text. So do these, before anything is written:
 
 - a comment that holds `--` or ends in `-`, a processing instruction whose data holds `?>`, and a
   CDATA section that holds `]]>`, since each would end early and turn the rest into markup;

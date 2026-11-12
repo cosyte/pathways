@@ -110,6 +110,111 @@ describe("format: xml, read", () => {
     expect((await refusal(read(latin1))).code).toBe("ERR_ENCODING_INVALID_ENCODED_DATA");
   });
 
+  it("refuses a body whose declaration names an encoding other than UTF-8, even as valid UTF-8", async () => {
+    const declared = (encoding: string, quote = '"'): string =>
+      `<?xml version="1.0" encoding=${quote}${encoding}${quote}?>`;
+    // Each is valid UTF-8, so read as UTF-8 it would reach the transform as other characters.
+    const cases: [Uint8Array, string | undefined][] = [
+      // To an ISO-8859-1 sender these two bytes are two characters, not one.
+      [
+        new Uint8Array([...bytes(`${declared("ISO-8859-1")}<p n="`), 0xc3, 0xa9, ...bytes('"/>')]),
+        "ISO-8859-1",
+      ],
+      [
+        new Uint8Array([
+          ...bytes(`${declared("Shift_JIS")}<p n="`),
+          0xe3,
+          0x81,
+          0x82,
+          ...bytes('"/>'),
+        ]),
+        "Shift_JIS",
+      ],
+      [bytes(`${declared("UTF-16")}<p n="TEST-VALUE"/>`), "UTF-16"],
+      [bytes(`${declared("EBCDIC-CP-US")}<p n="TEST-VALUE"/>`), "EBCDIC-CP-US"],
+      [bytes(`${declared("us-ascii", "'")}<p n="TEST-VALUE"/>`), "us-ascii"],
+      [bytes(`${declared("iSo-8859-1", "'")}<p n="TEST-VALUE"/>`), "iSo-8859-1"],
+      [
+        bytes(`<?xml version='1.0' encoding = "windows-1252" standalone='yes'?>\n<p/>`),
+        "windows-1252",
+      ],
+      // After a UTF-8 byte order mark the declaration starts at byte 3, and is still read.
+      [
+        new Uint8Array([
+          0xef,
+          0xbb,
+          0xbf,
+          ...bytes(`${declared("ISO-8859-1")}<p n="`),
+          0xc3,
+          0xa9,
+          ...bytes('"/>'),
+        ]),
+        "ISO-8859-1",
+      ],
+      // A name that is not an encoding name's shape is not repeated.
+      [bytes(`${declared("TEST VALUE")}<p/>`), undefined],
+      [bytes(`${declared(`TEST-${"X".repeat(60)}`)}<p/>`), undefined],
+      [bytes(`<?xml version="1.0" encoding="TEST-VALUE'?><p/>`), undefined],
+      // A declaration that never ends is read to the end of the body.
+      [bytes(`<?xml version="1.0" encoding="ISO-8859-1" <p/>`), "ISO-8859-1"],
+    ];
+    for (const [body, named] of cases) {
+      const refused = await refusal(read(body));
+      expect(refused.code).toBe("XML_ENCODING_UNSUPPORTED");
+      expect(refused.text).not.toContain("TEST VALUE");
+      expect(refused.text).not.toContain("TEST-VALUE");
+      expect(refused.text).not.toContain("TEST-X");
+      if (named !== undefined) expect(refused.text).toContain(`"${named}"`);
+    }
+  });
+
+  it("refuses a body in UTF-16, UTF-32 or EBCDIC, by its byte order mark or its first bytes", async () => {
+    const utf16le = (source: string): number[] =>
+      [...source].flatMap((char) => [char.charCodeAt(0), 0]);
+    const utf16be = (source: string): number[] =>
+      [...source].flatMap((char) => [0, char.charCodeAt(0)]);
+    for (const body of [
+      [0xff, 0xfe, ...utf16le("<p/>")],
+      [0xfe, 0xff, ...utf16be("<p/>")],
+      [0xff, 0xfe, 0, 0, 0x3c, 0, 0, 0],
+      [0, 0, 0xfe, 0xff, 0, 0, 0, 0x3c],
+      utf16le("<?xml version='1.0'?><p/>"),
+      utf16be("<?xml version='1.0'?><p/>"),
+      [0x3c, 0, 0, 0, 0x70, 0, 0, 0],
+      [0, 0, 0, 0x3c, 0, 0, 0, 0x70],
+      [0x4c, 0x6f, 0xa7, 0x94, 0x40],
+    ]) {
+      expect((await refusal(read(new Uint8Array(body)))).code).toBe("XML_ENCODING_UNSUPPORTED");
+    }
+  });
+
+  it("reads a body declaring UTF-8 in any case and quote, or no encoding, as UTF-8", async () => {
+    for (const declaration of [
+      "",
+      "<?xml version='1.0'?>",
+      '<?xml version="1.0" standalone="yes"?>',
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      "<?xml version='1.0' encoding='utf-8'?>",
+      '<?xml version="1.0"\tencoding = "Utf-8" ?>',
+      // A processing instruction whose name only starts with xml is not a declaration.
+      '<?xml-stylesheet href="TEST-encoding" encoding="ISO-8859-1"?>',
+    ]) {
+      const body = `${declaration}<p n="TESTÉ"/>`;
+      const document = await read(body);
+      expect(document.documentElement?.getAttribute("n")).toBe("TESTÉ");
+      expect(await write(document)).toBe(body);
+    }
+    // A declaration anywhere but the start is not well-formed, whatever it names.
+    for (const body of [
+      ' <?xml version="1.0" encoding="ISO-8859-1"?><p/>',
+      '\n<?xml version="1.0"?><p/>',
+      '<!--c--><?xml version="1.0" encoding="UTF-8"?><p/>',
+      '<p><?xml version="1.0" encoding="ISO-8859-1"?></p>',
+    ]) {
+      expect((await refusal(read(body))).code).toBe("NOT_WELL_FORMED_XML");
+    }
+  });
+
   it("refuses a body over the size cap, by default and as the channel sets it", async () => {
     expect(XML_DEFAULTS.maxBytes).toBe(10_485_760);
     const filler = "x".repeat(64);
@@ -348,20 +453,23 @@ describe("format: xml, write", () => {
     expect(refused.text).not.toContain("TEST-VALUE");
   });
 
-  it("writes a changed document's declaration as UTF-8, whatever it named", async () => {
+  it("writes a changed document's declaration as UTF-8, whatever a transform set it to name", async () => {
+    // A body naming another encoding is refused on reading, so only a transform can set one.
     for (const [declared, written] of [
-      ['<?xml version="1.0" encoding="ISO-8859-1"?>', '<?xml version="1.0" encoding="UTF-8"?>'],
+      ['version="1.0" encoding="ISO-8859-1"', '<?xml version="1.0" encoding="UTF-8"?>'],
       [
-        "<?xml version='1.0' encoding='UTF-16' standalone='yes'?>",
+        "version='1.0' encoding='UTF-16' standalone='yes'",
         "<?xml version='1.0' encoding='UTF-8' standalone='yes'?>",
       ],
-      ['<?xml version="1.0" encoding="utf-8"?>', '<?xml version="1.0" encoding="utf-8"?>'],
-      ['<?xml version="1.0"?>', '<?xml version="1.0"?>'],
+      ['version="1.0" encoding="utf-8"', '<?xml version="1.0" encoding="utf-8"?>'],
+      ['version="1.0"', '<?xml version="1.0"?>'],
     ] as const) {
-      const body = `${declared}\n<a/>`;
-      const untouched = await read(body);
-      expect(await write(untouched)).toBe(body);
-      const document = await read(body);
+      const body = `<?xml ${declared}?>\n<a/>`;
+      if (!declared.includes("UTF-16") && !declared.includes("ISO")) {
+        expect(await write(await read(body))).toBe(body);
+      }
+      const document = await read('<?xml version="1.0" encoding="UTF-8"?>\n<a/>');
+      (document.firstChild as unknown as { data: string }).data = declared;
       document.documentElement?.setAttribute("n", "TESTÉ");
       const out = await encode("xml", document, {});
       expect(text(out)).toBe(`${written}\n<a n="TESTÉ"/>`);
@@ -373,6 +481,28 @@ describe("format: xml, write", () => {
       built.documentElement,
     );
     expect(await write(built)).toBe('<?xml version="1.0" encoding="UTF-8"?><a/>');
+  });
+
+  it("reads a written document back under the channel's own caps", async () => {
+    const settings = { maxBytes: 64, maxDepth: 3, maxElements: 4 };
+    const grown = await read("<a/>", settings);
+    grown.documentElement?.appendChild(grown.createTextNode("x".repeat(64)));
+    const large = await refusal(write(grown, settings));
+    expect(large.code).toBe("XML_NOT_WRITABLE");
+    expect(large.text).toContain("INPUT_SIZE_LIMIT_EXCEEDED");
+    const deep = await read("<a><b/></a>", settings);
+    deep
+      .getElementsByTagName("b")[0]
+      ?.appendChild(deep.createElement("c"))
+      .appendChild(deep.createElement("d"));
+    expect((await refusal(write(deep, settings))).text).toContain("ELEMENT_DEPTH_LIMIT_EXCEEDED");
+    const wide = await read("<a/>", settings);
+    for (let at = 0; at < 4; at += 1) wide.documentElement?.appendChild(wide.createElement("b"));
+    expect((await refusal(write(wide, settings))).text).toContain("NODE_COUNT_LIMIT_EXCEEDED");
+    // Within the caps, the same changes write.
+    const fits = await read("<a/>", settings);
+    for (let at = 0; at < 3; at += 1) fits.documentElement?.appendChild(fits.createElement("b"));
+    expect(await write(fits, settings)).toBe("<a><b/><b/><b/></a>");
   });
 
   it("writes a document a transform builds on a channel of another format", async () => {

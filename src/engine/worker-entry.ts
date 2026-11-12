@@ -179,6 +179,8 @@ class JsonBodyError extends Error {
 const encoder = new TextEncoder();
 /** `text` keeps its first-slice behaviour: bytes that are not UTF-8 become U+FFFD. */
 const lenientUtf8 = new TextDecoder();
+/** One character per byte, for an `xml` body's declaration, which is ASCII when it is well-formed. */
+const latin1 = new TextDecoder("latin1");
 /**
  * FHIR, X12, C-CDA, XML and JSON are read as UTF-8, and a body that is not UTF-8 fails to parse with
  * `ERR_ENCODING_INVALID_ENCODED_DATA` rather than being changed in silence.
@@ -578,8 +580,10 @@ export const FORMAT_REGISTRY = Object.freeze({
       // Told by shape, so a document is written on a channel of any format without loading the
       // library first; writing it loads the library to read the text back.
       byShape: true,
-      write: async (value) =>
-        isXmlDocument(value) ? writeXml(await libraries.ccda(), value) : undefined,
+      write: async (value, settings) =>
+        isXmlDocument(value)
+          ? writeXml(await libraries.ccda(), value, settings.xml ?? {})
+          : undefined,
     },
   }),
 });
@@ -1421,7 +1425,7 @@ function fixedText(
  * patient's details.
  *
  * Codes: `NOT_WELL_FORMED_XML` and `INPUT_SIZE_LIMIT_EXCEEDED` on reading, as `@cosyte/ccda`'s reader
- * uses them; `XML_NOT_WRITABLE` on writing.
+ * uses them, and `XML_ENCODING_UNSUPPORTED`; `XML_NOT_WRITABLE` on writing.
  */
 class XmlError extends Error {
   readonly code: string;
@@ -1455,8 +1459,11 @@ function ignoreWarning(): void {
  * (`ELEMENT_DEPTH_LIMIT_EXCEEDED`) or holding more than `maxElements` elements
  * (`NODE_COUNT_LIMIT_EXCEEDED`); and a body that is not well-formed (`NOT_WELL_FORMED_XML`), which
  * {@link readCheckedXml} widens to what that reader lets through. Each error's text is fixed and
- * names nothing of the body. The body must be UTF-8, and its size is held to `maxBytes` before it is
- * decoded.
+ * names nothing of the body. Its size is held to `maxBytes` before it is decoded. The body must be
+ * UTF-8, and say so or say nothing: one whose declaration or first bytes name another encoding is
+ * refused (`XML_ENCODING_UNSUPPORTED`, see {@link refuseOtherEncodings}), and one that is not valid
+ * UTF-8 fails to decode (`ERR_ENCODING_INVALID_ENCODED_DATA`). An untouched body is refused the
+ * same way, so a body Pathways cannot read is never forwarded.
  *
  * The document is kept against its bytes and its serialization as read, so {@link writeXml} can
  * send an untouched one as the bytes it arrived as.
@@ -1468,15 +1475,97 @@ function readXml(library: typeof Ccda, body: Uint8Array, settings: XmlSettings):
   if (body.byteLength - mark > maxBytes) {
     throw new XmlError("INPUT_SIZE_LIMIT_EXCEEDED", "Input exceeds the byte cap.");
   }
-  const limits = library.resolveLimits({
-    maxInputBytes: maxBytes,
+  refuseOtherEncodings(body, mark);
+  const document = readCheckedXml(library, strictUtf8.decode(body), xmlLimits(library, settings));
+  xmlOrigins.set(document, { body, written: serializeXml(document) });
+  return document;
+}
+
+/** The reader's caps for an `xml` channel's settings, an unset key taking its default. */
+function xmlLimits(
+  library: typeof Ccda,
+  settings: XmlSettings,
+): ReturnType<typeof Ccda.resolveLimits> {
+  return library.resolveLimits({
+    maxInputBytes: settings.maxBytes ?? XML_DEFAULTS.maxBytes,
     maxDepth: settings.maxDepth ?? XML_DEFAULTS.maxDepth,
     maxNodeCount: settings.maxElements ?? XML_DEFAULTS.maxElements,
     maxEntityExpansions: 0,
   });
-  const document = readCheckedXml(library, strictUtf8.decode(body), limits);
-  xmlOrigins.set(document, { body, written: serializeXml(document) });
-  return document;
+}
+
+/**
+ * The first bytes of a body in an encoding other than UTF-8 that XML 1.0 (appendix F) tells apart
+ * before any declaration: a UTF-32 or UTF-16 byte order mark, `<` in UTF-32 or `<?` in UTF-16 with
+ * none, and `<?xm` in EBCDIC. UTF-32's marks come first, since each starts with a UTF-16 mark.
+ */
+const OTHER_ENCODING_STARTS: readonly (readonly [string, readonly number[]])[] = [
+  ["UTF-32", [0xff, 0xfe, 0x00, 0x00]],
+  ["UTF-32", [0x00, 0x00, 0xfe, 0xff]],
+  ["UTF-32", [0x3c, 0x00, 0x00, 0x00]],
+  ["UTF-32", [0x00, 0x00, 0x00, 0x3c]],
+  ["UTF-16", [0xff, 0xfe]],
+  ["UTF-16", [0xfe, 0xff]],
+  ["UTF-16", [0x3c, 0x00, 0x3f, 0x00]],
+  ["UTF-16", [0x00, 0x3c, 0x00, 0x3f]],
+  ["EBCDIC", [0x4c, 0x6f, 0xa7, 0x94]],
+];
+
+/** An XML declaration's start: `<?xml` and whitespace, as ASCII bytes. */
+const DECLARATION_START = [0x3c, 0x3f, 0x78, 0x6d, 0x6c];
+
+/** An encoding name as XML 1.0 (section 4.3.3) shapes it, short enough to name in an error. */
+const ENCODING_NAME = /^[A-Za-z][A-Za-z0-9._-]{0,39}$/;
+
+/**
+ * Refuses, as `XML_ENCODING_UNSUPPORTED`, a body that is not in UTF-8 by its own account: one that
+ * starts as XML in UTF-16, UTF-32 or EBCDIC does, or whose XML declaration names an encoding other
+ * than UTF-8 (in any case). Such a body may still be valid UTF-8, and read as UTF-8 would reach the
+ * transform as other characters, so it is refused rather than misread; decoding other encodings is
+ * not supported yet. A body with no declaration, or one that names no encoding, is UTF-8.
+ *
+ * The declaration is read from the bytes after a UTF-8 byte order mark (`mark` of them), where XML
+ * puts it; a declaration anywhere else is not well-formed, and the reader refuses it. The error
+ * names the encoding only when the name has an encoding name's shape, so it never carries the body.
+ */
+function refuseOtherEncodings(body: Uint8Array, mark: number): void {
+  for (const [encoding, start] of OTHER_ENCODING_STARTS) {
+    if (start.every((byte, at) => body[mark + at] === byte)) throw encodingUnsupported(encoding);
+  }
+  if (!DECLARATION_START.every((byte, at) => body[mark + at] === byte)) return;
+  const after = body[mark + DECLARATION_START.length];
+  if (after !== 0x20 && after !== 0x09 && after !== 0x0d && after !== 0x0a) return;
+  // The declaration's bytes up to its `?>`, one character each: it is ASCII when it is well-formed.
+  const end = indexOfBytes(body, [0x3f, 0x3e], mark);
+  const declaration = latin1.decode(body.subarray(mark, end === -1 ? body.byteLength : end));
+  const keyword = /[ \t\r\n]encoding(?![A-Za-z0-9._:-])/.exec(declaration);
+  if (keyword === null) return;
+  const value = /^[ \t\r\n]encoding[ \t\r\n]*=[ \t\r\n]*(["'])([^"']*)\1/.exec(
+    declaration.slice(keyword.index),
+  )?.[2];
+  if (value !== undefined && value.toUpperCase() === "UTF-8") return;
+  throw encodingUnsupported(value !== undefined && ENCODING_NAME.test(value) ? value : undefined);
+}
+
+/** Where `needle` first starts in `haystack` at or after `from`, or -1. */
+function indexOfBytes(haystack: Uint8Array, needle: readonly number[], from: number): number {
+  outer: for (let at = from; at + needle.length <= haystack.byteLength; at += 1) {
+    for (const [offset, byte] of needle.entries()) {
+      if (haystack[at + offset] !== byte) continue outer;
+    }
+    return at;
+  }
+  return -1;
+}
+
+/** The refusal of a body in an encoding other than UTF-8, naming it only when given. */
+function encodingUnsupported(encoding: string | undefined): XmlError {
+  return new XmlError(
+    "XML_ENCODING_UNSUPPORTED",
+    encoding === undefined
+      ? "Input is not in UTF-8: its XML declaration names another encoding, and only UTF-8 is read."
+      : `Input is not in UTF-8: it is in "${encoding}", and only UTF-8 is read.`,
+  );
 }
 
 /**
@@ -1655,14 +1744,14 @@ function isXmlDocument(value: object): value is XmlDocument {
  *   start;
  * - it is written as UTF-8, so an XML declaration that names another encoding is written naming
  *   UTF-8 (one that names none means UTF-8 already);
- * - the text is read back with the same reader and its checks (its size and shape caps lifted), and
+ * - the text is read back with the same reader and its checks, under the channel's own caps, and
  *   the two documents are compared node by node: kinds, names, namespaces, attributes, text,
  *   comment and processing-instruction data, and order. A text fixed point is not enough: a
  *   comment holding `-->` writes as markup that reads back as itself.
  *
  * Every error from the DOM library is caught here, so its text never reaches the failure.
  */
-function writeXml(library: typeof Ccda, document: XmlDocument): Written {
+function writeXml(library: typeof Ccda, document: XmlDocument, settings: XmlSettings): Written {
   let written: string;
   try {
     written = serializeXml(document);
@@ -1683,7 +1772,7 @@ function writeXml(library: typeof Ccda, document: XmlDocument): Written {
       declared = utf8Declaration(data);
       written = `<?xml ${declared}?>${written.slice(as.length)}`;
     }
-    const again = readCheckedXml(library, written, openLimits(library));
+    const again = readCheckedXml(library, written, xmlLimits(library, settings));
     if (holdsForbiddenCharacter(written)) throw notWritable(undefined);
     if (!sameDocument(root, again, declaration, declared)) {
       throw notWritable(undefined);
@@ -1858,16 +1947,6 @@ function holdsForbiddenCharacter(written: string): boolean {
     if (code > 0x10ffff || FORBIDDEN_XML_CHARACTER.test(String.fromCodePoint(code))) return true;
   }
   return false;
-}
-
-/** The caps a written document is read back under: none on size or shape, none for entities. */
-function openLimits(library: typeof Ccda): ReturnType<typeof Ccda.resolveLimits> {
-  return library.resolveLimits({
-    maxInputBytes: Number.POSITIVE_INFINITY,
-    maxDepth: Number.POSITIVE_INFINITY,
-    maxNodeCount: Number.POSITIVE_INFINITY,
-    maxEntityExpansions: 0,
-  });
 }
 
 /**
