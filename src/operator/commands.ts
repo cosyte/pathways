@@ -2,6 +2,7 @@ import { parseDuration, type ProjectConfig } from "../config/schema.js";
 import type { Env } from "../connectors/endpoint.js";
 import { channelStatus } from "../engine/health.js";
 import { describeHolder } from "../engine/lease.js";
+import { destinationKeys } from "../engine/destination-key.js";
 import { describeNode, seconds } from "../engine/nodes.js";
 import { EXIT } from "../exit.js";
 import {
@@ -284,7 +285,10 @@ export async function statusCommand(
         // Named only when there are some: a channel that never ran dry reads as it always has.
         (counts["dry-run"] === undefined
           ? ""
-          : `, ${counts["dry-run"]} dry-run (recorded, not sent)`),
+          : `, ${counts["dry-run"]} dry-run (recorded, not sent)`) +
+        (counts.filtered === undefined
+          ? ""
+          : `, ${counts.filtered} filtered (by a destination transform)`),
     );
     for (const d of shown) {
       lines.push(
@@ -480,10 +484,27 @@ export async function showCommand(
   }
 
   const { error, ...summary } = message;
-  const shownDeliveries = deliveries.map((delivery) => ({
-    ...delivery,
-    error: safeError(delivery.error),
-  }));
+  // The destinations' names, from the channel as configured now, when it still is: each delivery's
+  // by the key it recorded, never by its place, which may have moved since.
+  const configured = context.project.channels.find((channel) => channel.name === message.channel);
+  const nameByKey = new Map<string, string | undefined>();
+  if (configured !== undefined) {
+    const keys = destinationKeys(context.project.root, configured.destinations);
+    for (const [index, destination] of configured.destinations.entries()) {
+      nameByKey.set(keys[index] as string, destination.name);
+    }
+  }
+  const names = deliveries.map((delivery) =>
+    delivery.destinationKey === undefined ? undefined : nameByKey.get(delivery.destinationKey),
+  );
+  const shownDeliveries = deliveries.map((delivery, index) => {
+    const name = names[index];
+    return {
+      ...delivery,
+      ...(name === undefined ? {} : { destinationName: name }),
+      error: safeError(delivery.error),
+    };
+  });
   const lines = [
     `Message ${message.id}`,
     ...table([
@@ -501,7 +522,7 @@ export async function showCommand(
         : [["  content hash", message.contentHash] as [string, string]]),
     ]),
     deliveries.length === 0 ? "No deliveries." : "Deliveries:",
-    ...(deliveries.length === 0 ? [] : indent(deliveryTable(deliveries))),
+    ...(deliveries.length === 0 ? [] : indent(deliveryTable(deliveries, names))),
   ];
   let json: Record<string, unknown> = {
     message: { ...summary, error: safeError(error) },
@@ -1059,6 +1080,8 @@ const REFUSALS: Readonly<Record<ActionRefusal, string>> = {
   "not-failed": "nothing about it has failed",
   "content-dropped":
     "its content was dropped after delivery (storage.content: dropAfterDelivery), so there is nothing to send again",
+  "destination-unknown":
+    "its outputs were stored before deliveries recorded their destination, so which destination each was for cannot be told; replay it without --resend",
 };
 
 function describeReplay(result: ReplayResult): string {
@@ -1073,13 +1096,17 @@ function describeReplay(result: ReplayResult): string {
         result.superseded === 0
           ? ""
           : `; ${count(result.superseded, "earlier failed delivery", "earlier failed deliveries")} cleared`;
+      const notStored =
+        result.notStored === undefined
+          ? ""
+          : `; ${count(result.notStored, "destination", "destinations")} with nothing stored for this message ${result.notStored === 1 ? "was" : "were"} sent nothing (not-stored)`;
       if (result.status === "failed") {
         return `${result.outcome}, and failed again: ${result.failure ?? "the transform failed"}${cleared}`;
       }
       if (result.status === "filtered") {
         return `${result.outcome}: filtered out, nothing queued${cleared}`;
       }
-      return `${result.outcome}: ${count(result.queued, "delivery", "deliveries")} queued${cleared}`;
+      return `${result.outcome}: ${count(result.queued, "delivery", "deliveries")} queued${notStored}${cleared}`;
     }
   }
 }
@@ -1119,7 +1146,7 @@ function tally(counts: Readonly<Record<string, number>>): string {
 }
 
 function deliverySummary(deliveries: DeliveryTally): string {
-  const parts = (["delivered", "dry-run", "pending", "failed", "cleared"] as const)
+  const parts = (["delivered", "dry-run", "filtered", "pending", "failed", "cleared"] as const)
     .filter((status) => (deliveries[status] ?? 0) > 0)
     .map((status) =>
       status === "pending" && deliveries.retrying > 0
@@ -1129,14 +1156,20 @@ function deliverySummary(deliveries: DeliveryTally): string {
   return parts.length === 0 ? "-" : parts.join(", ");
 }
 
-function deliveryTable(deliveries: readonly StoredDelivery[]): string[] {
+function deliveryTable(
+  deliveries: readonly StoredDelivery[],
+  names: readonly (string | undefined)[],
+): string[] {
   return table([
     ["ID", "GENERATION", "DESTINATION", "OUTPUT", "STATUS", "ATTEMPTS", "WHEN", "ERROR", "RESENT"],
-    ...deliveries.map((d) => [
+    ...deliveries.map((d, index) => [
       String(d.id),
       String(d.generation),
-      String(d.destination),
-      String(d.seq + 1),
+      names[index] === undefined
+        ? String(d.destination)
+        : `${d.destination} (${String(names[index])})`,
+      // A filtered delivery, or one whose destination transform failed, has no output.
+      d.seq < 0 ? "-" : String(d.seq + 1),
       d.status,
       String(d.attempts),
       when(d),

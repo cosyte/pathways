@@ -7,6 +7,7 @@ import { EXIT, run } from "../src/cli.js";
 import { loadProject } from "../src/config/load.js";
 import type { ChannelConfig, ProjectConfig } from "../src/config/schema.js";
 import { generateKey } from "../src/encryption/keys.js";
+import { destinationKeys } from "../src/engine/destination-key.js";
 import { clearMessages, replayMessages } from "../src/operator/actions.js";
 import { AuditLog } from "../src/operator/audit.js";
 import { bulkReplayCommand, countBulkReplay } from "../src/operator/bulk-replay.js";
@@ -77,10 +78,16 @@ async function failTransforms(store: Store, n: number): Promise<number[]> {
   return ids;
 }
 
-/** Stores a transformed message whose delivery to `destination` failed for good. */
-async function failDelivery(store: Store, destination: number): Promise<number> {
+/**
+ * Stores a transformed message whose delivery to `destination` failed for good, each delivery
+ * recording its destination's key as the engine records it, so a resend can find it.
+ */
+async function failDelivery(setup: Setup, destination: number): Promise<number> {
+  const { project, store } = setup;
+  const channel = project.channels[0] as ChannelConfig;
+  const keys = destinationKeys(project.root, channel.destinations);
   const { id } = await store.receive("adt", BODY);
-  await store.completeTransform(id, [BODY], 2);
+  await store.completeTransform(id, [BODY], 2, undefined, keys);
   const delivery = (await store.deliveries(id)).find((d) => d.destination === destination);
   await store.failDelivery(delivery?.id ?? -1, "delivery: ECONNREFUSED");
   // The other destination took it.
@@ -374,7 +381,7 @@ for (const database of TEST_DATABASES) {
 
     it("refuses to resume a run whose destination the channel no longer has", async () => {
       const setup = await setUp(database);
-      await failDelivery(setup.store, 1);
+      await failDelivery(setup, 1);
       await tick();
       const stop = new AbortController();
       stop.abort();
@@ -405,8 +412,8 @@ for (const database of TEST_DATABASES) {
     it("takes only messages whose delivery to --destination failed, within the times given", async () => {
       const setup = await setUp(database);
       await failTransforms(setup.store, 1);
-      const atZero = await failDelivery(setup.store, 0);
-      const atOne = await failDelivery(setup.store, 1);
+      const atZero = await failDelivery(setup, 0);
+      const atOne = await failDelivery(setup, 1);
       await tick();
       const scope = {
         channel: "adt",

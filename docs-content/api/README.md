@@ -416,6 +416,13 @@ The output it carried, in base64; `null` once its message's content was dropped.
 
 > `readonly` **destination**: `number`
 
+##### destinationKey
+
+> `readonly` **destinationKey**: `string` \| `null`
+
+The key of the destination it was made for; null when it records none. An archive written
+before deliveries recorded one leaves it out.
+
 ##### error
 
 > `readonly` **error**: `string` \| `null`
@@ -1757,6 +1764,54 @@ Releases what the destination keeps open between deliveries, such as connections
 
 ***
 
+### DestinationFacts
+
+Which destination a destination transform runs for: its place in the channel's `destinations:`
+list, from 0, its `name:` when the block sets one, and its kind.
+
+#### Example
+
+```ts
+import type { Transform } from "@cosyte/pathways";
+export default ((msg, ctx) => (ctx?.destination?.name === "billing" ? msg : null)) satisfies Transform;
+```
+
+#### Properties
+
+##### index
+
+> `readonly` **index**: `number`
+
+##### kind
+
+> `readonly` **kind**: `string`
+
+`file`, `http`, `mllp`, `tcp`, `smtp` or `module`.
+
+##### name
+
+> `readonly` **name**: `string` \| `undefined`
+
+***
+
+### DestinationKey
+
+A destination named by its key rather than its place, for [MessageStore.outputs](#outputs-1).
+
+#### Example
+
+```ts
+const theirs = await store.outputs(12, { key: keys[1] });
+```
+
+#### Properties
+
+##### key
+
+> `readonly` **key**: `string`
+
+***
+
 ### ExpireResult
 
 What retention deleted, or would delete, from one channel.
@@ -2120,6 +2175,30 @@ The channel's name.
 ###### Overrides
 
 [`LifecycleEventBase`](#lifecycleeventbase).[`type`](#type-8)
+
+***
+
+### HeldDeliveries
+
+What [MessageStore.holdDeliveries](#holddeliveries) held: `unknown`, pending deliveries queued before
+destinations were recorded, now failed; `gone`, pending deliveries made for a destination the
+channel no longer has, still pending.
+
+#### Example
+
+```ts
+const held: HeldDeliveries = { unknown: 0, gone: 2 };
+```
+
+#### Properties
+
+##### gone
+
+> `readonly` **gone**: `number`
+
+##### unknown
+
+> `readonly` **unknown**: `number`
 
 ***
 
@@ -2844,9 +2923,20 @@ is nothing failed. The audit entry is written in the same transaction.
 
 ##### completeTransform()
 
-> **completeTransform**(`messageId`, `outputs`, `destinations`, `epoch?`): `Promise`\<`void`\>
+> **completeTransform**(`messageId`, `outputs`, `destinations`, `epoch?`, `keys?`): `Promise`\<`void`\>
 
-Fenced by `epoch` when it is given: see the lease methods above.
+Records a transform's outputs and the message's new status, all or nothing: given a list, one
+pending delivery per output per destination, and the message `filtered` when the list is
+empty; given `{ byDestination }`, each destination's own outputs as pending deliveries, a
+destination with none as one `filtered` delivery and one that failed as one `failed` delivery
+with its error, and the message `filtered` only when every destination filtered it. Fenced by
+`epoch` when it is given: see the lease methods above.
+
+`keys` names each destination, in the channel's order, by a key it keeps when others are added,
+removed or moved (its `name:`, or its kind and target); each delivery records its destination's
+key, so it is sent to, and resent or verified against, that destination only. The engine always
+gives them, and storage needs them with `{ byDestination }`. A store that ignores them finds
+deliveries by place, as before keys.
 
 ###### Parameters
 
@@ -2856,7 +2946,7 @@ Fenced by `epoch` when it is given: see the lease methods above.
 
 ###### outputs
 
-readonly `Uint8Array`\<`ArrayBufferLike`\>[]
+[`TransformOutputs`](#transformoutputs)
 
 ###### destinations
 
@@ -2865,6 +2955,10 @@ readonly `Uint8Array`\<`ArrayBufferLike`\>[]
 ###### epoch?
 
 `number`
+
+###### keys?
+
+readonly `string`[]
 
 ###### Returns
 
@@ -2991,6 +3085,40 @@ Removes the row of `node` only while it is stale. Returns whether it did. Option
 ###### Returns
 
 `Promise`\<`boolean`\>
+
+##### holdDeliveries()?
+
+> `optional` **holdDeliveries**(`channel`, `keys`, `error`, `epoch?`): `Promise`\<[`HeldDeliveries`](#helddeliveries)\>
+
+Holds the channel's pending deliveries that no destination it has now was made for, so none is
+sent to another: fails each one queued before destinations were recorded (no key, so which
+destination it was made for cannot be told), with `error`, so an operator can replay its
+message; and counts those made for a destination that is not among `keys` (removed, or its
+`name:` or target changed), which stay pending and go out if it comes back. Fenced by `epoch`
+when it is given. The engine calls it once per channel at its first delivery pass; a store
+without it holds nothing.
+
+###### Parameters
+
+###### channel
+
+`string`
+
+###### keys
+
+readonly `string`[]
+
+###### error
+
+`string`
+
+###### epoch?
+
+`number`
+
+###### Returns
+
+`Promise`\<[`HeldDeliveries`](#helddeliveries)\>
 
 ##### joinNode()?
 
@@ -3315,15 +3443,22 @@ Every node row, by node id, with its heartbeat age by the database's clock. Opti
 
 ##### outputs()
 
-> **outputs**(`messageId`): `Promise`\<`Uint8Array`\<`ArrayBufferLike`\>[]\>
+> **outputs**(`messageId`, `destination?`): `Promise`\<`Uint8Array`\<`ArrayBufferLike`\>[]\>
 
-The outputs of a message's current generation, in order; none when it has none or they were dropped.
+The outputs of a message's current generation, in order; none when it has none or they were
+dropped. Those of `destination` when it is given, by its place or, as `{ key }`, by the key its
+deliveries record (see [completeTransform](#completetransform)), else those of the first destination that has
+any.
 
 ###### Parameters
 
 ###### messageId
 
 `number`
+
+###### destination?
+
+`number` \| [`DestinationKey`](#destinationkey-1)
 
 ###### Returns
 
@@ -3859,6 +3994,14 @@ const due = await store.nextDelivery("adt", 0, { dueBy: Date.now() });
 Only a delivery due by this time, in epoch milliseconds: the oldest whose `nextAttemptAt` is at
 or before it, passing over any still waiting for a retry. The engine asks this for a destination
 with `retry.rotate: true`. A store that ignores it keeps that destination in order.
+
+##### key?
+
+> `readonly` `optional` **key?**: `string`
+
+Only a delivery made for the destination with this key, wherever it stands in the list now
+(see [MessageStore.completeTransform](#completetransform)); `destination` is then not read. The engine always
+gives it. A store that ignores it finds deliveries by place, as before keys.
 
 ***
 
@@ -4555,6 +4698,14 @@ const request: RequeueRequest = { mode: "resend", expected: "transformed", outpu
 
 #### Properties
 
+##### byDestination?
+
+> `readonly` `optional` **byDestination?**: readonly [`DestinationOutcome`](#destinationoutcome)[]
+
+On a channel with destination transforms: what each destination gets, in order, in place of
+`outputs` for every one. A destination's failure is recorded as its failed delivery, and one
+`notStored` gets no delivery; how many were is `notStored` in the result and its audit entry.
+
 ##### destinations
 
 > `readonly` **destinations**: `number`
@@ -4579,6 +4730,13 @@ was replayed or resent since, so a bulk replay never replays a message twice.
 > `readonly` `optional` **failure?**: `string`
 
 What the replayed transform failed with, as stored; the message is marked failed.
+
+##### keys?
+
+> `readonly` `optional` **keys?**: readonly `string`[]
+
+Each destination's key, in the channel's order now, recorded on its deliveries: see
+[MessageStore.completeTransform](#completetransform). Needed with `byDestination`.
 
 ##### mode
 
@@ -5253,6 +5411,16 @@ const waiting = (await store.deliveries(12)).filter((d: StoredDelivery) => d.sta
 
 > `readonly` **destination**: `number`
 
+The destination's place in the channel's list when the delivery was made, from 0.
+
+##### destinationKey?
+
+> `readonly` `optional` **destinationKey?**: `string`
+
+The key of the destination it was made for, which a destination keeps when others are added,
+removed or moved; undefined for one queued before destinations were recorded, or by a caller
+that gave no keys. See [MessageStore.completeTransform](#completetransform).
+
 ##### error
 
 > `readonly` **error**: `string` \| `null`
@@ -5292,7 +5460,8 @@ Epoch milliseconds before which it is not tried again; 0 when due at once.
 
 > `readonly` **seq**: `number`
 
-Which output of the transform this is, from 0.
+Which output of the transform this is, from 0; -1 for a delivery with no output, which its
+destination's own transform filtered (`filtered`) or failed (`failed`, then `cleared`).
 
 ##### status
 
@@ -5329,6 +5498,12 @@ const old = (row: StoredDeliveryRow, current: number): boolean => row.generation
 ##### destination
 
 > `readonly` **destination**: `number`
+
+##### destinationKey
+
+> `readonly` **destinationKey**: `string` \| `null`
+
+The key of the destination it was made for; null when it records none.
 
 ##### error
 
@@ -5851,6 +6026,13 @@ replay or resend before this one.
 
 The channel's configuration, resolved when the engine (or the command) started.
 
+##### destination?
+
+> `readonly` `optional` **destination?**: [`DestinationFacts`](#destinationfacts)
+
+The destination whose own transform this is: set only for a destination's `transform:`, never
+for the channel's.
+
 ##### messageId
 
 > `readonly` **messageId**: `number`
@@ -6345,16 +6527,21 @@ const table: CsvTable = { header: null, rows: [["TEST-001", "Example"]] };
 
 ### DeliveryCounts
 
-> **DeliveryCounts** = `Readonly`\<`Record`\<`Exclude`\<[`DeliveryStatus`](#deliverystatus), `"dry-run"`\>, `number`\>\> & `object`
+> **DeliveryCounts** = `Readonly`\<`Record`\<`Exclude`\<[`DeliveryStatus`](#deliverystatus), `"dry-run"` \| `"filtered"`\>, `number`\>\> & `object`
 
-How many deliveries stand at each status. `dry-run` is there only when some delivery ran dry, so
-the counts of a project that never runs a destination dry read as they did before dry runs.
+How many deliveries stand at each status. `dry-run` is there only when some delivery ran dry, and
+`filtered` only when a destination's transform filtered one, so the counts of a project that does
+neither read as they did before.
 
 #### Type Declaration
 
 ##### dry-run?
 
 > `readonly` `optional` **dry-run?**: `number`
+
+##### filtered?
+
+> `readonly` `optional` **filtered?**: `number`
 
 #### Example
 
@@ -6366,11 +6553,13 @@ const recorded = (counts: DeliveryCounts): number => counts.delivered + (counts[
 
 ### DeliveryStatus
 
-> **DeliveryStatus** = `"pending"` \| `"delivered"` \| `"failed"` \| `"cleared"` \| `"dry-run"`
+> **DeliveryStatus** = `"pending"` \| `"delivered"` \| `"failed"` \| `"cleared"` \| `"dry-run"` \| `"filtered"`
 
 Where one delivery of a message to one destination stands. `cleared`: it failed for good, and an
 operator cleared it, or replayed its message. `dry-run`: its destination runs dry (`dryRun: true`,
-or `pathways start --dry-run`), so its output was recorded and never sent.
+or `pathways start --dry-run`), so its output was recorded and never sent. `filtered`: the
+destination's own transform returned nothing for the message, so nothing goes to it; done, as a
+delivered one is.
 
 #### Example
 
@@ -6443,6 +6632,34 @@ export default ((options) => ({
     if (status !== 200) throw Object.assign(new Error("not stored"), { code: `HTTP_${status}` });
   },
 })) satisfies DestinationFactory<{ bucket: string }>;
+```
+
+***
+
+### DestinationOutcome
+
+> **DestinationOutcome** = (\{ `outputs`: readonly `Uint8Array`[]; \} \| \{ `failure`: `string`; \} \| \{ `notStored`: `true`; \}) & `object`
+
+What one destination's transform gave for a message, as storage records it: its outputs, in
+order, none meaning it filtered the message for that destination; or why it failed, as stored,
+which fails that destination's delivery only. On a resend only, `{ notStored: true }`: nothing is
+stored for this destination in the message's generation (it was added to the channel since), so
+it gets no delivery at all, never another destination's outputs.
+
+#### Type Declaration
+
+##### emptyBody?
+
+> `readonly` `optional` **emptyBody?**: `Uint8Array`
+
+For a destination with no output: the body its one delivery row holds, as the store keeps it.
+A layer that encodes every body on its way in (encryption at rest) passes its encoding of an
+empty body here, so no row holds a body that did not pass through it. Empty when not given.
+
+#### Example
+
+```ts
+const results: DestinationOutcome[] = [{ outputs: [body] }, { outputs: [] }, { failure: "transform: TypeError: ..." }];
 ```
 
 ***
@@ -6884,7 +7101,7 @@ const retryable = (reason: RefusalReason): boolean => reason === "changed" || re
 
 ### RequeueResult
 
-> **RequeueResult** = \{ `done`: `true`; `entry`: [`AuditEntry`](#auditentry); `generation`: `number`; `queued`: `number`; `status`: [`MessageStatus`](#messagestatus); `superseded`: `number`; \} \| \{ `done`: `false`; `entry`: [`AuditEntry`](#auditentry); `reason`: `Extract`\<[`RefusalReason`](#refusalreason), `"not-found"` \| `"changed"` \| `"pending"` \| `"content-dropped"`\>; \}
+> **RequeueResult** = \{ `done`: `true`; `entry`: [`AuditEntry`](#auditentry); `generation`: `number`; `notStored?`: `number`; `queued`: `number`; `status`: [`MessageStatus`](#messagestatus); `superseded`: `number`; \} \| \{ `done`: `false`; `entry`: [`AuditEntry`](#auditentry); `reason`: `Extract`\<[`RefusalReason`](#refusalreason), `"not-found"` \| `"changed"` \| `"pending"` \| `"content-dropped"`\>; \}
 
 What a replay or a resend did, with the audit entry written in the same transaction.
 
@@ -6892,7 +7109,7 @@ What a replay or a resend did, with the audit entry written in the same transact
 
 ##### Type Literal
 
-\{ `done`: `true`; `entry`: [`AuditEntry`](#auditentry); `generation`: `number`; `queued`: `number`; `status`: [`MessageStatus`](#messagestatus); `superseded`: `number`; \}
+\{ `done`: `true`; `entry`: [`AuditEntry`](#auditentry); `generation`: `number`; `notStored?`: `number`; `queued`: `number`; `status`: [`MessageStatus`](#messagestatus); `superseded`: `number`; \}
 
 ###### done
 
@@ -6905,6 +7122,12 @@ What a replay or a resend did, with the audit entry written in the same transact
 ###### generation
 
 > `readonly` **generation**: `number`
+
+###### notStored?
+
+> `readonly` `optional` **notStored?**: `number`
+
+Destinations given `notStored` that got no delivery; absent when none.
 
 ###### queued
 
@@ -7344,6 +7567,23 @@ What a transform may return: a message, a string or bytes to send on, several of
 ```ts
 const filtered: TransformOutput<string> = null;
 const bytes: TransformOutput<string> = Buffer.from("MSH|^~\\&|LAB", "latin1");
+```
+
+***
+
+### TransformOutputs
+
+> **TransformOutputs** = readonly `Uint8Array`[] \| \{ `byDestination`: readonly [`DestinationOutcome`](#destinationoutcome)[]; \}
+
+What a transform gave, as [MessageStore.completeTransform](#completetransform) records it: the same outputs for
+every destination, or, on a channel with destination transforms, one [DestinationOutcome](#destinationoutcome)
+per destination, in order.
+
+#### Example
+
+```ts
+const same: TransformOutputs = [body];
+const each: TransformOutputs = { byDestination: [{ outputs: [body] }, { outputs: [] }] };
 ```
 
 ***

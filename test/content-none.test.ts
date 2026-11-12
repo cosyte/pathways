@@ -103,7 +103,13 @@ interface Running {
 async function startNone(
   count = 2,
   storage = "storage: { content: none }",
-  options: { readonly destination?: string; readonly engine?: Partial<EngineOptions> } = {},
+  options: {
+    readonly destination?: string;
+    readonly engine?: Partial<EngineOptions>;
+    /** Lines added to each destination's block by its place, and files added to the project. */
+    readonly each?: readonly string[];
+    readonly files?: Readonly<Record<string, string>>;
+  } = {},
 ): Promise<Running> {
   const root = await makeProject({
     "channels/notes/channel.yaml": [
@@ -117,11 +123,13 @@ async function startNone(
         { length: count },
         (_, i) =>
           `  - file: { dir: ../../data/out-${String(i)} }` +
-          (options.destination === undefined ? "" : `\n    ${options.destination}`),
+          (options.destination === undefined ? "" : `\n    ${options.destination}`) +
+          (options.each?.[i] === undefined ? "" : `\n    ${options.each[i]}`),
       ),
       "",
     ].join("\n"),
     "channels/notes/transform.ts": TEXT_TRANSFORM,
+    ...options.files,
   });
   const project = await loadProject(root);
   const store = await Store.open(project.databaseFile);
@@ -458,6 +466,52 @@ describe("a channel that stores nothing", () => {
     expect(events).toContainEqual(
       expect.objectContaining({ event: "dry-run", destination: 0, pass: id }),
     );
+  });
+
+  it("sends each destination what its own transform made, and none another's", async () => {
+    const { engine, sink, destinations, events, lines } = await startNone(3, undefined, {
+      each: [
+        "name: lower\n    transform: ./lower.ts",
+        "name: plain",
+        "name: tagged\n    transform: ./tag.ts",
+      ],
+      files: {
+        // Filters what the channel made of "skip", fails on "boom", and lowers the rest.
+        "channels/notes/lower.ts":
+          'export default (text: string): string | null => { if (text === "SKIP") return null; if (text === "BOOM") throw new Error("synthetic destination failure"); return text.toLowerCase(); };\n',
+        // Two outputs for each one the channel made.
+        "channels/notes/tag.ts":
+          "export default (text: string): string[] => [`a:${text}`, `b:${text}`];\n",
+      },
+    });
+    const [lower, plain, tagged] = destinations as [Scripted, Scripted, Scripted];
+
+    await sink.receive(text("note"));
+    expect(lower.sent).toEqual(["note"]);
+    expect(plain.sent).toEqual(["NOTE"]);
+    expect(tagged.sent).toEqual(["a:NOTE", "b:NOTE"]);
+
+    // Filtered for one destination only: the others are sent it, and the pass is accepted.
+    await sink.receive(text("skip"));
+    expect(lower.sent).toEqual(["note"]);
+    expect(plain.sent).toEqual(["NOTE", "SKIP"]);
+    expect(tagged.sent).toEqual(["a:NOTE", "b:NOTE", "a:SKIP", "b:SKIP"]);
+
+    // One destination's transform throws: the others are still sent it, and the sender is told
+    // not to send it again, as for a channel transform that throws.
+    const failed = await refusal(sink.receive(text("boom")));
+    expect(failed).toMatchObject({ permanent: true, code: "TRANSFORM_FAILED" });
+    expect(lower.sent).toEqual(["note"]);
+    expect(plain.sent).toEqual(["NOTE", "SKIP", "BOOM"]);
+    expect(tagged.sent.slice(-2)).toEqual(["a:BOOM", "b:BOOM"]);
+    expect(events).toContainEqual(
+      expect.objectContaining({ event: "pass-transform-failed", destination: 0, name: "Error" }),
+    );
+    expect(lines.join("")).not.toContain("synthetic destination failure");
+    expect((await engine.health()).channels["notes"]?.passes).toMatchObject({
+      accepted: 2,
+      rejected: 1,
+    });
   });
 
   it("is a PassFailed from the package entry, by any copy's mark", () => {

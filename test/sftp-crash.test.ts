@@ -111,7 +111,7 @@ async function project(): Promise<Project> {
       "destinations:",
       ...DESTINATIONS.map(
         (name) =>
-          `  - module: ../../destination.ts\n` +
+          `  - name: ${name}\n    module: ../../destination.ts\n` +
           `    options: { log: ${JSON.stringify(log)}, name: ${name} }`,
       ),
       "",

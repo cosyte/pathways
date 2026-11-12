@@ -29,6 +29,18 @@ byte for byte, whatever the format:
 - a message the transform filters out expects an empty file;
 - several outputs are joined by one newline (`\n`) into one expected file.
 
+On a channel where a destination has its own `transform:`, each destination's outputs have an
+expected file of their own: `<input without its extension>.expected.<destination name>.<extension of
+the destination's format>`, with the destination's place in the list, from 1, when it has no
+`name:`. A destination with no expected file is expected to filter the input out, so `--update`
+removes the file of a destination that filtered it.
+
+| Input     | Destination                     | Expected                     |
+| --------- | ------------------------------- | ---------------------------- |
+| `a01.hl7` | `name: ehr`, format `hl7v2`     | `a01.expected.ehr.hl7`       |
+| `a01.hl7` | `name: registry`, format `json` | `a01.expected.registry.json` |
+| `a01.hl7` | the third, with no `name:`      | `a01.expected.3.hl7`         |
+
 Use synthetic messages only: [`@cosyte/synth`](https://docs.cosyte.com/synth) generates them, as
 [Make sample messages](./make-sample-messages.md) shows, or write them by hand with values that are
 visibly invented.
