@@ -746,26 +746,30 @@ export async function nodesCommand(context: OperatorContext): Promise<number> {
 export async function nodeForgetCommand(context: OperatorContext, node: string): Promise<number> {
   const nodes = nodeStore(context.store);
   if (nodes === undefined) return noNodes(context);
-  const find = async (): Promise<NodeRow | undefined> => {
+  // A read or the DELETE that fails is audited before the command reports it, with the code only:
+  // the error's own text can name the server. A database that refuses the statement may refuse the
+  // entry too; the statement's error is the one reported.
+  const audited = async <T>(reason: string, statement: () => Promise<T>): Promise<T> => {
     try {
-      return (await nodes.nodes()).find((candidate) => candidate.node === node);
+      return await statement();
     } catch (error) {
-      // Audited before the command reports it, with the code only: the error's own text can name
-      // the server. A database that refuses the read may refuse the entry too; the read's error is
-      // the one reported.
       const code = (error as { code?: unknown } | undefined)?.code;
       try {
         await context.audit.record({
           action: "node-forget",
           outcome: "refused",
-          detail: { node, reason: "unreadable", ...(typeof code === "string" ? { code } : {}) },
+          detail: { node, reason, ...(typeof code === "string" ? { code } : {}) },
         });
       } catch {
-        // The read's error is the one to report.
+        // The statement's error is the one to report.
       }
       throw error;
     }
   };
+  const find = async (): Promise<NodeRow | undefined> =>
+    audited("unreadable", async () =>
+      (await nodes.nodes()).find((candidate) => candidate.node === node),
+    );
   const notFound = async (): Promise<number> => {
     await context.audit.record({ action: "node-forget", outcome: "not-found", detail: { node } });
     print(context, { forgotten: false, node: null }, ["No node by that id on this database."]);
@@ -773,7 +777,7 @@ export async function nodeForgetCommand(context: OperatorContext, node: string):
   };
   const row = await find();
   if (row === undefined) return notFound();
-  if (!(await nodes.forgetNode(node))) {
+  if (!(await audited("unwritable", () => nodes.forgetNode(node)))) {
     // Gone between the read and the DELETE (its engine stopped cleanly): not found, not live.
     if ((await find()) === undefined) return notFound();
     await context.audit.record({
@@ -796,7 +800,9 @@ export async function nodeForgetCommand(context: OperatorContext, node: string):
 
 /**
  * `pathways nodes forget` with an argument that is not a node id: audited as refused, without the
- * argument, which can hold anything, and exits 2 with the rule for a node id.
+ * argument, which can hold anything, and exits 2 with the rule for a node id. The CLI runs it only on
+ * a store opened with no schema step applied; where that cannot open, it exits 2 unaudited. An entry
+ * the database refuses changes neither the message nor the exit code.
  *
  * @example
  * ```ts
@@ -804,11 +810,15 @@ export async function nodeForgetCommand(context: OperatorContext, node: string):
  * ```
  */
 export async function nodeForgetInvalidCommand(context: OperatorContext): Promise<number> {
-  await context.audit.record({
-    action: "node-forget",
-    outcome: "refused",
-    detail: { reason: "invalid-id" },
-  });
+  try {
+    await context.audit.record({
+      action: "node-forget",
+      outcome: "refused",
+      detail: { reason: "invalid-id" },
+    });
+  } catch {
+    // The command line was still not understood: that is what to say.
+  }
   context.err(`pathways: ${NODE_ID_RULE} Run "pathways --help" for usage.\n`);
   return EXIT.usage;
 }

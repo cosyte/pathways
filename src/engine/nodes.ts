@@ -130,6 +130,9 @@ export function silenceFor(row: NodeRow): number {
   return Math.ceil(row.staleAfterMs / 2);
 }
 
+/** How much longer than the database says a join waits for a holder to fall silent, in ms. */
+const JOIN_MARGIN_MS = 250;
+
 /**
  * A node row in a refusal or in `pathways nodes`: its id, host, process, version, role and how long
  * ago it last beat. Never a URL, a path or anything stored.
@@ -264,7 +267,9 @@ export class NodeHeartbeat {
       const { holder } = join;
       const silentMs = silenceFor(holder);
       const left = silentMs - holder.heartbeatAgeMs;
-      if (left > 0) await this.joinWait(left, this.stopping.signal);
+      // A local timer may fire a little early by the database's clock: the margin keeps a crashed
+      // holder's row from being asked for before the database counts it silent.
+      if (left > 0) await this.joinWait(left + JOIN_MARGIN_MS, this.stopping.signal);
       const replace = { node: holder.node, host: holder.host, pid: holder.pid, silentMs };
       join = await store.joinNode({ ...this.options.info, ...this.options.state() }, replace);
     }

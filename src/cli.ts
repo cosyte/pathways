@@ -70,6 +70,7 @@ import {
   migrateCommand,
   nodeForgetCommand,
   nodeForgetInvalidCommand,
+  NODE_ID_RULE,
   nodesCommand,
   parseAction,
   parseId,
@@ -1441,9 +1442,11 @@ async function test(
 type OperatorRun = (context: OperatorContext) => Promise<number>;
 
 /**
- * The operator commands: status, messages, replay, clear, retention, audit, lease and migrate.
- * Parses and checks the arguments first, so a mistake changes nothing and opens nothing; then loads
- * the project, opens its store and runs.
+ * The operator commands: status, messages, replay, clear, retention, audit, lease, nodes and
+ * migrate. Parses and checks the arguments first, so a mistake changes nothing and opens nothing;
+ * then loads the project, opens its store and runs. One mistake opens the store all the same: a
+ * malformed id to `nodes forget`, audited without it. That open applies no schema step and makes no
+ * SQLite file, and where it cannot open, the mistake exits 2 unaudited.
  */
 async function operator(
   command: string,
@@ -1457,6 +1460,15 @@ async function operator(
 
   const project = await load(projectDir, io);
   if (project === undefined) return EXIT.config;
+  const invalidForget = parsed === nodeForgetInvalidCommand;
+  const unaudited = (): number => {
+    io.err(`pathways: ${NODE_ID_RULE} Run "pathways --help" for usage.\n`);
+    return EXIT.usage;
+  };
+  // Where SQLite has no file there is no audit log to write to, and opening it would make one.
+  if (invalidForget && project.storage.kind === "sqlite" && !existsSync(project.storage.file)) {
+    return unaudited();
+  }
   // verify reads what a running engine stored, so where SQLite has no file there is nothing to read,
   // and opening it would leave an empty database behind.
   if (
@@ -1484,13 +1496,17 @@ async function operator(
   const context = { ...bare, secrets };
   // verify runs a candidate project, which may be on a newer Pathways than the engine running on
   // this database: it applies no schema step, so it never changes the schema under that engine.
+  // A malformed id is only audited on a schema this version runs on: it applies no step either, and
+  // a store that will not open says nothing beyond the usage error.
   const wrapped =
     command === "migrate"
       ? await openForMigrate(project, context, io)
       : command === "verify"
         ? await openWrapped(project, { ...context, migrate: "none" }, io, command)
-        : await openWrapped(project, context, io);
-  if (typeof wrapped === "number") return wrapped;
+        : invalidForget
+          ? await openWrapped(project, { ...context, migrate: "none" }, { ...io, err: () => {} })
+          : await openWrapped(project, context, io);
+  if (typeof wrapped === "number") return invalidForget ? unaudited() : wrapped;
   const { store } = wrapped;
   const audit = auditFor(store, io, (error) => {
     io.err(`pathways: an audit listener failed (${errorCode(error) ?? "no code"}).\n`);

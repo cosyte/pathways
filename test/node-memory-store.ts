@@ -32,6 +32,8 @@ interface Failing {
   readonly nodes?: boolean;
   /** `forgetNode` finds the row gone: its engine stopped cleanly just before. */
   readonly vanish?: boolean;
+  /** `forgetNode` rejects, with a code. */
+  readonly forget?: boolean;
 }
 
 function rowOf(row: Row, now: number): NodeRow {
@@ -98,6 +100,9 @@ export class NodeMemoryStore extends MemoryStore {
   }
 
   forgetNode(node: string): Promise<boolean> {
+    if (this.failing.forget === true) {
+      return Promise.reject(Object.assign(new Error("gone"), { code: "ECONNRESET" }));
+    }
     if (this.failing.vanish === true) {
       nodeRows.delete(node);
       return Promise.resolve(false);

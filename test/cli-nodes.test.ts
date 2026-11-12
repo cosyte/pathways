@@ -3,11 +3,13 @@
 // gone at a clean stop, written again when it goes from under a running engine, a start refused
 // beside a live row of the same id, and the forget command's answers and audit entries. The same
 // between real processes and on every database is in test/nodes-processes.test.ts.
+import { existsSync } from "node:fs";
 import { hostname } from "node:os";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
+import SqliteDatabase from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { EXIT, run } from "../src/cli.js";
@@ -302,6 +304,8 @@ describe("pathways nodes forget", () => {
     ]) {
       expect((await cli([...argv, "-C", root])).code, argv.join(" ")).toBe(EXIT.usage);
     }
+    // A database at this version's schema, which the audit entry goes to.
+    expect((await cli(["migrate", "-C", root])).code).toBe(EXIT.ok);
     const audited: AuditEntry[] = [];
     const bad = await runCli(["nodes", "forget", "../secret-path", "-C", root], {
       onAudit: (entry) => {
@@ -316,6 +320,44 @@ describe("pathways nodes forget", () => {
       ["node-forget", "refused", { reason: "invalid-id" }],
     ]);
     expect(JSON.stringify(audited)).not.toContain("secret-path");
+  });
+
+  it("changes no database for a malformed id: creates no SQLite file, and applies no schema step", async () => {
+    const root = await project();
+    const rule =
+      'pathways: a node id is 1 to 64 letters, digits, dots, hyphens and underscores, starting with a letter or a digit. Run "pathways --help" for usage.\n';
+    const audited: AuditEntry[] = [];
+    const bad = async () =>
+      runCli(["nodes", "forget", "../x", "-C", root], {
+        onAudit: (entry) => {
+          audited.push(entry);
+        },
+      }).done;
+    // No database yet: none is made, and there is nothing to audit into.
+    expect(await bad()).toMatchObject({ code: EXIT.usage, out: "", err: rule });
+    expect(existsSync(db(root))).toBe(false);
+    // A database one generation behind: left at that generation, unaudited, since this version
+    // writes only to a schema it runs on.
+    expect((await cli(["migrate", "-C", root])).code).toBe(EXIT.ok);
+    const older = new SqliteDatabase(db(root));
+    older.exec(
+      "drop table nodes; delete from kysely_migration where name = '0011-nodes'; delete from schema_info where step = '0011-nodes'",
+    );
+    older.close();
+    expect(await bad()).toMatchObject({ code: EXIT.usage, out: "", err: rule });
+    const after = new SqliteDatabase(db(root), { readonly: true });
+    try {
+      const steps = after.prepare("select name from kysely_migration").pluck().all();
+      expect(steps).not.toContain("0011-nodes");
+      expect(steps).toHaveLength(10);
+      const tables = after
+        .prepare("select name from sqlite_master where type = 'table' and name = 'nodes'")
+        .all();
+      expect(tables).toEqual([]);
+    } finally {
+      after.close();
+    }
+    expect(audited).toEqual([]);
   });
 
   it("audits a forget whose listing fails, and one whose row went before it could be removed", async () => {
@@ -343,9 +385,18 @@ describe("pathways nodes forget", () => {
       code: EXIT.failed,
       out: "No node by that id on this database.\n",
     });
+    // Listed, then the DELETE itself fails.
+    const unwritten = await failing("{ forget: true }");
+    module.nodeRows.set("engine-a", { ...OTHER, startedAt: Date.now(), heartbeatAt: 0 });
+    expect(await forget(unwritten)).toMatchObject({
+      code: EXIT.failed,
+      out: "",
+      err: "pathways: the command could not finish (ECONNRESET).\n",
+    });
     expect(audited.map((entry) => [entry.action, entry.outcome, entry.detail])).toEqual([
       ["node-forget", "refused", { node: "engine-a", reason: "unreadable", code: "ECONNRESET" }],
       ["node-forget", "not-found", { node: "engine-a" }],
+      ["node-forget", "refused", { node: "engine-a", reason: "unwritable", code: "ECONNRESET" }],
     ]);
   });
 });

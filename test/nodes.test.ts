@@ -218,8 +218,9 @@ describe("A node's heartbeat", () => {
       holder: { ...ROW, ...over },
     });
     // It waits for the holder's next heartbeat before it asks: half the holder's stale bound, less
-    // how long ago it beat.
-    const silence = 15_000 / 2 - 1_234;
+    // how long ago it beat, and a margin, so a local timer that fires early by the database's clock
+    // does not ask too soon.
+    const silence = 15_000 / 2 - 1_234 + 250;
     const cases: { holder: NodeJoin; runs: boolean; joined: boolean; waited: number[] }[] = [
       // Its process is gone: an earlier run, killed.
       { holder: holder({ pid: 1111 }), runs: false, joined: true, waited: [silence] },
@@ -331,7 +332,7 @@ describe("A node's heartbeat", () => {
       },
     });
     expect(await heartbeat.join()).toEqual({ joined: true });
-    expect(waited).toEqual([7_300]);
+    expect(waited).toEqual([7_300 + 250]);
     await heartbeat.stop();
   });
 
