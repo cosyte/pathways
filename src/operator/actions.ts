@@ -3,10 +3,16 @@ import { transformConfigFor } from "../config/transform-config.js";
 import type { Env } from "../connectors/endpoint.js";
 import { EncryptionError } from "../encryption/envelope.js";
 import { processEnv } from "../env.js";
-import { ChannelWorker, TransformLoadError } from "../engine/channel-worker.js";
-import { storedFailure } from "../engine/engine.js";
+import { ChannelWorker, destinationSetups, TransformLoadError } from "../engine/channel-worker.js";
+import { destinationKeys } from "../engine/destination-key.js";
+import { destinationOutcomes, storedFailure } from "../engine/engine.js";
 import type { FailureSummary } from "../engine/worker-entry.js";
-import type { MessageStatus, MessageStore, RequeueResult } from "../storage/store.js";
+import type {
+  DestinationOutcome,
+  MessageStatus,
+  MessageStore,
+  RequeueResult,
+} from "../storage/store.js";
 import { describeFailure } from "../testing/run-tests.js";
 import type { AuditLog } from "./audit.js";
 
@@ -15,14 +21,16 @@ import type { AuditLog } from "./audit.js";
  *
  * - `waiting`: it has not been transformed yet, and the engine will;
  * - `pending`: some of its deliveries still wait to be sent;
- * - `no-output`: a resend, but its current transform produced nothing to send;
+ * - `no-output`: a resend, but its current transform produced nothing to send, to any destination;
  * - `no-channel`: its channel is no longer configured;
  * - `transform-load`: its channel's transform could not be loaded;
  * - `changed`: it changed while the replay ran, so nothing was recorded;
  * - `unreadable`: what is stored of it could not be decrypted;
  * - `not-failed`: a clear, but nothing about it had failed;
  * - `content-dropped`: its content was dropped after delivery (`storage.content:
- *   dropAfterDelivery`), so there is nothing to replay or resend.
+ *   dropAfterDelivery`), so there is nothing to replay or resend;
+ * - `destination-unknown`: a resend, but its outputs were stored before deliveries recorded their
+ *   destination, so which destination each was for cannot be told; a replay runs it again.
  *
  * @example
  * ```ts
@@ -38,7 +46,8 @@ export type ActionRefusal =
   | "changed"
   | "unreadable"
   | "not-failed"
-  | "content-dropped";
+  | "content-dropped"
+  | "destination-unknown";
 
 /**
  * What a replay or a resend did to one message. Ids, counts, states and codes only.
@@ -58,6 +67,11 @@ export type ReplayResult =
       readonly queued: number;
       /** Earlier deliveries that had failed for good, now cleared by the replay. */
       readonly superseded: number;
+      /**
+       * A resend: destinations with nothing stored for the message's last transform (added to the
+       * channel since, or renamed), which were sent nothing. Absent when there were none.
+       */
+      readonly notStored?: number;
       /** When the replayed transform failed: what happened, without the error's own text. */
       readonly failure?: string;
     }
@@ -185,11 +199,27 @@ export async function replayMessages(
       return refuse(id, channel.name, "changed");
     }
 
-    let outputs: readonly Uint8Array[];
+    const keys = destinationKeys(project.root, channel.destinations);
+    let outputs: readonly Uint8Array[] = [];
+    let byDestination: DestinationOutcome[] | undefined;
     let failure: FailureSummary | undefined;
     if (resend) {
-      outputs = message.status === "transformed" ? await store.outputs(id) : [];
-      if (outputs.length === 0) return refuse(id, channel.name, "no-output");
+      if (message.status === "transformed") {
+        const stored = await storedByDestination(store, id, message.generation, keys);
+        if (stored === undefined) return refuse(id, channel.name, "destination-unknown");
+        byDestination = stored;
+        const same = sameForEvery(byDestination);
+        if (same !== undefined) {
+          // Every destination has the same outputs: queued as one list, as a store always took them.
+          outputs = same;
+          byDestination = undefined;
+        }
+      }
+      const sends =
+        byDestination === undefined
+          ? outputs.length > 0
+          : byDestination.some((o) => "outputs" in o && o.outputs.length > 0);
+      if (!sends) return refuse(id, channel.name, "no-output");
     } else {
       const env = context.env ?? processEnv();
       const worker = await workerFor(project, channel, workers, env);
@@ -207,6 +237,7 @@ export async function replayMessages(
         context: { messageId: id, attempt: message.generation + 2, source: undefined, meta: {} },
       });
       outputs = outcome.ok ? outcome.outputs : [];
+      byDestination = outcome.ok ? destinationOutcomes(outcome) : undefined;
       failure = outcome.ok ? undefined : outcome.failure;
     }
 
@@ -218,6 +249,8 @@ export async function replayMessages(
         outputs,
         failure: failure === undefined ? undefined : storedFailure(failure),
         destinations: channel.destinations.length,
+        keys,
+        ...(byDestination === undefined ? {} : { byDestination }),
         expectedGeneration,
       },
       audit.actor,
@@ -329,6 +362,7 @@ async function workerFor(
     timeoutMs: channel.settings.timeoutMs,
     memoryMb: channel.settings.memoryMb,
     config: config.resolved,
+    destinations: destinationSetups(channel),
   });
   try {
     await worker.start();
@@ -340,6 +374,58 @@ async function workerFor(
     workers.set(channel.name, error.failure);
     return error.failure;
   }
+}
+
+/**
+ * What a resend sends to each destination: the outputs stored for it in the message's current
+ * generation, so a destination transform changed since is not run again. A destination whose
+ * transform filtered the message stays filtered, and one whose transform failed keeps its failure.
+ *
+ * Each destination is matched to what was stored for it by its key (see {@link destinationKeys}),
+ * never by its place in the list, so adding, removing or moving a destination since gives none of
+ * them another's outputs. A destination with no delivery of that generation under its key (added
+ * since, or renamed) is `notStored` and gets nothing. A generation stored before deliveries
+ * recorded their destination cannot be matched at all: `undefined`, and the resend is refused.
+ */
+async function storedByDestination(
+  store: MessageStore,
+  id: number,
+  generation: number,
+  keys: readonly string[],
+): Promise<DestinationOutcome[] | undefined> {
+  const current = (await store.deliveries(id)).filter((d) => d.generation === generation);
+  if (current.some((d) => d.destinationKey === undefined)) return undefined;
+  const outcomes: DestinationOutcome[] = [];
+  for (const key of keys) {
+    const rows = current.filter((d) => d.destinationKey === key);
+    if (rows.length === 0) {
+      outcomes.push({ notStored: true });
+      continue;
+    }
+    const none = rows.find((d) => d.seq < 0);
+    if (none === undefined) {
+      outcomes.push({ outputs: await store.outputs(id, { key }) });
+    } else if (none.status === "filtered") {
+      outcomes.push({ outputs: [] });
+    } else {
+      // Its transform failed: there is nothing stored to send, and the failure stands. A row with
+      // no output that is not filtered was written failed, with its error.
+      outcomes.push({ failure: String(none.error) });
+    }
+  }
+  return outcomes;
+}
+
+/** The outputs every destination has, when each has the same ones, byte for byte; else undefined. */
+function sameForEvery(outcomes: readonly DestinationOutcome[]): readonly Uint8Array[] | undefined {
+  const [first] = outcomes;
+  if (first === undefined || !("outputs" in first)) return undefined;
+  const equal = (a: readonly Uint8Array[], b: readonly Uint8Array[]): boolean =>
+    a.length === b.length &&
+    a.every((output, index) => Buffer.from(output).equals(b[index] ?? new Uint8Array()));
+  return outcomes.every((o) => "outputs" in o && equal(o.outputs, first.outputs))
+    ? first.outputs
+    : undefined;
 }
 
 function describeRequeue(
@@ -359,6 +445,9 @@ function describeRequeue(
     status: recorded.status,
     queued: recorded.queued,
     superseded: recorded.superseded,
+    ...(recorded.notStored === undefined || recorded.notStored === 0
+      ? {}
+      : { notStored: recorded.notStored }),
   };
   return failure === undefined ? done : { ...done, failure: describeFailure(failure, channel) };
 }

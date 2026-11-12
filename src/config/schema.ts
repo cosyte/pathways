@@ -2848,6 +2848,9 @@ const source = restate(
   restateKinds(SOURCE_KINDS),
 );
 
+/** A destination's `name:`, which `pathways test` puts in a file name. */
+const DESTINATION_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
 /** One entry of a channel's `destinations:` list: exactly one kind. */
 const destination = restate(
   z
@@ -2882,10 +2885,34 @@ const destination = restate(
             "Run dry: transform and record each output, mark its delivery dry-run, and never send it or open a connection. Default false.",
         }),
       ).optional(),
+      name: z
+        .string()
+        .regex(
+          DESTINATION_NAME,
+          "lowercase letters, digits and hyphens, starting with a letter or digit, at most 64",
+        )
+        .meta({
+          description:
+            "The destination's name, unique in the channel: lowercase letters, digits and hyphens. Shown by pathways messages show, and named in pathways test's expected files. Default: its place in the list.",
+        })
+        .optional(),
+      transform: path
+        .meta({
+          description:
+            "This destination's own transform module, relative to this file: it runs after the channel's transform, once for each channel output, and returns a message, several, or null to filter this destination for that message. Default: none, the channel's outputs are sent as they are.",
+        })
+        .optional(),
+      format: z
+        .enum(FORMATS)
+        .meta({
+          description:
+            "The format this destination sends: what its transform's return is written in, the extension a file destination writes and the Content-Type an http destination sends. Its transform reads the channel's format. Default: the channel's format.",
+        })
+        .optional(),
     })
     .meta({
       description:
-        "One destination: exactly one of file, http, mllp, tcp, smtp or module, its own retry settings, and dryRun.",
+        "One destination: exactly one of file, http, mllp, tcp, smtp or module, its own retry settings, dryRun, and an optional name, transform and format.",
     })
     .superRefine(oneKind(DESTINATION_KINDS))
     .superRefine(optionsWithModule)
@@ -3119,7 +3146,21 @@ export const channelSchema = restate(
       destinations: z
         .array(destination)
         .min(1, "at least one destination")
-        .meta({ description: "Where each output goes: at least one destination." }),
+        .meta({ description: "Where each output goes: at least one destination." })
+        .superRefine((entries, ctx) => {
+          const seen = new Set<string>();
+          for (const [index, entry] of entries.entries()) {
+            if (entry.name === undefined) continue;
+            if (seen.has(entry.name)) {
+              ctx.addIssue({
+                code: "custom",
+                path: [index, "name"],
+                message: `${entry.name} names another destination of this channel; each name is used once`,
+              });
+            }
+            seen.add(entry.name);
+          }
+        }),
       hooks,
       // A channel overrides the transform limits, the MLLP defaults and retention; how often the
       // engine polls, and how often it runs retention, are engine-wide.
@@ -4065,6 +4106,19 @@ export type DestinationConfig = (
   readonly timeoutMs?: number | undefined;
   /** True when the destination runs dry: each output recorded, marked `dry-run`, never sent. */
   readonly dryRun?: boolean | undefined;
+  /** The block's `name:`, unique in the channel, when it sets one. */
+  readonly name?: string | undefined;
+  /**
+   * The destination's own transform module, an absolute path, when the block sets one: it runs
+   * after the channel's transform, once for each channel output.
+   */
+  readonly transform?: string | undefined;
+  /**
+   * The format the destination sends, when the block sets one: what its transform reads and
+   * writes, a file destination's extension and an http destination's `Content-Type`. Unset, the
+   * channel's.
+   */
+  readonly format?: Format | undefined;
 };
 
 /**

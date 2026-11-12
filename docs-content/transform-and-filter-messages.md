@@ -2,7 +2,7 @@
 id: transform-and-filter-messages
 title: Transform and filter messages
 sidebar_label: Transform and filter
-description: "Write a channel's transform: edit a message, filter it out, send several outputs, load a lookup table, and fail a message on purpose."
+description: "Write a channel's transform: edit a message, filter it out, send several outputs, transform or filter for one destination, load a lookup table, and fail a message on purpose."
 ---
 
 # Transform and filter messages
@@ -53,6 +53,94 @@ export default ((value) => (Array.isArray(value) ? value : [value])) satisfies T
 object, an array, a number or a boolean is written back as JSON, and a string is sent as it is. Each
 one becomes a delivery of its own to every destination, and a file destination
 names them `<message id>-1.json`, `<message id>-2.json` and so on.
+
+## Transform or filter for one destination
+
+A destination block may name a `transform:` of its own. It runs in the same worker, in the same pass,
+after the channel's transform: once for each output the channel's transform returned, with that
+output parsed in the channel's format. It returns what that destination gets, by the same rules
+as the table above, so it can edit the message for one receiver, send it several, or route it away
+from this destination with `null`.
+
+```yaml title="channels/results-out/channel.yaml"
+source:
+  mllp: { port: 6661, plaintext: true }
+transform: ./transform.ts
+destinations:
+  - name: ehr
+    mllp: { host: ehr.example.test, port: 2575, plaintext: true }
+  - name: billing
+    file: { dir: ../../data/billing }
+    transform: ./billing.ts
+  - name: registry
+    http: { url: "https://registry.example.test/results" }
+    transform: ./registry.ts
+    format: json
+```
+
+```ts runnable title="channels/results-out/billing.ts"
+import type { Transform } from "@cosyte/pathways";
+
+// Billing takes final results only; anything else is filtered for billing alone.
+export default ((msg) => (msg.get("OBR.25") === "F" ? msg : null)) satisfies Transform;
+```
+
+```ts runnable title="channels/results-out/registry.ts"
+import type { TransformFor } from "@cosyte/pathways";
+
+// It reads the channel's hl7v2 and, with format: json, what it returns goes out as JSON.
+export default ((msg, ctx) => ({
+  destination: ctx?.destination?.name ?? null,
+  control: msg.get("MSH.10") ?? null,
+})) satisfies TransformFor<"hl7v2", "json">;
+```
+
+The destination's three keys:
+
+| Key         | Meaning                                                                                                                                                                                                                       |
+| ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `transform` | the destination's own transform module, relative to `channel.yaml`. Without one, the destination is sent the channel's outputs as they are.                                                                                   |
+| `name`      | lowercase letters, digits and hyphens, unique in the channel. `pathways messages show` prints it beside the destination, and `pathways test` puts it in the expected file's name. Without one, its place in the list is used. |
+| `format`    | the format the destination sends: what its transform's return is written in, the extension a `file` destination writes and the `Content-Type` an `http` destination sends. The channel's `format` by default.                 |
+
+Each delivery records the destination it was made for: by its `name`, or, without one, by its kind
+and target (a `file` destination's folder, or its bucket or container and prefix, an `http` destination's URL, an `mllp` or `tcp`
+destination's host and port, an `smtp` destination's server and recipients, a `module` destination's module). Adding a destination anywhere in the
+list, removing one or reordering them is safe: after a restart, each queued delivery goes to the
+destination it was made for, and a resend or `pathways verify` reads each destination's own stored
+outputs. A delivery queued for a destination the channel no longer has waits, and is logged at
+start as `deliveries-held` with the code `destination-gone`; it is sent if that destination comes
+back. A destination given a removed one's identity, its `name`, or without one its kind and target,
+takes over that destination's pending deliveries and sends them. Renaming a destination, setting a `name` on one that had none, or changing the target of one
+without a name makes it a new destination, so what was queued for it waits in the same way: give
+each destination a `name` when you add it, and it stays the same destination when its URL, host or
+folder changes.
+
+Two destinations with no `name`, of the same kind and sending to the same place, would share one
+identity, and nothing would tell their deliveries apart once one of them is removed or moved. So
+`pathways validate` and a start refuse such a pair, naming both, as in
+`destinations.2: sends where destinations.0 sends, and neither has a name:`; a `name` on either
+one is enough. Two `module` destinations of one module with different `options` are such a pair.
+
+Its context is the channel transform's, with `ctx.destination` beside it: the destination's `index`
+(from 0), its `name` and its `kind` (`file`, `http`, `mllp`, `tcp`, `smtp` or `module`).
+
+What each destination gets is recorded in one write with the message, so a destination's queue keeps
+the order messages arrived in:
+
+- **Outputs.** Each is a delivery of its own to that destination, as for a channel transform.
+- **`null`.** That destination's delivery is recorded as `filtered` and nothing is sent to it. A
+  `filtered` delivery is done, like a `delivered` one: the message counts as delivered once the other
+  destinations have it, and retention treats it the same. When every destination filters a message,
+  the message is stored as `filtered`.
+- **A throw.** Only that destination's delivery fails, with the error's name, code and line stored
+  and its text stored encrypted, never logged; the other destinations go on. Fix the transform and
+  [replay the message](./inspect-replay-and-clear-messages.md).
+
+The channel's `timeout` and `memory` cover the channel's transform and every destination's together,
+as one pass. A pass that runs past the timeout, or runs out of memory, fails the whole message, as a
+channel transform's would. A destination transform that will not load stops the channel's start, and
+the error names the destination.
 
 ## Load a lookup table once
 

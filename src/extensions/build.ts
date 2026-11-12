@@ -50,6 +50,7 @@ const STORE_METHOD_LIST = {
   channelStates: false,
   setChannelState: false,
   markDryRun: false,
+  holdDeliveries: false,
   metaCandidates: false,
   joinNode: false,
   nodeHeartbeat: false,

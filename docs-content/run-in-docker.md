@@ -12,10 +12,10 @@ Node.js 24 image: no shell and no package manager, so it has few packages to pat
 database driver, so one image stores messages in SQLite, PostgreSQL, MySQL or MariaDB, or SQL Server,
 as `pathways.yaml` says. It runs as the distroless `nonroot` user (uid 65532).
 
-From the first release on, each release publishes the image to `ghcr.io/cosyte/pathways`, tagged
-with its version, for `linux/amd64` and `linux/arm64`, with an SBOM and build provenance, signed with
-cosign keyless signing by the release workflow. Pull it by version, or by digest once you have
-checked its signature:
+Each release publishes the image to `ghcr.io/cosyte/pathways`, tagged with its version, for
+`linux/amd64` and `linux/arm64`, with an SBOM and build provenance, signed with cosign keyless
+signing by the release workflow. Pull it by version, or by digest once you have checked its
+signature:
 
 ```bash
 docker pull ghcr.io/cosyte/pathways:<version>

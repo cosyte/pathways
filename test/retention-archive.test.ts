@@ -191,6 +191,35 @@ describe("an archive", () => {
     expect((await sealed()).equals(bytes)).toBe(false);
   });
 
+  it("opens a delivery written before it recorded a destination key or a failed time", async () => {
+    const older = {
+      id: 1,
+      destination: 0,
+      seq: 0,
+      generation: 0,
+      status: "delivered",
+      attempts: 1,
+      nextAttemptAt: 0,
+      deliveredAt: "2026-11-01T00:00:00.000Z",
+      error: null,
+      body: Buffer.from("SYNTHETIC-OUT").toString("base64"),
+      sendingAt: null,
+      sendingAttempt: null,
+      interruptedAttempt: null,
+    };
+    const bytes = await sealArchive(
+      {
+        channel: "adt",
+        step: "metadata",
+        created: "2026-11-11T00:00:00.000Z",
+        messages: [{ ...message(1), deliveries: [older] } as unknown as ArchivedMessage],
+      },
+      keys,
+    );
+    const opened = await openArchive(bytes, keys);
+    expect(opened.messages[0]?.deliveries[0]).toEqual(older);
+  });
+
   it("refuses a master key it does not hold", async () => {
     const other = new LocalKeyProvider([["other", randomBytes(KEY_BYTES)]], "other");
     const error = await openArchive(await sealed(), other).catch((caught: unknown) => caught);

@@ -46,6 +46,11 @@ it again. A message with no usable MSH header is answered as on any channel, and
 `unreadable`. Over MLLP, `onStoreFailure` still says what a failure that may pass is answered with: by
 default it closes the connection without an ACK.
 
+A destination with its own `transform:` is sent what that transform made, as on a stored channel,
+and nothing when it filters the message; the pass counts as filtered only when every destination's
+transform filtered it. When one destination's transform throws, the others are still sent the
+message, and the sender is answered as for a channel transform that throws.
+
 `Retry-After` is the wait the receiver asked for, when it asked, or else the channel's first retry
 wait (`retry.first`, 1 second by default), in whole seconds.
 

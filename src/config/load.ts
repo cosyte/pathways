@@ -5,6 +5,7 @@ import { parse as parseYaml, YAMLParseError } from "yaml";
 import type { z } from "zod";
 
 import { normalisePath } from "../connectors/http-path.js";
+import { alikeDestinations } from "../engine/destination-key.js";
 import { secretSourceOf, secretUses, type SecretSourceYaml } from "../secrets/sources.js";
 import { type Env, processEnv } from "../env.js";
 import { referencesIn, resolvingEnv, variableAt, type EnvReference } from "./env-ref.js";
@@ -281,8 +282,35 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
         ...resolveDestination(destination, channelDir, channelSettings),
         // Set only when true, so a destination that sends resolves as it always has.
         ...(destination.dryRun === true ? { dryRun: true } : {}),
+        // Each set only when the block sets it, likewise.
+        ...(destination.name === undefined ? {} : { name: destination.name }),
+        ...(destination.transform === undefined
+          ? {}
+          : { transform: resolve(channelDir, destination.transform) }),
+        ...(destination.format === undefined ? {} : { format: destination.format }),
       }),
     );
+    // Two unnamed destinations of one kind and target would share one identity, and a pending
+    // delivery or a resend could reach the wrong one after either is removed or moved.
+    const alike = alikeDestinations(projectRoot, destinations).map(
+      ([index, earlier]) =>
+        `${show(file)}: destinations.${index}: sends where destinations.${earlier} sends, and neither has a name:; give each a name: so each keeps its own deliveries`,
+    );
+    if (alike.length > 0) {
+      problems.push(...alike);
+      continue;
+    }
+    const missingTransforms: string[] = [];
+    for (const [index, destination] of destinations.entries()) {
+      if (destination.transform === undefined || (await exists(destination.transform))) continue;
+      missingTransforms.push(
+        `${show(file)}: destinations.${index}.transform: ${absent(destination.transform, `destinations.${index}.transform`, channelEnv, show)}`,
+      );
+    }
+    if (missingTransforms.length > 0) {
+      problems.push(...missingTransforms);
+      continue;
+    }
     const channelRetry: RetryLevel = { key: "retry", block: channel.retry, fromEnv: channelEnv };
     const badRetry = [
       ...retryProblems(show(file), [channelRetry, projectRetry], channelSettings.retry),

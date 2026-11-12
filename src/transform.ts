@@ -270,6 +270,27 @@ export interface TransformContext {
   readonly meta: Readonly<Record<string, string | number | boolean>>;
   /** The channel's configuration, resolved when the engine (or the command) started. */
   readonly config: Readonly<TransformConfig>;
+  /**
+   * The destination whose own transform this is: set only for a destination's `transform:`, never
+   * for the channel's.
+   */
+  readonly destination?: DestinationFacts | undefined;
+}
+
+/**
+ * Which destination a destination transform runs for: its place in the channel's `destinations:`
+ * list, from 0, its `name:` when the block sets one, and its kind.
+ * @example
+ * ```ts
+ * import type { Transform } from "@cosyte/pathways";
+ * export default ((msg, ctx) => (ctx?.destination?.name === "billing" ? msg : null)) satisfies Transform;
+ * ```
+ */
+export interface DestinationFacts {
+  readonly index: number;
+  readonly name: string | undefined;
+  /** `file`, `http`, `mllp`, `tcp`, `smtp` or `module`. */
+  readonly kind: string;
 }
 
 /**

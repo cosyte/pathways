@@ -6,6 +6,7 @@ import type {
   ChannelRunState,
   ClearResult,
   DeliveryCounts,
+  DestinationOutcome,
   ExpireResult,
   LeaseClaim,
   LeaseClaimant,
@@ -26,6 +27,8 @@ import type {
   SendStart,
   PendingMessage,
   ReceivedMessage,
+  DestinationKey,
+  HeldDeliveries,
   RequeueRequest,
   RequeueResult,
   RetryingDelivery,
@@ -34,9 +37,11 @@ import type {
   StoredDeliveryRow,
   StoredMessage,
   StoreReceiveOptions,
+  TransformOutputs,
 } from "../storage/store.js";
 import {
   channelStateStore,
+  isByDestination,
   leaseStore,
   nodeStore,
   retentionStore,
@@ -219,6 +224,16 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
   readonly nodes?: () => Promise<NodeRow[]>;
   readonly forgetNode?: (node: string) => Promise<boolean>;
   /**
+   * Holds the deliveries no destination was made for, its error passed through the codec; present
+   * only when the store underneath has it.
+   */
+  readonly holdDeliveries?: (
+    channel: string,
+    keys: readonly string[],
+    error: string,
+    epoch?: number,
+  ) => Promise<HeldDeliveries>;
+  /**
    * The retention steps: ids and counts, and rows changed whole or emptied, so straight through,
    * present only when the store underneath has all four; the rows an archive holds come back
    * through the codec.
@@ -250,6 +265,11 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
       this.setChannelState = states.setChannelState;
     }
     if (inner.markDryRun !== undefined) this.markDryRun = inner.markDryRun.bind(inner);
+    if (inner.holdDeliveries !== undefined) {
+      const hold = inner.holdDeliveries.bind(inner);
+      this.holdDeliveries = async (channel, keys, error, epoch) =>
+        hold(channel, keys, await codec.storeText(error), epoch);
+    }
     const nodes = nodeStore(inner);
     if (nodes !== undefined) {
       this.joinNode = nodes.joinNode;
@@ -418,16 +438,68 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
     return next === undefined ? undefined : { ...next, body: await this.#read(next.body) };
   }
 
-  /** Records a transform's outputs, each passed through the codec once for every destination. */
+  /**
+   * Records a transform's outputs, each passed through the codec once for every destination, or
+   * each destination's own outputs and failure text.
+   */
   async completeTransform(
     messageId: number,
-    outputs: readonly Uint8Array[],
+    outputs: TransformOutputs,
     destinations: number,
     epoch?: number,
+    keys?: readonly string[],
   ): Promise<void> {
+    if (isByDestination(outputs)) {
+      await this.#storedByDestination(outputs.byDestination, (byDestination) =>
+        this.#inner.completeTransform(messageId, { byDestination }, destinations, epoch, keys),
+      );
+      return;
+    }
     await this.#stored(outputs, (stored) =>
-      this.#inner.completeTransform(messageId, stored, destinations, epoch),
+      this.#inner.completeTransform(messageId, stored, destinations, epoch, keys),
     );
+  }
+
+  /**
+   * Each destination's outputs and failure text passed through the codec, handed to `write`; the
+   * stored copies are freed after, as {@link #stored} frees them.
+   */
+  async #storedByDestination<T>(
+    outcomes: readonly DestinationOutcome[],
+    write: (stored: DestinationOutcome[]) => Promise<T>,
+  ): Promise<T> {
+    const stored: DestinationOutcome[] = [];
+    // A row with no output still holds a body: an empty one, passed through the codec like any.
+    const empty = async (): Promise<Uint8Array> => this.#codec.storeBody(new Uint8Array());
+    for (const outcome of outcomes) {
+      if ("notStored" in outcome) {
+        // No row is written for it, so there is nothing to encode.
+        stored.push({ notStored: true });
+        continue;
+      }
+      if ("failure" in outcome) {
+        stored.push({
+          failure: await this.#codec.storeText(outcome.failure),
+          emptyBody: await empty(),
+        });
+        continue;
+      }
+      if (outcome.outputs.length === 0) {
+        stored.push({ outputs: [], emptyBody: await empty() });
+        continue;
+      }
+      const bodies: Uint8Array[] = [];
+      for (const body of outcome.outputs) bodies.push(await this.#codec.storeBody(body));
+      stored.push({ outputs: bodies });
+    }
+    const result = await write(stored);
+    if (this.#codec.copies && this.#innerCopies) {
+      for (const outcome of stored) {
+        if ("outputs" in outcome) for (const copy of outcome.outputs) release(copy);
+        if (outcome.emptyBody !== undefined) release(outcome.emptyBody);
+      }
+    }
+    return result;
   }
 
   /** Marks a message failed, its error passed through the codec. */
@@ -520,10 +592,14 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
     return read;
   }
 
-  /** The outputs of a message's current generation, each read back. */
-  async outputs(messageId: number): Promise<Uint8Array[]> {
+  /** The outputs of a message's current generation, of one destination or the first, each read back. */
+  async outputs(messageId: number, destination?: number | DestinationKey): Promise<Uint8Array[]> {
     const read: Uint8Array[] = [];
-    for (const output of await this.#inner.outputs(messageId)) read.push(await this.#read(output));
+    const stored =
+      destination === undefined
+        ? await this.#inner.outputs(messageId)
+        : await this.#inner.outputs(messageId, destination);
+    for (const output of stored) read.push(await this.#read(output));
     return read;
   }
 
@@ -538,19 +614,24 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
   }
 
   /**
-   * Records a replay or a resend, its outputs (each once, for every destination) and any failure
-   * passed through the codec.
+   * Records a replay or a resend, its outputs (each once, for every destination), or each
+   * destination's own, and any failure passed through the codec.
    */
   async requeue(messageId: number, request: RequeueRequest, actor: string): Promise<RequeueResult> {
-    const { failure } = request;
+    const { failure, byDestination } = request;
+    const sealedFailure = async (): Promise<string | undefined> =>
+      failure === undefined ? undefined : this.#codec.storeText(failure);
+    if (byDestination !== undefined) {
+      // Each destination's own outputs take the place of the list, which is not stored: not encoded.
+      const sealed = { ...request, outputs: [], failure: await sealedFailure() };
+      return this.#storedByDestination(byDestination, (stored) =>
+        this.#inner.requeue(messageId, { ...sealed, byDestination: stored }, actor),
+      );
+    }
     return this.#stored(request.outputs, async (outputs) =>
       this.#inner.requeue(
         messageId,
-        {
-          ...request,
-          outputs,
-          failure: failure === undefined ? undefined : await this.#codec.storeText(failure),
-        },
+        { ...request, outputs, failure: await sealedFailure() },
         actor,
       ),
     );
