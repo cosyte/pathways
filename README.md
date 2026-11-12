@@ -109,7 +109,8 @@ synthetic messages, with its tests, which CI runs on every change. Each has a pa
 Pathways is for a developer who writes and runs integrations: someone who would rather review a
 channel in a pull request and test a transform with sample messages than configure both in a product.
 So a channel is a file in git, a transform is TypeScript, and both go through review and tests like
-the rest of a project's code. Pathways runs on one machine, from the command line or in Docker.
+the rest of a project's code. Pathways runs from the command line or in Docker, and more than one engine can share a database
+through the engine lease: one is active and the rest wait as standbys.
 
 It is not a web UI, not a drop-in replacement for another engine (it does not import channels from
 one), and not a sandbox: a transform is your own trusted code.

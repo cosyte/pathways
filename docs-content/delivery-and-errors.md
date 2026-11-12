@@ -73,7 +73,8 @@ after a crash goes out unflagged, as it did before.
 Each output Pathways sends carries an id that stays the same on every attempt, a resend after a
 crash, a retry after a timeout and a `pathways replay --resend` included: its message's id and its
 output number, `messageId` and `seq` on the outgoing message. A file destination names each file
-`<messageId>-<seq>`, so a second copy replaces the first. A custom destination can send the pair to
+`<messageId>-<seq + 1>`, the output number counted from 1 in the name (the first file for message 12
+is `12-1.hl7`), so a second copy replaces the first. A custom destination can send the pair to
 its receiver, as a header or a key, and the receiver can keep the last ids it took and drop a copy.
 An MLLP receiver can do the same with the MSH-10 control ID, which Pathways sends unchanged.
 
