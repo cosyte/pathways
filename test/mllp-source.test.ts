@@ -198,6 +198,37 @@ describe("MllpSource", () => {
     },
   );
 
+  it.each([
+    ["msh", ADT_A01 + "msh" + ADT_A08.slice(3)],
+    ["Msh", ADT_A01 + "Msh" + ADT_A08.slice(3)],
+    [
+      "mixed line endings",
+      ADT_A01.replaceAll("\r", "\r\n") + "mSh" + ADT_A08.slice(3).replaceAll("\r", "\n"),
+    ],
+    ["a blank line", `${ADT_A01}\r\nmsh${ADT_A08.slice(3)}`],
+  ])(
+    "refuses a frame holding a second message whose header is %s, answering AR",
+    async (_, message) => {
+      const { sink, received } = recordingSink();
+      const { port, events } = await startSource(sink);
+      const { replies } = await exchange(port, [message], { replies: 1 });
+
+      // Kept as failed, for the operator, and never handed on as a message.
+      expect(received).toEqual([
+        { body: message, options: { failure: "inbound: MULTIPLE_MESSAGES" } },
+      ]);
+      const [ack = ""] = replies;
+      expect(msaOf(ack)).toEqual(["AR", "MSG00001"]);
+      expect(errOf(ack)).toBe("100");
+      expect(events).toContainEqual({
+        level: "warn",
+        event: "mllp-unreadable",
+        message: 1,
+        problem: "MULTIPLE_MESSAGES",
+      });
+    },
+  );
+
   it("stores a message whose framing lost bytes as failed, and answers AE so it is sent again", async () => {
     const { sink, received } = recordingSink();
     const { port } = await startSource(sink);
