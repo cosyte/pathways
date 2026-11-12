@@ -74,9 +74,18 @@ seconds, so several collectors, or one that retries, read the database once.
 ## Read them right
 
 - **Counters start at 0 when the engine starts.** `pathways_messages_received_total`,
-  `pathways_transforms_total` and `pathways_deliveries_total` count what this process did since it
-  started, and each series carries its `_created` time. Read them with `rate()` or `increase()`,
-  which handle the reset a restart makes.
+  `pathways_messages_refused_total`, `pathways_transforms_total`, `pathways_deliveries_total`,
+  `pathways_messages_settled_total` and `pathways_settled_destinations_total` count what this
+  process did since it started, and each series carries its `_created` time. Read them with
+  `rate()` or `increase()`, which handle the reset a restart makes.
+- **Each message counts once on each channel.** A message handed from one channel to another, by a
+  channel destination or `ctx.route`, counts as received on each, once; the hand-off counts as a
+  delivery of the channel it leaves. Each piece of a batch counts as a message. A body the source
+  refused (a compressed HTTP body, a frame with a second message header) counts in
+  `pathways_messages_refused_total` and never as received.
+- **The settled counters follow the `settled` event.** Each event adds one to
+  `pathways_messages_settled_total` and one per destination to
+  `pathways_settled_destinations_total`, under the state the event gives that destination.
 - **Store gauges are the database's.** `pathways_queue_depth`,
   `pathways_oldest_pending_age_seconds`, `pathways_deliveries_retrying`,
   `pathways_deliveries_failed` and `pathways_messages_failed` are read from the database (at most
@@ -84,10 +93,12 @@ seconds, so several collectors, or one that retries, read the database once.
   Take `max` over nodes, never `sum`.
 - **A standby serves no gauges.** Until it takes the engine lease, a standby
   (`pathways start --standby`) serves its counters, all 0, and nothing else.
-- **Labels are bounded.** Each series is labelled by `channel`, `destination` (the index in the
-  channel's `destinations:` list) and an `outcome` from a fixed list, never by a message id, a
-  metadata key, an error's text or a host, so the number of series is set by your channels, not by
-  your traffic.
+- **Labels are bounded.** Each series is labelled by `channel`, `destination` (the destination's
+  `name:`, or its place in the channel's `destinations:` list from 0 where it has none) and an
+  `outcome` from a fixed list, never by a message id, a control id, a patient field, a metadata
+  key, a URL, an error's text or a host, so the number of series is set by your channels, not by
+  your traffic. Give each destination a `name:` and its series keep their label when the list is
+  reordered; its store gauges follow it by its destination key either way.
 
 ## Alert on them
 

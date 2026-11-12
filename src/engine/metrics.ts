@@ -3,8 +3,9 @@
 // Counters live in this process and start at zero when it starts, each series with the time it was
 // made as its `_created`, as the format expects of a counter that resets. Gauges are read when they
 // are asked for, from the store and the engine, so they hold across a restart and across nodes.
-// Labels are only the channel's name, the destination's index and an outcome from a fixed list:
-// never a message id, a metadata key, an error's text or a host a message named.
+// Labels are only the channel's name, the destination's label (its `name:`, else its place in the
+// list) and an outcome from a fixed list: never a message id, a metadata key, an error's text or a
+// host a message named.
 
 import type { LifecycleEvent } from "../extensions/events.js";
 
@@ -60,16 +61,41 @@ export interface MetricFamily {
 }
 
 /**
- * The outcome a message's receipt counts under: `stored`, `failed` (stored as failed, such as an
- * MLLP message with no usable header) or `not_stored` (storage refused it, so it was not
- * acknowledged).
+ * The outcome a message's receipt counts under: `stored`, or `not_stored` (storage refused it, so
+ * it was not acknowledged). A message another channel hands over counts as `stored` on the channel
+ * it is handed to, once. A body the source or the engine refused is not received: it counts under
+ * {@link RefuseOutcome}.
  *
  * @example
  * ```ts
  * const outcome: ReceiveOutcome = "stored";
  * ```
  */
-export type ReceiveOutcome = "stored" | "failed" | "not_stored";
+export type ReceiveOutcome = "stored" | "not_stored";
+
+/**
+ * The outcome a refused body counts under: `unreadable` (kept as a failed message with no
+ * transform run and answered with an error, such as a frame with a second message header or a
+ * batch piece that cannot be read) or `rejected` (an HTTP source answered 400, 413, 415 or 422
+ * before storing anything, such as for a compressed body).
+ *
+ * @example
+ * ```ts
+ * const outcome: RefuseOutcome = "unreadable";
+ * ```
+ */
+export type RefuseOutcome = "unreadable" | "rejected";
+
+/**
+ * Where a settled message stands with one destination, as the settled event says it:
+ * `delivered`, `failed`, `filtered`, `cleared` or `dry_run`.
+ *
+ * @example
+ * ```ts
+ * const outcome: SettleOutcome = "delivered";
+ * ```
+ */
+export type SettleOutcome = "delivered" | "failed" | "filtered" | "cleared" | "dry_run";
 
 /**
  * The outcome a transform counts under: `transformed`, `filtered` (no output) or `failed`.
@@ -94,7 +120,15 @@ export type TransformOutcomeLabel = "transformed" | "filtered" | "failed";
 export type DeliveryOutcome =
   "delivered" | "retry" | "redirected" | "rejected" | "exhausted" | "dry_run";
 
-const RECEIVE_OUTCOMES: readonly ReceiveOutcome[] = ["stored", "failed", "not_stored"];
+const RECEIVE_OUTCOMES: readonly ReceiveOutcome[] = ["stored", "not_stored"];
+const REFUSE_OUTCOMES: readonly RefuseOutcome[] = ["unreadable", "rejected"];
+const SETTLE_OUTCOMES: readonly SettleOutcome[] = [
+  "delivered",
+  "failed",
+  "filtered",
+  "cleared",
+  "dry_run",
+];
 const TRANSFORM_OUTCOMES: readonly TransformOutcomeLabel[] = ["transformed", "filtered", "failed"];
 const DELIVERY_OUTCOMES: readonly DeliveryOutcome[] = [
   "delivered",
@@ -104,6 +138,33 @@ const DELIVERY_OUTCOMES: readonly DeliveryOutcome[] = [
   "exhausted",
   "dry_run",
 ];
+
+/**
+ * Every value an `outcome` label takes, across the families: a fixed set, so no outcome carries a
+ * code, a status or any text from a message or an error.
+ *
+ * @example
+ * ```ts
+ * METRIC_OUTCOMES.includes("delivered"); // true
+ * ```
+ */
+export const METRIC_OUTCOMES: readonly string[] = [
+  ...new Set<string>([
+    ...RECEIVE_OUTCOMES,
+    ...REFUSE_OUTCOMES,
+    ...TRANSFORM_OUTCOMES,
+    ...DELIVERY_OUTCOMES,
+    ...SETTLE_OUTCOMES,
+  ]),
+];
+
+/**
+ * The HTTP statuses a source answers a body it refuses before storing with, which count as
+ * `rejected`: 400 (an empty body), 413 (too large), 415 (compressed, or not HL7 where an
+ * acknowledgement is asked for) and 422 (a batch with no piece). A 401, 404 or 405 refuses a
+ * request, not a body, and is not counted.
+ */
+const REFUSED_BODY_STATUSES: ReadonlySet<number> = new Set([400, 413, 415, 422]);
 
 /**
  * The upper bounds of the delivery duration histogram's buckets, in seconds; `+Inf` follows them.
@@ -131,7 +192,14 @@ export const METRIC_FAMILIES: readonly MetricFamily[] = [
     name: "pathways_messages_received",
     type: "counter",
     unit: undefined,
-    help: "Messages a source handed in since the engine started: stored, stored as failed, or not stored.",
+    help: "Messages a source or another channel handed in since the engine started: stored, or not stored.",
+    labels: ["channel", "outcome"],
+  },
+  {
+    name: "pathways_messages_refused",
+    type: "counter",
+    unit: undefined,
+    help: "Bodies refused since the engine started, which are never counted as received: unreadable (kept as failed, never transformed) or rejected (refused before storing).",
     labels: ["channel", "outcome"],
   },
   {
@@ -154,6 +222,20 @@ export const METRIC_FAMILIES: readonly MetricFamily[] = [
     unit: "seconds",
     help: "How long each delivery attempt took, from its hand-over to its outcome.",
     labels: ["channel", "destination"],
+  },
+  {
+    name: "pathways_messages_settled",
+    type: "counter",
+    unit: undefined,
+    help: "Messages settled since the engine started, one for each settled event.",
+    labels: ["channel"],
+  },
+  {
+    name: "pathways_settled_destinations",
+    type: "counter",
+    unit: undefined,
+    help: "Where each settled message stood with each destination, as its settled event says.",
+    labels: ["channel", "destination", "outcome"],
   },
   {
     name: "pathways_queue_depth",
@@ -231,7 +313,7 @@ export const METRIC_FAMILIES: readonly MetricFamily[] = [
  * ```
  */
 export interface DestinationGauges {
-  /** The destination's index in the channel's `destinations:` list. */
+  /** The destination's index in the channel's `destinations:` list; its label is its name. */
   readonly destination: number;
   readonly queueDepth: number;
   readonly oldestPendingAgeSeconds: number;
@@ -275,13 +357,38 @@ export interface MetricsSnapshot {
  *
  * @example
  * ```ts
- * const known: MetricsChannel = { name: "adt-to-lab", destinations: 2 };
+ * const known: MetricsChannel = { name: "adt-to-lab", destinations: ["billing", undefined] };
  * ```
  */
 export interface MetricsChannel {
   readonly name: string;
-  /** How many destinations it has. */
-  readonly destinations: number;
+  /**
+   * Each destination's `name:`, undefined where it has none, in the channel's order; or how many
+   * destinations it has, none of them named.
+   */
+  readonly destinations: number | readonly (string | undefined)[];
+}
+
+/**
+ * Each destination's `destination` label, in the channel's order: its `name:`, or, without one, its
+ * place in the list from 0, as the lifecycle events count it. A name is lowercase letters, digits
+ * and hyphens, so it can read as a place; an unnamed destination whose place another destination
+ * has as its name is labelled `#` and its place, which no name can be. So no two destinations of a
+ * channel share a series, as no two share a destination key.
+ *
+ * @example
+ * ```ts
+ * destinationLabels(["billing", undefined]); // ["billing", "1"]
+ * destinationLabels([undefined, "0"]); // ["#0", "0"]
+ * ```
+ */
+export function destinationLabels(names: readonly (string | undefined)[]): string[] {
+  const named = new Set(names.filter((name) => name !== undefined));
+  return names.map((name, index) => {
+    if (name !== undefined) return name;
+    const place = String(index);
+    return named.has(place) ? `#${place}` : place;
+  });
 }
 
 /** One counter series: its label values, its count and when it was made. */
@@ -321,9 +428,14 @@ interface HistogramSeries {
 export class EngineMetrics {
   private readonly now: () => number;
   private readonly received = new Map<string, CounterSeries>();
+  private readonly refusals = new Map<string, CounterSeries>();
   private readonly transforms = new Map<string, CounterSeries>();
   private readonly deliveries = new Map<string, CounterSeries>();
   private readonly durations = new Map<string, HistogramSeries>();
+  private readonly settledMessages = new Map<string, CounterSeries>();
+  private readonly settledDestinations = new Map<string, CounterSeries>();
+  /** Each known channel's destination labels, by the destination's place. */
+  private readonly labels = new Map<string, readonly string[]>();
 
   /**
    * @param channels The channels to make every series of at once, at 0.
@@ -332,21 +444,41 @@ export class EngineMetrics {
   constructor(channels: readonly MetricsChannel[] = [], now: () => number = Date.now) {
     this.now = now;
     for (const { name, destinations } of channels) {
+      const labels = destinationLabels(
+        typeof destinations === "number"
+          ? Array.from({ length: destinations }, () => undefined)
+          : destinations,
+      );
+      this.labels.set(name, labels);
       for (const outcome of RECEIVE_OUTCOMES) this.counter(this.received, [name, outcome]);
+      for (const outcome of REFUSE_OUTCOMES) this.counter(this.refusals, [name, outcome]);
       for (const outcome of TRANSFORM_OUTCOMES) this.counter(this.transforms, [name, outcome]);
-      for (let destination = 0; destination < destinations; destination += 1) {
+      this.counter(this.settledMessages, [name]);
+      for (const label of labels) {
         for (const outcome of DELIVERY_OUTCOMES) {
-          this.counter(this.deliveries, [name, String(destination), outcome]);
+          this.counter(this.deliveries, [name, label, outcome]);
         }
-        this.histogram([name, String(destination)]);
+        for (const outcome of SETTLE_OUTCOMES) {
+          this.counter(this.settledDestinations, [name, label, outcome]);
+        }
+        this.histogram([name, label]);
       }
     }
   }
 
   /**
-   * Counts a lifecycle event: a receipt, a transform's outcome or a delivery attempt's outcome.
-   * Every other event, and everything an event carries beyond its channel, destination and type, is
-   * left alone.
+   * The `destination` label of the destination at `index` in `channel`: its name, or its place.
+   * A channel the metrics were not given has no names, so its destinations read as their places.
+   */
+  private label(channel: string, index: number): string {
+    return this.labels.get(channel)?.[index] ?? String(index);
+  }
+
+  /**
+   * Counts a lifecycle event: a receipt (a message stored as failed counts as refused, never as
+   * received), a transform's outcome, or a settled message and where it stood with each
+   * destination. Every other event, and everything an event carries beyond its channel,
+   * destination places, states and type, is left alone.
    *
    * @example
    * ```ts
@@ -356,7 +488,18 @@ export class EngineMetrics {
   observe(event: LifecycleEvent): void {
     // Delivery attempts are counted by deliveryAttempt, with their durations; the rest are not counted.
     if (event.type === "received") {
-      this.add(this.received, [event.channel, event.failed ? "failed" : "stored"]);
+      if (event.failed) this.add(this.refusals, [event.channel, "unreadable"]);
+      else this.add(this.received, [event.channel, "stored"]);
+    } else if (event.type === "settled") {
+      this.add(this.settledMessages, [event.channel]);
+      for (const { index, state } of event.destinations) {
+        const outcome: SettleOutcome = state === "dry-run" ? "dry_run" : state;
+        this.add(this.settledDestinations, [
+          event.channel,
+          this.label(event.channel, index),
+          outcome,
+        ]);
+      }
     } else if (event.type === "receive-failed") {
       this.add(this.received, [event.channel, "not_stored"]);
     } else if (event.type === "transformed" || event.type === "filtered") {
@@ -364,6 +507,33 @@ export class EngineMetrics {
     } else if (event.type === "transform-failed") {
       this.add(this.transforms, [event.channel, "failed"]);
     }
+  }
+
+  /**
+   * Counts a message another channel handed to `channel` and storage took: received once there,
+   * as a source's message is on the channel it came in on.
+   *
+   * @example
+   * ```ts
+   * metrics.handedIn("lab-results");
+   * ```
+   */
+  handedIn(channel: string): void {
+    this.add(this.received, [channel, "stored"]);
+  }
+
+  /**
+   * Counts a body an HTTP source of `channel` refused before storing it, by the status it answered:
+   * 400, 413, 415 and 422 count as `rejected`; any other status refuses a request rather than a
+   * body and is not counted.
+   *
+   * @example
+   * ```ts
+   * metrics.sourceRefused("adt", 415);
+   * ```
+   */
+  sourceRefused(channel: string, status: number): void {
+    if (REFUSED_BODY_STATUSES.has(status)) this.add(this.refusals, [channel, "rejected"]);
   }
 
   /**
@@ -382,9 +552,10 @@ export class EngineMetrics {
     outcome: DeliveryOutcome,
     seconds?: number,
   ): void {
-    this.add(this.deliveries, [channel, String(destination), outcome]);
+    const label = this.label(channel, destination);
+    this.add(this.deliveries, [channel, label, outcome]);
     if (seconds === undefined) return;
-    const series = this.histogram([channel, String(destination)]);
+    const series = this.histogram([channel, label]);
     // The first bucket it fits: the last is +Inf, which every number but NaN fits.
     for (const bucket of series.buckets) {
       if (seconds <= bucket.bound) {
@@ -424,7 +595,7 @@ export class EngineMetrics {
             name,
             [
               ["channel", channel.channel],
-              ["destination", String(gauges.destination)],
+              ["destination", this.label(channel.channel, gauges.destination)],
             ],
             pick(gauges),
           ),
@@ -439,6 +610,16 @@ export class EngineMetrics {
         return counterSamples(name, this.deliveries, ["channel", "destination", "outcome"]);
       case "pathways_delivery_duration_seconds":
         return histogramSamples(name, this.durations);
+      case "pathways_messages_settled":
+        return counterSamples(name, this.settledMessages, ["channel"]);
+      case "pathways_settled_destinations":
+        return counterSamples(name, this.settledDestinations, [
+          "channel",
+          "destination",
+          "outcome",
+        ]);
+      case "pathways_messages_refused":
+        return counterSamples(name, this.refusals, ["channel", "outcome"]);
       case "pathways_queue_depth":
         return perDestination((gauges) => gauges.queueDepth);
       case "pathways_oldest_pending_age_seconds":

@@ -419,6 +419,11 @@ export interface ConnectorContext {
    * `drain.timeout`. Defaults to the source's own default, 30 seconds.
    */
   readonly drainTimeoutMs?: number | undefined;
+  /**
+   * Told the status of each request an HTTP source refuses before storing anything, as its
+   * `http-refused` log line is: a status, never the request.
+   */
+  readonly onSourceRefused?: ((status: number) => void) | undefined;
 }
 
 /**
@@ -559,6 +564,7 @@ export async function connectorsFor(
         token,
         onRefused: (status) => {
           logger.warn({ event: "http-refused", channel: channel.name, status });
+          context.onSourceRefused?.(status);
         },
         onUnreadable: (message, problem) => {
           logger.warn({ event: "http-unreadable", channel: channel.name, message, problem });
@@ -1216,6 +1222,9 @@ export class Engine {
               secrets,
               dryRun,
               drainTimeoutMs: this.drainTimeoutMs(),
+              onSourceRefused: (status) => {
+                this.options.metrics?.sourceRefused(config.name, status);
+              },
             }));
         } catch (error) {
           await hooks.stop();
@@ -1814,6 +1823,7 @@ export class Engine {
     const now = this.now();
     const channels = project.channels.map(({ name, destinations }, index): ChannelGauges => {
       const { messagesFailed, queues } = read.channels?.[index] ?? { messagesFailed: 0 };
+      const keys = this.channels.find((c) => c.config.name === name)?.keys;
       return {
         ...live(name),
         messagesFailed,
@@ -1821,19 +1831,31 @@ export class Engine {
           ? {}
           : {
               destinations: destinations.map((_, destination) => {
-                const queue = queues.find((q) => q.destination === destination);
-                const since =
-                  queue?.oldestPendingSince === undefined
-                    ? Number.NaN
-                    : Date.parse(queue.oldestPendingSince);
+                // By key, as the deliveries are sent: the destination they were made for, wherever
+                // it stands in the list now. Those made before keys are found by their place.
+                const key = keys?.[destination];
+                const mine = queues.filter((q) =>
+                  q.destinationKey === undefined
+                    ? q.destination === destination
+                    : q.destinationKey === key,
+                );
+                const oldest = Math.min(
+                  ...mine.map((q) =>
+                    q.oldestPendingSince === undefined
+                      ? Number.POSITIVE_INFINITY
+                      : Date.parse(q.oldestPendingSince),
+                  ),
+                );
+                const sum = (pick: (q: DestinationQueue) => number): number =>
+                  mine.reduce((total, q) => total + pick(q), 0);
                 return {
                   destination,
-                  queueDepth: queue?.pending ?? 0,
-                  oldestPendingAgeSeconds: Number.isNaN(since)
-                    ? 0
-                    : Math.max(0, now - since) / 1000,
-                  retrying: queue?.retrying ?? 0,
-                  failed: queue?.failed ?? 0,
+                  queueDepth: sum((q) => q.pending),
+                  oldestPendingAgeSeconds: Number.isFinite(oldest)
+                    ? Math.max(0, now - oldest) / 1000
+                    : 0,
+                  retrying: sum((q) => q.retrying),
+                  failed: sum((q) => q.failed),
                 };
               }),
             }),
@@ -3130,6 +3152,8 @@ export class Engine {
       });
       return "full";
     }
+    // Received once on each channel it was handed to; the channel it came from counted it already.
+    for (const { channel: target } of handOffs) this.options.metrics?.handedIn(target);
     for (const [index, id] of result.ids.entries()) {
       logger.info({
         event: "handed-over",
@@ -3191,6 +3215,7 @@ export class Engine {
         delivery: delivery.id,
         code,
       });
+      this.options.metrics?.deliveryAttempt(config.name, index, "rejected");
       this.emit(channel, () => ({
         type: "delivery-rejected",
         at: this.at(),
@@ -3256,8 +3281,12 @@ export class Engine {
         retryInMs: wait,
         code: TARGET_FULL_CODE,
       });
+      this.options.metrics?.deliveryAttempt(config.name, index, "retry");
       return "wait";
     }
+    // Delivered on this channel and received once on its target, as any delivery and any message.
+    this.options.metrics?.deliveryAttempt(config.name, index, "delivered");
+    this.options.metrics?.handedIn(destination.channel);
     logger.info({
       event: "delivered",
       channel: config.name,

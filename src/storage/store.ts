@@ -162,18 +162,29 @@ export type DeliveryTally = DeliveryCounts & { readonly retrying: number };
 type Writable<T> = { -readonly [K in keyof T]: T[K] };
 
 /**
- * One destination's queue, as `/metrics` reports it: counts and a time, never content.
+ * One destination's queue, as `/metrics` reports it: counts and a time, never content. A channel's
+ * deliveries made under one destination key, or, for those made before keys, at one place in its
+ * list, make one queue.
  *
  * @example
  * ```ts
  * const queue: DestinationQueue = {
- *   destination: 0, pending: 3, retrying: 1, failed: 0, oldestPendingSince: "2026-11-10T07:52:16.000Z",
+ *   destination: 0, destinationKey: undefined, pending: 3, retrying: 1, failed: 0,
+ *   oldestPendingSince: "2026-11-10T07:52:16.000Z",
  * };
  * ```
  */
 export interface DestinationQueue {
-  /** The destination's index in the channel's `destinations:` list. */
+  /**
+   * The destination's index in the channel's `destinations:` list when its deliveries were made;
+   * where it stands now is found by {@link destinationKey} when there is one.
+   */
   readonly destination: number;
+  /**
+   * The key the deliveries were made under, which names the destination wherever it stands in the
+   * list now; undefined for deliveries made before destinations had keys.
+   */
+  readonly destinationKey: string | undefined;
   /** Its deliveries pending, those waiting for a retry among them. */
   readonly pending: number;
   /** Its pending deliveries that failed at least once and wait for a retry. */
@@ -4109,57 +4120,79 @@ export class Store implements MessageStore, ContentStore, MetaStore {
   }
 
   /**
-   * Each destination of `channel` with a delivery pending or failed: its counts, and the oldest
-   * last update of a message with a delivery pending there. Three reads, each on the deliveries'
-   * index by channel, destination and status.
+   * Each destination of `channel` with a delivery pending or failed, by its key (or, for deliveries
+   * made before keys, its place): its counts, and the oldest last update of a message with a
+   * delivery pending there. Three reads, each on the deliveries' index by channel, destination and
+   * status.
    */
   async destinationQueues(channel: string): Promise<DestinationQueue[]> {
     const counts = await this.db
       .selectFrom("deliveries")
-      .select(["destination", "status", (eb) => eb.fn.countAll<number | string>().as("count")])
+      .select([
+        "destination",
+        "destination_key",
+        "status",
+        (eb) => eb.fn.countAll<number | string>().as("count"),
+      ])
       .where("channel", "=", channel)
       .where("status", "in", ["pending", "failed"])
-      .groupBy(["destination", "status"])
+      .groupBy(["destination", "destination_key", "status"])
       .orderBy("destination")
       .execute();
     const retrying = await this.db
       .selectFrom("deliveries")
-      .select(["destination", (eb) => eb.fn.countAll<number | string>().as("count")])
+      .select([
+        "destination",
+        "destination_key",
+        (eb) => eb.fn.countAll<number | string>().as("count"),
+      ])
       .where("channel", "=", channel)
       .where("status", "=", "pending")
       .where("attempts", ">", 0)
-      .groupBy("destination")
+      .groupBy(["destination", "destination_key"])
       .execute();
     const oldest = await this.db
       .selectFrom("deliveries")
       .innerJoin("messages", "messages.id", "deliveries.message_id")
       .select([
         "deliveries.destination as destination",
+        "deliveries.destination_key as destination_key",
         // Never null: each group has a pending delivery, and its message an update time.
         (eb) => eb.fn.min<string>("messages.updated_at").as("since"),
       ])
       .where("deliveries.channel", "=", channel)
       .where("deliveries.status", "=", "pending")
-      .groupBy("deliveries.destination")
+      .groupBy(["deliveries.destination", "deliveries.destination_key"])
       .execute();
-    const queues = new Map<number, Writable<DestinationQueue>>();
-    const queue = (destination: number): Writable<DestinationQueue> => {
-      let found = queues.get(destination);
+    const queues = new Map<string, Writable<DestinationQueue>>();
+    const queue = (row: {
+      readonly destination: number | string;
+      readonly destination_key: string | null;
+    }): Writable<DestinationQueue> => {
+      const destination = Number(row.destination);
+      const destinationKey = row.destination_key ?? undefined;
+      const id = JSON.stringify([destination, destinationKey ?? null]);
+      let found = queues.get(id);
       if (found === undefined) {
-        found = { destination, pending: 0, retrying: 0, failed: 0, oldestPendingSince: undefined };
-        queues.set(destination, found);
+        found = {
+          destination,
+          destinationKey,
+          pending: 0,
+          retrying: 0,
+          failed: 0,
+          oldestPendingSince: undefined,
+        };
+        queues.set(id, found);
       }
       return found;
     };
     for (const row of counts) {
-      const found = queue(Number(row.destination));
+      const found = queue(row);
       if (row.status === "pending") found.pending = Number(row.count);
       else found.failed = Number(row.count);
     }
-    for (const row of retrying) queue(Number(row.destination)).retrying = Number(row.count);
-    for (const row of oldest) {
-      queue(Number(row.destination)).oldestPendingSince = row.since;
-    }
+    for (const row of retrying) queue(row).retrying = Number(row.count);
+    for (const row of oldest) queue(row).oldestPendingSince = row.since;
     // In the destinations' order: every one with a row here appeared first in the ordered counts.
     return [...queues.values()];
   }

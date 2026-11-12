@@ -1968,13 +1968,16 @@ const theirs = await store.outputs(12, { key: keys[1] });
 
 ### DestinationQueue
 
-One destination's queue, as `/metrics` reports it: counts and a time, never content.
+One destination's queue, as `/metrics` reports it: counts and a time, never content. A channel's
+deliveries made under one destination key, or, for those made before keys, at one place in its
+list, make one queue.
 
 #### Example
 
 ```ts
 const queue: DestinationQueue = {
-  destination: 0, pending: 3, retrying: 1, failed: 0, oldestPendingSince: "2026-11-10T07:52:16.000Z",
+  destination: 0, destinationKey: undefined, pending: 3, retrying: 1, failed: 0,
+  oldestPendingSince: "2026-11-10T07:52:16.000Z",
 };
 ```
 
@@ -1984,7 +1987,15 @@ const queue: DestinationQueue = {
 
 > `readonly` **destination**: `number`
 
-The destination's index in the channel's `destinations:` list.
+The destination's index in the channel's `destinations:` list when its deliveries were made;
+where it stands now is found by [destinationKey](#destinationkey-2) when there is one.
+
+##### destinationKey
+
+> `readonly` **destinationKey**: `string` \| `undefined`
+
+The key the deliveries were made under, which names the destination wherever it stands in the
+list now; undefined for deliveries made before destinations had keys.
 
 ##### failed
 

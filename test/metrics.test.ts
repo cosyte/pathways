@@ -118,6 +118,16 @@ const EVENTS: readonly LifecycleEvent[] = [
     locationHost: "elsewhere.example.test",
   },
   {
+    type: "settled",
+    at: AT,
+    channel: "adt-to-lab",
+    messageId: 90_417,
+    destinations: [
+      { index: 0, name: "file", state: "delivered" },
+      { index: 1, name: "http", state: "dry-run" },
+    ],
+  },
+  {
     type: "source-down",
     at: AT,
     channel: "adt-to-lab",
@@ -129,16 +139,21 @@ const EVENTS: readonly LifecycleEvent[] = [
   },
 ];
 
-/** The text the golden file holds: two channels, counters, a histogram and every gauge. */
+/**
+ * The text the golden file holds: two channels, the first with a named destination and an unnamed
+ * one, counters, a histogram and every gauge.
+ */
 function goldenText(): string {
   const metrics = new EngineMetrics(
     [
-      { name: "adt-to-lab", destinations: 2 },
+      { name: "adt-to-lab", destinations: ["lab", undefined] },
       { name: "orders", destinations: 1 },
     ],
     () => MADE_AT,
   );
   for (const event of EVENTS) metrics.observe(event);
+  metrics.handedIn("orders");
+  metrics.sourceRefused("orders", 415);
   metrics.deliveryAttempt("adt-to-lab", 0, "delivered", 0.004);
   metrics.deliveryAttempt("adt-to-lab", 0, "delivered", 0.25);
   metrics.deliveryAttempt("adt-to-lab", 1, "retry", 75);
@@ -625,6 +640,7 @@ for (const database of TEST_DATABASES) {
       expect(await store.destinationQueues("adt")).toEqual([
         {
           destination: 1,
+          destinationKey: expect.any(String) as string,
           pending: 1,
           retrying: 1,
           failed: 0,
@@ -636,7 +652,14 @@ for (const database of TEST_DATABASES) {
       const [retrying] = await store.listRetrying("adt", 10);
       await store.failDelivery(retrying?.id ?? 0, "synthetic: exhausted");
       expect(await store.destinationQueues("adt")).toEqual([
-        { destination: 1, pending: 0, retrying: 0, failed: 1, oldestPendingSince: undefined },
+        {
+          destination: 1,
+          destinationKey: expect.any(String) as string,
+          pending: 0,
+          retrying: 0,
+          failed: 1,
+          oldestPendingSince: undefined,
+        },
       ]);
 
       await store.close();

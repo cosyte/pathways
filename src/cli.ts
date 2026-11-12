@@ -823,7 +823,8 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
       ? new EngineMetrics(
           project.channels.map(({ name, destinations }) => ({
             name,
-            destinations: destinations.length,
+            // Each labelled by its name, or its place where it has none.
+            destinations: destinations.map((destination) => destination.name),
           })),
         )
       : undefined;

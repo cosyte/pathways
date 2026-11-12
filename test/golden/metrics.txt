@@ -1,17 +1,23 @@
 # TYPE pathways_messages_received counter
-# HELP pathways_messages_received Messages a source handed in since the engine started: stored, stored as failed, or not stored.
-pathways_messages_received_total{channel="adt-to-lab",outcome="failed"} 1
-pathways_messages_received_created{channel="adt-to-lab",outcome="failed"} 1794312000
+# HELP pathways_messages_received Messages a source or another channel handed in since the engine started: stored, or not stored.
 pathways_messages_received_total{channel="adt-to-lab",outcome="not_stored"} 1
 pathways_messages_received_created{channel="adt-to-lab",outcome="not_stored"} 1794312000
 pathways_messages_received_total{channel="adt-to-lab",outcome="stored"} 1
 pathways_messages_received_created{channel="adt-to-lab",outcome="stored"} 1794312000
-pathways_messages_received_total{channel="orders",outcome="failed"} 0
-pathways_messages_received_created{channel="orders",outcome="failed"} 1794312000
 pathways_messages_received_total{channel="orders",outcome="not_stored"} 0
 pathways_messages_received_created{channel="orders",outcome="not_stored"} 1794312000
-pathways_messages_received_total{channel="orders",outcome="stored"} 0
+pathways_messages_received_total{channel="orders",outcome="stored"} 1
 pathways_messages_received_created{channel="orders",outcome="stored"} 1794312000
+# TYPE pathways_messages_refused counter
+# HELP pathways_messages_refused Bodies refused since the engine started, which are never counted as received: unreadable (kept as failed, never transformed) or rejected (refused before storing).
+pathways_messages_refused_total{channel="adt-to-lab",outcome="rejected"} 0
+pathways_messages_refused_created{channel="adt-to-lab",outcome="rejected"} 1794312000
+pathways_messages_refused_total{channel="adt-to-lab",outcome="unreadable"} 1
+pathways_messages_refused_created{channel="adt-to-lab",outcome="unreadable"} 1794312000
+pathways_messages_refused_total{channel="orders",outcome="rejected"} 1
+pathways_messages_refused_created{channel="orders",outcome="rejected"} 1794312000
+pathways_messages_refused_total{channel="orders",outcome="unreadable"} 0
+pathways_messages_refused_created{channel="orders",outcome="unreadable"} 1794312000
 # TYPE pathways_transforms counter
 # HELP pathways_transforms Transforms run since the engine started: transformed, filtered, or failed.
 pathways_transforms_total{channel="adt-to-lab",outcome="failed"} 1
@@ -28,18 +34,6 @@ pathways_transforms_total{channel="orders",outcome="transformed"} 0
 pathways_transforms_created{channel="orders",outcome="transformed"} 1794312000
 # TYPE pathways_deliveries counter
 # HELP pathways_deliveries Delivery attempts since the engine started, by outcome.
-pathways_deliveries_total{channel="adt-to-lab",destination="0",outcome="delivered"} 2
-pathways_deliveries_created{channel="adt-to-lab",destination="0",outcome="delivered"} 1794312000
-pathways_deliveries_total{channel="adt-to-lab",destination="0",outcome="dry_run"} 0
-pathways_deliveries_created{channel="adt-to-lab",destination="0",outcome="dry_run"} 1794312000
-pathways_deliveries_total{channel="adt-to-lab",destination="0",outcome="exhausted"} 0
-pathways_deliveries_created{channel="adt-to-lab",destination="0",outcome="exhausted"} 1794312000
-pathways_deliveries_total{channel="adt-to-lab",destination="0",outcome="redirected"} 0
-pathways_deliveries_created{channel="adt-to-lab",destination="0",outcome="redirected"} 1794312000
-pathways_deliveries_total{channel="adt-to-lab",destination="0",outcome="rejected"} 0
-pathways_deliveries_created{channel="adt-to-lab",destination="0",outcome="rejected"} 1794312000
-pathways_deliveries_total{channel="adt-to-lab",destination="0",outcome="retry"} 0
-pathways_deliveries_created{channel="adt-to-lab",destination="0",outcome="retry"} 1794312000
 pathways_deliveries_total{channel="adt-to-lab",destination="1",outcome="delivered"} 0
 pathways_deliveries_created{channel="adt-to-lab",destination="1",outcome="delivered"} 1794312000
 pathways_deliveries_total{channel="adt-to-lab",destination="1",outcome="dry_run"} 0
@@ -52,6 +46,18 @@ pathways_deliveries_total{channel="adt-to-lab",destination="1",outcome="rejected
 pathways_deliveries_created{channel="adt-to-lab",destination="1",outcome="rejected"} 1794312000
 pathways_deliveries_total{channel="adt-to-lab",destination="1",outcome="retry"} 1
 pathways_deliveries_created{channel="adt-to-lab",destination="1",outcome="retry"} 1794312000
+pathways_deliveries_total{channel="adt-to-lab",destination="lab",outcome="delivered"} 2
+pathways_deliveries_created{channel="adt-to-lab",destination="lab",outcome="delivered"} 1794312000
+pathways_deliveries_total{channel="adt-to-lab",destination="lab",outcome="dry_run"} 0
+pathways_deliveries_created{channel="adt-to-lab",destination="lab",outcome="dry_run"} 1794312000
+pathways_deliveries_total{channel="adt-to-lab",destination="lab",outcome="exhausted"} 0
+pathways_deliveries_created{channel="adt-to-lab",destination="lab",outcome="exhausted"} 1794312000
+pathways_deliveries_total{channel="adt-to-lab",destination="lab",outcome="redirected"} 0
+pathways_deliveries_created{channel="adt-to-lab",destination="lab",outcome="redirected"} 1794312000
+pathways_deliveries_total{channel="adt-to-lab",destination="lab",outcome="rejected"} 0
+pathways_deliveries_created{channel="adt-to-lab",destination="lab",outcome="rejected"} 1794312000
+pathways_deliveries_total{channel="adt-to-lab",destination="lab",outcome="retry"} 0
+pathways_deliveries_created{channel="adt-to-lab",destination="lab",outcome="retry"} 1794312000
 pathways_deliveries_total{channel="orders",destination="0",outcome="delivered"} 0
 pathways_deliveries_created{channel="orders",destination="0",outcome="delivered"} 1794312000
 pathways_deliveries_total{channel="orders",destination="0",outcome="dry_run"} 1
@@ -67,23 +73,6 @@ pathways_deliveries_created{channel="orders",destination="0",outcome="retry"} 17
 # TYPE pathways_delivery_duration_seconds histogram
 # UNIT pathways_delivery_duration_seconds seconds
 # HELP pathways_delivery_duration_seconds How long each delivery attempt took, from its hand-over to its outcome.
-pathways_delivery_duration_seconds_bucket{channel="adt-to-lab",destination="0",le="0.005"} 1
-pathways_delivery_duration_seconds_bucket{channel="adt-to-lab",destination="0",le="0.01"} 1
-pathways_delivery_duration_seconds_bucket{channel="adt-to-lab",destination="0",le="0.025"} 1
-pathways_delivery_duration_seconds_bucket{channel="adt-to-lab",destination="0",le="0.05"} 1
-pathways_delivery_duration_seconds_bucket{channel="adt-to-lab",destination="0",le="0.1"} 1
-pathways_delivery_duration_seconds_bucket{channel="adt-to-lab",destination="0",le="0.25"} 2
-pathways_delivery_duration_seconds_bucket{channel="adt-to-lab",destination="0",le="0.5"} 2
-pathways_delivery_duration_seconds_bucket{channel="adt-to-lab",destination="0",le="1.0"} 2
-pathways_delivery_duration_seconds_bucket{channel="adt-to-lab",destination="0",le="2.5"} 2
-pathways_delivery_duration_seconds_bucket{channel="adt-to-lab",destination="0",le="5.0"} 2
-pathways_delivery_duration_seconds_bucket{channel="adt-to-lab",destination="0",le="10.0"} 2
-pathways_delivery_duration_seconds_bucket{channel="adt-to-lab",destination="0",le="30.0"} 2
-pathways_delivery_duration_seconds_bucket{channel="adt-to-lab",destination="0",le="60.0"} 2
-pathways_delivery_duration_seconds_bucket{channel="adt-to-lab",destination="0",le="+Inf"} 2
-pathways_delivery_duration_seconds_count{channel="adt-to-lab",destination="0"} 2
-pathways_delivery_duration_seconds_sum{channel="adt-to-lab",destination="0"} 0.254
-pathways_delivery_duration_seconds_created{channel="adt-to-lab",destination="0"} 1794312000
 pathways_delivery_duration_seconds_bucket{channel="adt-to-lab",destination="1",le="0.005"} 0
 pathways_delivery_duration_seconds_bucket{channel="adt-to-lab",destination="1",le="0.01"} 0
 pathways_delivery_duration_seconds_bucket{channel="adt-to-lab",destination="1",le="0.025"} 0
@@ -101,6 +90,23 @@ pathways_delivery_duration_seconds_bucket{channel="adt-to-lab",destination="1",l
 pathways_delivery_duration_seconds_count{channel="adt-to-lab",destination="1"} 1
 pathways_delivery_duration_seconds_sum{channel="adt-to-lab",destination="1"} 75
 pathways_delivery_duration_seconds_created{channel="adt-to-lab",destination="1"} 1794312000
+pathways_delivery_duration_seconds_bucket{channel="adt-to-lab",destination="lab",le="0.005"} 1
+pathways_delivery_duration_seconds_bucket{channel="adt-to-lab",destination="lab",le="0.01"} 1
+pathways_delivery_duration_seconds_bucket{channel="adt-to-lab",destination="lab",le="0.025"} 1
+pathways_delivery_duration_seconds_bucket{channel="adt-to-lab",destination="lab",le="0.05"} 1
+pathways_delivery_duration_seconds_bucket{channel="adt-to-lab",destination="lab",le="0.1"} 1
+pathways_delivery_duration_seconds_bucket{channel="adt-to-lab",destination="lab",le="0.25"} 2
+pathways_delivery_duration_seconds_bucket{channel="adt-to-lab",destination="lab",le="0.5"} 2
+pathways_delivery_duration_seconds_bucket{channel="adt-to-lab",destination="lab",le="1.0"} 2
+pathways_delivery_duration_seconds_bucket{channel="adt-to-lab",destination="lab",le="2.5"} 2
+pathways_delivery_duration_seconds_bucket{channel="adt-to-lab",destination="lab",le="5.0"} 2
+pathways_delivery_duration_seconds_bucket{channel="adt-to-lab",destination="lab",le="10.0"} 2
+pathways_delivery_duration_seconds_bucket{channel="adt-to-lab",destination="lab",le="30.0"} 2
+pathways_delivery_duration_seconds_bucket{channel="adt-to-lab",destination="lab",le="60.0"} 2
+pathways_delivery_duration_seconds_bucket{channel="adt-to-lab",destination="lab",le="+Inf"} 2
+pathways_delivery_duration_seconds_count{channel="adt-to-lab",destination="lab"} 2
+pathways_delivery_duration_seconds_sum{channel="adt-to-lab",destination="lab"} 0.254
+pathways_delivery_duration_seconds_created{channel="adt-to-lab",destination="lab"} 1794312000
 pathways_delivery_duration_seconds_bucket{channel="orders",destination="0",le="0.005"} 0
 pathways_delivery_duration_seconds_bucket{channel="orders",destination="0",le="0.01"} 0
 pathways_delivery_duration_seconds_bucket{channel="orders",destination="0",le="0.025"} 0
@@ -118,22 +124,60 @@ pathways_delivery_duration_seconds_bucket{channel="orders",destination="0",le="+
 pathways_delivery_duration_seconds_count{channel="orders",destination="0"} 0
 pathways_delivery_duration_seconds_sum{channel="orders",destination="0"} 0
 pathways_delivery_duration_seconds_created{channel="orders",destination="0"} 1794312000
+# TYPE pathways_messages_settled counter
+# HELP pathways_messages_settled Messages settled since the engine started, one for each settled event.
+pathways_messages_settled_total{channel="adt-to-lab"} 1
+pathways_messages_settled_created{channel="adt-to-lab"} 1794312000
+pathways_messages_settled_total{channel="orders"} 0
+pathways_messages_settled_created{channel="orders"} 1794312000
+# TYPE pathways_settled_destinations counter
+# HELP pathways_settled_destinations Where each settled message stood with each destination, as its settled event says.
+pathways_settled_destinations_total{channel="adt-to-lab",destination="1",outcome="cleared"} 0
+pathways_settled_destinations_created{channel="adt-to-lab",destination="1",outcome="cleared"} 1794312000
+pathways_settled_destinations_total{channel="adt-to-lab",destination="1",outcome="delivered"} 0
+pathways_settled_destinations_created{channel="adt-to-lab",destination="1",outcome="delivered"} 1794312000
+pathways_settled_destinations_total{channel="adt-to-lab",destination="1",outcome="dry_run"} 1
+pathways_settled_destinations_created{channel="adt-to-lab",destination="1",outcome="dry_run"} 1794312000
+pathways_settled_destinations_total{channel="adt-to-lab",destination="1",outcome="failed"} 0
+pathways_settled_destinations_created{channel="adt-to-lab",destination="1",outcome="failed"} 1794312000
+pathways_settled_destinations_total{channel="adt-to-lab",destination="1",outcome="filtered"} 0
+pathways_settled_destinations_created{channel="adt-to-lab",destination="1",outcome="filtered"} 1794312000
+pathways_settled_destinations_total{channel="adt-to-lab",destination="lab",outcome="cleared"} 0
+pathways_settled_destinations_created{channel="adt-to-lab",destination="lab",outcome="cleared"} 1794312000
+pathways_settled_destinations_total{channel="adt-to-lab",destination="lab",outcome="delivered"} 1
+pathways_settled_destinations_created{channel="adt-to-lab",destination="lab",outcome="delivered"} 1794312000
+pathways_settled_destinations_total{channel="adt-to-lab",destination="lab",outcome="dry_run"} 0
+pathways_settled_destinations_created{channel="adt-to-lab",destination="lab",outcome="dry_run"} 1794312000
+pathways_settled_destinations_total{channel="adt-to-lab",destination="lab",outcome="failed"} 0
+pathways_settled_destinations_created{channel="adt-to-lab",destination="lab",outcome="failed"} 1794312000
+pathways_settled_destinations_total{channel="adt-to-lab",destination="lab",outcome="filtered"} 0
+pathways_settled_destinations_created{channel="adt-to-lab",destination="lab",outcome="filtered"} 1794312000
+pathways_settled_destinations_total{channel="orders",destination="0",outcome="cleared"} 0
+pathways_settled_destinations_created{channel="orders",destination="0",outcome="cleared"} 1794312000
+pathways_settled_destinations_total{channel="orders",destination="0",outcome="delivered"} 0
+pathways_settled_destinations_created{channel="orders",destination="0",outcome="delivered"} 1794312000
+pathways_settled_destinations_total{channel="orders",destination="0",outcome="dry_run"} 0
+pathways_settled_destinations_created{channel="orders",destination="0",outcome="dry_run"} 1794312000
+pathways_settled_destinations_total{channel="orders",destination="0",outcome="failed"} 0
+pathways_settled_destinations_created{channel="orders",destination="0",outcome="failed"} 1794312000
+pathways_settled_destinations_total{channel="orders",destination="0",outcome="filtered"} 0
+pathways_settled_destinations_created{channel="orders",destination="0",outcome="filtered"} 1794312000
 # TYPE pathways_queue_depth gauge
 # HELP pathways_queue_depth Deliveries pending for the destination, read from the store.
-pathways_queue_depth{channel="adt-to-lab",destination="0"} 0
+pathways_queue_depth{channel="adt-to-lab",destination="lab"} 0
 pathways_queue_depth{channel="adt-to-lab",destination="1"} 4
 # TYPE pathways_oldest_pending_age_seconds gauge
 # UNIT pathways_oldest_pending_age_seconds seconds
 # HELP pathways_oldest_pending_age_seconds How long the oldest delivery pending for the destination has waited since it was queued, read from the store; 0 when none is pending.
-pathways_oldest_pending_age_seconds{channel="adt-to-lab",destination="0"} 0
+pathways_oldest_pending_age_seconds{channel="adt-to-lab",destination="lab"} 0
 pathways_oldest_pending_age_seconds{channel="adt-to-lab",destination="1"} 81.5
 # TYPE pathways_deliveries_retrying gauge
 # HELP pathways_deliveries_retrying Pending deliveries that failed at least once and wait for a retry, read from the store.
-pathways_deliveries_retrying{channel="adt-to-lab",destination="0"} 0
+pathways_deliveries_retrying{channel="adt-to-lab",destination="lab"} 0
 pathways_deliveries_retrying{channel="adt-to-lab",destination="1"} 1
 # TYPE pathways_deliveries_failed gauge
 # HELP pathways_deliveries_failed Deliveries that failed for good and are not cleared, read from the store.
-pathways_deliveries_failed{channel="adt-to-lab",destination="0"} 0
+pathways_deliveries_failed{channel="adt-to-lab",destination="lab"} 0
 pathways_deliveries_failed{channel="adt-to-lab",destination="1"} 2
 # TYPE pathways_messages_failed gauge
 # HELP pathways_messages_failed Messages that failed and are not cleared, read from the store.
