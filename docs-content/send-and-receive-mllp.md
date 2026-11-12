@@ -37,6 +37,77 @@ destinations:
 The TLS files are read when the engine starts. A file that cannot be read, or a certificate, key and
 CA that do not load together, stops the start with the file and key at fault.
 
+## Bound connections and messages
+
+```yaml title="channels/adt-in/channel.yaml"
+source:
+  mllp:
+    port: 2575
+    tls: { cert: ../../certs/server.pem, key: ../../certs/server.key }
+    maxConnections: 20
+    receiveTimeout: 10m
+    maxMessageSize: 8MB
+    keepOpen: false
+destinations:
+  - file: { dir: ../../data/adt-in/out }
+```
+
+- **`maxConnections`** (100 by default) is the most connections the source holds at once. One that
+  arrives over it is closed at once, before any byte of it is read or any TLS handshake starts. The
+  engine logs `mllp-connection-refused` with the cap and the code `MLLP_CONNECTION_LIMIT_REACHED`, never
+  who connected, and the [health report](./check-status-and-health.md) counts them in the channel's
+  `connections.refused`.
+- **`receiveTimeout`** (no limit by default) closes a connection that goes this long without a whole
+  message: one left idle, and one that sent part of a message and stopped. The clock starts again at
+  each message. A part-sent message is never stored, so the sender sends it again on a new connection.
+  Set it longer than the sender's own quiet periods, since many senders keep one connection open all
+  day, and longer than storing a message takes.
+- **`maxMessageSize`** (4 MB by default, 1 MB being 1,024 KB) is the largest message taken. A frame
+  that grows past it closes the connection, nothing of it is stored, and the engine logs
+  `mllp-source-error` with the code `MLLP_FRAME_TOO_LARGE`.
+- **`keepOpen: false`** closes each connection once every message it brought has been answered, for a
+  sender that opens one connection per message. Each ACK is written out before the connection closes,
+  and two messages that arrive together are each stored and answered first. By default the connection
+  stays open for the next message.
+
+## Choose the TLS version and cipher suites
+
+Both ends take the same TLS keys beside `cert`, `key` and `ca`:
+
+```yaml title="channels/adt-in/channel.yaml"
+source:
+  mllp:
+    port: 2575
+    tls:
+      pfx: ../../certs/server.p12
+      passphrase: { env: ADT_IN_PFX_PASSPHRASE }
+      minVersion: TLSv1.3
+      profile: atna
+destinations:
+  - file: { dir: ../../data/adt-in/out }
+```
+
+- **`minVersion`** is the oldest TLS version accepted: `TLSv1.2` (the default) or `TLSv1.3`. Nothing
+  older can be set, so a client that offers only TLS 1.1 or 1.0 fails the handshake.
+- **`profile`** names the cipher suites offered. `bcp195`, the default, offers TLS 1.3's suites and,
+  for TLS 1.2, only suites with ECDHE key exchange and AES-GCM: `ECDHE-ECDSA-AES128-GCM-SHA256`,
+  `ECDHE-RSA-AES128-GCM-SHA256`, `ECDHE-ECDSA-AES256-GCM-SHA384` and `ECDHE-RSA-AES256-GCM-SHA384`.
+  `atna` offers the IHE ATNA suites as `@cosyte/mllp` lists them: TLS 1.3's suites, and for TLS 1.2
+  `ECDHE-RSA-AES128-GCM-SHA256`, `ECDHE-RSA-AES256-GCM-SHA384`, `DHE-RSA-AES128-GCM-SHA256` and
+  `DHE-RSA-AES256-GCM-SHA384`, which need an RSA certificate.
+- **`ciphers`** is an OpenSSL cipher list in place of a profile, for a peer no profile reaches. It
+  cannot be set together with `profile`, and a list OpenSSL takes nothing from stops the start.
+- **`pfx`** is a PKCS#12 file holding the certificate and key, in place of `cert` and `key` (set one
+  or the other). Its **`passphrase`** is read at start from a
+  [secret reference](./read-secrets.md), never written in the YAML. PEM files in `cert` and `key` stay
+  the usual choice. A pfx file that does not open with its passphrase stops the start, naming the key,
+  never the file's path or the passphrase.
+
+A TLS client that worked before may now fail the handshake: before, the source and destination
+offered Node.js's default cipher list, which still holds TLS 1.2 suites without forward secrecy or
+without AES-GCM. A peer that can use none of the `bcp195` suites needs `profile: atna` or a `ciphers`
+list.
+
 ## What the source answers
 
 Each message is stored before it is acknowledged, and messages on one connection are handled one at a
@@ -82,7 +153,9 @@ destinations:
 - **`tls: {}`** verifies the receiver's certificate against Node.js's built-in roots; **`tls.ca`**
   trusts your own CA in their place. The certificate is always verified.
 - **`tls.cert` and `tls.key`** present a client certificate, for a receiver that requires mutual TLS.
-  Set both or neither.
+  Set both or neither, or `tls.pfx` with its `passphrase` in their place.
+- **`tls.minVersion`, `tls.profile` and `tls.ciphers`** work as on the source: see
+  [Choose the TLS version and cipher suites](#choose-the-tls-version-and-cipher-suites).
 - **`ackTimeout`** (10 seconds by default) is how long to wait to connect, and then for each ACK.
 
 The destination keeps one connection open and reuses it, and opens a new one after any failure so a
