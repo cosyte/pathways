@@ -19,7 +19,7 @@ import {
   projectSchema,
 } from "../src/config/schema.js";
 import { ChannelWorker } from "../src/engine/channel-worker.js";
-import type { CsvSettings } from "../src/engine/worker-entry.js";
+import type { CsvSettings, XmlSettings } from "../src/engine/worker-entry.js";
 import { generateKey } from "../src/encryption/keys.js";
 import {
   age,
@@ -435,15 +435,17 @@ describe("make sample messages with @cosyte/synth", () => {
 async function transformWith(
   dir: string,
   transformFile: string,
-  format: "hl7v2" | "fhir" | "x12" | "json" | "csv",
+  format: "hl7v2" | "fhir" | "x12" | "json" | "csv" | "xml",
   inputs: readonly string[],
   csv?: CsvSettings,
+  xml?: XmlSettings,
 ): Promise<(readonly string[] | string)[]> {
   const worker = new ChannelWorker({
     channel: "docs",
     transformFile: join(dir, transformFile),
     format,
     csv,
+    xml,
     timeoutMs: 10_000,
     memoryMb: 256,
   });
@@ -531,7 +533,7 @@ describe("transform and filter messages", () => {
   );
 });
 
-describe("handle FHIR, X12, C-CDA, JSON, CSV and text", () => {
+describe("handle FHIR, X12, C-CDA, JSON, CSV, XML and text", () => {
   const name = "work-with-formats.md";
 
   it(
@@ -600,6 +602,34 @@ describe("handle FHIR, X12, C-CDA, JSON, CSV and text", () => {
           settings,
         ),
       ).toEqual([['code;status;note\nTEST-001;active;"\'=1+2"\nTEST-003;active;y\n']]);
+    },
+    SLOW,
+  );
+
+  it(
+    "sends new orders on as sent, with the page's xml settings",
+    async () => {
+      const dir = await starterProject();
+      await putTitled(dir, name, "channels/orders-in/transform.ts");
+      const settings = (
+        parseYaml(titled(name, "channels/orders-in/channel.yaml")) as { xml: XmlSettings }
+      ).xml;
+      expect(settings).toEqual({ maxBytes: 1_048_576, maxDepth: 64 });
+      const deep = `<order status='new'>${"<a>".repeat(64)}${"</a>".repeat(64)}</order>`;
+      expect(
+        await transformWith(
+          dir,
+          "channels/orders-in/transform.ts",
+          "xml",
+          [
+            "<order id='TEST-ORDER-001' status='new'/>",
+            "<order id='TEST-ORDER-002' status='held'/>",
+            deep,
+          ],
+          undefined,
+          settings,
+        ),
+      ).toEqual([['<order id="TEST-ORDER-001" status="sent"/>'], [], "parse: CcdaParseError"]);
     },
     SLOW,
   );

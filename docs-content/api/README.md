@@ -541,6 +541,13 @@ Why it failed, as stored: can quote the message.
 
 > `readonly` **id**: `number`
 
+##### idempotencyClaim?
+
+> `readonly` `optional` **idempotencyClaim?**: `string` \| `null`
+
+The same hash when it held its channel's claim to the key, the one message stored under it;
+`null` when it did not. Absent from an archive an older Pathways wrote.
+
 ##### idempotencyKey
 
 > `readonly` **idempotencyKey**: `string` \| `null`
@@ -871,7 +878,7 @@ Where to read credentials and other settings from: `process.env` when the engine
 
 ##### format
 
-> `readonly` **format**: `"hl7v2"` \| `"json"` \| `"fhir"` \| `"x12"` \| `"ccda"` \| `"text"` \| `"csv"`
+> `readonly` **format**: `"hl7v2"` \| `"json"` \| `"fhir"` \| `"x12"` \| `"xml"` \| `"ccda"` \| `"text"` \| `"csv"`
 
 ##### logger
 
@@ -3495,9 +3502,11 @@ Stores an incoming message, durably, before its source acknowledges it: as `rece
 `failed` when `options.failure` is set. Flags it as a possible duplicate when an earlier
 message of the channel has the same `options.duplicateKey`. Given `options.resumed`, when a
 message of the channel was already stored with the same `options.idempotencyKey`, stores
-nothing and returns that message's id with `alreadyStored: true`. A store that ignores the key
-still works, and a source that stops between storing and acknowledging then stores that
-message twice.
+nothing and returns that message's id with `alreadyStored: true`. A store that more than one
+connection writes to makes that lookup and the insert one atomic step (Pathways' own store
+claims the key in a column a unique index covers), or two hand-ins of one message at the same
+moment can both be stored. A store that ignores the key still works, and a source that stops
+between storing and acknowledging then stores that message twice.
 
 ###### Parameters
 
@@ -5765,6 +5774,12 @@ Why it failed, as stored: can quote the message.
 
 > `readonly` **id**: `number`
 
+##### idempotencyClaim
+
+> `readonly` **idempotencyClaim**: `string` \| `null`
+
+The idempotency key again when this message holds its claim; null when it does not.
+
 ##### idempotencyKey
 
 > `readonly` **idempotencyKey**: `string` \| `null`
@@ -5863,7 +5878,9 @@ An opaque key that names this one message to its source (the engine passes a has
 with the message. With `resumed`, when a message of the channel was already stored with the
 same key, nothing is stored and that message's id comes back with `alreadyStored`: a source
 that stored a message and then stopped before it could acknowledge it hands it in again on
-restart, and it is stored once.
+restart, and it is stored once. That holds for two hand-ins at the same moment too, on two
+connections or two nodes: one is stored, and the other gets its id. Without `resumed` the
+message is always stored.
 
 ##### meta?
 
@@ -6234,6 +6251,39 @@ read after another key becomes current. Printable ASCII with no space, 1 to 255 
 > `readonly` **wrapped**: `Uint8Array`
 
 The data key, encrypted by that master key, in the provider's own layout: 1 to 65,535 bytes.
+
+***
+
+### XmlSettings
+
+How an `xml` channel reads its bodies, from the channel's `xml:` block: the caps a body is held to
+as it is parsed. Every key is optional; XML\_DEFAULTS says what an unset one means.
+
+#### Example
+
+```ts
+const settings: XmlSettings = { maxBytes: 1_048_576, maxDepth: 64 };
+```
+
+#### Properties
+
+##### maxBytes?
+
+> `readonly` `optional` **maxBytes?**: `number`
+
+The largest body read, in bytes of UTF-8 after a byte order mark. Default 10,485,760.
+
+##### maxDepth?
+
+> `readonly` `optional` **maxDepth?**: `number`
+
+How deep elements may nest, the root element counting as 1. Default 1,000.
+
+##### maxElements?
+
+> `readonly` `optional` **maxElements?**: `number`
+
+How many elements a body may hold. Default 1,000,000.
 
 ## Type Aliases
 
@@ -7053,8 +7103,8 @@ const done = (status: MessageStatus): boolean => status === "transformed" || sta
 The message each format hands a transform, by the `format` a channel declares, read from the
 format registry: `hl7v2` an [Hl7Message](#hl7message), `fhir` a [FhirResource](#fhirresource), `x12` an
 [X12Interchange](#x12interchange), `ccda` a [CcdaDocument](#ccdadocument), `json` a [JsonValue](#jsonvalue) (a string a
-`json` transform returns is sent as it is, not JSON-quoted), `text` the body as a string, and
-`csv` a `CsvTable`.
+`json` transform returns is sent as it is, not JSON-quoted), `text` the body as a string, `csv` a
+`CsvTable`, and `xml` an `XmlDocument`.
 
 #### Example
 
@@ -7624,6 +7674,24 @@ An X12 interchange as an `x12` channel's transform receives it: `@cosyte/x12`'s
 import type { Transform, X12Interchange } from "@cosyte/pathways";
 
 export default ((interchange) => interchange) satisfies Transform<X12Interchange>;
+```
+
+***
+
+### XmlDocument
+
+> **XmlDocument** = `ReturnType`\<*typeof* `Ccda.parseSecureXml`\>
+
+What an `xml` channel's transform receives, and may return: the document `@cosyte/ccda`'s
+hardened XML reader builds, an `@xmldom/xmldom` `Document`. Read and change it with the DOM API
+(`documentElement`, `getElementsByTagName`, `getAttribute`, `setAttribute` and the rest). A
+document the transform leaves as it was read is written back byte for byte.
+
+#### Example
+
+```ts
+const id = (document: XmlDocument): string | null =>
+  document.documentElement?.getAttribute("id") ?? null;
 ```
 
 ## Variables

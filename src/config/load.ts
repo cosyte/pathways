@@ -401,6 +401,7 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
       format,
       ...(channel.csv === undefined ? {} : { csv: channel.csv }),
       ...(channel.hl7v2 === undefined ? {} : { hl7v2: channel.hl7v2 }),
+      ...(channel.xml === undefined ? {} : { xml: channel.xml }),
       source,
       transform,
       destinations,
@@ -870,6 +871,7 @@ function resolveConnector(
     ...resolveHttpClient(http, dir),
     timeoutMs: http.timeout ?? DEFAULT_HTTP_TIMEOUT_MS,
     resendHeader: http.resendHeader,
+    ack: http.ack,
   };
 }
 

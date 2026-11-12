@@ -198,6 +198,7 @@ class Runner {
       format: config.format,
       csv: config.csv,
       hl7v2: config.hl7v2,
+      xml: config.xml,
       timeoutMs: config.settings.timeoutMs,
       memoryMb: config.settings.memoryMb,
       config: resolved.resolved,

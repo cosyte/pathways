@@ -14,6 +14,7 @@ import type {
   WorkerFormat,
   WorkerHello,
   WorkerSetup,
+  XmlSettings,
 } from "./worker-entry.js";
 
 /**
@@ -158,6 +159,8 @@ export interface ChannelWorkerOptions {
   readonly csv?: CsvSettings | undefined;
   /** An `hl7v2` channel's `hl7v2:` block, as validated: how its bodies are read and written. */
   readonly hl7v2?: Hl7v2Settings | undefined;
+  /** An `xml` channel's `xml:` block, as validated: the caps its bodies are read under. */
+  readonly xml?: XmlSettings | undefined;
   readonly workerUrl?: URL;
 }
 
@@ -242,12 +245,15 @@ export class ChannelWorker {
       ...(this.options.destinations === undefined
         ? {}
         : { destinations: this.options.destinations }),
-      ...(this.options.csv === undefined && this.options.hl7v2 === undefined
+      ...(this.options.csv === undefined &&
+      this.options.hl7v2 === undefined &&
+      this.options.xml === undefined
         ? {}
         : {
             formatSettings: {
               ...(this.options.csv === undefined ? {} : { csv: this.options.csv }),
               ...(this.options.hl7v2 === undefined ? {} : { hl7v2: this.options.hl7v2 }),
+              ...(this.options.xml === undefined ? {} : { xml: this.options.xml }),
             },
           }),
     };
