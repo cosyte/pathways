@@ -24,6 +24,7 @@ export type {
   FhirResource,
   FileSourceFacts,
   Hl7Message,
+  Hl7v2Settings,
   HttpSourceFacts,
   JsonValue,
   MessageFor,
