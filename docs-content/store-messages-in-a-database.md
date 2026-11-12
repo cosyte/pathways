@@ -240,6 +240,13 @@ stopped, sets every channel running again. A custom store may implement `channel
 `setChannelState`; one without them keeps a channel's state in the engine only, and a restart
 forgets it.
 
+Migration `0011-delivery-failed-at` adds a `failed_at` column to `deliveries`: when a delivery failed
+for good, so a resumed bulk replay leaves out a message that failed after its count. It only adds a
+column that may be null, which an older Pathways never reads, and has no rollback step: to remove it,
+stop every engine and drop the column. A delivery an older Pathways failed has none, and a custom
+store may set `failedAt` on what `deliveries` returns; without it, a resume takes such a message by
+its own `updatedAt` alone.
+
 If the database becomes unreachable while the engine runs, the engine stops with exit code 1 and the
 driver's error code, for a supervisor (systemd, Docker, Kubernetes) to restart it. Nothing is lost: a
 message is acknowledged only once it is stored, and a delivery is recorded only once it is done.

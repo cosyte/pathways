@@ -333,6 +333,75 @@ for (const database of TEST_DATABASES) {
       expect(again.out()).toContain("Nothing to replay.");
     });
 
+    it("leaves alone on resume a message whose delivery was pending at the count and failed after a stop", async () => {
+      const setup = await setUp(database);
+      const [first] = await failTransforms(setup.store, 1);
+      // Transformed before the count, its deliveries still pending then: not failed, not counted.
+      const { id: late } = await setup.store.receive("adt", BODY);
+      await setup.store.completeTransform(late, [BODY], 2);
+      const [last] = await failTransforms(setup.store, 1);
+      await tick();
+      const stop = new AbortController();
+      setup.audit.subscribe((entry) => {
+        if (entry.detail["phase"] === "batch") stop.abort();
+      });
+      const stopped = contextFor(setup, { signal: stop.signal });
+      expect(
+        await bulkReplayCommand(stopped.context, { scope: { resend: false }, yes: true, batch: 1 }),
+      ).toBe(EXIT.failed);
+      const runId = (await bulkEntries(setup.store))[0]?.id as number;
+      expect((await bulkEntries(setup.store))[0]?.detail).toMatchObject({ count: 2, upTo: last });
+
+      // After the stop, its delivery fails for good: the engine writes only the delivery's row.
+      await tick();
+      const deliveries = await setup.store.deliveries(late);
+      await setup.store.failDelivery(deliveries[0]?.id ?? -1, "delivery: ECONNREFUSED");
+      await setup.store.markDelivered(deliveries[1]?.id ?? -1);
+      expect(await setup.store.message(late)).toMatchObject({ state: "failed", generation: 0 });
+
+      const resumed = contextFor(setup, { json: true });
+      expect(await bulkReplayCommand(resumed.context, { resume: runId, yes: true, batch: 1 })).toBe(
+        EXIT.ok,
+      );
+      expect(JSON.parse(resumed.out())).toMatchObject({
+        count: 1,
+        summary: { replayed: 1, skipped: 0 },
+      });
+      expect(await setup.store.message(first as number)).toMatchObject({ generation: 1 });
+      expect(await setup.store.message(last as number)).toMatchObject({ generation: 1 });
+      expect(await setup.store.message(late)).toMatchObject({ state: "failed", generation: 0 });
+    });
+
+    it("refuses to resume a run whose destination the channel no longer has", async () => {
+      const setup = await setUp(database);
+      await failDelivery(setup.store, 1);
+      await tick();
+      const stop = new AbortController();
+      stop.abort();
+      const begun = contextFor(setup, { signal: stop.signal });
+      expect(
+        await bulkReplayCommand(begun.context, {
+          scope: { channel: "adt", destination: 1, resend: false },
+          yes: true,
+          batch: 10,
+        }),
+      ).toBe(EXIT.failed);
+      const runId = (await bulkEntries(setup.store))[0]?.id as number;
+
+      // The channel was reloaded with one destination: index 1 now names nothing.
+      const channel = setup.project.channels[0] as ChannelConfig;
+      const shorter: ProjectConfig = {
+        ...setup.project,
+        channels: [{ ...channel, destinations: channel.destinations.slice(0, 1) }],
+      };
+      const resumed = contextFor({ ...setup, project: shorter });
+      expect(
+        await bulkReplayCommand(resumed.context, { resume: runId, yes: true, batch: 10 }),
+      ).toBe(EXIT.usage);
+      expect(resumed.err()).toContain("from 0 to 0");
+      expect(resumed.out()).toBe("");
+    });
+
     it("takes only messages whose delivery to --destination failed, within the times given", async () => {
       const setup = await setUp(database);
       await failTransforms(setup.store, 1);
@@ -501,6 +570,8 @@ describe("countBulkReplay", () => {
       listMessages: () =>
         Promise.resolve({
           items: [
+            row(6, "adt", "failed", "2026-11-11T11:00:00.000Z"),
+            row(5, "adt", "failed", "2026-11-11T11:00:00.000Z"),
             row(4, "adt", "failed", "2026-11-11T11:00:00.000Z"),
             row(3, "lab", "failed", "2026-11-11T11:00:00.000Z"),
             row(2, "adt", "failed", countedAt),
@@ -508,10 +579,31 @@ describe("countBulkReplay", () => {
           ],
           next: undefined,
         }),
+      // 5 failed at a delivery after the count; 6 failed before it, and an older generation's
+      // failure after it does not count; 4 has a delivery from a store that records no time.
+      deliveries: (id: number) =>
+        Promise.resolve(
+          {
+            4: [{ destination: 0, generation: 0, status: "failed" }],
+            5: [{ destination: 0, generation: 0, status: "failed", failedAt: countedAt }],
+            6: [
+              {
+                destination: 0,
+                generation: 0,
+                status: "failed",
+                failedAt: "2026-11-11T11:30:00.000Z",
+              },
+              { destination: 1, generation: 1, status: "failed", failedAt: countedAt },
+            ],
+          }[id] ?? [],
+        ),
     } as unknown as Store;
     expect(
       await countBulkReplay(store, { channel: "adt", upTo: 0, countedAt, resend: false }),
-    ).toEqual([{ id: 4, generation: 0 }]);
+    ).toEqual([
+      { id: 4, generation: 0 },
+      { id: 6, generation: 0 },
+    ]);
   });
 });
 

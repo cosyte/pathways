@@ -121,7 +121,10 @@ Stopped with 120 left; go on with: pathways replay --resume 1207
 
 `--resume <run>` counts again under the run's own scope: the same filters, ids up to the same one,
 and only messages unchanged since the first count. What the run replayed changed when it was
-replayed, so it is not replayed again. "Unchanged since" compares each message's last change time,
+replayed, so it is not replayed again. A message whose delivery was still pending or retrying at the
+first count and failed for good after it is left out too: each delivery records when it failed. If
+the project was reloaded since and the channel or the `--destination` place is gone, the resume is
+refused with exit 2 before it counts. "Unchanged since" compares each message's last change time,
 as Pathways' clock wrote it, with the count's start: run a resume where the first run ran, or on a
 host whose clock agrees with it.
 

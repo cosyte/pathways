@@ -60,6 +60,7 @@ interface DeliveryRow {
   deliveredAt: string | null;
   sending: SendingMarker | undefined;
   interruptedAttempt: number | undefined;
+  failedAt?: string | undefined;
 }
 
 const now = (): string => new Date().toISOString();
@@ -190,7 +191,12 @@ export class MemoryStore implements MessageStore {
   }
 
   failDelivery(deliveryId: number, error: string): Promise<void> {
-    Object.assign(this.delivery(deliveryId), { status: "failed", error, sending: undefined });
+    Object.assign(this.delivery(deliveryId), {
+      status: "failed",
+      error,
+      sending: undefined,
+      failedAt: now(),
+    });
     return Promise.resolve();
   }
 
@@ -257,6 +263,7 @@ export class MemoryStore implements MessageStore {
           deliveredAt: d.deliveredAt,
           error: d.error,
           interruptedAttempt: d.interruptedAttempt,
+          ...(d.failedAt === undefined ? {} : { failedAt: d.failedAt }),
         })),
     );
   }

@@ -69,8 +69,11 @@ export interface CountedMessage {
 /**
  * The failed messages in `scope`, oldest first: each failed now, received within its times, at or
  * below `upTo` when that is set, unchanged since `countedAt`, and with `destination` set, holding a
- * failed delivery of its current generation to that destination. Reads summaries and deliveries
- * only, never content.
+ * failed delivery of its current generation to that destination. A message changed at or after
+ * `countedAt` is left out, and so is one with a delivery of its current generation that failed for
+ * good then: a delivery's failure writes only the delivery, so a message pending at the count and
+ * failed after it would otherwise look unchanged. Reads summaries and deliveries only, never
+ * content.
  *
  * @example
  * ```ts
@@ -97,15 +100,18 @@ export async function countBulkReplay(
       // A custom store's listing is checked again here: a row outside the scope is never replayed.
       if (message.state !== "failed" || Date.parse(message.updatedAt) >= countedAt) continue;
       if (scope.channel !== undefined && message.channel !== scope.channel) continue;
-      if (scope.destination !== undefined) {
-        const deliveries = await store.deliveries(message.id);
-        const failedThere = deliveries.some(
-          (delivery) =>
-            delivery.destination === scope.destination &&
-            delivery.generation === message.generation &&
-            delivery.status === "failed",
-        );
-        if (!failedThere) continue;
+      const current = (await store.deliveries(message.id)).filter(
+        (delivery) => delivery.generation === message.generation && delivery.status === "failed",
+      );
+      const failedLater = current.some(
+        (delivery) => delivery.failedAt !== undefined && Date.parse(delivery.failedAt) >= countedAt,
+      );
+      if (failedLater) continue;
+      if (
+        scope.destination !== undefined &&
+        !current.some((delivery) => delivery.destination === scope.destination)
+      ) {
+        continue;
       }
       counted.push({ id: message.id, generation: message.generation });
     }
@@ -180,27 +186,13 @@ export async function bulkReplayCommand(
   } else {
     // A new run: options.scope is set whenever resume is not.
     const filters = options.scope as Omit<BulkReplayScope, "upTo" | "countedAt">;
-    const channel = project.channels.find((candidate) => candidate.name === filters.channel);
-    if (filters.channel !== undefined && channel === undefined) {
-      context.err(
-        `pathways: no such channel. The channels are: ${project.channels.map((c) => c.name).join(", ")}\n`,
-      );
-      return EXIT.usage;
-    }
-    if (filters.destination !== undefined) {
-      if (channel === undefined) {
-        context.err("pathways: --destination needs --channel.\n");
-        return EXIT.usage;
-      }
-      const last = channel.destinations.length - 1;
-      if (filters.destination > last) {
-        context.err(
-          `pathways: --destination takes the destination's place in the channel's list, from 0 to ${String(last)}.\n`,
-        );
-        return EXIT.usage;
-      }
-    }
     scope = { ...filters, upTo: 0, countedAt: new Date(context.now()).toISOString() };
+  }
+  // Checked again on a resume: the project may have been reloaded since the run began.
+  const refusal = checkFilters(context, scope);
+  if (refusal !== undefined) {
+    context.err(refusal);
+    return EXIT.usage;
   }
 
   const counted = await countBulkReplay(store, scope);
@@ -316,6 +308,22 @@ export async function bulkReplayCommand(
   return stopped || total.failed > 0 || total.refused > 0 ? EXIT.failed : EXIT.ok;
 }
 
+/** Why the project cannot take `scope`'s channel or destination, or undefined when it can. */
+function checkFilters(context: OperatorContext, scope: BulkReplayScope): string | undefined {
+  const { channels } = context.project;
+  const channel = channels.find((candidate) => candidate.name === scope.channel);
+  if (scope.channel !== undefined && channel === undefined) {
+    return `pathways: no such channel. The channels are: ${channels.map((c) => c.name).join(", ")}\n`;
+  }
+  if (scope.destination === undefined) return undefined;
+  if (channel === undefined) return "pathways: --destination needs --channel.\n";
+  const last = channel.destinations.length - 1;
+  if (scope.destination > last) {
+    return `pathways: --destination takes the destination's place in the channel's list, from 0 to ${String(last)}.\n`;
+  }
+  return undefined;
+}
+
 /** The scope a run began with, read back from its first audit entry; undefined when there is none. */
 async function runEntry(store: MessageStore, id: number): Promise<BulkReplayScope | undefined> {
   const page = await store.auditEntries({ action: "bulk-replay", before: id + 1, limit: 1 });
@@ -349,12 +357,12 @@ function scopeDetail(scope: BulkReplayScope): AuditDetail {
   return detail;
 }
 
-/** The scope, as the run prints it before it asks for the count. */
 /** What the run does to each message, as its text says it. */
 function verbs(scope: BulkReplayScope): { readonly verb: string; readonly done: string } {
   return scope.resend ? { verb: "resend", done: "resent" } : { verb: "replay", done: "replayed" };
 }
 
+/** The scope, as the run prints it before it asks for the count. */
 function describeScope(scope: BulkReplayScope, count: number, run: number | undefined): string[] {
   const { verb, done } = verbs(scope);
   const lines = [

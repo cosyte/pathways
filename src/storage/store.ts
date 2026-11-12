@@ -216,6 +216,8 @@ interface DeliveriesTable {
   sending_attempt: number | null;
   /** The latest attempt found cut off: set means every later send is a possible duplicate. Since 0005. */
   interrupted_attempt: number | null;
+  /** When the delivery failed for good (ISO 8601, UTC); null until then. Since 0011. */
+  failed_at: string | null;
 }
 
 /** The audit log. Rows are only ever inserted: nothing here updates or deletes one. Since 0003. */
@@ -430,6 +432,11 @@ export interface StoredDelivery {
    * flagged as a possible duplicate.
    */
   readonly interruptedAttempt?: number | undefined;
+  /**
+   * When it failed for good (ISO 8601, UTC), by the store's clock. Unset until then, and on a
+   * delivery an older Pathways failed or a store that does not record it.
+   */
+  readonly failedAt?: string | undefined;
 }
 
 /**
@@ -1539,6 +1546,15 @@ export function migrations(kind: StorageKind): Record<string, SchemaStep> {
           .execute();
       },
     },
+    "0011-delivery-failed-at": {
+      // Expand only: a column that may be null, which an older Pathways never reads or writes. A
+      // delivery an older Pathways failed has none, and reads as one that failed before any count
+      // a newer Pathways makes. To roll it back, stop every engine and drop the column.
+      tag: "expand",
+      async up(db: Kysely<unknown>): Promise<void> {
+        await db.schema.alterTable("deliveries").addColumn("failed_at", t.time).execute();
+      },
+    },
   };
 }
 
@@ -2051,6 +2067,7 @@ export class Store implements MessageStore, ContentStore, MetaStore {
         "delivered_at",
         "last_error",
         "interrupted_attempt",
+        "failed_at",
       ])
       .where("message_id", "=", messageId)
       .orderBy("id")
@@ -2066,6 +2083,7 @@ export class Store implements MessageStore, ContentStore, MetaStore {
       deliveredAt: row.delivered_at,
       error: row.last_error,
       ...(row.interrupted_attempt === null ? {} : { interruptedAttempt: row.interrupted_attempt }),
+      ...(row.failed_at === null ? {} : { failedAt: row.failed_at }),
     }));
   }
 
@@ -2469,7 +2487,13 @@ export class Store implements MessageStore, ContentStore, MetaStore {
   async failDelivery(deliveryId: number, error: string, epoch?: number): Promise<void> {
     const updated = await this.db
       .updateTable("deliveries")
-      .set({ status: "failed", last_error: error, sending_at: null, sending_attempt: null })
+      .set({
+        status: "failed",
+        last_error: error,
+        sending_at: null,
+        sending_attempt: null,
+        failed_at: this.now().toISOString(),
+      })
       .where("id", "=", deliveryId)
       .$if(epoch !== undefined, (q) => q.where(this.fence("pending", epoch)))
       .executeTakeFirst();
