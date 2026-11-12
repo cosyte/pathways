@@ -115,6 +115,12 @@ without a name makes it a new destination, so what was queued for it waits in th
 each destination a `name` when you add it, and it stays the same destination when its URL, host or
 folder changes.
 
+Two destinations with no `name`, of the same kind and sending to the same place, would share one
+identity, and nothing would tell their deliveries apart once one of them is removed or moved. So
+`pathways validate` and a start refuse such a pair, naming both, as in
+`destinations.2: sends where destinations.0 sends, and neither has a name:`; a `name` on either
+one is enough. Two `module` destinations of one module with different `options` are such a pair.
+
 Its context is the channel transform's, with `ctx.destination` beside it: the destination's `index`
 (from 0), its `name` and its `kind` (`file`, `http`, `mllp` or `module`).
 

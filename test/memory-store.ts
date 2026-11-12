@@ -74,6 +74,7 @@ interface DeliveryRow {
   sending: SendingMarker | undefined;
   interruptedAttempt: number | undefined;
   readonly destinationKey: string | undefined;
+  failedAt?: string | undefined;
 }
 
 const now = (): string => new Date().toISOString();
@@ -206,7 +207,12 @@ export class MemoryStore implements MessageStore {
   }
 
   failDelivery(deliveryId: number, error: string): Promise<void> {
-    Object.assign(this.delivery(deliveryId), { status: "failed", error, sending: undefined });
+    Object.assign(this.delivery(deliveryId), {
+      status: "failed",
+      error,
+      sending: undefined,
+      failedAt: now(),
+    });
     return Promise.resolve();
   }
 
@@ -216,7 +222,7 @@ export class MemoryStore implements MessageStore {
     for (const d of this.deliveryRows) {
       if (d.channel !== channel || d.status !== "pending") continue;
       if (d.destinationKey === undefined) {
-        Object.assign(d, { status: "failed", error, sending: undefined });
+        Object.assign(d, { status: "failed", error, sending: undefined, failedAt: now() });
         unknown += 1;
       } else if (!keys.includes(d.destinationKey)) {
         gone += 1;
@@ -289,6 +295,7 @@ export class MemoryStore implements MessageStore {
           error: d.error,
           interruptedAttempt: d.interruptedAttempt,
           ...(d.destinationKey === undefined ? {} : { destinationKey: d.destinationKey }),
+          ...(d.failedAt === undefined ? {} : { failedAt: d.failedAt }),
         })),
     );
   }
@@ -351,7 +358,7 @@ export class MemoryStore implements MessageStore {
   }
 
   requeue(messageId: number, request: RequeueRequest, actor: string): Promise<RequeueResult> {
-    const { mode, expected, failure, destinations, byDestination } = request;
+    const { mode, expected, failure, destinations, byDestination, expectedGeneration } = request;
     const outputs: TransformOutputs =
       byDestination === undefined ? request.outputs : { byDestination };
     const message = this.messageRows.find((m) => m.id === messageId);
@@ -367,6 +374,9 @@ export class MemoryStore implements MessageStore {
     };
     if (message === undefined) return refuse("not-found");
     if (message.status !== expected) return refuse("changed");
+    if (expectedGeneration !== undefined && message.generation !== expectedGeneration) {
+      return refuse("changed");
+    }
     const mine = this.deliveryRows.filter((d) => d.messageId === messageId);
     if (mine.some((d) => d.status === "pending")) return refuse("pending");
     const superseded = mine.filter((d) => d.status === "failed");
@@ -522,6 +532,7 @@ export class MemoryStore implements MessageStore {
           sending: undefined,
           interruptedAttempt: undefined,
           destinationKey: keys?.[destination],
+          ...("failure" in outcome ? { failedAt: now() } : {}),
         });
         continue;
       }

@@ -81,6 +81,8 @@ export interface ArchivedDelivery {
   readonly interruptedAttempt: number | null;
   /** The key of the destination it was made for; null when it records none. */
   readonly destinationKey: string | null;
+  /** When it failed for good, when it did and the store recorded it. */
+  readonly failedAt: string | null;
 }
 
 /**
@@ -426,6 +428,7 @@ function asMessage(value: unknown): ArchivedMessage {
     check(isWholeOrNull(d["sendingAt"]) && isWholeOrNull(d["sendingAttempt"]));
     check(isWholeOrNull(d["interruptedAttempt"]));
     check(isTextOrNull(d["destinationKey"]));
+    check(d["failedAt"] === undefined || isTextOrNull(d["failedAt"]));
   }
   return fields as unknown as ArchivedMessage;
 }
@@ -491,6 +494,7 @@ export async function archivedMessage(
       sendingAttempt: delivery.sendingAttempt,
       interruptedAttempt: delivery.interruptedAttempt,
       destinationKey: delivery.destinationKey,
+      failedAt: delivery.failedAt ?? null,
     })),
   };
 }

@@ -376,9 +376,9 @@ for (const kind of STORES) {
       it("are refused without names, and named, the one left after the other is removed is never sent its bytes", async () => {
         const setup = await setUp();
         // Unnamed, nothing would tell their deliveries apart once one is removed: no start.
-        await expect(edit(setup, twin(undefined, "a.ts"), twin(undefined, "none.ts"))).rejects.toThrow(
-          ConfigError,
-        );
+        await expect(
+          edit(setup, twin(undefined, "a.ts"), twin(undefined, "none.ts")),
+        ).rejects.toThrow(ConfigError);
         await edit(setup, twin("a", "a.ts"), twin("b", "none.ts"));
         const { id } = await setup.store.receive("adt", bytes("alpha"));
         expect((await pass(setup, { down: true })).sent).toEqual({});
