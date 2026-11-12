@@ -898,13 +898,17 @@ function describeReplay(result: ReplayResult): string {
         result.superseded === 0
           ? ""
           : `; ${count(result.superseded, "earlier failed delivery", "earlier failed deliveries")} cleared`;
+      const notStored =
+        result.notStored === undefined
+          ? ""
+          : `; ${count(result.notStored, "destination", "destinations")} with nothing stored for this message ${result.notStored === 1 ? "was" : "were"} sent nothing (not-stored)`;
       if (result.status === "failed") {
         return `${result.outcome}, and failed again: ${result.failure ?? "the transform failed"}${cleared}`;
       }
       if (result.status === "filtered") {
         return `${result.outcome}: filtered out, nothing queued${cleared}`;
       }
-      return `${result.outcome}: ${count(result.queued, "delivery", "deliveries")} queued${cleared}`;
+      return `${result.outcome}: ${count(result.queued, "delivery", "deliveries")} queued${notStored}${cleared}`;
     }
   }
 }

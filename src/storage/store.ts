@@ -673,7 +673,9 @@ export interface Page<T> {
 /**
  * What one destination's transform gave for a message, as storage records it: its outputs, in
  * order, none meaning it filtered the message for that destination; or why it failed, as stored,
- * which fails that destination's delivery only.
+ * which fails that destination's delivery only. On a resend only, `{ notStored: true }`: nothing is
+ * stored for this destination in the message's generation (it was added to the channel since), so
+ * it gets no delivery at all, never another destination's outputs.
  *
  * @example
  * ```ts
@@ -681,7 +683,9 @@ export interface Page<T> {
  * ```
  */
 export type DestinationOutcome = (
-  { readonly outputs: readonly Uint8Array[] } | { readonly failure: string }
+  | { readonly outputs: readonly Uint8Array[] }
+  | { readonly failure: string }
+  | { readonly notStored: true }
 ) & {
   /**
    * For a destination with no output: the body its one delivery row holds, as the store keeps it.
@@ -726,9 +730,25 @@ export function isByDestination(
 function transformedStatus(outputs: TransformOutputs): MessageStatus {
   if (!isByDestination(outputs)) return outputs.length === 0 ? "filtered" : "transformed";
   const filtered = outputs.byDestination.every(
-    (outcome) => "outputs" in outcome && outcome.outputs.length === 0,
+    (outcome) => "notStored" in outcome || ("outputs" in outcome && outcome.outputs.length === 0),
   );
   return filtered ? "filtered" : "transformed";
+}
+
+/**
+ * How many destinations a resend gave `notStored`, as a requeue's result and audit entry name it:
+ * `{ notStored: n }`, or nothing when there were none.
+ *
+ * @example
+ * ```ts
+ * notStoredOf([{ outputs: [] }, { notStored: true }]); // { notStored: 1 }
+ * ```
+ */
+export function notStoredOf(
+  byDestination: readonly DestinationOutcome[] | undefined,
+): { readonly notStored?: number } {
+  const count = byDestination?.filter((outcome) => "notStored" in outcome).length ?? 0;
+  return count === 0 ? {} : { notStored: count };
 }
 
 /**
@@ -756,7 +776,8 @@ export interface RequeueRequest {
   readonly destinations: number;
   /**
    * On a channel with destination transforms: what each destination gets, in order, in place of
-   * `outputs` for every one. A destination's failure is recorded as its failed delivery.
+   * `outputs` for every one. A destination's failure is recorded as its failed delivery, and one
+   * `notStored` gets no delivery; how many were is `notStored` in the result and its audit entry.
    */
   readonly byDestination?: readonly DestinationOutcome[] | undefined;
 }
@@ -790,6 +811,8 @@ export type RequeueResult =
       /** Earlier deliveries that had failed for good, now cleared. */
       readonly superseded: number;
       readonly generation: number;
+      /** Destinations given `notStored` that got no delivery; absent when none. */
+      readonly notStored?: number;
       readonly entry: AuditEntry;
     }
   | {
@@ -2861,6 +2884,7 @@ export class Store implements MessageStore, ContentStore, MetaStore {
           queued,
           superseded: Number(superseded.numUpdatedRows),
           generation: message.generation,
+          ...notStoredOf(byDestination),
         };
         faultPoint("mid-requeue");
         const [entry] = await this.insertAudit(tx, actor, at, [
@@ -3087,6 +3111,8 @@ export class Store implements MessageStore, ContentStore, MetaStore {
       : Array.from({ length: destinations }, () => ({ outputs: given }));
     let queued = 0;
     for (const [destination, outcome] of outcomes.entries()) {
+      // Nothing stored for it to send again: no row at all, so it is neither filtered nor failed.
+      if ("notStored" in outcome) continue;
       if ("failure" in outcome || outcome.outputs.length === 0) {
         // No output: one row says why, so the message settles and shows what this destination got.
         // Its body is empty, never read: only a delivery with an output (seq 0 and up) is sent.

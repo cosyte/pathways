@@ -29,7 +29,12 @@ import {
 import { EXIT } from "../src/exit.js";
 import { replayMessages } from "../src/operator/actions.js";
 import { AuditLog } from "../src/operator/audit.js";
-import { showCommand, statusCommand, type OperatorContext } from "../src/operator/commands.js";
+import {
+  replayCommand,
+  showCommand,
+  statusCommand,
+  type OperatorContext,
+} from "../src/operator/commands.js";
 import type { Store } from "../src/storage/store.js";
 import { destinationExpectedName, runChannelTests } from "../src/testing/run-tests.js";
 import {
@@ -604,6 +609,57 @@ destinations:
       expect(texts(await store.outputs(id, 0))).toEqual(["BETA"]);
     });
 
+    it("resends no destination another's bytes when a destination was added since, through encryption", async () => {
+      const root = await makeProject({
+        ...FILES,
+        "channels/adt/channel.yaml": `
+format: text
+source:
+  file: { dir: ../../data/inbox, minAge: 0 }
+destinations:
+  - name: skip
+    file: { dir: ../../data/out-0 }
+    transform: ./skip.ts
+  - name: upper
+    file: { dir: ../../data/out-1 }
+    transform: ./upper.ts
+  - name: added
+    file: { dir: ../../data/out-2 }
+`,
+        "channels/adt/skip.ts": "export default () => null;\n",
+      });
+      const project = await loadProject(root);
+      const raw = await storeOn(database, project.databaseFile);
+      const keys = new LocalKeyProvider([["k1", Buffer.alloc(KEY_BYTES, 5)]], "k1");
+      const store = new EncryptedStore(raw, keys);
+      const audit = new AuditLog(store, { actor: "tester" });
+      const { id } = await store.receive("adt", bytes("alpha"));
+      // Stored when the channel had the first two destinations only.
+      await store.completeTransform(
+        id,
+        { byDestination: [{ outputs: [] }, { outputs: [bytes("ALPHA")] }] },
+        2,
+      );
+      const next = await store.nextDelivery("adt", 1);
+      await store.markDelivered(next?.id ?? -1);
+      expect(await replayMessages([id], { project, store, audit, resend: true })).toEqual([
+        { id, outcome: "resent", status: "transformed", queued: 1, superseded: 0, notStored: 1 },
+      ]);
+      const current = (await store.deliveries(id)).filter((d) => d.generation === 1);
+      expect(current.map((d) => [d.destination, d.seq, d.status])).toEqual([
+        [0, -1, "filtered"],
+        [1, 0, "pending"],
+      ]);
+      expect(await store.outputs(id, 0)).toEqual([]);
+      expect(texts(await store.outputs(id, 1))).toEqual(["ALPHA"]);
+      expect(await store.outputs(id, 2)).toEqual([]);
+      const entries = await store.auditEntries({ limit: 10 });
+      expect(entries.items.find((entry) => entry.action === "resend")?.detail).toMatchObject({
+        queued: 1,
+        notStored: 1,
+      });
+    });
+
     it("drops a message's content once its last delivery is delivered and the rest were filtered", async () => {
       const root = await makeProject(FILES);
       const store = await storeOn(database, (await loadProject(root)).databaseFile);
@@ -800,17 +856,83 @@ destinations:
     ]);
   });
 
-  it("queues the first destination's outputs for every one when a destination was added since", async () => {
+  it("sends a destination added since nothing, and the others their own outputs", async () => {
     const { store, results } = await resendWith([bytes("a")], 1);
-    expect(results).toMatchObject([{ outcome: "resent", queued: 2 }]);
+    expect(results).toMatchObject([{ outcome: "resent", queued: 1, notStored: 1 }]);
+    expect(
+      store.deliveryRows
+        .filter((d) => d.generation === 1)
+        .map((d) => [d.destination, d.status, text(d.body)]),
+    ).toEqual([[0, "pending", "a"]]);
+  });
+
+  const THREE = `${TWO}  - file: { dir: out-2 }\n`;
+
+  it("never sends one destination's outputs to another: a filtered one stays filtered, one added since gets nothing", async () => {
+    const { store, results } = await resendWith(
+      { byDestination: [{ outputs: [] }, { outputs: [bytes("B")] }] },
+      2,
+      THREE,
+    );
+    expect(results).toMatchObject([{ outcome: "resent", queued: 1, notStored: 1 }]);
+    expect(
+      store.deliveryRows
+        .filter((d) => d.generation === 1)
+        .map((d) => [d.destination, d.seq, d.status, text(d.body)]),
+    ).toEqual([
+      [0, -1, "filtered", ""],
+      [1, 0, "pending", "B"],
+    ]);
+  });
+
+  it("sends each of two destinations its own outputs when a third was added since", async () => {
+    const { store, results } = await resendWith(
+      { byDestination: [{ outputs: [bytes("A")] }, { outputs: [bytes("B")] }] },
+      2,
+      THREE,
+    );
+    expect(results).toMatchObject([{ outcome: "resent", queued: 2, notStored: 1 }]);
     expect(
       store.deliveryRows
         .filter((d) => d.generation === 1)
         .map((d) => [d.destination, text(d.body)]),
     ).toEqual([
-      [0, "a"],
-      [1, "a"],
+      [0, "A"],
+      [1, "B"],
     ]);
+  });
+
+  it("names the destinations with nothing stored in the audit entry and the command's output", async () => {
+    const project = await loadProject(await makeProject({ "channels/adt/channel.yaml": THREE }));
+    const store = new MemoryStore();
+    const audit = new AuditLog(store, { actor: "tester" });
+    const { id } = await store.receive("adt", bytes("alpha"));
+    await store.completeTransform(
+      id,
+      { byDestination: [{ outputs: [] }, { outputs: [bytes("B")] }] },
+      2,
+    );
+    for (const row of store.deliveryRows) if (row.status === "pending") row.status = "delivered";
+    let printed = "";
+    const context: OperatorContext = {
+      project,
+      store,
+      audit,
+      json: false,
+      out: (line) => {
+        printed += line;
+      },
+      err: () => undefined,
+      now: Date.now,
+    };
+    expect(await replayCommand(context, [id], true)).toBe(EXIT.ok);
+    expect(printed).toBe(
+      `message ${id}: resent: 1 delivery queued; 1 destination with nothing stored for this message was sent nothing (not-stored)\n`,
+    );
+    expect(store.auditRows.find((entry) => entry.action === "resend")?.detail).toMatchObject({
+      queued: 1,
+      notStored: 1,
+    });
   });
 
   it("refuses a resend when no destination has an output to send", async () => {

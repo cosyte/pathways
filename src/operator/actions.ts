@@ -62,6 +62,11 @@ export type ReplayResult =
       readonly queued: number;
       /** Earlier deliveries that had failed for good, now cleared by the replay. */
       readonly superseded: number;
+      /**
+       * A resend: destinations with nothing stored for the message's last transform (added to the
+       * channel since), which were sent nothing. Absent when there were none.
+       */
+      readonly notStored?: number;
       /** When the replayed transform failed: what happened, without the error's own text. */
       readonly failure?: string;
     }
@@ -176,13 +181,11 @@ export async function replayMessages(
           message.generation,
           channel.destinations.length,
         );
-        const same = byDestination === undefined ? undefined : sameForEvery(byDestination);
+        const same = sameForEvery(byDestination);
         if (same !== undefined) {
           // Every destination has the same outputs: queued as one list, as a store always took them.
           outputs = same;
           byDestination = undefined;
-        } else if (byDestination === undefined) {
-          outputs = await store.outputs(id);
         }
       }
       const sends =
@@ -335,20 +338,23 @@ async function workerFor(
  * What a resend sends to each destination: the outputs stored for it in the message's current
  * generation, so a destination transform changed since is not run again. A destination whose
  * transform filtered the message stays filtered, and one whose transform failed keeps its failure.
- * `undefined` when a destination has no delivery of that generation (it was added since): the
- * resend then queues the first destination's outputs for every destination, as it always has.
+ * A destination with no delivery of that generation (added to the channel since) is `notStored`
+ * and gets nothing: a destination is never sent another destination's outputs.
  */
 async function storedByDestination(
   store: MessageStore,
   id: number,
   generation: number,
   destinations: number,
-): Promise<DestinationOutcome[] | undefined> {
+): Promise<DestinationOutcome[]> {
   const current = (await store.deliveries(id)).filter((d) => d.generation === generation);
   const outcomes: DestinationOutcome[] = [];
   for (let destination = 0; destination < destinations; destination += 1) {
     const rows = current.filter((d) => d.destination === destination);
-    if (rows.length === 0) return undefined;
+    if (rows.length === 0) {
+      outcomes.push({ notStored: true });
+      continue;
+    }
     const none = rows.find((d) => d.seq < 0);
     if (none === undefined) {
       outcomes.push({ outputs: await store.outputs(id, destination) });
@@ -392,6 +398,9 @@ function describeRequeue(
     status: recorded.status,
     queued: recorded.queued,
     superseded: recorded.superseded,
+    ...(recorded.notStored === undefined || recorded.notStored === 0
+      ? {}
+      : { notStored: recorded.notStored }),
   };
   return failure === undefined ? done : { ...done, failure: describeFailure(failure, channel) };
 }

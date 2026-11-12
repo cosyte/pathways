@@ -383,6 +383,11 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
     // A row with no output still holds a body: an empty one, passed through the codec like any.
     const empty = async (): Promise<Uint8Array> => this.#codec.storeBody(new Uint8Array());
     for (const outcome of outcomes) {
+      if ("notStored" in outcome) {
+        // No row is written for it, so there is nothing to encode.
+        stored.push({ notStored: true });
+        continue;
+      }
       if ("failure" in outcome) {
         stored.push({
           failure: await this.#codec.storeText(outcome.failure),
@@ -520,22 +525,27 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
   }
 
   /**
-   * Records a replay or a resend, its outputs (each once, for every destination) and any failure
-   * passed through the codec.
+   * Records a replay or a resend, its outputs (each once, for every destination), or each
+   * destination's own, and any failure passed through the codec.
    */
   async requeue(messageId: number, request: RequeueRequest, actor: string): Promise<RequeueResult> {
     const { failure, byDestination } = request;
-    return this.#stored(request.outputs, async (outputs) => {
-      const sealed = {
-        ...request,
-        outputs,
-        failure: failure === undefined ? undefined : await this.#codec.storeText(failure),
-      };
-      if (byDestination === undefined) return this.#inner.requeue(messageId, sealed, actor);
+    const sealedFailure = async (): Promise<string | undefined> =>
+      failure === undefined ? undefined : this.#codec.storeText(failure);
+    if (byDestination !== undefined) {
+      // Each destination's own outputs take the place of the list, which is not stored: not encoded.
+      const sealed = { ...request, outputs: [], failure: await sealedFailure() };
       return this.#storedByDestination(byDestination, (stored) =>
         this.#inner.requeue(messageId, { ...sealed, byDestination: stored }, actor),
       );
-    });
+    }
+    return this.#stored(request.outputs, async (outputs) =>
+      this.#inner.requeue(
+        messageId,
+        { ...request, outputs, failure: await sealedFailure() },
+        actor,
+      ),
+    );
   }
 
   /** Clears a failed message: statuses only. */
