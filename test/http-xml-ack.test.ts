@@ -348,7 +348,10 @@ describe("an http destination's ack setting", () => {
 
   it("is read from the channel, and the destination it builds settles by the acknowledgement", async () => {
     const r = await serve(answer(ack("AR")));
-    const root = await makeProject(channel(`http: { url: "${r.url}", plaintext: true, ack: xml }`));
+    // The receiver is on loopback, which the destination connects to only when allowNetworks names it.
+    const root = await makeProject(
+      channel(`http: { url: "${r.url}", plaintext: true, allowNetworks: [127.0.0.1], ack: xml }`),
+    );
     const [config] = (await loadProject(root)).channels;
     expect(config?.destinations[0]).toMatchObject({ kind: "http", ack: "xml" });
     const { logger } = captureLogger();

@@ -3345,7 +3345,8 @@ export class Store implements MessageStore, ContentStore, MetaStore {
         for (const handOff of handOffs) {
           const { channel, body, options } = handOff;
           const at = this.now().toISOString();
-          const id = await this.insertMessage(tx, {
+          const key = options.idempotencyKey;
+          const row = (claim: string | null): Insertable<MessagesTable> => ({
             channel,
             received_at: at,
             body: blob(body),
@@ -3355,7 +3356,8 @@ export class Store implements MessageStore, ContentStore, MetaStore {
             dedup_key: null,
             duplicate_of: null,
             size: options.size ?? body.byteLength,
-            idempotency_key: options.idempotencyKey ?? null,
+            idempotency_key: key ?? null,
+            idempotency_claim: claim,
             content_hash: options.contentHash ?? null,
             content_dropped_at: null,
             meta:
@@ -3363,6 +3365,14 @@ export class Store implements MessageStore, ContentStore, MetaStore {
               (options.meta === undefined ? null : JSON.stringify(options.meta)),
             ...parentColumns(options),
           });
+          // A handed-over message claims its key as a received one does, so the earliest message
+          // of the target under it holds the claim and a hand-in resumed under it finds that one.
+          // The record above is fenced and written in this transaction, so a hand-off is stored
+          // once; a claim already held (by a hand-in through `receive`) leaves this one unclaimed
+          // and still stored, as a hand-in that is not resumed is.
+          const id =
+            (key === undefined ? undefined : await this.insertClaiming(tx, row(key))) ??
+            (await this.insertMessage(tx, row(null)));
           await this.insertTags(tx, id, channel, options.metaTags ?? []);
           ids.push(id);
         }

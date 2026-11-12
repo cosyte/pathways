@@ -133,6 +133,13 @@ at its default isolation level:
 - A resumed hand-in whose claim is free still looks for an earlier message under its key, so it finds
   one stored before claims were, or by an older Pathways running on the same database.
 - A message that retention deleted frees its key: handed in again after that, it is stored again.
+- Each piece of a batch is handed in under a key of its own, so each piece claims its key: a batch
+  handed in again, on the same node or another, stores no piece twice, and the hand-in that yields
+  gets no `received` or `settled` event of its own.
+- A message one channel hands to another (a channel destination or `ctx.route`) claims its key on
+  the target channel, as a received one does. The hand-off is recorded in the same transaction, so
+  it is stored once; when another message of the target already holds the key's claim, it is stored
+  without one.
 
 Schema step `0014-idempotency-claims` adds the column and the index, and gives each key's claim to
 the earliest message of its channel stored under it. A database where an older Pathways stored two
