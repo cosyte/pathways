@@ -22,5 +22,6 @@ destinations:
       # an https:// URL, which needs no plaintext line.
       plaintext: true
       # The receiver is on this machine, an address the destination refuses unless it is named
-      # here. A real endpoint on another network needs no allowNetworks line.
+      # here. A real endpoint on the public internet needs no allowNetworks line; one on a private
+      # network, such as 10.20.0.0/16, needs that network named here.
       allowNetworks: [127.0.0.1]
