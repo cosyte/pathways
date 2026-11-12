@@ -5,9 +5,8 @@ import { connect, createServer } from "node:net";
 import { userInfo } from "node:os";
 import { join } from "node:path";
 
-import { utils } from "ssh2";
-
 import { makeProject } from "./helpers.js";
+import { ed25519KeyPair } from "./ssh-keys.js";
 
 // OpenSSH's own server for the SFTP suites, started on the loopback as this user, with throwaway
 // keys made for the run and synthetic files only. PATHWAYS_TEST_SSHD names the sshd binary (an
@@ -93,8 +92,8 @@ export async function startSshd(options: SshdOptions = {}): Promise<Sshd> {
   const { extra = [], ownSftpServer = false } = options;
   const home = await makeProject({});
   const port = await freePort();
-  const host = utils.generateKeyPairSync("ed25519");
-  const user = utils.generateKeyPairSync("ed25519");
+  const host = ed25519KeyPair();
+  const user = ed25519KeyPair();
   await writeFile(join(home, "host_ed25519"), host.private, { mode: 0o600 });
   await writeFile(join(home, "authorized_keys"), `${user.public}\n`, { mode: 0o600 });
   const sftpPid = join(home, "sftp-server.pid");
