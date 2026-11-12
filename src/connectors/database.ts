@@ -1,6 +1,7 @@
 import { CompiledQuery, Kysely, type Dialect } from "kysely";
 
-import type { StorageKind } from "../config/schema.js";
+import type { DatabaseStorage, StorageKind } from "../config/schema.js";
+import { dialectFor, type DialectOptions } from "../storage/dialects.js";
 import { bindParameters, type Statement, type StatementError } from "./sql-statement.js";
 import { DeliveryRejected, type DestinationConnector, type OutgoingMessage } from "./types.js";
 
@@ -78,6 +79,38 @@ const SQLSERVER_REJECTED = [
 
 /** Reads a delivery's body as UTF-8, refusing bytes that are not. */
 const UTF8 = new TextDecoder("utf-8", { fatal: true });
+
+/**
+ * The dialect a database destination runs on, with its own small pool:
+ *
+ * - every value bound by the server, apart from the SQL text: PostgreSQL's extended protocol
+ *   (`pg`), a server-side prepared statement on MySQL and MariaDB (mysql2's `execute`, never its
+ *   `query`, which escapes values into the SQL on the client), `sp_executesql` with typed
+ *   parameters on SQL Server (`tedious`), and SQLite's own binding (`better-sqlite3`);
+ * - on SQL Server, a request timeout a second past `statementTimeoutMs`, so the server's own limit,
+ *   with its code, comes first;
+ * - a SQLite file opened on the first delivery, so one that never delivers holds nothing open.
+ *
+ * @throws {ConfigError} as {@link dialectFor} does, naming `where`.
+ * @example
+ * ```ts
+ * const dialect = await destinationDialect(database, { env: secrets, where, statementTimeoutMs: 10_000 });
+ * ```
+ */
+export function destinationDialect(
+  database: DatabaseStorage,
+  options: Pick<DialectOptions, "env" | "importDriver" | "where"> & {
+    readonly statementTimeoutMs: number;
+  },
+): Promise<Dialect> {
+  const { statementTimeoutMs, ...rest } = options;
+  return dialectFor(database, {
+    ...rest,
+    requestTimeoutMs: statementTimeoutMs + 1_000,
+    openLazily: true,
+    bindOnServer: true,
+  });
+}
 
 /**
  * Runs one parameterised statement per delivery, in a transaction of its own, on a database server

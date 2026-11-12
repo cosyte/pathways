@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
+import { rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { Kysely, sql, type Dialect } from "kysely";
@@ -9,19 +9,21 @@ import { ConfigError, loadProject } from "../src/config/load.js";
 import type {
   DatabaseDestination as DatabaseConfig,
   DatabaseStorage,
+  ServerStorage,
 } from "../src/config/schema.js";
 import type { Env } from "../src/connectors/endpoint.js";
 import {
   DatabaseDeliveryError,
   DatabaseDestination,
   databaseFailure,
+  destinationDialect,
   timeoutStatement,
 } from "../src/connectors/database.js";
 import { parseStatement } from "../src/connectors/sql-statement.js";
 import { DeliveryRejected } from "../src/connectors/types.js";
 import { connectorsFor, Engine } from "../src/engine/engine.js";
 import { secretUses } from "../src/secrets/sources.js";
-import { dialectFor } from "../src/storage/dialects.js";
+import { boundOnServer, dialectFor } from "../src/storage/dialects.js";
 import { Store } from "../src/storage/store.js";
 import {
   available,
@@ -45,6 +47,13 @@ afterAll(closeAdmins);
 /** A synthetic output: no real patient, and text a naive substitution would break on. */
 const OUTPUT =
   "MSH|^~\\&|LAB|SYN|||20261111||ORU^R01|SYN-0001|P|2.5\rOBX|1|ST|NOTE||it's :seq; -- not SQL";
+
+/**
+ * An output that ends a MySQL string literal written by the client under NO_BACKSLASH_ESCAPES:
+ * mysql2's own escaping turns its quote into `\'`, which that mode reads as a backslash and the end
+ * of the literal, so the rest would run as SQL.
+ */
+const ESCAPES_A_LITERAL = "x', (select @@version)) -- ";
 
 /** A database for one test: a SQLite file in a fresh folder, or a fresh database on a server. */
 async function target(database: TestDatabase): Promise<{ storage: DatabaseStorage; env: Env }> {
@@ -161,6 +170,37 @@ for (const database of TEST_DATABASES) {
         { message_id: 7, seq: 1, body: "" },
       ]);
     });
+
+    it.skipIf(database.kind !== "mysql")(
+      "binds each value on the server, so NO_BACKSLASH_ESCAPES changes nothing it writes",
+      async () => {
+        const { storage, env } = await target(database);
+        const db = await connect(storage, env);
+        await createTables(db, storage.kind);
+        // One connection, so the session set here is the one the destination writes on.
+        const one: DatabaseStorage = {
+          ...(storage as ServerStorage),
+          pool: { max: 1, idleTimeoutMs: 60_000 },
+        };
+        const dialect = await destinationDialect(one, { env, statementTimeoutMs: 10_000 });
+        const session = new Kysely<unknown>({ dialect });
+        await sql`set session sql_mode = 'STRICT_TRANS_TABLES,NO_BACKSLASH_ESCAPES'`.execute(
+          session,
+        );
+        const mode = await sql<{ mode: string }>`select @@session.sql_mode as mode`.execute(
+          session,
+        );
+        expect(mode.rows[0]?.mode).toContain("NO_BACKSLASH_ESCAPES");
+        const sink = await destination(one, env, INSERT, { dialect });
+        await sink.deliver({ messageId: 8, seq: 0, body: body(ESCAPES_A_LITERAL) });
+        await sink.deliver({ messageId: 8, seq: 1, body: body(OUTPUT) });
+        const written = (await rows(db)).map((row) => Buffer.from(row.body, "utf8"));
+        expect(written).toEqual([
+          Buffer.from(ESCAPES_A_LITERAL, "utf8"),
+          Buffer.from(OUTPUT, "utf8"),
+        ]);
+      },
+    );
 
     it("rejects a duplicate key and a value of the wrong type for good, naming only the code", async () => {
       const { storage, env } = await target(database);
@@ -510,7 +550,7 @@ describe("building a database destination at start", () => {
     await writeFile(join(root, "channels/results/insert.sql"), "select :mrn");
     const { logger } = captureLogger();
     await expect(
-      connectorsFor(loaded.channels[0] as never, { now: Date.now, logger, env: {} }),
+      connectorsFor(loaded.channels[0] as never, { now: Date.now, logger, env: {}, root }),
     ).rejects.toThrow(
       new ConfigError([
         "channels/results/channel.yaml: destinations.0.database.statement: line 1: :mrn is not a parameter Pathways binds; use :messageId, :seq, :output",
@@ -534,9 +574,52 @@ describe("building a database destination at start", () => {
     const loaded = await loadProject(root);
     const { logger } = captureLogger();
     await expect(
-      connectorsFor(loaded.channels[0] as never, { now: Date.now, logger, env: {} }),
+      connectorsFor(loaded.channels[0] as never, { now: Date.now, logger, env: {}, root }),
     ).rejects.toThrow(
       "channels/results/channel.yaml: destinations.0.database.postgres.url: the environment variable RESULTS_DB_URL is not set",
+    );
+  });
+
+  it("refuses at start a statement file a link moved outside the project after it loaded", async () => {
+    const outside = await makeProject({ "sql/insert.sql": INSERT });
+    const root = await makeProject({
+      "channels/results/channel.yaml": [
+        "source:",
+        "  file: { dir: ./in }",
+        "destinations:",
+        "  - database:",
+        "      sqlite: { file: ./out.db }",
+        "      statement: ./sql/insert.sql",
+        "",
+      ].join("\n"),
+      "channels/results/real/insert.sql": INSERT,
+    });
+    // A junction on Windows, where a symbolic link needs a privilege; elsewhere the type is ignored.
+    const link = join(root, "channels", "results", "sql");
+    await symlink(join(root, "channels", "results", "real"), link, "junction");
+    const loaded = await loadProject(root);
+    await rm(link);
+    await symlink(join(outside, "sql"), link, "junction");
+    const store = await Store.open(loaded.databaseFile);
+    opened.push({ stop: () => store.close() });
+    const engine = new Engine({ project: loaded, store, logger: captureLogger().logger, env: {} });
+    await expect(engine.start()).rejects.toEqual(
+      new ConfigError([
+        "channels/results/channel.yaml: destinations.0.database.statement: the file is outside the project; keep statement files inside it",
+      ]),
+    );
+  });
+
+  it("refuses a database destination when it is not told the project's folder", async () => {
+    const { root } = await project(INSERT);
+    const loaded = await loadProject(root);
+    const { logger } = captureLogger();
+    await expect(
+      connectorsFor(loaded.channels[0] as never, { now: Date.now, logger, env: {} }),
+    ).rejects.toEqual(
+      new ConfigError([
+        "channels/results/channel.yaml: destinations.0.database.statement: the project's folder is not known, so the file cannot be checked to be inside it",
+      ]),
     );
   });
 
@@ -697,5 +780,101 @@ describe("a database destination's failures", () => {
     expect(timeoutStatement("mysql", 200)).toBe("set session innodb_lock_wait_timeout = 1");
     expect(timeoutStatement("sqlserver", 2_000)).toBe("set lock_timeout 2000");
     expect(timeoutStatement("sqlite", 2_000)).toBeUndefined();
+  });
+});
+
+describe("a MySQL or MariaDB destination's values", () => {
+  type Callback = (error: unknown, result?: unknown) => void;
+
+  /** A stand-in for mysql2's pool, recording what its one connection is sent. */
+  function standIn(failure: unknown = null) {
+    const calls: { how: string; sql: string; values: unknown }[] = [];
+    const released: boolean[] = [];
+    let ended = 0;
+    const result = { affectedRows: 1, changedRows: 0, insertId: 0 };
+    const connection = {
+      threadId: 7,
+      query(sql: string, values: unknown, callback: Callback) {
+        calls.push({ how: "query", sql, values });
+        callback(null, result);
+      },
+      execute(sql: string, values: unknown, callback: Callback) {
+        calls.push({ how: "execute", sql, values });
+        callback(null, result);
+      },
+      release() {
+        released.push(this === connection);
+      },
+    };
+    const pool = {
+      getConnection(callback: Callback) {
+        callback(failure, failure === null ? connection : undefined);
+      },
+      end(callback: Callback) {
+        ended += 1;
+        callback(null);
+      },
+    };
+    return { calls, released, connection, pool, ended: () => ended };
+  }
+
+  const STORAGE: DatabaseStorage = {
+    kind: "mysql",
+    url: { env: "URL" },
+    tls: undefined,
+    plaintext: true,
+    pool: { max: 1, idleTimeoutMs: 1_000 },
+    connectTimeoutMs: 1_000,
+  };
+  const URL_ENV = { URL: "mysql://synthetic:synthetic@127.0.0.1/results" };
+
+  it("sends every value apart from the SQL, as a prepared statement, never through mysql2's query", async () => {
+    const { calls, released, pool, ended } = standIn();
+    const dialect = await destinationDialect(STORAGE, {
+      env: URL_ENV,
+      importDriver: () => Promise.resolve({ createPool: () => pool }),
+      statementTimeoutMs: 10_000,
+    });
+    const sink = new DatabaseDestination({
+      kind: "mysql",
+      dialect,
+      statement: parseStatement(INSERT, "mysql"),
+      statementTimeoutMs: 10_000,
+    });
+    await sink.deliver({ messageId: 7, seq: 0, body: body(ESCAPES_A_LITERAL) });
+    expect(calls).toEqual([
+      { how: "query", sql: "begin", values: [] },
+      { how: "query", sql: "set session innodb_lock_wait_timeout = 10", values: [] },
+      {
+        how: "execute",
+        sql: "insert into results (message_id, seq, body) values (?, ?, ?)",
+        values: [7, 0, ESCAPES_A_LITERAL],
+      },
+      { how: "query", sql: "commit", values: [] },
+    ]);
+    expect(released).toEqual([true]);
+    await sink.stop();
+    expect(ended()).toBe(1);
+  });
+
+  it("hands on the connection's other fields, and a failure to connect, as they are", async () => {
+    const { connection, pool } = standIn();
+    const wrapped = boundOnServer(pool as never);
+    const handed = await new Promise<{ threadId: number }>((resolve) => {
+      wrapped.getConnection((_error, each) => {
+        resolve(each);
+      });
+    });
+    expect(handed.threadId).toBe(connection.threadId);
+    expect(handed).not.toBe(connection);
+
+    const refused = Object.assign(new Error("synthetic"), { code: "ECONNREFUSED" });
+    const failing = boundOnServer(standIn(refused).pool as never);
+    const outcome = await new Promise<unknown[]>((resolve) => {
+      failing.getConnection((error, each) => {
+        resolve([error, each]);
+      });
+    });
+    expect(outcome).toEqual([refused, undefined]);
   });
 });

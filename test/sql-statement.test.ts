@@ -188,6 +188,21 @@ describe("parseStatement", () => {
     expect(refusal("select E'a\\'")).toBe("line 1: a string literal that is never closed");
   });
 
+  it("reads -- as a comment on MySQL and MariaDB only before a space or a control character", () => {
+    expect(parseStatement("select 1--:seq", "mysql")).toEqual({
+      sql: "select 1--?",
+      parameters: ["seq"],
+    });
+    for (const after of [" ", "\t", "\r", "\u0001"]) {
+      expect(parseStatement(`select 1--${after}:seq\n`, "mysql").parameters).toEqual([]);
+    }
+    expect(parseStatement("select 1--", "mysql").parameters).toEqual([]);
+    expect(parseStatement("select 1--!:seq", "mysql").parameters).toEqual(["seq"]);
+    for (const kind of ["postgres", "sqlserver", "sqlite"] as const) {
+      expect(parseStatement("select 1--:seq", kind).parameters).toEqual([]);
+    }
+  });
+
   it("reads a backslash as itself in a standard PostgreSQL string, and in an identifier ending in e", () => {
     expect(parseStatement("select 'a\\', :seq", "postgres").parameters).toEqual(["seq"]);
     expect(parseStatement("select some'a\\', :seq", "postgres").parameters).toEqual(["seq"]);
@@ -269,11 +284,6 @@ describe("readStatement", () => {
         new StatementError("the file is outside the project; keep statement files inside it"),
       );
     }
-    // Without a project, any file.
-    await expect(readStatement(join(outside, "insert.sql"), "sqlite")).resolves.toEqual({
-      sql: "select 1",
-      parameters: [],
-    });
   });
 
   it("refuses a file that is missing, or a folder", async () => {

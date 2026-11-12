@@ -46,7 +46,13 @@ A statement names each value it binds as `:name`:
 A name used twice binds the same value twice. Any other `:name` stops `pathways validate` and
 `pathways start` with the file's line, as do a file that is missing or outside the project (a
 symbolic link is followed first), a file with no statement, and a file with a second statement after
-a `;`. One `;` may end the statement.
+a `;`. One `;` may end the statement. `pathways start` reads the file again and checks again that it
+is inside the project, so a link moved after the project loaded cannot lead it to a file elsewhere.
+
+SQL Server also runs two statements written one after the other with no `;` between them. Telling
+where one ends takes a T-SQL parser, which the tokeniser is not, so such a file is not refused there.
+It is your own SQL, and it changes nothing a value can do: every value is still bound, never read as
+SQL.
 
 Pathways reads the file with its own tokeniser, so a `:name` inside a string literal, a quoted
 identifier or a comment is left alone, and so is a cast such as `:seq::int` on PostgreSQL. It also
@@ -54,7 +60,26 @@ reads each database's own quoting: dollar quotes and `E'...'` strings on Postgre
 backslash escapes and `#` comments on MySQL and MariaDB, and `[brackets]` on SQL Server and SQLite.
 Each `:name` is rewritten to the driver's placeholder (`$1` on PostgreSQL, `?` on MySQL, MariaDB and
 SQLite, `@1` on SQL Server), so the driver's own placeholder is refused in the file: it would shift
-what each parameter binds.
+what each parameter binds. On MySQL and MariaDB, `--` starts a comment only before a space or a
+control character, as those servers read it, so `1--:seq` binds `:seq` there.
+
+## How each database binds the values
+
+The values go to the server apart from the SQL text, and the server binds them:
+
+| Database       | How the values are sent                                                                   |
+| -------------- | ----------------------------------------------------------------------------------------- |
+| PostgreSQL     | `pg`'s extended query protocol: the statement is prepared, and the values are bound to it |
+| MySQL, MariaDB | a server-side prepared statement, mysql2's `execute`                                      |
+| SQL Server     | `sp_executesql`, with each value a typed parameter (`tedious`)                            |
+| SQLite         | bound to the prepared statement by the bundled driver (`better-sqlite3`)                  |
+
+On MySQL and MariaDB, mysql2's `query` would escape each value and write it into the SQL on the
+client, and a server whose `sql_mode` includes `NO_BACKSLASH_ESCAPES` reads that escaping
+differently. Pathways never sends a statement with values through `query`, so the server's
+`sql_mode` changes nothing a value can do, and an output's backslashes, such as HL7's `^~\&`, are
+stored as they are. The statement must be one MySQL or MariaDB can prepare: `insert`, `update`,
+`delete`, `replace`, `select` and `call` all can.
 
 ## Write each output once
 

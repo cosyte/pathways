@@ -67,7 +67,8 @@ const SPACE = /\s/;
  *
  * What the tokeniser passes over, for each kind:
  *
- * - every kind: `'...'` literals (`''` inside), `"..."` (`""` inside), `--` and block comments;
+ * - every kind: `'...'` literals (`''` inside), `"..."` (`""` inside), `--` and block comments
+ *   (on MySQL and MariaDB, `--` only before a space or a control character, as those servers read it);
  * - PostgreSQL: nested block comments, `E'...'` with backslash escapes, `$$...$$` and
  *   `$tag$...$tag$` dollar quotes, and `::` casts;
  * - MySQL and MariaDB: backslash escapes in `'...'` and `"..."`, `` `...` `` identifiers, and `#`
@@ -176,7 +177,11 @@ function placeholder(kind: StorageKind, name: string, named: string[], numbered:
 function commentEnd(text: string, at: number, kind: StorageKind): number | undefined {
   const char = text.charAt(at);
   const next = text.charAt(at + 1);
-  if ((char === "-" && next === "-") || (char === "#" && kind === "mysql")) {
+  // MySQL and MariaDB start a `--` comment only before a space or a control character: `1--1` is
+  // two minus signs there.
+  const dashes =
+    char === "-" && next === "-" && (kind !== "mysql" || text.charCodeAt(at + 2) <= 0x20);
+  if (dashes || (char === "#" && kind === "mysql")) {
     const end = text.indexOf("\n", at);
     return end < 0 ? text.length : end + 1;
   }
@@ -295,8 +300,9 @@ export function bindParameters(
 }
 
 /**
- * Reads and parses a statement file for a database of `kind`. With `root`, the file, once its
- * symbolic links are followed, must be inside that folder: a statement comes from the project.
+ * Reads and parses a statement file for a database of `kind`. The file, once its symbolic links are
+ * followed, must be inside `root`: a statement comes from the project. The file read is the one the
+ * links led to when they were followed.
  *
  * @throws {StatementError} when the file is missing, outside `root`, or not one statement
  *   {@link parseStatement} reads: never any other error.
@@ -308,23 +314,21 @@ export function bindParameters(
 export async function readStatement(
   file: string,
   kind: StorageKind,
-  root?: string,
+  root: string,
 ): Promise<Statement> {
   let real: string;
   let text: string;
-  let project: string | undefined;
+  let project: string;
   try {
     real = await realpath(file);
+    project = await realpath(root);
     text = await readFile(real, "utf8");
-    project = root === undefined ? undefined : await realpath(root);
   } catch {
     throw new StatementError("the file does not exist or cannot be read");
   }
-  if (project !== undefined) {
-    const inside = relative(project, real);
-    if (inside.startsWith("..") || isAbsolute(inside)) {
-      throw new StatementError("the file is outside the project; keep statement files inside it");
-    }
+  const inside = relative(project, real);
+  if (inside.startsWith("..") || isAbsolute(inside)) {
+    throw new StatementError("the file is outside the project; keep statement files inside it");
   }
   return parseStatement(text, kind);
 }

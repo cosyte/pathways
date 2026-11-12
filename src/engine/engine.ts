@@ -24,7 +24,7 @@ import {
   resolveHeaders,
   type Env,
 } from "../connectors/endpoint.js";
-import { DatabaseDestination } from "../connectors/database.js";
+import { DatabaseDestination, destinationDialect } from "../connectors/database.js";
 import { FileDestination, FileSource } from "../connectors/file.js";
 import { KnownHosts, pinnedKey } from "../connectors/known-hosts.js";
 import { SftpLocation } from "../connectors/sftp.js";
@@ -32,7 +32,7 @@ import { HttpDestination, HttpSource } from "../connectors/http.js";
 import { RedirectHeld, RetryableError } from "../connectors/http-core.js";
 import { MllpDestination, MllpSource } from "../connectors/mllp.js";
 import { loadMllpClientTls, loadMllpServerTls } from "../connectors/mllp-tls.js";
-import { readStatement, type StatementError } from "../connectors/sql-statement.js";
+import { readStatement, StatementError } from "../connectors/sql-statement.js";
 import { loadClientTls } from "../connectors/tls.js";
 import {
   DeliveryRejected,
@@ -48,7 +48,6 @@ import type { ChannelContext } from "../extensions/types.js";
 import { AuditLog, auditEvent } from "../operator/audit.js";
 import { resolveSecrets, type Secrets, secretsOf } from "../secrets/resolve.js";
 import { recordRetention, runRetention, type RetentionReport } from "../operator/retention.js";
-import { dialectFor } from "../storage/dialects.js";
 import { copiesBodies, markCopiesBodies, release } from "../storage/ownership.js";
 import {
   channelStateStore,
@@ -313,6 +312,11 @@ export interface ConnectorContext {
   readonly dryRun?: boolean | undefined;
   /** The secrets a start resolved; `env` alone without them. */
   readonly secrets?: Secrets | undefined;
+  /**
+   * The project's folder. A database destination's statement file must be inside it, once its
+   * symbolic links are followed, when it is read here; without it, a database destination is refused.
+   */
+  readonly root?: string | undefined;
 }
 
 /**
@@ -530,7 +534,14 @@ export async function connectorsFor(
         const { database } = destination;
         let statement;
         try {
-          statement = await readStatement(destination.statement, database.kind);
+          // Checked again here, on the read whose SQL runs: a link on its path may have moved since
+          // the project loaded.
+          if (context.root === undefined) {
+            throw new StatementError(
+              "the project's folder is not known, so the file cannot be checked to be inside it",
+            );
+          }
+          statement = await readStatement(destination.statement, database.kind, context.root);
         } catch (error) {
           // Only a StatementError, whose text names a line and never the SQL.
           throw new ConfigError([`${where}.statement: ${(error as StatementError).message}`]);
@@ -538,13 +549,10 @@ export async function connectorsFor(
         destinations.push(
           new DatabaseDestination({
             kind: database.kind,
-            dialect: await dialectFor(database, {
+            dialect: await destinationDialect(database, {
               env: secrets,
               where: `${where}.${database.kind}`,
-              // A second past the server's own limit, so its timeout, with its code, comes first.
-              requestTimeoutMs: destination.statementTimeoutMs + 1_000,
-              // A destination that never delivers then holds no SQLite file open after it stops.
-              openLazily: true,
+              statementTimeoutMs: destination.statementTimeoutMs,
             }),
             statement,
             expectRows: destination.expectRows,
@@ -879,7 +887,14 @@ export class Engine {
         let connectors: ChannelConnectors;
         try {
           connectors = await (this.options.connectors?.(config) ??
-            connectorsFor(config, { now: this.now, logger, env, secrets, dryRun }));
+            connectorsFor(config, {
+              now: this.now,
+              logger,
+              env,
+              secrets,
+              dryRun,
+              root: project.root,
+            }));
         } catch (error) {
           await hooks.stop();
           throw error;

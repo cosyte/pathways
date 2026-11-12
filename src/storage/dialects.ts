@@ -7,6 +7,8 @@ import {
   MssqlDialect,
   MysqlDialect,
   PostgresDialect,
+  type MysqlPool,
+  type MysqlPoolConnection,
   SqliteDialect,
   type Dialect,
   type SqliteDatabase as KyselySqliteDatabase,
@@ -101,6 +103,13 @@ export interface DialectOptions {
    * holds no file open (Kysely closes only a database it opened). Default false.
    */
   readonly openLazily?: boolean | undefined;
+  /**
+   * MySQL and MariaDB only: run each query that carries values as a server-side prepared statement
+   * (mysql2's `execute`), so the server binds each value and none is ever written into the SQL text.
+   * Default false: mysql2's `query`, which Kysely calls, escapes each value on the client and writes
+   * it into the SQL, and how the server reads that escaping depends on its `sql_mode`.
+   */
+  readonly bindOnServer?: boolean | undefined;
 }
 
 /** The URL schemes each database server's connection URL may use; the first is the one errors name. */
@@ -154,7 +163,7 @@ export async function dialectFor(
     }
     case "mysql": {
       const [mysql2] = await loadDrivers(storage.kind, load, where);
-      return mysqlDialect(mysql2 as Mysql2, storage, url, tls);
+      return mysqlDialect(mysql2 as Mysql2, storage, url, tls, options.bindOnServer === true);
     }
     case "sqlserver": {
       const [tedious, tarn] = await loadDrivers(storage.kind, load, where);
@@ -282,6 +291,7 @@ function mysqlDialect(
   storage: ServerStorage,
   url: URL,
   tls: TlsOptions | undefined,
+  bindOnServer: boolean,
 ): Dialect {
   const pool = mysql2.createPool({
     ...address(url, DEFAULT_PORTS.mysql),
@@ -291,8 +301,56 @@ function mysqlDialect(
     idleTimeout: storage.pool.idleTimeoutMs,
     connectTimeout: storage.connectTimeoutMs,
   });
-  return new MysqlDialect({ pool });
+  return new MysqlDialect({ pool: bindOnServer ? boundOnServer(pool) : pool });
 }
+
+/**
+ * `pool`, with each connection's `query` sending a query that carries values through `execute`: a
+ * prepared statement the server binds the values to, sent apart from the SQL text. Kysely's MySQL
+ * driver calls `query` alone, and mysql2's `query` writes each value, escaped, into the SQL on the
+ * client. A query without values runs as it is.
+ *
+ * @example
+ * ```ts
+ * const dialect = new MysqlDialect({ pool: boundOnServer(mysql2.createPool(options)) });
+ * ```
+ */
+export function boundOnServer(pool: MysqlPool): MysqlPool {
+  return {
+    end: (callback) => {
+      pool.end(callback);
+    },
+    getConnection: (callback) => {
+      pool.getConnection((error, connection) => {
+        // mysql2 passes null when it has a connection.
+        if (error !== null) {
+          callback(error, connection);
+          return;
+        }
+        callback(error, new Proxy(connection, EXECUTING));
+      });
+    },
+  };
+}
+
+/**
+ * What {@link boundOnServer} hands Kysely in place of a connection: the connection itself, whose
+ * `query` with values runs as `execute`, and whose methods run on the connection, never the proxy.
+ */
+const EXECUTING: ProxyHandler<MysqlPoolConnection> = {
+  get(target, key) {
+    const raw = target as MysqlPoolConnection & { execute: MysqlPoolConnection["query"] };
+    if (key === "query") {
+      // Kysely passes a query's values as an array, empty when it has none.
+      return (sql: string, values: unknown[], callback?: Parameters<typeof raw.query>[2]) =>
+        values.length > 0 ? raw.execute(sql, values, callback) : raw.query(sql, values, callback);
+    }
+    const value: unknown = Reflect.get(target, key, target);
+    return typeof value === "function"
+      ? (value as (...args: unknown[]) => unknown).bind(target)
+      : value;
+  },
+};
 
 function sqlServerDialect(
   tedious: Tedious,
