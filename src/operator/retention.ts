@@ -322,7 +322,7 @@ async function runStep(
     let seen = ids.length;
     let batch: readonly number[] = ids;
     if (project.archive !== undefined) {
-      const read = await readBatch(store, ids, options.archiveBytes ?? ARCHIVE_TARGET_BYTES);
+      const read = await readBatch(steps, ids, options.archiveBytes ?? ARCHIVE_TARGET_BYTES);
       seen = read.seen;
       batch = read.records.map((record) => record.id);
       if (read.records.length > 0) {
@@ -346,7 +346,7 @@ async function runStep(
  * A message deleted since it was listed is passed over.
  */
 async function readBatch(
-  store: MessageStore,
+  steps: RetentionStore,
   ids: readonly number[],
   bytes: number,
 ): Promise<{ readonly records: ArchivedMessage[]; readonly seen: number }> {
@@ -355,7 +355,7 @@ async function readBatch(
   let seen = 0;
   for (const id of ids) {
     seen += 1;
-    const record = await archivedMessage(store, id);
+    const record = await archivedMessage(steps, id);
     // Listed a moment ago: another run can have deleted it meanwhile.
     if (record === undefined) continue;
     records.push(record);

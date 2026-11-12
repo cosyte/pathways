@@ -3,6 +3,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 
+import { Kysely } from "kysely";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 
 import { ConfigError, loadProject } from "../src/config/load.js";
@@ -23,6 +24,7 @@ import { AuditLog } from "../src/operator/audit.js";
 import { retentionCommand } from "../src/operator/commands.js";
 import { Engine } from "../src/engine/engine.js";
 import { runRetention, type RetentionOptions } from "../src/operator/retention.js";
+import { dialectFor } from "../src/storage/dialects.js";
 import type { MessageStore, RetentionStore } from "../src/storage/store.js";
 import { available, closeAdmins, dropDatabases, TEST_DATABASES, testStorage } from "./databases.js";
 import { captureLogger, cleanUp, makeProject } from "./helpers.js";
@@ -84,6 +86,25 @@ describe("retention's configuration", () => {
     });
   });
 
+  it("reads the archive folder from an environment reference before it builds the path", async () => {
+    const root = await makeProject({
+      "pathways.yaml":
+        "defaults:\n  retention: { archive: { dir: { env: SYNTHETIC_ARCHIVE_DIR } }, metadata: 30d }\n",
+      "channels/adt/channel.yaml": CHANNEL,
+    });
+    const loaded = await loadProject(root, { env: { SYNTHETIC_ARCHIVE_DIR: "./kept" } });
+    expect(loaded.archive).toEqual({ dir: join(loaded.root, "kept") });
+    const fallback = await makeProject({
+      "pathways.yaml":
+        "defaults:\n  retention: { archive: { dir: { env: SYNTHETIC_ARCHIVE_DIR, default: ./held } } }\n",
+      "channels/adt/channel.yaml": CHANNEL,
+    });
+    expect((await loadProject(fallback, { env: {} })).archive).toEqual({
+      dir: join(fallback, "held"),
+    });
+    await expect(loadProject(root, { env: {} })).rejects.toThrow(ConfigError);
+  });
+
   it("refuses a metadata clock shorter than the content clock, in pathways.yaml or a channel", async () => {
     await expect(project("{ content: 30d, metadata: 7d }")).rejects.toThrow(
       /pathways\.yaml: retention\.metadata: .* is shorter than retention\.content/,
@@ -120,7 +141,10 @@ describe("an archive", () => {
     duplicateOf: null,
     contentHash: null,
     contentDroppedAt: null,
+    dedupKey: null,
+    idempotencyKey: null,
     error: null,
+    meta: null,
     body: Buffer.from("SYNTHETIC").toString("base64"),
     outputs: [],
     deliveries: [],
@@ -218,6 +242,21 @@ describe("an archive", () => {
     expect(await code(gzipSync("{}"))).toBe("ERR_PATHWAYS_ARCHIVE_FORMAT");
     expect(await code(gzipSync("not json\n{}\n"))).toBe("ERR_PATHWAYS_ARCHIVE_FORMAT");
     expect(await code(gzipSync("[]\n{}\n"))).toBe("ERR_PATHWAYS_ARCHIVE_FORMAT");
+    // Sound trailers over records whose metadata is not flat values by key.
+    for (const meta of ["SYNTHETIC", ["SYNTHETIC"], { nested: {} }]) {
+      const bad = await sealArchive(
+        {
+          channel: "adt",
+          step: "metadata",
+          created: "2026-11-11T00:00:00.000Z",
+          messages: [{ ...message(1), meta } as unknown as ArchivedMessage],
+        },
+        keys,
+      );
+      expect(
+        await openArchive(bad, keys).catch((error: unknown) => (error as ArchiveError).code),
+      ).toBe("ERR_PATHWAYS_ARCHIVE_FORMAT");
+    }
     const short = await reseal((lines) =>
       lines.map((line, index) =>
         index === lines.length - 1 ? JSON.stringify({ trailer: true, count: 2, hmac: "00" }) : line,
@@ -234,12 +273,11 @@ for (const database of TEST_DATABASES) {
     /** An encrypted store on `database` whose clock the test moves. */
     async function storeFor(config: ProjectConfig) {
       const clock = { now: Date.now() - 200 * DAY };
-      const raw = await (
-        await testStorage(database, config.databaseFile)
-      ).open({ now: () => new Date(clock.now) });
+      const storage = await testStorage(database, config.databaseFile);
+      const raw = await storage.open({ now: () => new Date(clock.now) });
       closers.push(() => raw.close());
       const store = new EncryptedStore(raw, keys);
-      return { store, clock };
+      return { store, clock, storage };
     }
 
     /** A message of `adt`, delivered to its one destination. */
@@ -533,13 +571,14 @@ for (const database of TEST_DATABASES) {
 
       it("passes over a message gone since it was listed, and keeps going when a cleanup fails", async () => {
         const { config, store, ids, files, options } = await archived(10);
-        expect(await archivedMessage(store, 9_999)).toBeUndefined();
-        Object.defineProperty(store, "message", {
+        expect(await archivedMessage(store as unknown as RetentionStore, 9_999)).toBeUndefined();
+        const rows = Object.getOwnPropertyDescriptor(store, "archiveRows") as PropertyDescriptor;
+        Object.defineProperty(store, "archiveRows", {
           value: () => Promise.resolve(undefined),
           configurable: true,
         });
         expect(await run(store, config, options)).toMatchObject({ messages: 0, archives: 0 });
-        Reflect.deleteProperty(store, "message");
+        Object.defineProperty(store, "archiveRows", rows);
         const report = await run(store, config, {
           ...options,
           files: {
@@ -612,6 +651,156 @@ for (const database of TEST_DATABASES) {
           ["content", id, true],
           ["metadata", id, false],
         ]);
+      });
+
+      it("archives every value retention destroys: metadata, error texts and every generation's bodies", async () => {
+        const config = await project(
+          "{ archive: { dir: ./archive }, content: 7d, metadata: 30d, failed: 30d }",
+        );
+        const { store, clock, storage } = await storeFor(config);
+        clock.now = Date.now() - 40 * DAY;
+        // A message delivered in two generations, the first after a retry that left an error text.
+        const meta = { mrn: "SYN-MRN-0001", visit: 2, flagged: true };
+        const { id } = await store.receive("adt", text("SYNTHETIC-BODY"), { meta });
+        await store.completeTransform(id, [text("SYNTHETIC-GEN-0")], 1);
+        const first = await store.nextDelivery("adt", 0);
+        if (first === undefined) throw new Error("no delivery");
+        await store.scheduleRetry(first.id, 1, 0, "delivery: SYNTHETIC-RETRY");
+        await store.markDelivered(first.id);
+        const replayed = await store.requeue(
+          id,
+          {
+            mode: "replay",
+            expected: "transformed",
+            outputs: [text("SYNTHETIC-GEN-1A"), text("SYNTHETIC-GEN-1B")],
+            destinations: 1,
+          },
+          "tester",
+        );
+        expect(replayed).toMatchObject({ done: true });
+        for (let n = 0; n < 2; n += 1) {
+          const next = await store.nextDelivery("adt", 0);
+          if (next === undefined) throw new Error("no delivery");
+          await store.markDelivered(next.id);
+        }
+        // A failed message, with metadata and an error text.
+        const lost = await store.receive("adt", text("SYNTHETIC-FAILED"), {
+          meta: { mrn: "SYN-MRN-0002" },
+        });
+        await store.failTransform(lost.id, "transform: SYNTHETIC-ERROR");
+
+        // Every row retention will change or delete, as storage holds it now.
+        const db = new Kysely<Record<string, Record<string, unknown>>>({
+          dialect: await dialectFor(storage.storage, { env: storage.env }),
+        });
+        closers.push(() => db.destroy());
+        const tables = await db.introspection.getTables();
+        const columns = (name: string): string[] =>
+          (tables.find((t) => t.name === name)?.columns ?? []).map((c) => c.name).sort();
+        // Each table that holds rows of a message: retention deletes those of all but the audit log.
+        expect(
+          tables
+            .filter((t) => t.columns.some((c) => c.name === "message_id"))
+            .map((t) => t.name)
+            .sort(),
+        ).toEqual(["audit_log", "deliveries", "meta_index"]);
+        const rows = (table: string, column: string, value: number) =>
+          db.selectFrom(table).selectAll().where(column, "=", value).orderBy("id").execute();
+        const held = async (messageId: number) => ({
+          message: (await rows("messages", "id", messageId))[0],
+          deliveries: await rows("deliveries", "message_id", messageId),
+        });
+        const before = { pruned: await held(id), failed: await held(lost.id) };
+
+        // The content clock first, then the metadata and failed clocks.
+        expect(await run(store, config, { now: Date.now() - 20 * DAY })).toMatchObject({
+          pruned: 1,
+          archives: 1,
+        });
+        expect(await run(store, config)).toMatchObject({ messages: 2, archives: 2 });
+        const dir = join(config.root, "archive", "adt");
+        const opened = await Promise.all(
+          (await readdir(dir))
+            .sort()
+            .map(async (f) => openArchive(await readFile(join(dir, f)), keys)),
+        );
+        const record = (step: string, messageId: number) => {
+          const found = opened
+            .find((a) => a.header.step === step)
+            ?.messages.find((m) => m.id === messageId);
+          if (found === undefined) throw new Error(`no ${step} record of ${String(messageId)}`);
+          return found as ArchivedMessage & Readonly<Record<string, unknown>>;
+        };
+        const pruned = record("content", id);
+        const failedRecord = record("failed", lost.id);
+        const decoded = (value: string | null | undefined) =>
+          value === null || value === undefined ? value : Buffer.from(value, "base64").toString();
+
+        // The destroyed values, each found in the archive taken before it went.
+        expect(pruned["meta"]).toEqual(meta);
+        expect(decoded(pruned.body)).toBe("SYNTHETIC-BODY");
+        expect(
+          pruned.deliveries.map((d) => [
+            d.generation,
+            decoded((d as unknown as Record<string, string | null>)["body"]),
+            d.error,
+          ]),
+        ).toEqual([
+          [0, "SYNTHETIC-GEN-0", "delivery: SYNTHETIC-RETRY"],
+          [1, "SYNTHETIC-GEN-1A", null],
+          [1, "SYNTHETIC-GEN-1B", null],
+        ]);
+        expect(pruned.outputs.map(decoded)).toEqual(["SYNTHETIC-GEN-1A", "SYNTHETIC-GEN-1B"]);
+        expect(failedRecord["meta"]).toEqual({ mrn: "SYN-MRN-0002" });
+        expect(failedRecord.error).toBe("transform: SYNTHETIC-ERROR");
+        expect(decoded(failedRecord.body)).toBe("SYNTHETIC-FAILED");
+
+        // Every column of every row it changes is in the record: stored values whole, and those the
+        // codec seals (bodies, error texts and metadata) present and read back above. A column added
+        // later fails here until the archive carries it. The index tags are derived from the
+        // metadata under the keys, so the archived metadata gives them back.
+        const sealed = new Set(["body", "error", "last_error", "meta"]);
+        const field = (column: string): string =>
+          column === "last_error"
+            ? "error"
+            : column.replaceAll(/_([a-z])/g, (_, c: string) => c.toUpperCase());
+        // Numbers can come back as text or bigints from a server's driver: compared as text.
+        const plain = (value: unknown): unknown =>
+          typeof value === "number" || typeof value === "bigint" ? String(value) : value;
+        const same = (archived: unknown, stored: unknown): boolean =>
+          plain(archived) === plain(stored);
+        for (const [archived, rowsHeld] of [
+          [pruned, before.pruned],
+          [failedRecord, before.failed],
+        ] as const) {
+          for (const column of columns("messages")) {
+            const name = field(column);
+            expect(Object.keys(archived), `messages.${column}`).toContain(name);
+            if (sealed.has(column)) continue;
+            expect(same(archived[name], rowsHeld.message?.[column]), `messages.${column}`).toBe(
+              true,
+            );
+          }
+          expect(archived.deliveries).toHaveLength(rowsHeld.deliveries.length);
+          for (const [index, delivery] of archived.deliveries.entries()) {
+            const stored = rowsHeld.deliveries[index];
+            const fields = delivery as unknown as Readonly<Record<string, unknown>>;
+            for (const column of columns("deliveries")) {
+              // Its message's id and channel: the record it sits in holds them.
+              if (column === "message_id" || column === "channel") {
+                const own = column === "channel" ? archived.channel : archived.id;
+                expect(same(own, stored?.[column]), `deliveries.${column}`).toBe(true);
+                continue;
+              }
+              const name = field(column);
+              expect(Object.keys(fields), `deliveries.${column}`).toContain(name);
+              if (sealed.has(column)) continue;
+              expect(same(fields[name], stored?.[column]), `deliveries.${column}`).toBe(true);
+            }
+          }
+        }
+        // And the metadata clock's record of the pruned message holds what its row still had.
+        expect(record("metadata", id)).toMatchObject({ id, body: null, meta: null });
       });
     });
   });

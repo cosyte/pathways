@@ -90,6 +90,12 @@ defaults:
   message is kept until you replay or clear it. A delivery that failed for good keeps no time of its
   own, so its last attempt's due time stands for it.
 
+Any block counts as written out, even one that sets no clock: `retention: { archive: { dir: ./archive
+} }` or `retention: { audit: never }` alone switches it on. The metadata clock stays 30 days, and
+from then on it also deletes each message whose content was dropped after delivery, which the
+shorthand kept. To keep those rows, stay with the shorthand, or set `metadata:` as long as you want
+them kept.
+
 `metadata` shorter than `content` is refused when the project loads: a row must outlive its content.
 A channel's `retention:` sets the clocks it names and keeps the project's others; the shorthand in a
 channel sets its metadata clock alone.
@@ -108,8 +114,8 @@ Retention dry run: 0 messages and 0 deliveries would be deleted. Nothing was del
     failed: 0 messages, 0 deliveries (last active before 2026-05-15T07:40:48.263Z)
 ```
 
-A store from a custom module needs the optional `countExpiring`, `listExpiring` and `applyExpiry`
-methods for the content and failed clocks and for an archive; on a store without them, retention
+A store from a custom module needs the optional `countExpiring`, `listExpiring`, `applyExpiry` and
+`archiveRows` methods for the content and failed clocks and for an archive; on a store without them, retention
 leaves a channel with a written-out block alone and logs `retention-skipped` with
 `ERR_PATHWAYS_RETENTION_UNSUPPORTED`.
 
@@ -136,8 +142,8 @@ when the project loads. `archive` and `audit` are set in `pathways.yaml` only.
 Retention works a batch of at most 500 messages at a time, and fewer when an archive reaches 256 MiB.
 For each batch, in this order:
 
-1. It reads every message of the batch as it stands, decrypted: its body, its outputs, its error
-   texts, its times and statuses, and its deliveries.
+1. It reads every message of the batch as it stands, decrypted: every column of its row and of each
+   of its deliveries, of every generation, so nothing a step empties or deletes is left out.
 2. It writes them to a new file under `archive/<channel>/`, ending in `.partial`, readable by its
    own user alone, and flushes the file to disk.
 3. It renames the file to its name, ending in `.pwa`, and flushes the folder.
@@ -159,9 +165,20 @@ stored messages, under a fresh data key for each file:
 - the first line is a header: `format` (`pathways-archive`), `version` (1), `channel`, `keyId` (the
   master key it is sealed under), `created`, the retention `step` (`content`, `metadata` or
   `failed`), and `mac`, the trailer's key, wrapped under that master key;
-- each line after it is one message, with its body and outputs in base64;
+- each line after it is one message: its id, channel, status, times, size, generation, duplicate
+  and idempotency keys, content hash, error text, `ctx.meta`, and its body in base64; `outputs`,
+  the current generation's outputs in order; and `deliveries`, every delivery of every generation
+  with its status, attempts, times, error text and body in base64;
 - the last line is the trailer: the `count` of messages and an HMAC-SHA-256 over the header and every
   message line.
+
+The index tags over `ctx.meta` are not in an archive: they are worked out from `ctx.meta` under your
+keys, so the archived `ctx.meta` gives them back. A message whose content was dropped after delivery
+(`storage.content: dropAfterDelivery`) lost its bodies, error texts and `ctx.meta` at delivery,
+before retention reached it, so its archive holds what its row still has.
+
+`dir` takes an environment reference too, such as `dir: { env: PATHWAYS_ARCHIVE_DIR }`, read when
+the project loads.
 
 Keep each master key that sealed an archive for as long as you keep the archive: without it the
 archive cannot be opened. Retention never deletes an archive; how long you keep them, and where,

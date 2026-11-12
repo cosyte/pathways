@@ -3,13 +3,14 @@ import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 
+import type { MessageMeta } from "../encryption/blind-index.js";
 import { decrypt, encrypt } from "../encryption/envelope.js";
 import type { KeyProvider } from "../encryption/keys.js";
 import type {
   DeliveryStatus,
   MessageStatus,
-  MessageStore,
   RetentionStep,
+  RetentionStore,
 } from "../storage/store.js";
 
 /**
@@ -50,7 +51,8 @@ export interface ArchiveHeader {
 }
 
 /**
- * One delivery of an archived message, as storage held it, without its body.
+ * One delivery of an archived message, of any generation, as storage held it: every column of its
+ * row but its message's id and channel, which the record it sits in holds.
  *
  * @example
  * ```ts
@@ -64,14 +66,26 @@ export interface ArchivedDelivery {
   readonly generation: number;
   readonly status: DeliveryStatus;
   readonly attempts: number;
+  /** Epoch milliseconds before which it was not to be tried again; 0 when due at once. */
+  readonly nextAttemptAt: number;
   readonly deliveredAt: string | null;
   /** Its last error text, which can quote the message. */
   readonly error: string | null;
+  /** The output it carried, in base64; `null` once its message's content was dropped. */
+  readonly body: string | null;
+  /** When an attempt in flight was handed to its destination, in epoch milliseconds. */
+  readonly sendingAt: number | null;
+  /** The number of the attempt in flight, beside `sendingAt`. */
+  readonly sendingAttempt: number | null;
+  /** The latest attempt found cut off, when one was. */
+  readonly interruptedAttempt: number | null;
 }
 
 /**
- * One message in an archive: everything storage held about it when retention reached it. Bodies
- * are base64, and `null` (with no outputs) once its content was dropped.
+ * One message in an archive: everything storage held about it when retention reached it, every
+ * column of its row and of each delivery row, every generation. Bodies are base64, and `null`
+ * (with no outputs) once its content was dropped. The index tags of its metadata are not kept:
+ * they are derived from `meta` under the master keys.
  *
  * @example
  * ```ts
@@ -90,12 +104,19 @@ export interface ArchivedMessage {
   readonly duplicateOf: number | null;
   readonly contentHash: string | null;
   readonly contentDroppedAt: string | null;
+  /** The hash of who sent it and its control ID, for spotting a repeat. */
+  readonly dedupKey: string | null;
+  /** The hash that names it to its source, so it is stored once. */
+  readonly idempotencyKey: string | null;
   /** Why it failed, as stored: can quote the message. */
   readonly error: string | null;
+  /** Its `ctx.meta`, which can hold identifiers; `null` when it had none or it was dropped. */
+  readonly meta: MessageMeta | null;
   /** The body as it arrived, in base64; `null` once dropped. */
   readonly body: string | null;
-  /** The outputs of its current generation, in order, in base64. */
+  /** The outputs of its current generation, in order, in base64: those of its first destination. */
   readonly outputs: readonly string[];
+  /** Every delivery, every generation, oldest first, each with its body. */
   readonly deliveries: readonly ArchivedDelivery[];
 }
 
@@ -360,6 +381,11 @@ const isText = (value: unknown): value is string => typeof value === "string";
 const isTextOrNull = (value: unknown): boolean => value === null || typeof value === "string";
 const isWhole = (value: unknown): value is number => Number.isSafeInteger(value);
 const isWholeOrNull = (value: unknown): boolean => value === null || Number.isSafeInteger(value);
+const isMetaValue = (value: unknown): boolean =>
+  typeof value === "string" || typeof value === "boolean" || Number.isFinite(value);
+const isMetaOrNull = (value: unknown): boolean =>
+  value === null ||
+  (typeof value === "object" && !Array.isArray(value) && Object.values(value).every(isMetaValue));
 const STEPS: readonly unknown[] = ["content", "metadata", "failed"];
 
 function asHeader(value: unknown): ArchiveHeader {
@@ -383,7 +409,8 @@ function asMessage(value: unknown): ArchivedMessage {
   check(isWholeOrNull(fields["size"]) && isWhole(fields["generation"]));
   check(isWholeOrNull(fields["duplicateOf"]) && isTextOrNull(fields["contentHash"]));
   check(isTextOrNull(fields["contentDroppedAt"]) && isTextOrNull(fields["error"]));
-  check(isTextOrNull(fields["body"]));
+  check(isTextOrNull(fields["dedupKey"]) && isTextOrNull(fields["idempotencyKey"]));
+  check(isTextOrNull(fields["body"]) && isMetaOrNull(fields["meta"]));
   const outputs = fields["outputs"];
   check(Array.isArray(outputs) && outputs.every(isText));
   const deliveries = fields["deliveries"];
@@ -393,13 +420,17 @@ function asMessage(value: unknown): ArchivedMessage {
     check(isWhole(d["id"]) && isWhole(d["destination"]) && isWhole(d["seq"]));
     check(isWhole(d["generation"]) && isText(d["status"]) && isWhole(d["attempts"]));
     check(isTextOrNull(d["deliveredAt"]) && isTextOrNull(d["error"]));
+    check(isWhole(d["nextAttemptAt"]) && isTextOrNull(d["body"]));
+    check(isWholeOrNull(d["sendingAt"]) && isWholeOrNull(d["sendingAttempt"]));
+    check(isWholeOrNull(d["interruptedAttempt"]));
   }
   return fields as unknown as ArchivedMessage;
 }
 
 /**
- * Reads one message as an archive record, through `store`, so its bodies and texts come back
- * decrypted; `undefined` when it is gone.
+ * Reads one message as an archive record, every column of its row and of each delivery row,
+ * through `store`, so its bodies, texts and metadata come back decrypted; `undefined` when it is
+ * gone.
  *
  * @example
  * ```ts
@@ -407,16 +438,21 @@ function asMessage(value: unknown): ArchivedMessage {
  * ```
  */
 export async function archivedMessage(
-  store: MessageStore,
+  store: Pick<RetentionStore, "archiveRows">,
   id: number,
 ): Promise<ArchivedMessage | undefined> {
-  const message = await store.message(id);
-  if (message === undefined) return undefined;
-  const base64 = (bytes: Uint8Array): string =>
-    Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64");
-  const body = message.contentDroppedAt === undefined ? await store.messageBody(id) : undefined;
-  const outputs = message.contentDroppedAt === undefined ? await store.outputs(id) : [];
-  const deliveries = await store.deliveries(id);
+  const rows = await store.archiveRows(id);
+  if (rows === undefined) return undefined;
+  const { message } = rows;
+  const base64 = (bytes: Uint8Array | null): string | null =>
+    bytes === null
+      ? null
+      : Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64");
+  // The current generation's outputs, as storage reads them: the first destination's, in order.
+  const current = rows.deliveries.filter(
+    (delivery) => delivery.generation === message.generation && delivery.body !== null,
+  );
+  const first = Math.min(...current.map((delivery) => delivery.destination));
   return {
     id: message.id,
     channel: message.channel,
@@ -426,20 +462,31 @@ export async function archivedMessage(
     size: message.size,
     generation: message.generation,
     duplicateOf: message.duplicateOf,
-    contentHash: message.contentHash ?? null,
-    contentDroppedAt: message.contentDroppedAt ?? null,
+    contentHash: message.contentHash,
+    contentDroppedAt: message.contentDroppedAt,
+    dedupKey: message.dedupKey,
+    idempotencyKey: message.idempotencyKey,
     error: message.error,
-    body: body === undefined ? null : base64(body),
-    outputs: outputs.map(base64),
-    deliveries: deliveries.map((delivery) => ({
+    meta: message.meta === null ? null : (JSON.parse(message.meta) as MessageMeta),
+    body: base64(message.body),
+    outputs: current
+      .filter((delivery) => delivery.destination === first)
+      .sort((a, b) => a.seq - b.seq)
+      .map((delivery) => base64(delivery.body) as string),
+    deliveries: rows.deliveries.map((delivery) => ({
       id: delivery.id,
       destination: delivery.destination,
       seq: delivery.seq,
       generation: delivery.generation,
       status: delivery.status,
       attempts: delivery.attempts,
+      nextAttemptAt: delivery.nextAttemptAt,
       deliveredAt: delivery.deliveredAt,
       error: delivery.error,
+      body: base64(delivery.body),
+      sendingAt: delivery.sendingAt,
+      sendingAttempt: delivery.sendingAttempt,
+      interruptedAttempt: delivery.interruptedAttempt,
     })),
   };
 }

@@ -120,6 +120,7 @@ export type {
   ExpireResult,
   LeaseStore,
   MessageQuery,
+  MessageRows,
   MetaCandidate,
   MetaCandidateQuery,
   MetaStore,
@@ -143,7 +144,9 @@ export type {
   SendStart,
   StoredContent,
   StoredDelivery,
+  StoredDeliveryRow,
   StoredMessage,
+  StoredMessageRow,
   StoredMeta,
   StoreReceiveOptions,
 } from "./storage/store.js";

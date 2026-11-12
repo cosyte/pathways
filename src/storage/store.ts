@@ -797,9 +797,80 @@ export interface RetentionQuery {
 }
 
 /**
+ * Every column of one message's row, as storage holds it, for an archive: nothing a retention step
+ * nulls or deletes is left out. `body` is `null` once the content was dropped; `meta` is the
+ * metadata as stored (JSON, sealed under encryption), and a store wrapper reads it back.
+ *
+ * @example
+ * ```ts
+ * const mrnHeld = (row: StoredMessageRow): boolean => row.meta !== null;
+ * ```
+ */
+export interface StoredMessageRow {
+  readonly id: number;
+  readonly channel: string;
+  readonly status: MessageStatus;
+  readonly receivedAt: string;
+  readonly updatedAt: string;
+  readonly body: Uint8Array | null;
+  /** Why it failed, as stored: can quote the message. */
+  readonly error: string | null;
+  readonly dedupKey: string | null;
+  readonly duplicateOf: number | null;
+  readonly size: number | null;
+  readonly generation: number;
+  readonly idempotencyKey: string | null;
+  readonly contentHash: string | null;
+  readonly contentDroppedAt: string | null;
+  readonly meta: string | null;
+}
+
+/**
+ * Every column of one delivery's row, of any generation, as storage holds it, for an archive.
+ * `body` is `null` once its message's content was dropped; its message id and channel are those of
+ * the {@link StoredMessageRow} it comes with.
+ *
+ * @example
+ * ```ts
+ * const old = (row: StoredDeliveryRow, current: number): boolean => row.generation < current;
+ * ```
+ */
+export interface StoredDeliveryRow {
+  readonly id: number;
+  readonly destination: number;
+  readonly seq: number;
+  readonly generation: number;
+  readonly status: DeliveryStatus;
+  readonly attempts: number;
+  readonly nextAttemptAt: number;
+  readonly deliveredAt: string | null;
+  readonly body: Uint8Array | null;
+  /** Its last error text, as stored: can quote the message. */
+  readonly error: string | null;
+  readonly sendingAt: number | null;
+  readonly sendingAttempt: number | null;
+  readonly interruptedAttempt: number | null;
+}
+
+/**
+ * One message's row and every delivery row of it, oldest first: what retention archives before it
+ * changes or deletes them. The index tags of its metadata are left out: they are derived from
+ * `meta` under the master keys, and are derived again from it.
+ *
+ * @example
+ * ```ts
+ * const rows: MessageRows | undefined = await store.archiveRows(12);
+ * ```
+ */
+export interface MessageRows {
+  readonly message: StoredMessageRow;
+  readonly deliveries: readonly StoredDeliveryRow[];
+}
+
+/**
  * What retention needs from storage to archive before it changes anything: the messages a step
- * would reach, a batch at a time, and a way to change exactly those. Each method is optional on
- * {@link MessageStore}; {@link Store} has all three.
+ * would reach, a batch at a time, every column of each, and a way to change exactly those. Each
+ * method is optional on {@link MessageStore}; {@link Store} has all four.
  *
  * @example
  * ```ts
@@ -810,6 +881,11 @@ export interface RetentionQuery {
 export interface RetentionStore {
   /** How many messages, and their deliveries, `query` reaches on `channel` now. */
   countExpiring(channel: string, query: RetentionQuery): Promise<ExpireResult>;
+  /**
+   * Every column of one message's row and of each of its delivery rows, every generation, bodies
+   * included: what an archive holds. `undefined` when the message is gone.
+   */
+  archiveRows(id: number): Promise<MessageRows | undefined>;
   /** Up to `limit` ids of the messages `query` reaches on `channel`, lowest first, above `after`. */
   listExpiring(
     channel: string,
@@ -832,7 +908,7 @@ export interface RetentionStore {
 }
 
 /**
- * `store`'s retention methods, or `undefined` when it lacks any of the three: such a store runs
+ * `store`'s retention methods, or `undefined` when it lacks any of the four: such a store runs
  * only the metadata clock, through `expire`, and cannot archive. {@link Store} has them.
  *
  * @example
@@ -845,13 +921,15 @@ export function retentionStore(store: MessageStore): RetentionStore | undefined 
   if (
     typeof candidate.countExpiring !== "function" ||
     typeof candidate.listExpiring !== "function" ||
-    typeof candidate.applyExpiry !== "function"
+    typeof candidate.applyExpiry !== "function" ||
+    typeof candidate.archiveRows !== "function"
   ) {
     return undefined;
   }
   const steps = candidate as MessageStore & RetentionStore;
   return {
     countExpiring: (channel, query) => steps.countExpiring(channel, query),
+    archiveRows: (id) => steps.archiveRows(id),
     listExpiring: (channel, query, limit, after) =>
       steps.listExpiring(channel, query, limit, after),
     applyExpiry: (channel, ids, query) => steps.applyExpiry(channel, ids, query),
@@ -3096,6 +3174,60 @@ export class Store implements MessageStore, ContentStore, MetaStore {
       )
       .executeTakeFirstOrThrow();
     return { messages: Number(messages.count), deliveries: Number(deliveries.count) };
+  }
+
+  /**
+   * Every column of one message's row and of each of its delivery rows, every generation, bodies
+   * included and as stored: what an archive holds. Bodies are `null` once the content was dropped.
+   */
+  async archiveRows(id: number): Promise<MessageRows | undefined> {
+    const row = await this.db
+      .selectFrom("messages")
+      .selectAll()
+      .where("id", "=", id)
+      .executeTakeFirst();
+    if (row === undefined) return undefined;
+    const kept = row.content_dropped_at === null;
+    const deliveries = await this.db
+      .selectFrom("deliveries")
+      .selectAll()
+      .where("message_id", "=", id)
+      .orderBy("id")
+      .execute();
+    return {
+      message: {
+        id: Number(row.id),
+        channel: row.channel,
+        status: readStatus(row.status),
+        receivedAt: row.received_at,
+        updatedAt: row.updated_at,
+        body: kept ? row.body : null,
+        error: row.error,
+        dedupKey: row.dedup_key,
+        duplicateOf: int64OrNull(row.duplicate_of),
+        size: int64OrNull(row.size),
+        generation: row.generation,
+        idempotencyKey: row.idempotency_key,
+        contentHash: row.content_hash,
+        contentDroppedAt: row.content_dropped_at,
+        meta: row.meta,
+      },
+      deliveries: deliveries.map((delivery) => ({
+        id: Number(delivery.id),
+        destination: delivery.destination,
+        seq: delivery.seq,
+        generation: delivery.generation,
+        status: delivery.status,
+        attempts: delivery.attempts,
+        nextAttemptAt: Number(delivery.next_attempt_at),
+        deliveredAt: delivery.delivered_at,
+        body: kept ? delivery.body : null,
+        error: delivery.last_error,
+        sendingAt: int64OrNull(delivery.sending_at),
+        sendingAttempt: delivery.sending_attempt,
+        interruptedAttempt: delivery.interrupted_attempt,
+      })),
+    };
   }
 
   /** Up to `limit` ids a retention step reaches on `channel`, lowest first, above `after`. */

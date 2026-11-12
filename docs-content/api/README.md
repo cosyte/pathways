@@ -280,7 +280,8 @@ codes (such as `NO_MSH_SEGMENT`), `NO_CONTROL_ID`, `MULTIPLE_MESSAGES` or
 
 ### ArchivedDelivery
 
-One delivery of an archived message, as storage held it, without its body.
+One delivery of an archived message, of any generation, as storage held it: every column of its
+row but its message's id and channel, which the record it sits in holds.
 
 #### Example
 
@@ -293,6 +294,12 @@ const sent = (d: ArchivedDelivery): boolean => d.status === "delivered";
 ##### attempts
 
 > `readonly` **attempts**: `number`
+
+##### body
+
+> `readonly` **body**: `string` \| `null`
+
+The output it carried, in base64; `null` once its message's content was dropped.
 
 ##### deliveredAt
 
@@ -316,6 +323,30 @@ Its last error text, which can quote the message.
 
 > `readonly` **id**: `number`
 
+##### interruptedAttempt
+
+> `readonly` **interruptedAttempt**: `number` \| `null`
+
+The latest attempt found cut off, when one was.
+
+##### nextAttemptAt
+
+> `readonly` **nextAttemptAt**: `number`
+
+Epoch milliseconds before which it was not to be tried again; 0 when due at once.
+
+##### sendingAt
+
+> `readonly` **sendingAt**: `number` \| `null`
+
+When an attempt in flight was handed to its destination, in epoch milliseconds.
+
+##### sendingAttempt
+
+> `readonly` **sendingAttempt**: `number` \| `null`
+
+The number of the attempt in flight, beside `sendingAt`.
+
 ##### seq
 
 > `readonly` **seq**: `number`
@@ -328,8 +359,10 @@ Its last error text, which can quote the message.
 
 ### ArchivedMessage
 
-One message in an archive: everything storage held about it when retention reached it. Bodies
-are base64, and `null` (with no outputs) once its content was dropped.
+One message in an archive: everything storage held about it when retention reached it, every
+column of its row and of each delivery row, every generation. Bodies are base64, and `null`
+(with no outputs) once its content was dropped. The index tags of its metadata are not kept:
+they are derived from `meta` under the master keys.
 
 #### Example
 
@@ -358,9 +391,17 @@ The body as it arrived, in base64; `null` once dropped.
 
 > `readonly` **contentHash**: `string` \| `null`
 
+##### dedupKey
+
+> `readonly` **dedupKey**: `string` \| `null`
+
+The hash of who sent it and its control ID, for spotting a repeat.
+
 ##### deliveries
 
 > `readonly` **deliveries**: readonly [`ArchivedDelivery`](#archiveddelivery)[]
+
+Every delivery, every generation, oldest first, each with its body.
 
 ##### duplicateOf
 
@@ -380,11 +421,23 @@ Why it failed, as stored: can quote the message.
 
 > `readonly` **id**: `number`
 
+##### idempotencyKey
+
+> `readonly` **idempotencyKey**: `string` \| `null`
+
+The hash that names it to its source, so it is stored once.
+
+##### meta
+
+> `readonly` **meta**: `Readonly`\<`Record`\<`string`, `string` \| `number` \| `boolean`\>\> \| `null`
+
+Its `ctx.meta`, which can hold identifiers; `null` when it had none or it was dropped.
+
 ##### outputs
 
 > `readonly` **outputs**: readonly `string`[]
 
-The outputs of its current generation, in order, in base64.
+The outputs of its current generation, in order, in base64: those of its first destination.
 
 ##### receivedAt
 
@@ -2306,6 +2359,30 @@ Received before this time (ISO 8601, UTC).
 
 ***
 
+### MessageRows
+
+One message's row and every delivery row of it, oldest first: what retention archives before it
+changes or deletes them. The index tags of its metadata are left out: they are derived from
+`meta` under the master keys, and are derived again from it.
+
+#### Example
+
+```ts
+const rows: MessageRows | undefined = await store.archiveRows(12);
+```
+
+#### Properties
+
+##### deliveries
+
+> `readonly` **deliveries**: readonly [`StoredDeliveryRow`](#storeddeliveryrow)[]
+
+##### message
+
+> `readonly` **message**: [`StoredMessageRow`](#storedmessagerow)
+
+***
+
 ### MessageSink
 
 What a source hands each incoming message to, and tells when its connection drops and comes back.
@@ -3579,7 +3656,7 @@ const due = (delivery: PendingDelivery): boolean => delivery.nextAttemptAt <= Da
 
 > `readonly` `optional` **interruptedAttempt?**: `number`
 
-The latest attempt found cut off, kept after it: see [StoredDelivery.interruptedAttempt](#interruptedattempt-2).
+The latest attempt found cut off, kept after it: see [StoredDelivery.interruptedAttempt](#interruptedattempt-3).
 
 ##### messageId
 
@@ -3995,8 +4072,8 @@ the `content` step. Without it such a message is kept, as `retention: 30d` alway
 ### RetentionStore
 
 What retention needs from storage to archive before it changes anything: the messages a step
-would reach, a batch at a time, and a way to change exactly those. Each method is optional on
-[MessageStore](#messagestore); Store has all three.
+would reach, a batch at a time, every column of each, and a way to change exactly those. Each
+method is optional on [MessageStore](#messagestore); Store has all four.
 
 #### Example
 
@@ -4034,6 +4111,23 @@ readonly `number`[]
 ###### Returns
 
 `Promise`\<[`ExpireResult`](#expireresult)\>
+
+##### archiveRows()
+
+> **archiveRows**(`id`): `Promise`\<[`MessageRows`](#messagerows) \| `undefined`\>
+
+Every column of one message's row and of each of its delivery rows, every generation, bodies
+included: what an archive holds. `undefined` when the message is gone.
+
+###### Parameters
+
+###### id
+
+`number`
+
+###### Returns
+
+`Promise`\<[`MessageRows`](#messagerows) \| `undefined`\>
 
 ##### countExpiring()
 
@@ -4578,6 +4672,76 @@ Which output of the transform this is, from 0.
 
 ***
 
+### StoredDeliveryRow
+
+Every column of one delivery's row, of any generation, as storage holds it, for an archive.
+`body` is `null` once its message's content was dropped; its message id and channel are those of
+the [StoredMessageRow](#storedmessagerow) it comes with.
+
+#### Example
+
+```ts
+const old = (row: StoredDeliveryRow, current: number): boolean => row.generation < current;
+```
+
+#### Properties
+
+##### attempts
+
+> `readonly` **attempts**: `number`
+
+##### body
+
+> `readonly` **body**: `Uint8Array`\<`ArrayBufferLike`\> \| `null`
+
+##### deliveredAt
+
+> `readonly` **deliveredAt**: `string` \| `null`
+
+##### destination
+
+> `readonly` **destination**: `number`
+
+##### error
+
+> `readonly` **error**: `string` \| `null`
+
+Its last error text, as stored: can quote the message.
+
+##### generation
+
+> `readonly` **generation**: `number`
+
+##### id
+
+> `readonly` **id**: `number`
+
+##### interruptedAttempt
+
+> `readonly` **interruptedAttempt**: `number` \| `null`
+
+##### nextAttemptAt
+
+> `readonly` **nextAttemptAt**: `number`
+
+##### sendingAt
+
+> `readonly` **sendingAt**: `number` \| `null`
+
+##### sendingAttempt
+
+> `readonly` **sendingAttempt**: `number` \| `null`
+
+##### seq
+
+> `readonly` **seq**: `number`
+
+##### status
+
+> `readonly` **status**: [`DeliveryStatus`](#deliverystatus)
+
+***
+
 ### StoredMessage
 
 What storage holds about one message, without its body.
@@ -4632,7 +4796,7 @@ The deliveries of the current generation, by status.
 
 ###### Inherited from
 
-[`MessageSummary`](#messagesummary).[`deliveries`](#deliveries-3)
+[`MessageSummary`](#messagesummary).[`deliveries`](#deliveries-4)
 
 ##### duplicateOf
 
@@ -4714,6 +4878,84 @@ When the message last changed: transformed, failed, replayed or cleared.
 ###### Inherited from
 
 [`MessageSummary`](#messagesummary).[`updatedAt`](#updatedat-1)
+
+***
+
+### StoredMessageRow
+
+Every column of one message's row, as storage holds it, for an archive: nothing a retention step
+nulls or deletes is left out. `body` is `null` once the content was dropped; `meta` is the
+metadata as stored (JSON, sealed under encryption), and a store wrapper reads it back.
+
+#### Example
+
+```ts
+const mrnHeld = (row: StoredMessageRow): boolean => row.meta !== null;
+```
+
+#### Properties
+
+##### body
+
+> `readonly` **body**: `Uint8Array`\<`ArrayBufferLike`\> \| `null`
+
+##### channel
+
+> `readonly` **channel**: `string`
+
+##### contentDroppedAt
+
+> `readonly` **contentDroppedAt**: `string` \| `null`
+
+##### contentHash
+
+> `readonly` **contentHash**: `string` \| `null`
+
+##### dedupKey
+
+> `readonly` **dedupKey**: `string` \| `null`
+
+##### duplicateOf
+
+> `readonly` **duplicateOf**: `number` \| `null`
+
+##### error
+
+> `readonly` **error**: `string` \| `null`
+
+Why it failed, as stored: can quote the message.
+
+##### generation
+
+> `readonly` **generation**: `number`
+
+##### id
+
+> `readonly` **id**: `number`
+
+##### idempotencyKey
+
+> `readonly` **idempotencyKey**: `string` \| `null`
+
+##### meta
+
+> `readonly` **meta**: `string` \| `null`
+
+##### receivedAt
+
+> `readonly` **receivedAt**: `string`
+
+##### size
+
+> `readonly` **size**: `number` \| `null`
+
+##### status
+
+> `readonly` **status**: [`MessageStatus`](#messagestatus)
+
+##### updatedAt
+
+> `readonly` **updatedAt**: `string`
 
 ***
 
