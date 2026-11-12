@@ -1094,6 +1094,7 @@ export class Engine {
           transformFile: config.transform,
           format: config.format,
           csv: config.csv,
+          hl7v2: config.hl7v2,
           timeoutMs: config.settings.timeoutMs,
           memoryMb: config.settings.memoryMb,
           // Read here, in the engine's process, so a worker never sees the environment.
@@ -2028,6 +2029,7 @@ export class Engine {
       transformFile: next.transform,
       format: next.format,
       csv: next.csv,
+      hl7v2: next.hl7v2,
       timeoutMs: next.settings.timeoutMs,
       memoryMb: next.settings.memoryMb,
       config,

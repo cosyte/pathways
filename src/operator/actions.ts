@@ -359,6 +359,7 @@ async function workerFor(
     transformFile: channel.transform,
     format: channel.format,
     csv: channel.csv,
+    hl7v2: channel.hl7v2,
     timeoutMs: channel.settings.timeoutMs,
     memoryMb: channel.settings.memoryMb,
     config: config.resolved,

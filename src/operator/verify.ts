@@ -197,6 +197,7 @@ class Runner {
       transformFile: config.transform,
       format: config.format,
       csv: config.csv,
+      hl7v2: config.hl7v2,
       timeoutMs: config.settings.timeoutMs,
       memoryMb: config.settings.memoryMb,
       config: resolved.resolved,
