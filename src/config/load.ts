@@ -5,6 +5,7 @@ import { parse as parseYaml, YAMLParseError } from "yaml";
 import type { z } from "zod";
 
 import { normalisePath } from "../connectors/http-path.js";
+import { alikeDestinations } from "../engine/destination-key.js";
 import { secretSourceOf, secretUses, type SecretSourceYaml } from "../secrets/sources.js";
 import { referencesIn, resolvingEnv, variableAt, type EnvReference } from "./env-ref.js";
 import { DEFAULT_INDEX_BITS, isLowEntropyKey } from "./meta-index.js";
@@ -285,6 +286,16 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
         ...(destination.format === undefined ? {} : { format: destination.format }),
       }),
     );
+    // Two unnamed destinations of one kind and target would share one identity, and a pending
+    // delivery or a resend could reach the wrong one after either is removed or moved.
+    const alike = alikeDestinations(projectRoot, destinations).map(
+      ([index, earlier]) =>
+        `${show(file)}: destinations.${index}: sends where destinations.${earlier} sends, and neither has a name:; give each a name: so each keeps its own deliveries`,
+    );
+    if (alike.length > 0) {
+      problems.push(...alike);
+      continue;
+    }
     const missingTransforms: string[] = [];
     for (const [index, destination] of destinations.entries()) {
       if (destination.transform === undefined || (await exists(destination.transform))) continue;

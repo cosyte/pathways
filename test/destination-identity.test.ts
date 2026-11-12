@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 
 import type { ChannelConfig, DestinationConfig, ProjectConfig } from "../src/config/schema.js";
-import { loadProject } from "../src/config/load.js";
+import { ConfigError, loadProject } from "../src/config/load.js";
 import { EncryptedStore } from "../src/encryption/encrypted-store.js";
 import { KEY_BYTES, LocalKeyProvider } from "../src/encryption/keys.js";
 import { destinationKeys } from "../src/engine/destination-key.js";
@@ -46,6 +46,10 @@ const block = (name: string, transform?: string): string =>
 const channel = (...blocks: string[]): string =>
   `format: text\nsource:\n  file: { dir: in }\ndestinations:\n${blocks.join("")}`;
 
+/** A destination block that sends to the one folder `out`: named when a name is given. */
+const twin = (name: string | undefined, transform: string): string =>
+  `  - ${name === undefined ? "" : `name: ${name}\n    `}file: { dir: out }\n    transform: ./${transform}\n`;
+
 const A = block("a", "a.ts");
 const B = block("b", "b.ts");
 const C = block("c");
@@ -55,6 +59,7 @@ const FILES = {
   "channels/adt/a.ts":
     'export default (msg: string) => (msg.startsWith("skip") ? null : `A:${msg}`);\n',
   "channels/adt/b.ts": "export default (msg: string) => `B:${msg}`;\n",
+  "channels/adt/none.ts": "export default () => null;\n",
 };
 
 /** What each destination was handed, by its name, in order. */
@@ -367,6 +372,32 @@ for (const kind of STORES) {
       });
     });
 
+    describe("two destinations that send to one place", () => {
+      it("are refused without names, and named, the one left after the other is removed is never sent its bytes", async () => {
+        const setup = await setUp();
+        // Unnamed, nothing would tell their deliveries apart once one is removed: no start.
+        await expect(edit(setup, twin(undefined, "a.ts"), twin(undefined, "none.ts"))).rejects.toThrow(
+          ConfigError,
+        );
+        await edit(setup, twin("a", "a.ts"), twin("b", "none.ts"));
+        const { id } = await setup.store.receive("adt", bytes("alpha"));
+        expect((await pass(setup, { down: true })).sent).toEqual({});
+        expect((await setup.store.deliveries(id)).map((d) => d.status)).toEqual([
+          "pending",
+          "filtered",
+        ]);
+        const project = await edit(setup, twin("b", "none.ts"));
+        const restarted = await pass(setup, { later: true });
+        expect(restarted.sent).toEqual({});
+        expect(restarted.events).toContainEqual(
+          expect.objectContaining({ event: "deliveries-held", code: "destination-gone" }),
+        );
+        const audit = new AuditLog(setup.store, { actor: "tester" });
+        await replayMessages([id], { project, store: setup.store, audit, resend: true });
+        expect((await pass(setup, { later: true })).sent).toEqual({});
+      });
+    });
+
     describe("messages show", () => {
       it("names each delivery's destination by its key after the list was reordered", async () => {
         const setup = await setUp();
@@ -456,16 +487,18 @@ describe("destinationKeys", () => {
   });
   const named = as({ kind: "http", url: "https://lab.example.com/in", name: "lab" });
 
-  it("keys a destination by its name, else by its kind and target, and two alike by their order", () => {
-    const keys = destinationKeys(root, [file, sftp, http, mllp, tcp, module, named, http]);
+  it("keys a destination by its name, else by its kind and target, and refuses two alike without names", () => {
+    const keys = destinationKeys(root, [file, sftp, http, mllp, tcp, module, named]);
     for (const key of keys) expect(key).toMatch(/^[0-9a-f]{32}$/);
-    expect(new Set(keys).size).toBe(8);
+    expect(new Set(keys).size).toBe(7);
     const others = destinationKeys(root, [s3, s3At, azblob, azblobAt, smtp]);
-    expect(new Set([...keys, ...others]).size).toBe(13);
+    expect(new Set([...keys, ...others]).size).toBe(12);
+    // Two unnamed alike would share a key: refused, as the configuration refuses them.
+    expect(() => destinationKeys(root, [http, named, http])).toThrow(RangeError);
     // A name keeps its key whatever the destination's kind or target.
     expect(destinationKeys(root, [as({ ...mllp, name: "lab" })])).toEqual([keys[6]]);
-    // The first of two alike keeps the key it has alone.
-    expect(destinationKeys(root, [http])).toEqual([keys[2]]);
+    // A destination keeps its key wherever it stands in the list.
+    expect(destinationKeys(root, [named, http])).toEqual([keys[6], keys[2]]);
     // A moved project keeps the keys of its folders and modules.
     const moved = "/srv/moved";
     expect(
@@ -474,6 +507,28 @@ describe("destinationKeys", () => {
         as({ kind: "module", module: `${moved}/destination.ts` }),
       ]),
     ).toEqual([keys[0], keys[5]]);
+  });
+});
+
+describe("two unnamed destinations of one kind and target", () => {
+  it("are refused by the configuration, which asks for a name on each", async () => {
+    const root = await makeProject({
+      ...FILES,
+      "channels/adt/channel.yaml": `format: text\nsource:\n  file: { dir: in }\ndestinations:\n  - http: { url: https://lab.example.com/in }\n  - file: { dir: out }\n  - http: { url: https://lab.example.com/in }\n`,
+    });
+    const refused = await loadProject(root).then(
+      () => [],
+      (error: unknown) => (error instanceof ConfigError ? error.problems : [String(error)]),
+    );
+    expect(refused).toEqual([
+      "channels/adt/channel.yaml: destinations.2: sends where destinations.0 sends, and neither has a name:; give each a name: so each keeps its own deliveries",
+    ]);
+    // A name on one of them is enough to tell them apart.
+    await writeFile(
+      join(root, "channels/adt/channel.yaml"),
+      `format: text\nsource:\n  file: { dir: in }\ndestinations:\n  - http: { url: https://lab.example.com/in }\n  - name: copy\n    http: { url: https://lab.example.com/in }\n`,
+    );
+    expect((await loadProject(root)).channels[0]?.destinations).toHaveLength(2);
   });
 });
 

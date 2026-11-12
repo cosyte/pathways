@@ -36,6 +36,40 @@ function target(root: string, destination: DestinationConfig): string {
   }
 }
 
+/** What a destination is known by: its `name:` when it has one, else its kind and target. */
+function identity(root: string, destination: DestinationConfig): string {
+  return destination.name === undefined
+    ? `kind\u0000${destination.kind}\u0000${target(root, destination)}`
+    : `name\u0000${destination.name}`;
+}
+
+/**
+ * The unnamed destinations that share their kind and target with an earlier unnamed one, each as
+ * `[index, earlier]`. Such a pair would share one identity, so nothing would tell their deliveries
+ * apart after one of them is removed or moved: the configuration refuses it, and asks for a
+ * `name:` on each.
+ *
+ * @example
+ * ```ts
+ * for (const [index, earlier] of alikeDestinations(root, destinations)) report(index, earlier);
+ * ```
+ */
+export function alikeDestinations(
+  root: string,
+  destinations: readonly DestinationConfig[],
+): (readonly [number, number])[] {
+  const first = new Map<string, number>();
+  const alike: (readonly [number, number])[] = [];
+  for (const [index, destination] of destinations.entries()) {
+    if (destination.name !== undefined) continue;
+    const id = identity(root, destination);
+    const earlier = first.get(id);
+    if (earlier === undefined) first.set(id, index);
+    else alike.push([index, earlier]);
+  }
+  return alike;
+}
+
 /**
  * Each destination's key, in the channel's order: what storage records on every delivery and
  * stored output, so a delivery goes to, and a resend or `pathways verify` reads, the destination it
@@ -43,9 +77,12 @@ function target(root: string, destination: DestinationConfig): string {
  * removed or moved.
  *
  * A destination is known by its `name:` when it has one, else by its kind and where it sends (see
- * {@link target}); two unnamed destinations of the same kind and target are told apart by their
- * order among themselves. The key is a hash of that identity, so no URL or path is stored. Setting
- * or changing a destination's `name:`, or, without one, its kind or target, gives it a new key.
+ * {@link target}). Names are unique in a channel, and the configuration refuses two unnamed
+ * destinations of the same kind and target (see {@link alikeDestinations}), so no two destinations
+ * of a loaded channel share a key. A list built by hand that holds such a pair is refused here with a
+ * `RangeError`, since no key could keep their deliveries apart. The key is a hash of the identity,
+ * so no URL or path is stored. Setting or changing a destination's `name:`, or, without one, its
+ * kind or target, gives it a new key.
  *
  * @example
  * ```ts
@@ -56,15 +93,13 @@ export function destinationKeys(
   root: string,
   destinations: readonly DestinationConfig[],
 ): string[] {
-  const seen = new Map<string, number>();
-  return destinations.map((destination) => {
-    let identity =
-      destination.name === undefined
-        ? `kind\u0000${destination.kind}\u0000${target(root, destination)}`
-        : `name\u0000${destination.name}`;
-    const count = (seen.get(identity) ?? 0) + 1;
-    seen.set(identity, count);
-    if (count > 1) identity = `${identity}\u0000${String(count)}`;
-    return createHash("sha256").update(identity).digest("hex").slice(0, 32);
-  });
+  const [pair] = alikeDestinations(root, destinations);
+  if (pair !== undefined) {
+    throw new RangeError(
+      `destinations ${String(pair[1])} and ${String(pair[0])} have no name and send to one place; give each a name`,
+    );
+  }
+  return destinations.map((destination) =>
+    createHash("sha256").update(identity(root, destination)).digest("hex").slice(0, 32),
+  );
 }
