@@ -112,7 +112,7 @@ describe("poll: in channel.yaml", () => {
     "source:\n  mllp: { port: 9, plaintext: true }\n  poll: 1s\n",
   ])("refuses poll on a source that listens: %j", async (source) => {
     expect(await problems(`${source}destinations:\n  - file: { dir: ./out }\n`)).toEqual([
-      "channels/a/channel.yaml: source.poll: goes with file or module: http and mllp listen rather than poll",
+      "channels/a/channel.yaml: source.poll: goes with file or module: http, mllp and tcp listen rather than poll",
     ]);
   });
 });
@@ -131,7 +131,7 @@ describe("timeout: on a destination", () => {
     "  - mllp: { host: lab.example.test, port: 2575, plaintext: true }\n    timeout: 5s\n",
   ])("refuses it on an http or mllp destination: %j", async (destination) => {
     expect(await problems(channel("", destination))).toEqual([
-      "channels/a/channel.yaml: destinations.0.timeout: goes with file or module: an http destination sets timeout in its block, and an mllp one ackTimeout",
+      "channels/a/channel.yaml: destinations.0.timeout: goes with file or module: an http or tcp destination sets timeout in its block, and an mllp one ackTimeout",
     ]);
   });
 

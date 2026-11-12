@@ -27,7 +27,7 @@ so a restart loses nothing.
   worker thread of the channel's own.
 - **Formats.** HL7 v2, FHIR R4 JSON, X12, and C-CDA arrive parsed, through our open-source
   `@cosyte/*` libraries. JSON arrives as a value and anything else as text.
-- **Connectors.** MLLP, HTTP, and files, in and out, over TLS by default.
+- **Connectors.** MLLP, HTTP, TCP with your own framing, and files, in and out, over TLS by default.
 - **Storage.** SQLite with no setup, or PostgreSQL, MySQL or MariaDB, and SQL Server, with every
   stored message encrypted at rest.
 - **Operations from the command line.** `pathways status`, `messages`, `replay`, `clear`,
