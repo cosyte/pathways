@@ -655,7 +655,8 @@ destinations:
   it("take a reference at every key that holds one value, but the documented exceptions", () => {
     // configuration-reference.md, "Settings from the environment": plaintext, a channel's name and
     // format, the header names an HTTP source hands a transform, a channel's index: entries, and
-    // the SHA-1 algorithms an SFTP block turns back on, are never read from the environment (encryption: none and auth: none are the short form of a
+    // the SHA-1 algorithms an SFTP block turns back on, and a csv channel's csv: block (how its
+    // bodies are read, which belongs with its format), are never read from the environment (encryption: none and auth: none are the short form of a
     // block, and blocks are not scalars, so the walk passes over them). Matched by the whole path,
     // so a new key that only shares one of these names is still checked.
     const EXCEPTIONS: readonly string[] = [
@@ -681,6 +682,20 @@ destinations:
       "channel.yaml.source.file.azblob.plaintext",
       "channel.yaml.destinations.[].file.s3.plaintext",
       "channel.yaml.destinations.[].file.azblob.plaintext",
+      ...[
+        "delimiter",
+        "quote",
+        "escape",
+        "header",
+        "encoding",
+        "newline",
+        "pad",
+        "escapeFormulas",
+        "maxRowLength",
+        "columns.[].name",
+        "columns.[].start",
+        "columns.[].length",
+      ].map((key) => `channel.yaml.csv.${key}`),
     ];
     type Node = Record<string, unknown>;
     const isNode = (value: unknown): value is Node =>
