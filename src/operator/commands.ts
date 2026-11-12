@@ -42,6 +42,7 @@ import {
 import { VERSION } from "../version.js";
 import type { AuditLog } from "./audit.js";
 import { recordRetention, runRetention } from "./retention.js";
+import type { KeyProvider } from "../encryption/keys.js";
 
 /**
  * What every operator command runs with: the project, its store and audit log, and where to write.
@@ -70,6 +71,8 @@ export interface OperatorContext {
   readonly ask?: ((prompt: string) => Promise<string | undefined>) | undefined;
   /** Stops a bulk replay between two batches. */
   readonly signal?: AbortSignal | undefined;
+  /** The project's encryption keys, which seal retention's archives. */
+  readonly keys?: KeyProvider | undefined;
 }
 
 /**
@@ -591,7 +594,12 @@ export async function clearCommand(
  */
 export async function retentionCommand(context: OperatorContext, dryRun: boolean): Promise<number> {
   const { project, store, audit } = context;
-  const report = await runRetention(store, project, { now: context.now(), dryRun });
+  const report = await runRetention(store, project, {
+    now: context.now(),
+    dryRun,
+    keys: context.keys,
+    audit,
+  });
   await recordRetention(audit, report);
   const totals = `${count(report.messages, "message")} and ${count(report.deliveries, "delivery", "deliveries")}`;
   const lines = [
@@ -599,12 +607,40 @@ export async function retentionCommand(context: OperatorContext, dryRun: boolean
       ? `Retention dry run: ${totals} would be deleted. Nothing was deleted.`
       : `Retention deleted ${totals}.`,
   ];
-  for (const [name, channel] of Object.entries(report.channels)) {
+  if (report.pruned !== undefined) {
     lines.push(
-      `  ${name}: ${count(channel.messages, "message")}, ${count(channel.deliveries, "delivery", "deliveries")} (done, and last active before ${channel.cutoff})`,
+      dryRun
+        ? `  Content would be dropped from ${count(report.pruned, "message")}.`
+        : `  Content was dropped from ${count(report.pruned, "message")}.`,
     );
   }
+  if (report.archives !== undefined) {
+    lines.push(`  ${count(report.archives, "archive")} written and checked first.`);
+  }
+  for (const [name, channel] of Object.entries(report.channels)) {
+    const rows = `${count(channel.messages, "message")}, ${count(channel.deliveries, "delivery", "deliveries")}`;
+    lines.push(`  ${name}: ${rows} (done, and last active before ${channel.cutoff})`);
+    if (channel.content !== undefined) {
+      lines.push(
+        `    content: ${count(channel.content.messages, "message")} (done, and last active before ${channel.content.cutoff})`,
+      );
+    }
+    if (channel.failed !== undefined) {
+      lines.push(
+        `    failed: ${count(channel.failed.messages, "message")}, ${count(channel.failed.deliveries, "delivery", "deliveries")} (last active before ${channel.failed.cutoff})`,
+      );
+    }
+    if (channel.skipped !== undefined) {
+      lines.push(`    left alone from here: ${channel.skipped}`);
+    }
+  }
   print(context, report, lines);
+  if (report.skipped !== undefined) {
+    context.err(
+      `pathways: retention left ${count(report.skipped, "channel")} alone part way; nothing of it was deleted without its archive.\n`,
+    );
+    return EXIT.failed;
+  }
   return EXIT.ok;
 }
 

@@ -184,7 +184,9 @@ Commands:
   clear <id...>       Mark failed messages cleared, so they leave the failed
                       count and retention can delete them
   retention           Delete delivered, filtered and cleared messages past
-                      their channel's retention period (default 30d)
+                      their channel's retention period (default 30d), and
+                      run its content and failed clocks, archiving first
+                      when retention.archive is set
   audit               Read the audit log, newest first
   rekey               Re-encrypt every stored message under the current key
                       of pathways.yaml's encryption, so older keys can be
@@ -286,7 +288,7 @@ Options:
                         replay, resend, clear, retention, config,
                         lease-release, migrate, channel-pause,
                         channel-resume, channel-stop, channel-halt,
-                        channel-reload, verify or bulk-replay
+                        channel-reload, verify, bulk-replay or archive
       --message <id>    audit: only entries about this message
       --encrypt-plaintext
                         rekey: also encrypt what was stored while encryption
@@ -614,7 +616,14 @@ async function openWrapped(
   context: OpenStoreContext & { readonly secrets: Secrets },
   io: CliIo,
   command?: string,
-): Promise<{ readonly store: MessageStore; readonly encrypted: boolean } | number> {
+): Promise<
+  | {
+      readonly store: MessageStore;
+      readonly encrypted: boolean;
+      readonly keys: KeyProvider | undefined;
+    }
+  | number
+> {
   const keys = await keysOrExit(project, context, io);
   if (typeof keys === "number") return keys;
   const { storage } = project;
@@ -622,7 +631,8 @@ async function openWrapped(
     context.logger.warn({ event: "plaintext", endpoint: "storage" });
   }
   try {
-    return { store: await openStore(project, { ...context, keys }), encrypted: keys !== undefined };
+    const store = await openStore(project, { ...context, keys });
+    return { store, encrypted: keys !== undefined, keys };
   } catch (error) {
     return reportStoreError(error, io, command);
   }
@@ -737,6 +747,7 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
     env,
     secrets,
     audit,
+    keys: opened.keys,
     dryRun: mode.dryRun,
     ...(lease === undefined ? {} : { fence: lease }),
   });
@@ -1460,6 +1471,7 @@ async function operator(
       env: context.env,
       ask: io.ask,
       signal: io.signal,
+      keys: (wrapped as { readonly keys?: KeyProvider | undefined }).keys,
     });
   } catch (error) {
     // A stored value that cannot be decrypted: never shown garbled. Fixed text and at most a key id.
