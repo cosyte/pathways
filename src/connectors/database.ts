@@ -128,10 +128,14 @@ export class DatabaseDestination implements DestinationConnector {
       throw new DeliveryRejected((error as StatementError).message);
     }
     const limit = timeoutStatement(kind, statementTimeoutMs);
+    // SQL Server runs each request through sp_executesql, whose SET options end with it, so there
+    // the limit goes first in the statement's own batch.
+    const inBatch = kind === "sqlserver";
+    const text = inBatch ? `${String(limit)};\n${statement.sql}` : statement.sql;
     try {
       await this.#db.transaction().execute(async (trx) => {
-        if (limit !== undefined) await trx.executeQuery(CompiledQuery.raw(limit));
-        const result = await trx.executeQuery(CompiledQuery.raw(statement.sql, values));
+        if (limit !== undefined && !inBatch) await trx.executeQuery(CompiledQuery.raw(limit));
+        const result = await trx.executeQuery(CompiledQuery.raw(text, values));
         const rows = result.numAffectedRows;
         if (expectRows !== undefined && (rows === undefined || Number(rows) !== expectRows)) {
           throw new DeliveryRejected(
@@ -157,7 +161,8 @@ export class DatabaseDestination implements DestinationConnector {
  * - PostgreSQL: `statement_timeout`, for this transaction alone.
  * - MySQL and MariaDB: `innodb_lock_wait_timeout`, in whole seconds, at least 1: the wait for a row
  *   lock. Neither server bounds every statement by one setting both read.
- * - SQL Server: `LOCK_TIMEOUT`, the wait for a lock; the connection's request timeout bounds the rest.
+ * - SQL Server: `LOCK_TIMEOUT`, the wait for a lock, run in the statement's own batch; the
+ *   connection's request timeout bounds the rest.
  * - SQLite: none; its connection waits up to 5 seconds for another writer.
  *
  * @example
@@ -236,14 +241,16 @@ export function databaseFailure(kind: StorageKind, thrown: unknown): Error {
 
 /**
  * The error that says why: tedious reports a statement's errors together, the server's own first,
- * as an `AggregateError`.
+ * as an `AggregateError`, which Kysely hands on as the plain list of its errors.
  */
 function first(thrown: unknown): Readonly<Record<string, unknown>> {
-  if (thrown instanceof AggregateError) {
-    const found = (thrown.errors as unknown[]).find(
+  const list: unknown =
+    thrown instanceof AggregateError ? thrown.errors : Array.isArray(thrown) ? thrown : undefined;
+  if (Array.isArray(list)) {
+    const found: unknown = list.find(
       (each) => typeof (each as { number?: unknown } | undefined)?.number === "number",
     );
-    return first(found ?? thrown.errors[0]);
+    return first(found ?? list[0]);
   }
   return typeof thrown === "object" && thrown !== null ? (thrown as Record<string, unknown>) : {};
 }

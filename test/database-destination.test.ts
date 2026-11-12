@@ -666,6 +666,9 @@ describe("a database destination's failures", () => {
       "retried ESOCKET",
     );
     expect(reason("sqlserver", new AggregateError([]))).toBe("retried DATABASE_ERROR");
+    // Kysely hands tedious's list on as a plain array.
+    expect(reason("sqlserver", [server(2627), server(3621)])).toBe("rejected sqlserver 2627");
+    expect(reason("sqlserver", [server(1205)])).toBe("retried SQLSERVER_1205");
     expect(reason("sqlserver", error({ code: "ETIMEOUT" }))).toBe("retried ETIMEOUT");
     expect(reason("sqlite", error({ code: "SQLITE_CONSTRAINT_NOTNULL" }))).toBe(
       "rejected sqlite SQLITE_CONSTRAINT_NOTNULL",
