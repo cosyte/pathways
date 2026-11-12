@@ -138,9 +138,9 @@ its block. Without `kind`, the one block written is used.
 
 and, beside it:
 
-| Key       | Value                         | Default | Meaning                                                                                                                                                |
-| --------- | ----------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `content` | `keep` or `dropAfterDelivery` | `keep`  | what is kept of a message's content; a channel overrides it; see [Drop content after delivery](./set-message-retention.md#drop-content-after-delivery) |
+| Key       | Value                         | Default | Meaning                                                                                                                                                                                   |
+| --------- | ----------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `content` | `keep` or `dropAfterDelivery` | `keep`  | what is kept of a message's content; a channel overrides it, and only a channel may set `none`; see [Drop content after delivery](./set-message-retention.md#drop-content-after-delivery) |
 
 A `MessageStore` from a module keeps the marker the engine writes before each send: `markSending`
 stores the attempt and its start, `nextDelivery` returns it as `sending`, and `markDelivered`,
@@ -309,20 +309,20 @@ by key. See [Use the message context](./use-the-message-context.md).
 
 ## channel.yaml
 
-| Key                                                              | Type                                                                                                                                                      | Default                          |
-| ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- |
-| `name`                                                           | lowercase letters, digits and hyphens                                                                                                                     | the folder's name; must match it |
-| `format`                                                         | `hl7v2`, `fhir`, `x12`, `ccda`, `json`, `text` or `csv`                                                                                                   | `hl7v2`                          |
-| `csv`                                                            | how a `csv` channel reads and writes; see [Read delimited and fixed-width text](./work-with-formats.md#read-delimited-and-fixed-width-text)               | comma-delimited, with a header   |
-| `source`                                                         | exactly one [source](#sources)                                                                                                                            | required                         |
-| `transform`                                                      | path to the transform module                                                                                                                              | none: messages pass through      |
-| `destinations`                                                   | a list of at least one [destination](#destinations)                                                                                                       | required                         |
-| `hooks`                                                          | a list of [hooks](#hooks)                                                                                                                                 | none                             |
-| `storage`                                                        | `{ content: keep }` or `{ content: dropAfterDelivery }`                                                                                                   | the project's `storage.content`  |
-| `config`                                                         | see [Transform configuration](#transform-configuration)                                                                                                   | the project's, key by key        |
-| `index`                                                          | a list of `ctx.meta` keys, each a key or `{ key, bits }`; `bits` 4 to 32, default 12; see [Search messages by metadata](./search-messages-by-metadata.md) | none                             |
-| `timeout`, `memory`, `onStoreFailure`, `ackTimeout`, `retention` | see [Settings](#settings)                                                                                                                                 | the project's                    |
-| `resendFlag`, `retry`                                            | see [Settings](#settings)                                                                                                                                 | the project's                    |
+| Key                                                              | Type                                                                                                                                                                                     | Default                                              |
+| ---------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| `name`                                                           | lowercase letters, digits and hyphens                                                                                                                                                    | the folder's name; must match it                     |
+| `format`                                                         | `hl7v2`, `fhir`, `x12`, `ccda`, `json`, `text` or `csv`                                                                                                                                  | `hl7v2`                                              |
+| `csv`                                                            | how a `csv` channel reads and writes; see [Read delimited and fixed-width text](./work-with-formats.md#read-delimited-and-fixed-width-text)                                              | comma-delimited, with a header                       |
+| `source`                                                         | exactly one [source](#sources)                                                                                                                                                           | required                                             |
+| `transform`                                                      | path to the transform module                                                                                                                                                             | none: messages pass through                          |
+| `destinations`                                                   | a list of at least one [destination](#destinations)                                                                                                                                      | required                                             |
+| `hooks`                                                          | a list of [hooks](#hooks)                                                                                                                                                                | none                                                 |
+| `storage`                                                        | `{ content: keep }`, `{ content: dropAfterDelivery }`, or `{ content: none, passTimeout }`; see [Pass messages through without storing them](./pass-messages-through-without-storing.md) | the project's `storage.content`; `passTimeout` `30s` |
+| `config`                                                         | see [Transform configuration](#transform-configuration)                                                                                                                                  | the project's, key by key                            |
+| `index`                                                          | a list of `ctx.meta` keys, each a key or `{ key, bits }`; `bits` 4 to 32, default 12; see [Search messages by metadata](./search-messages-by-metadata.md)                                | none                                                 |
+| `timeout`, `memory`, `onStoreFailure`, `ackTimeout`, `retention` | see [Settings](#settings)                                                                                                                                                                | the project's                                        |
+| `resendFlag`, `retry`                                            | see [Settings](#settings)                                                                                                                                                                | the project's                                        |
 
 A channel with an MLLP source or destination must have the format `hl7v2`. A channel with a tcp
 source or destination and the format `hl7v2`, said or by default, loads with a warning: tcp sends no
@@ -442,19 +442,22 @@ an API key header included.
 
 #### MLLP source
 
-| Key                | Type                  | Default                     |
-| ------------------ | --------------------- | --------------------------- |
-| `port`             | 1 to 65,535           | required                    |
-| `host`             | an address            | `127.0.0.1`                 |
-| `tls`              | [MLLP TLS](#tls)      | required unless `plaintext` |
-| `plaintext`        | boolean               | `false`                     |
-| `onStoreFailure`   | `close`, `AE` or `AR` | the channel's               |
-| `ackBuilder`       | path to a module      | the default ACK             |
-| `maxConnections`   | 1 to 100,000          | `100`                       |
-| `receiveTimeout`   | duration              | no limit                    |
-| `maxConnectionAge` | duration              | no limit                    |
-| `maxMessageSize`   | size                  | `4MB`                       |
-| `keepOpen`         | boolean               | `true`                      |
+| Key                | Type                  | Default                         |
+| ------------------ | --------------------- | ------------------------------- |
+| `port`             | 1 to 65,535           | required unless `connect`       |
+| `host`             | an address            | `127.0.0.1`                     |
+| `connect`          | `{ host, port }`      | none: the source listens        |
+| `replyTo`          | `{ host, port }`      | none: ACKs go on the connection |
+| `connectTimeout`   | duration              | `10s`                           |
+| `tls`              | [MLLP TLS](#tls)      | required unless `plaintext`     |
+| `plaintext`        | boolean               | `false`                         |
+| `onStoreFailure`   | `close`, `AE` or `AR` | the channel's                   |
+| `ackBuilder`       | path to a module      | the default ACK                 |
+| `maxConnections`   | 1 to 100,000          | `100`                           |
+| `receiveTimeout`   | duration              | no limit                        |
+| `maxConnectionAge` | duration              | no limit                        |
+| `maxMessageSize`   | size                  | `4MB`                           |
+| `keepOpen`         | boolean               | `true`                          |
 
 A connection over `maxConnections` is closed at accept. `receiveTimeout` closes a connection that goes
 that long without a whole message, a part-sent one included. `maxConnectionAge` closes a connection
@@ -462,6 +465,14 @@ older than it after the message it brings and that message's ACK, so the sender 
 through a load balancer to any node behind it. A message over `maxMessageSize` closes
 the connection and is not stored. `keepOpen: false` closes each connection once its messages are
 answered. See [Bound connections and messages](./send-and-receive-mllp.md#bound-connections-and-messages).
+
+`connect` makes the source dial out to the sender in place of listening, so it cannot be set with
+`port`, `host`, `maxConnections`, `keepOpen` or `replyTo`; its `tls` is a client's, where `tls: {}`
+verifies the sender against Node.js's built-in roots. `replyTo` sends each ACK on a new connection to
+that address. `connectTimeout` bounds each connection the source opens itself, for `connect` or
+`replyTo`, and is refused without one of them. See
+[Dial out to a sender](./send-and-receive-mllp.md#dial-out-to-a-sender) and
+[Send each ACK to another address](./send-and-receive-mllp.md#send-each-ack-to-another-address).
 
 #### TCP source
 

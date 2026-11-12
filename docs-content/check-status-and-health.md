@@ -94,6 +94,11 @@ source closed at accept since the engine started, because it already held its `m
 count only, never who connected. A rising count means senders are being turned away: raise the cap, or
 find the sender that opens connections and leaves them.
 
+A channel that stores nothing (`storage.content: none`) also has `storage: "volatile"` and `passes`:
+how its messages ended since the engine started, `accepted`, `filtered`, `unreadable`, `rejected`
+and `deferred`. See [Pass messages through without storing
+them](./pass-messages-through-without-storing.md#health).
+
 Each channel's `state` is `running`, or `paused` or `stopped` when an operator set it so with
 `pathways channel` (see [pause, stop and reload a channel](./pause-stop-and-reload-a-channel.md)).
 Neither is a fault: the answer stays 200, and the source of a paused channel shows `up`.
