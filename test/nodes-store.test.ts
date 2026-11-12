@@ -98,15 +98,29 @@ for (const database of TEST_DATABASES) {
       expect(refused[0]?.pid).toBe(joins[0]?.joined === true ? 1111 : 3333);
     });
 
-    it("refuses a live node's id to another, and takes it over from an earlier run it names", async () => {
+    it("refuses a live node's id to another, and takes it over from an earlier run it names once silent", async () => {
       const { a, b } = await twoEngines();
       await a.joinNode(A);
       const again = { ...A, pid: 3333 };
       const refused = await b.joinNode(again);
       expect(refused).toMatchObject({ joined: false, holder: { node: "engine-a", pid: 1111 } });
       // A replacement names the run it replaces: another process's row is not taken.
-      expect(await b.joinNode(again, { ...self(A), pid: 9999 })).toMatchObject({ joined: false });
-      expect(await b.joinNode(again, self(A))).toEqual({ joined: true });
+      const silentMs = 300;
+      expect(await b.joinNode(again, { ...self(A), pid: 9999, silentMs })).toMatchObject({
+        joined: false,
+      });
+      // The run it names beat a moment ago: still live, so not taken, however it is named.
+      expect(await b.joinNode(again, { ...self(A), silentMs })).toMatchObject({
+        joined: false,
+        holder: { pid: 1111 },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 2 * silentMs));
+      // It beat again: by the database's clock it is not silent, so it stays.
+      expect(await a.nodeHeartbeat(self(A), { role: "active", draining: false })).toBe(true);
+      expect(await b.joinNode(again, { ...self(A), silentMs })).toMatchObject({ joined: false });
+      // Silent for as long as asked, by the database's clock: taken.
+      await new Promise((resolve) => setTimeout(resolve, 2 * silentMs));
+      expect(await b.joinNode(again, { ...self(A), silentMs })).toEqual({ joined: true });
       expect((await a.nodes())[0]).toMatchObject({ node: "engine-a", pid: 3333 });
       // The run it replaced can no longer beat or remove the row.
       expect(await a.nodeHeartbeat(self(A), { role: "active", draining: false })).toBe(false);

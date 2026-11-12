@@ -2881,8 +2881,9 @@ Removes the row of `node` only while it is stale. Returns whether it did. Option
 
 Writes this node's row, its join time and first heartbeat from the database's clock: a new row,
 or over a row of the same id that is stale, or that still names `replace`'s host and process
-(an earlier run of this node, known gone). Answers with the live row that holds the id instead.
-Optional, with [nodeHeartbeat](#nodeheartbeat), [leaveNode](#leavenode), [nodes](#nodes) and [forgetNode](#forgetnode).
+and has not beaten for `replace.silentMs` (an earlier run of this node whose heartbeat stopped).
+Answers with the live row that holds the id instead. Optional, with [nodeHeartbeat](#nodeheartbeat),
+[leaveNode](#leavenode), [nodes](#nodes) and [forgetNode](#forgetnode).
 
 ###### Parameters
 
@@ -2892,7 +2893,7 @@ Optional, with [nodeHeartbeat](#nodeheartbeat), [leaveNode](#leavenode), [nodes]
 
 ###### replace?
 
-[`NodeSelf`](#nodeself)
+[`NodeReplace`](#nodereplace)
 
 ###### Returns
 
@@ -3784,7 +3785,7 @@ const info: NodeInfo = {
 
 ###### Inherited from
 
-[`NodeSelf`](#nodeself).[`host`](#host-4)
+[`NodeSelf`](#nodeself).[`host`](#host-5)
 
 ##### node
 
@@ -3792,7 +3793,7 @@ const info: NodeInfo = {
 
 ###### Inherited from
 
-[`NodeSelf`](#nodeself).[`node`](#node-4)
+[`NodeSelf`](#nodeself).[`node`](#node-5)
 
 ##### pid
 
@@ -3800,7 +3801,7 @@ const info: NodeInfo = {
 
 ###### Inherited from
 
-[`NodeSelf`](#nodeself).[`pid`](#pid-2)
+[`NodeSelf`](#nodeself).[`pid`](#pid-3)
 
 ##### role
 
@@ -3827,6 +3828,56 @@ How long after its last heartbeat the node counts as stale, in milliseconds.
 > `readonly` **version**: `string`
 
 The version of `@cosyte/pathways` the node runs.
+
+***
+
+### NodeReplace
+
+The row a join may replace: an earlier run of this node, named by its host and process, and how
+long its heartbeat must have been silent, by the database's clock, for the row to be taken. A
+row that names another process, or that beat within `silentMs`, is not.
+
+#### Example
+
+```ts
+const replace: NodeReplace = { node: "engine-a", host: "host-a", pid: 1, silentMs: 7_500 };
+```
+
+#### Extends
+
+- [`NodeSelf`](#nodeself)
+
+#### Properties
+
+##### host
+
+> `readonly` **host**: `string`
+
+###### Inherited from
+
+[`NodeSelf`](#nodeself).[`host`](#host-5)
+
+##### node
+
+> `readonly` **node**: `string`
+
+###### Inherited from
+
+[`NodeSelf`](#nodeself).[`node`](#node-5)
+
+##### pid
+
+> `readonly` **pid**: `number`
+
+###### Inherited from
+
+[`NodeSelf`](#nodeself).[`pid`](#pid-3)
+
+##### silentMs
+
+> `readonly` **silentMs**: `number`
+
+How long the row's heartbeat must have been silent, in milliseconds.
 
 ***
 
@@ -3952,6 +4003,7 @@ const self: NodeSelf = { node: "engine-a", host: "host-a", pid: 4242 };
 #### Extended by
 
 - [`NodeInfo`](#nodeinfo)
+- [`NodeReplace`](#nodereplace)
 
 #### Properties
 

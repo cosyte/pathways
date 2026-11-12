@@ -175,6 +175,7 @@ export {
   NODE_ROLES,
   type NodeInfo,
   type NodeJoin,
+  type NodeReplace,
   type NodeRole,
   type NodeRow,
   type NodeSelf,

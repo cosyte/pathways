@@ -18,6 +18,7 @@ import {
   type MessageState,
   type MessageStore,
   type MessageSummary,
+  type NodeRow,
   type Page,
   type StoredDelivery,
 } from "../storage/store.js";
@@ -745,13 +746,36 @@ export async function nodesCommand(context: OperatorContext): Promise<number> {
 export async function nodeForgetCommand(context: OperatorContext, node: string): Promise<number> {
   const nodes = nodeStore(context.store);
   if (nodes === undefined) return noNodes(context);
-  const row = (await nodes.nodes()).find((candidate) => candidate.node === node);
-  if (row === undefined) {
+  const find = async (): Promise<NodeRow | undefined> => {
+    try {
+      return (await nodes.nodes()).find((candidate) => candidate.node === node);
+    } catch (error) {
+      // Audited before the command reports it, with the code only: the error's own text can name
+      // the server. A database that refuses the read may refuse the entry too; the read's error is
+      // the one reported.
+      const code = (error as { code?: unknown } | undefined)?.code;
+      try {
+        await context.audit.record({
+          action: "node-forget",
+          outcome: "refused",
+          detail: { node, reason: "unreadable", ...(typeof code === "string" ? { code } : {}) },
+        });
+      } catch {
+        // The read's error is the one to report.
+      }
+      throw error;
+    }
+  };
+  const notFound = async (): Promise<number> => {
     await context.audit.record({ action: "node-forget", outcome: "not-found", detail: { node } });
     print(context, { forgotten: false, node: null }, ["No node by that id on this database."]);
     return EXIT.failed;
-  }
+  };
+  const row = await find();
+  if (row === undefined) return notFound();
   if (!(await nodes.forgetNode(node))) {
+    // Gone between the read and the DELETE (its engine stopped cleanly): not found, not live.
+    if ((await find()) === undefined) return notFound();
     await context.audit.record({
       action: "node-forget",
       outcome: "refused",
@@ -769,6 +793,36 @@ export async function nodeForgetCommand(context: OperatorContext, node: string):
   print(context, { forgotten: true, node: row }, [`Node forgotten: ${describeNode(row)}.`]);
   return EXIT.ok;
 }
+
+/**
+ * `pathways nodes forget` with an argument that is not a node id: audited as refused, without the
+ * argument, which can hold anything, and exits 2 with the rule for a node id.
+ *
+ * @example
+ * ```ts
+ * const code = await nodeForgetInvalidCommand(context);
+ * ```
+ */
+export async function nodeForgetInvalidCommand(context: OperatorContext): Promise<number> {
+  await context.audit.record({
+    action: "node-forget",
+    outcome: "refused",
+    detail: { reason: "invalid-id" },
+  });
+  context.err(`pathways: ${NODE_ID_RULE} Run "pathways --help" for usage.\n`);
+  return EXIT.usage;
+}
+
+/**
+ * What a node id may be, as `pathways nodes forget` says when given something else.
+ *
+ * @example
+ * ```ts
+ * NODE_ID_RULE.startsWith("a node id is"); // true
+ * ```
+ */
+export const NODE_ID_RULE =
+  "a node id is 1 to 64 letters, digits, dots, hyphens and underscores, starting with a letter or a digit.";
 
 function noNodes(context: OperatorContext): number {
   context.err(

@@ -45,6 +45,21 @@ export interface NodeSelf {
 }
 
 /**
+ * The row a join may replace: an earlier run of this node, named by its host and process, and how
+ * long its heartbeat must have been silent, by the database's clock, for the row to be taken. A
+ * row that names another process, or that beat within `silentMs`, is not.
+ *
+ * @example
+ * ```ts
+ * const replace: NodeReplace = { node: "engine-a", host: "host-a", pid: 1, silentMs: 7_500 };
+ * ```
+ */
+export interface NodeReplace extends NodeSelf {
+  /** How long the row's heartbeat must have been silent, in milliseconds. */
+  readonly silentMs: number;
+}
+
+/**
  * What a heartbeat writes beside the database's time: the node's role and its draining flag.
  *
  * @example

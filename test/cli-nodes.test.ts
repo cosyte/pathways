@@ -206,11 +206,42 @@ describe("pathways start's node, on SQLite", () => {
     const root = await project("node:\n  id: engine-a\n");
     const other = await Store.open(db(root));
     try {
-      // This host, a process that is not running: an earlier run of this node, killed.
-      await other.joinNode({ ...OTHER, host: hostname(), pid: 2 ** 22 + 12_345 });
+      // This host, a process that is not running: an earlier run of this node, killed. It beat a
+      // moment ago, so the start waits to see it miss a heartbeat, then takes the row.
+      await other.joinNode({
+        ...OTHER,
+        host: hostname(),
+        pid: 2 ** 22 + 12_345,
+        staleAfterMs: 4_000,
+      });
       expect((await cli(["start", "--once", "-C", root])).code).toBe(EXIT.ok);
       expect(await other.nodes()).toEqual([]);
     } finally {
+      await other.close();
+    }
+  });
+
+  it("refuses to start over a live row on this host whose process it cannot see, while it beats", async () => {
+    // Another host by the same name, or a container: its process is not one this host runs, but
+    // its heartbeat moves, so it is not an earlier run of this node.
+    const root = await project("node:\n  id: engine-a\n");
+    const other = await Store.open(db(root));
+    const holder = { ...OTHER, host: hostname(), pid: 2 ** 22 + 12_345, staleAfterMs: 4_000 };
+    const beating = setInterval(() => {
+      void other.nodeHeartbeat(holder, { role: "active", draining: false });
+    }, 200);
+    try {
+      await other.joinNode(holder);
+      const refused = await cli(["start", "--once", "-C", root]);
+      expect(refused.code).toBe(EXIT.failed);
+      expect(refused.err).toContain(
+        "pathways: another engine runs under this node id on this database: node engine-a on host",
+      );
+      expect(refused.events.map((e) => e.event)).not.toContain("lease-acquired");
+      // Its row stands as it was.
+      expect((await other.nodes())[0]).toMatchObject({ pid: holder.pid, stale: false });
+    } finally {
+      clearInterval(beating);
       await other.close();
     }
   });
@@ -271,10 +302,51 @@ describe("pathways nodes forget", () => {
     ]) {
       expect((await cli([...argv, "-C", root])).code, argv.join(" ")).toBe(EXIT.usage);
     }
-    const bad = await cli(["nodes", "forget", "../secret-path", "-C", root]);
+    const audited: AuditEntry[] = [];
+    const bad = await runCli(["nodes", "forget", "../secret-path", "-C", root], {
+      onAudit: (entry) => {
+        audited.push(entry);
+      },
+    }).done;
     expect(bad).toMatchObject({ code: EXIT.usage, out: "" });
     expect(bad.err).toContain("a node id is 1 to 64 letters");
     expect(bad.err).not.toContain("secret-path");
+    // Audited all the same, without the argument: it can hold anything.
+    expect(audited.map((entry) => [entry.action, entry.outcome, entry.detail])).toEqual([
+      ["node-forget", "refused", { reason: "invalid-id" }],
+    ]);
+    expect(JSON.stringify(audited)).not.toContain("secret-path");
+  });
+
+  it("audits a forget whose listing fails, and one whose row went before it could be removed", async () => {
+    const failing = (fail: string) =>
+      project(`storage:\n  module: ${NODE_STORE_FILE}\n  options: { fail: ${fail} }\n`);
+    const audited: AuditEntry[] = [];
+    const forget = async (root: string) =>
+      runCli(["nodes", "forget", "engine-a", "-C", root], {
+        onAudit: (entry) => {
+          audited.push(entry);
+        },
+      }).done;
+    const unread = await forget(await failing("{ nodes: true }"));
+    expect(unread).toMatchObject({
+      code: EXIT.failed,
+      err: "pathways: the command could not finish (ECONNRESET).\n",
+    });
+    // Listed, then stopped cleanly before the DELETE: no such node any more.
+    const vanished = await failing("{ vanish: true }");
+    const module = (await import(pathToFileURL(NODE_STORE_FILE).href)) as {
+      nodeRows: Map<string, unknown>;
+    };
+    module.nodeRows.set("engine-a", { ...OTHER, startedAt: Date.now(), heartbeatAt: 0 });
+    expect(await forget(vanished)).toMatchObject({
+      code: EXIT.failed,
+      out: "No node by that id on this database.\n",
+    });
+    expect(audited.map((entry) => [entry.action, entry.outcome, entry.detail])).toEqual([
+      ["node-forget", "refused", { node: "engine-a", reason: "unreadable", code: "ECONNRESET" }],
+      ["node-forget", "not-found", { node: "engine-a" }],
+    ]);
   });
 });
 

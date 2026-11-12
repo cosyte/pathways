@@ -95,13 +95,15 @@ export function processRuns(pid: number): boolean {
 }
 
 /**
- * Whether a live row that holds this node's id is an earlier run of this same node, known gone: it
- * names this host, and its process is this one (a container restarted under the same process id)
- * or runs no more. Such a row is replaced; any other live row refuses the start.
+ * Whether a live row that holds this node's id may be an earlier run of this same node: it names
+ * this host, and its process is this one (a container restarted under the same process id) or does
+ * not run here. Only may be: two containers can share a host name and a process id, and a process
+ * on another host by the same name is not seen here. So the join waits to see such a row miss a
+ * heartbeat before it replaces it ({@link silenceFor}); any other live row refuses the start.
  *
  * @example
  * ```ts
- * if (earlierRun(holder, self)) await store.joinNode(info, holder);
+ * if (earlierRun(holder, self)) await store.joinNode(info, { ...holder, silentMs: silenceFor(holder) });
  * ```
  */
 export function earlierRun(
@@ -111,6 +113,21 @@ export function earlierRun(
 ): boolean {
   if (holder.host !== self.host) return false;
   return holder.pid === self.pid || !runs(holder.pid);
+}
+
+/**
+ * How long a live row's heartbeat must be silent before a join takes it as an earlier run of this
+ * node whose process is gone: half its stale bound, one and a half of its heartbeat intervals, so
+ * a holder that still runs beats within it, even a little late, and a restarted engine gets in
+ * well before the row would show stale.
+ *
+ * @example
+ * ```ts
+ * silenceFor(row); // 7_500 for a row stale after 15 s
+ * ```
+ */
+export function silenceFor(row: NodeRow): number {
+  return Math.ceil(row.staleAfterMs / 2);
 }
 
 /**
@@ -171,7 +188,7 @@ export interface NodeHeartbeatOptions {
   readonly state: () => NodeState;
   /** The node's monotonic clock, in milliseconds. Tests pass their own. */
   readonly monotonic?: () => number;
-  /** Waits `ms`, or until `signal` aborts. Tests pass their own. */
+  /** Waits `ms`, or until `signal` aborts: between beats, and at a join. Tests pass their own. */
   readonly wait?: (ms: number, signal: AbortSignal) => Promise<void>;
   /** Told of a failed beat, a row written again, and a row another live node holds. */
   readonly onEvent?: (event: NodeEvent) => void;
@@ -181,7 +198,17 @@ export interface NodeHeartbeatOptions {
 
 /** Waits `ms` without keeping the process up, or until `signal` aborts. */
 function unrefWait(ms: number, signal: AbortSignal): Promise<void> {
-  return sleep(ms, undefined, { signal, ref: false }).catch(() => undefined);
+  return sleep(ms, undefined, { signal, ref: false }).catch(aborted);
+}
+
+/** Waits `ms`, keeping the process up, as a start does, or until `signal` aborts. */
+function refWait(ms: number, signal: AbortSignal): Promise<void> {
+  return sleep(ms, undefined, { signal }).catch(aborted);
+}
+
+/** A wait cut short by its signal: it simply ends. */
+function aborted(): undefined {
+  return undefined;
 }
 
 /**
@@ -203,6 +230,7 @@ export class NodeHeartbeat {
   private readonly options: NodeHeartbeatOptions;
   private readonly monotonic: () => number;
   private readonly wait: (ms: number, signal: AbortSignal) => Promise<void>;
+  private readonly joinWait: (ms: number, signal: AbortSignal) => Promise<void>;
   private readonly stopping = new AbortController();
   private loop: Promise<void> | undefined;
   private joined = false;
@@ -212,6 +240,7 @@ export class NodeHeartbeat {
     this.options = options;
     this.monotonic = options.monotonic ?? (() => performance.now());
     this.wait = options.wait ?? unrefWait;
+    this.joinWait = options.wait ?? refWait;
   }
 
   /** Who this node is: its id, host and process. */
@@ -221,15 +250,23 @@ export class NodeHeartbeat {
   }
 
   /**
-   * Writes the node's row. A live row of the same id that is an earlier run of this node, on this
-   * host and gone, is replaced; any other live row is the answer, and this node may not run.
+   * Writes the node's row. A live row of the same id that may be an earlier run of this node, on
+   * this host, is replaced once its heartbeat has been silent for {@link silenceFor} by the
+   * database's clock: this waits out the rest of that time, then asks the store to replace the row
+   * only if it did not beat meanwhile. A row that beat is another engine that runs, and is the
+   * answer, as is any other live row: this node may not run.
    */
   async join(): Promise<NodeJoin> {
     const { store } = this.options;
     const info = { ...this.options.info, ...this.options.state() };
     let join = await store.joinNode(info);
     if (!join.joined && earlierRun(join.holder, this.self, this.options.processRuns)) {
-      join = await store.joinNode(info, join.holder);
+      const { holder } = join;
+      const silentMs = silenceFor(holder);
+      const left = silentMs - holder.heartbeatAgeMs;
+      if (left > 0) await this.joinWait(left, this.stopping.signal);
+      const replace = { node: holder.node, host: holder.host, pid: holder.pid, silentMs };
+      join = await store.joinNode({ ...this.options.info, ...this.options.state() }, replace);
     }
     this.joined = join.joined;
     return join;

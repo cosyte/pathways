@@ -6,6 +6,7 @@
 import type {
   NodeInfo,
   NodeJoin,
+  NodeReplace,
   NodeRow,
   NodeSelf,
   NodeState,
@@ -27,6 +28,10 @@ interface Failing {
   readonly join?: "code" | "plain";
   /** `leaveNode` rejects. */
   readonly leave?: boolean;
+  /** `nodes` rejects, with a code. */
+  readonly nodes?: boolean;
+  /** `forgetNode` finds the row gone: its engine stopped cleanly just before. */
+  readonly vanish?: boolean;
 }
 
 function rowOf(row: Row, now: number): NodeRow {
@@ -51,7 +56,7 @@ export class NodeMemoryStore extends MemoryStore {
     this.failing = options.fail ?? {};
   }
 
-  joinNode(info: NodeInfo, replace?: NodeSelf): Promise<NodeJoin> {
+  joinNode(info: NodeInfo, replace?: NodeReplace): Promise<NodeJoin> {
     if (this.failing.join !== undefined) {
       const error = new Error("the database went away");
       if (this.failing.join === "code") Object.assign(error, { code: "ECONNRESET" });
@@ -62,7 +67,7 @@ export class NodeMemoryStore extends MemoryStore {
     const free =
       row === undefined ||
       row.heartbeatAt + row.staleAfterMs <= now ||
-      (replace !== undefined && named(row, replace));
+      (replace !== undefined && named(row, replace) && row.heartbeatAt + replace.silentMs <= now);
     if (!free) return Promise.resolve({ joined: false, holder: rowOf(row, now) });
     nodeRows.set(info.node, { ...info, startedAt: now, heartbeatAt: now });
     return Promise.resolve({ joined: true });
@@ -85,11 +90,18 @@ export class NodeMemoryStore extends MemoryStore {
   }
 
   nodes(): Promise<NodeRow[]> {
+    if (this.failing.nodes === true) {
+      return Promise.reject(Object.assign(new Error("gone"), { code: "ECONNRESET" }));
+    }
     const now = Date.now();
     return Promise.resolve([...nodeRows.values()].map((row) => rowOf(row, now)));
   }
 
   forgetNode(node: string): Promise<boolean> {
+    if (this.failing.vanish === true) {
+      nodeRows.delete(node);
+      return Promise.resolve(false);
+    }
     const row = nodeRows.get(node);
     if (row === undefined || row.heartbeatAt + row.staleAfterMs > Date.now()) {
       return Promise.resolve(false);

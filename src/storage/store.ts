@@ -29,7 +29,15 @@ import {
   type LeaseClaimant,
   type LeaseHolder,
 } from "./lease.js";
-import type { NodeInfo, NodeJoin, NodeRole, NodeRow, NodeSelf, NodeState } from "./nodes.js";
+import type {
+  NodeInfo,
+  NodeJoin,
+  NodeReplace,
+  NodeRole,
+  NodeRow,
+  NodeSelf,
+  NodeState,
+} from "./nodes.js";
 import { markCopiesBodies } from "./ownership.js";
 import {
   migrateSchema,
@@ -57,6 +65,7 @@ export {
   NODE_ROLES,
   type NodeInfo,
   type NodeJoin,
+  type NodeReplace,
   type NodeRole,
   type NodeRow,
   type NodeSelf,
@@ -1229,10 +1238,11 @@ export interface MessageStore {
   /**
    * Writes this node's row, its join time and first heartbeat from the database's clock: a new row,
    * or over a row of the same id that is stale, or that still names `replace`'s host and process
-   * (an earlier run of this node, known gone). Answers with the live row that holds the id instead.
-   * Optional, with {@link nodeHeartbeat}, {@link leaveNode}, {@link nodes} and {@link forgetNode}.
+   * and has not beaten for `replace.silentMs` (an earlier run of this node whose heartbeat stopped).
+   * Answers with the live row that holds the id instead. Optional, with {@link nodeHeartbeat},
+   * {@link leaveNode}, {@link nodes} and {@link forgetNode}.
    */
-  joinNode?(info: NodeInfo, replace?: NodeSelf): Promise<NodeJoin>;
+  joinNode?(info: NodeInfo, replace?: NodeReplace): Promise<NodeJoin>;
   /**
    * One UPDATE: sets the node's heartbeat from the database's clock in the same statement, with its
    * role and draining flag, while the row still names `self`. Returns whether it did. Optional.
@@ -2904,12 +2914,13 @@ export class Store implements MessageStore, ContentStore, MetaStore {
   }
 
   /**
-   * Writes this node's row: over a stale row of the same id, or one that still names `replace`, in
-   * one UPDATE that reads the database's clock; else a new row. Of two nodes joining under one id
+   * Writes this node's row: over a stale row of the same id, or one that still names `replace` and
+   * has not beaten for `replace.silentMs`, in one UPDATE that reads the database's clock; else a new
+   * row. A row that beat within that time is live, whatever process it names, so it stays. Of two nodes joining under one id
    * at once, one insert is refused, and that node reads the other's live row. Every time comes from
    * the database's clock.
    */
-  async joinNode(info: NodeInfo, replace?: NodeSelf): Promise<NodeJoin> {
+  async joinNode(info: NodeInfo, replace?: NodeReplace): Promise<NodeJoin> {
     const now = DATABASE_NOW[this.kind];
     const row = {
       host: info.host,
@@ -2930,7 +2941,13 @@ export class Store implements MessageStore, ContentStore, MetaStore {
             eb(sql<number>`${sql.ref("heartbeat_at")} + ${sql.ref("stale_after_ms")}`, "<=", now),
             ...(replace === undefined
               ? []
-              : [eb.and([eb("host", "=", replace.host), eb("pid", "=", replace.pid)])]),
+              : [
+                  eb.and([
+                    eb("host", "=", replace.host),
+                    eb("pid", "=", replace.pid),
+                    eb(sql<number>`${sql.ref("heartbeat_at")} + ${replace.silentMs}`, "<=", now),
+                  ]),
+                ]),
           ]),
         )
         .executeTakeFirst();

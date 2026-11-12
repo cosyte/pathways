@@ -190,9 +190,12 @@ after. `pathways nodes forget <id>` removes a stale row, audited; see the
 
 A second engine that starts under the node id of a live one is refused, exit 1, naming the one that
 runs: its node id, host, process id, version, role and heartbeat age. Give each engine an id of its
-own: with `node: { id: { env: HOSTNAME } }`, each container's host name. A row of the same id left by
-an earlier run on the same host whose process is gone (killed, or a container restarted) is taken
-over at once, so a restart is never held up by its own row.
+own: with `node: { id: { env: HOSTNAME } }`, each container's host name. A row of the same id that
+names this host, under this engine's own process id or one that does not run here, may be an
+earlier run of this engine (killed, or a container restarted). The start waits until that row has
+gone half its stale bound without a heartbeat, 7.5 seconds by default, by the database's clock, and
+takes it over only if no heartbeat came in that time. A row that beat is another engine that runs,
+such as a second container with the same host name and process id, and the start is refused.
 
 ## Logs
 

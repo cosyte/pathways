@@ -17,6 +17,7 @@ import type {
   NextDeliveryOptions,
   NodeInfo,
   NodeJoin,
+  NodeReplace,
   NodeRow,
   NodeSelf,
   NodeState,
@@ -212,7 +213,7 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
   /** Straight through, present only when the store underneath has it. */
   readonly markDryRun?: (deliveryId: number, epoch?: number) => Promise<void>;
   /** The node methods, straight through, present only when the store underneath has all five. */
-  readonly joinNode?: (info: NodeInfo, replace?: NodeSelf) => Promise<NodeJoin>;
+  readonly joinNode?: (info: NodeInfo, replace?: NodeReplace) => Promise<NodeJoin>;
   readonly nodeHeartbeat?: (self: NodeSelf, state: NodeState) => Promise<boolean>;
   readonly leaveNode?: (self: NodeSelf) => Promise<boolean>;
   readonly nodes?: () => Promise<NodeRow[]>;

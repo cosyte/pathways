@@ -323,8 +323,10 @@ engine-b          engine-b  311   standby  0.0.2    3.9s ago   live
 
 `nodes forget <id>` removes a stale node's row, so the list shows it no more, and writes that to the
 audit log (`node-forget`), whichever way it goes. It exits 1, changing nothing, when no node has that
-id, or when the node is live: stop that engine, and its row goes with it. The rows hold ids, a host
-name, numbers and states: no message content and no URL.
+id, or when the node is live: stop that engine, and its row goes with it. It exits 1 too when the
+rows cannot be read, audited with the error's code, and 2 when the argument is not a node id,
+audited without the argument. The rows hold ids, a host name, numbers and states: no message content
+and no URL.
 
 With `--json`, `nodes` prints `{ "nodes": [...] }`, each with `node`, `host`, `pid`, `version`,
 `schemaGeneration`, `role`, `draining`, `staleAfterMs`, `startedAt`, `heartbeatAgeMs` and `stale`.

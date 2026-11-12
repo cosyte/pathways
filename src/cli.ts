@@ -69,6 +69,7 @@ import {
   listCommand,
   migrateCommand,
   nodeForgetCommand,
+  nodeForgetInvalidCommand,
   nodesCommand,
   parseAction,
   parseId,
@@ -1676,13 +1677,8 @@ function parseOperator(
       if (rest.length === 0) return nodesCommand;
       const [verb, id] = rest;
       if (verb !== "forget" || rest.length !== 2 || id === undefined) return usage(io);
-      // Checked, never repeated: an argument can hold anything.
-      if (!NODE_ID.test(id)) {
-        return invalid(
-          io,
-          "a node id is 1 to 64 letters, digits, dots, hyphens and underscores, starting with a letter or a digit.",
-        );
-      }
+      // Checked, never repeated: an argument can hold anything. Audited all the same, without it.
+      if (!NODE_ID.test(id)) return nodeForgetInvalidCommand;
       return (context) => nodeForgetCommand(context, id);
     }
     default: {
