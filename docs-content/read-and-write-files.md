@@ -23,89 +23,31 @@ destinations:
 
 Both folders are created if they do not exist. Paths are relative to the channel's folder.
 
-## How the source reads a folder
+Each file is taken once: the source moves it into a claim folder of its channel's own,
+`.claimed/<channel>/` inside `dir`, stores it, and only then deletes it, so a stop or a power cut at
+any point loses nothing and stores nothing twice. [How a source claims files and
+objects](./file-and-object-claims.md) says how. Two channels can read the same `dir`, and each file
+goes to whichever channel's pass sees it first: give each channel a folder of its own when every file
+must reach one channel in particular.
 
-On every pass (each `pollInterval`, 1 second by default) the source first finishes any file its
-channel claimed in an earlier run that stopped part way. Then it looks for regular files in `dir`
-whose name does not start with a dot, that hold at least one byte and that have not changed for at
-least `minAge` (1 second by default), so a file still being written is left for a later pass. It
-takes them in name order, and:
+## Put the folder on a file system that keeps file ids
 
-1. moves each one into the channel's own hidden folder, `.claimed/<channel>/` inside `dir`, under a
-   name of its own;
-2. flushes those moves to disk, once for the pass (how depends on the platform, below);
-3. stores each file's bytes in the database, encrypted, in the order it claimed them;
-4. deletes each file once it is stored.
+The source checks each move by the file's id. FAT and exFAT, as on many USB drives and memory cards,
+can give a file a new id when it moves between folders, on Windows and macOS in particular. Where the
+id changes, the source claims nothing, and each pass logs `source-read-failed` with
+`ERR_PATHWAYS_FILE_ID_UNSTEADY`; the files stay where they are. Put `dir` on NTFS, APFS, ext4, XFS or
+another file system that keeps a file's id when it moves, and restart.
 
-A file that cannot be opened stays where it is, and the engine logs `source-read-failed` with the
-error's code. If the engine stops after a file is claimed and before it is deleted, the file waits in
-the claim folder. The next pass hands it in again under the same key: if the database already holds
-it, the database answers with that message, and the file is deleted. Because the moves are on disk before anything is stored, a power cut cannot
-put a stored file back in `dir` to be read again. So nothing is lost and nothing is stored twice.
+## Let the source open each file to write on Windows
 
-A claimed file is named `<claim id>-<file name>`. The claim id is always 33 bytes: the pass's time,
-the file's place in the pass, and a random part. A file name of up to 221 bytes is kept whole. A
-longer one keeps as much of its end as fits in 255 bytes, in whole characters, so the extension stays
-and a file with any name can be claimed. A file in a subfolder (with `recursive: true`) is named by
-its path from `dir`, with each `%` written `%25` and each `/` written `%2F`: `wards/east/a.hl7` is
-claimed as `<claim id>-wards%2Feast%2Fa.hl7`.
-
-### How the moves reach the disk
-
-- **Linux and macOS.** The source flushes the folders the files moved between: the claim folder,
-  `.claimed/` and `dir`. It opens each folder and calls `fsync`, which writes the folder's entries
-  to disk.
-- **Windows.** A folder cannot be flushed this way: Node's `fsync` there is `FlushFileBuffers`,
-  which needs a handle opened to write, and so refuses a folder opened to read as Linux and macOS
-  open it. Instead the source flushes each claimed file under its new name. `FlushFileBuffers` writes a file's metadata as well as its data,
-  and on NTFS a rename is part of the file's metadata. This is the same step PostgreSQL takes to
-  make a rename last on Windows.
-
-On Windows the source also opens each file to write before it claims it, since flushing it needs
-that. A file it cannot open to write stays where it is, and the engine logs `source-read-failed`
-with the error's code (`EPERM` for a read-only file); clear its read-only attribute and the next
-pass takes it. A file another program holds open without sharing write or delete access is left
-the same way, until that program closes it. A program that shares that access (as most do,
-Node's own write streams among them) does not stop the claim, so `minAgeMs` is what keeps a file
-that is still being written from being taken too soon.
-
-### Two channels on one folder
-
-Two channels can read the same `dir`. Each file goes to whichever channel's pass sees it first, and
-each channel claims into its own folder under `.claimed/`, so neither finishes a file the other
-claimed. Give each channel a folder of its own when every file must reach one channel in particular.
-
-Write files into the folder by writing them elsewhere on the same disk and moving them in, or rely on
-`minAge` being longer than a write takes.
-
-### How a file is claimed, by kind of location
-
-The source's claim, order and recovery steps run the same way on every kind of location; what
-differs is how a file is claimed there, its claim rule. Each rule holds to one test: two engines
-polling one location at once store each file once.
-
-| Location                 | Claim rule                                                                                                                       | Status          |
-| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------- | --------------- |
-| A folder on this machine | Rename to a unique claim name, checked after the move by the file's id; the moves are flushed to disk before anything is stored. | Available       |
-| SFTP                     | Rename to a unique claim name. A rename that finds the file gone means another engine claimed it first.                          | Available       |
-| FTPS and WebDAV          | Decided with their support.                                                                                                      | Planned         |
-| S3 and Azure Blob        | A marker object written only where none is (`If-None-Match: *`): the store lets one engine write it and refuses the others.      | Available       |
-| SMB                      | Not decided yet.                                                                                                                 | Not planned yet |
-
-A location the source reads must rename a file in one step, so that of two engines renaming one file
-only one succeeds. An object store has no rename, so its claim is a conditional write instead:
-[Read and write Amazon S3](./read-and-write-amazon-s3.md) and
-[Read and write Azure Blob Storage](./read-and-write-azure-blob-storage.md) say how.
-
-### Put the folder on a file system that keeps file ids
-
-The source checks each move by the file's id, its device and inode number. FAT and exFAT, as on many
-USB drives and memory cards, can give a file a new id when it moves between folders, on Windows and
-macOS in particular, so that check could not tell one file from another. Before its first claim, the
-source moves an empty file of its own inside `.claimed/` to find out. Where the id changes, it claims
-nothing, and each pass logs `source-read-failed` with `ERR_PATHWAYS_FILE_ID_UNSTEADY`; the files
-stay where they are. Put `dir` on NTFS, APFS, ext4, XFS or another file system that keeps a file's
-id when it moves, and restart.
+On Windows the source opens each file to write as well as to read before it claims it, to flush the
+claim to disk ([why](./file-and-object-claims.md#flushing-the-moves-to-disk)). A file it cannot open
+to write stays where it is, and the engine logs `source-read-failed` with the error's code (`EPERM`
+for a read-only file): clear its read-only attribute and the next pass takes it. A file another
+program holds open without sharing write or delete access is left the same way, until that program
+closes it. A program that shares that access (as most do, Node's own write streams among them) does
+not stop the claim, so `minAge` is what keeps a file that is still being written from being taken
+too soon.
 
 ## Choose which files a source takes
 
@@ -188,6 +130,7 @@ them:
   once its file's claim is on disk. A marker with no file stays where it is.
 
 Writing elsewhere on the same disk and moving the file in is still the safest: a move is whole.
+Otherwise, rely on `minAge` being longer than a write takes.
 
 ### Set aside a file that cannot be taken
 
@@ -225,7 +168,7 @@ Those copies are patient data in plaintext, outside the encrypted store, and not
 retention does not reach them. The engine logs `plaintext-copies` once for the channel at every start
 while it is on.
 
-## How the destination writes files
+## Output file names
 
 Each output is written as `<message id>-<output number>.<extension>`: the first output of message 12
 on an `hl7v2` channel is `12-1.hl7`. The extension comes from the channel's format:
@@ -240,7 +183,7 @@ on an `hl7v2` channel is `12-1.hl7`. The extension comes from the channel's form
 | `text`  | `txt`     |
 
 The destination writes to a hidden temporary name and renames it, so a reader of the folder never sees
-half a file. Any failure to write (a full disk, a folder it may not write to) is retried, with the
+half a file ([how a destination writes](./file-and-object-claims.md#how-a-destination-writes)). Any failure to write (a full disk, a folder it may not write to) is retried, with the
 destination's later outputs waiting behind it, until it succeeds.
 
 ## Read and write over SFTP
@@ -314,10 +257,8 @@ has it, and also these two, which Pathways uses where the server names them in i
   a folder, so a power cut on the server before its own disk catches up can undo a claim, and a file
   stored just before can be stored again. Without the extension nothing is flushed.
 
-SFTP gives no inode and no change time, so the source tells one file from another by its mode,
-owner, group, size and modification time together (in whole seconds, as SFTP gives it), and an SFTP open follows a link, so the source reads a file's own entry first,
-refuses a link, and checks after the open that the open file is that entry. A file being written when
-the source finds it changes size, so its claim is refused that pass and taken on a later one.
+How the source tells one file from another on a server that gives no inode, and what it does with a
+link, is on [How a source claims files and objects](./file-and-object-claims.md#a-folder-on-an-sftp-server).
 
 ### Deadlines, keepalives and a server that goes down
 
@@ -373,5 +314,6 @@ move.
 
 ## Related
 
+- [How a source claims files and objects](./file-and-object-claims.md).
 - [How delivery and errors work](./delivery-and-errors.md).
 - [Configuration reference: file](./configuration-reference.md#file-source).
