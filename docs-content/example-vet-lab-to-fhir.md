@@ -2,7 +2,7 @@
 id: example-vet-lab-to-fhir
 title: "Example: a veterinary lab result to FHIR"
 sidebar_label: A veterinary lab result to FHIR
-description: "A runnable project: take a veterinary lab result as HL7 v2 over MLLP, turn it into a FHIR Bundle that keeps the animal's species and breed, and POST it to a FHIR server."
+description: "A runnable project: take a veterinary lab result over MLLP, turn it into a FHIR Bundle that keeps the animal's species and breed, and POST it to a FHIR server."
 ---
 
 # Example: a veterinary lab result to FHIR
