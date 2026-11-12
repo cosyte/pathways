@@ -69,6 +69,14 @@ jobs:
       - name: Start the example and wait until both services are healthy
         run: docker compose up --detach --wait --wait-timeout 180 --pull never
 
+      # The message folders' volume belongs to the engine's user alone. Read with the data-owner
+      # service's own image, volume and empty network, so nothing more is pulled.
+      - name: The message folders' volume is the engine user's, mode 700
+        run: |
+          mode="$(docker compose run --rm --no-deps --entrypoint stat data-owner -c '%a %u:%g' /data)"
+          echo "mode and owner: $mode"
+          test "$mode" = "700 65532:65532"
+
       - name: Send the synthetic A01 through the channel
         run: docker compose cp channels/adt-to-lab/tests/a01.hl7 pathways:/project/data/adt-to-lab/in/
 

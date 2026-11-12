@@ -35,7 +35,10 @@ cp .env.example .env
 Then give the three variables at the top a value:
 
 - `PATHWAYS_VERSION`, the release to run: a version tag of `ghcr.io/cosyte/pathways`. In a project
-  from `pathways init` it is already the version that wrote the project.
+  from `pathways init` it is already the version that wrote the project. For production, pin the
+  image by its digest as well, as the tag followed by `@` and the digest:
+  `PATHWAYS_VERSION=0.1.0@sha256:<digest>`. Compose then runs that image and no other, even if the
+  tag is moved. [Run Pathways in Docker](./run-in-docker.md) says how to check its signature.
 - `POSTGRES_PASSWORD`, the database password, in letters and digits: `openssl rand -hex 24`.
 - `PATHWAYS_KEY`, the master key that wraps each stored message's data key: `openssl rand -base64 32`.
   Keep a copy in your secret store; without it the stored messages cannot be read.
@@ -44,8 +47,10 @@ Compose refuses to start while any of the three is empty, and names it. Every ot
 file is one Pathways reads by name, commented out. Compose hands every variable in `.env` to the
 engine, so a channel's `{ env: NAME }` settings go there too.
 
-Before the first release no image is published yet. Build one from the clone, tagged as the
-version you set in `.env`, here the version on `main`:
+Until `ghcr.io/cosyte/pathways` is public, pulling it can fail with an authentication error
+(`unauthorized` or `denied`): sign in first with `docker login ghcr.io`, or build the image
+locally. Before the first release no image is published yet, so build one from the clone, tagged as
+the version you set in `.env`, here the version on `main`:
 
 ```bash
 docker build --tag "ghcr.io/cosyte/pathways:$(jq -r .version ../../package.json)" ../..
@@ -58,7 +63,7 @@ docker compose up --detach --wait
 ```
 
 Compose starts PostgreSQL, waits for its health check, gives the message folders' volume to the
-engine's user (uid 65532), and starts the engine. `--wait` returns once the engine's own health
+engine's user (uid 65532) alone, with mode 700, and starts the engine. `--wait` returns once the engine's own health
 check passes: it runs `pathways probe --ready` inside the container, which asks the probe listener
 for `/readyz`.
 

@@ -3,7 +3,9 @@
  *
  * - Every environment variable Pathways' own code reads by name is listed in the repository's
  *   `.env.example`, the Compose example's, and the starter's, each under a comment of its own, with
- *   a placeholder in place of any secret. A new read that none of them lists fails here.
+ *   a placeholder in place of any secret. A new read that none of them lists fails here, and so
+ *   does a read whose name test/env-reads.ts cannot see, unless it is one of the few that read a
+ *   name from configuration.
  * - The Compose example lists every variable its `compose.yaml` and its configuration name.
  * - The starter carries the same `compose.yaml` and `.env.example` as the example, and the example's
  *   channel is the starter's.
@@ -20,6 +22,8 @@ import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
 
 import { projectSchema } from "../src/config/schema.js";
+
+import { type EnvReads, scanEnvReads } from "./env-reads.js";
 
 const ROOT = join(import.meta.dirname, "..");
 const EXAMPLE = "examples/docker-compose";
@@ -40,44 +44,30 @@ function filesUnder(dir: string): string[] {
 
 const NAME = "[A-Za-z_][A-Za-z0-9_]*";
 
+/** The code in `src/`, which test/env-reads.ts scans for the environment variables it reads. */
+const engineReads = (): EnvReads =>
+  scanEnvReads(
+    filesUnder("src")
+      .filter((path) => path.endsWith(".ts"))
+      .map((path) => ({ path, text: read(path) })),
+  );
+
+const engineVariables = (): readonly string[] => engineReads().names;
+
 /**
- * Every environment variable the code in `src/` reads by name: `env["NAME"]` and `env.NAME` on any
- * environment object (`process.env`, a context's `env`), `env[CONSTANT]` where the constant is a
- * string in `src/`, and every `*_ENV` constant, which names a variable a configuration falls back
- * to. Comment lines are left out, so the variables their examples name do not count.
+ * The reads in `src/` whose name comes from configuration, so no `.env.example` can list it: a
+ * `{ env: NAME }` reference in a YAML file, a transform's config, or the `env` secret provider. Any
+ * other read the scan cannot name fails the test until its name is visible or it is added here.
  */
-function engineVariables(): string[] {
-  const code = filesUnder("src")
-    .filter((path) => path.endsWith(".ts"))
-    .map((path) =>
-      read(path)
-        .split("\n")
-        .filter((line) => !/^\s*(\/\/|\/\*|\*)/.test(line))
-        .join("\n"),
-    )
-    .join("\n");
-  const constants = new Map<string, string>();
-  for (const [, constant = "", value = ""] of code.matchAll(
-    new RegExp(`\\bconst\\s+([A-Z][A-Z0-9_]*)\\s*=\\s*"(${NAME})"`, "g"),
-  )) {
-    constants.set(constant, value);
-  }
-  const found = new Set<string>();
-  for (const match of code.matchAll(/\benv\??\.([A-Z][A-Z0-9_]*)\b/g)) {
-    if (match[1] !== undefined) found.add(match[1]);
-  }
-  for (const match of code.matchAll(new RegExp(`\\benv\\??\\.?\\[\\s*"(${NAME})"\\s*\\]`, "g"))) {
-    if (match[1] !== undefined) found.add(match[1]);
-  }
-  for (const match of code.matchAll(/\benv\[\s*([A-Z][A-Z0-9_]*)\s*\]/g)) {
-    const value = match[1] === undefined ? undefined : constants.get(match[1]);
-    if (value !== undefined) found.add(value);
-  }
-  for (const [constant, value] of constants) {
-    if (constant.endsWith("_ENV")) found.add(value);
-  }
-  return [...found].sort();
-}
+const DYNAMIC_READS = [
+  { path: "src/cli.ts", read: "env[reference.variable]" },
+  { path: "src/config/env-ref.ts", read: "env[reference.env]" },
+  { path: "src/config/transform-config.ts", read: "env[reference.name]" },
+  { path: "src/secrets/provider.ts", read: "env[ref.name]" },
+] as const;
+
+const isDynamic = (found: { readonly path: string; readonly read: string }): boolean =>
+  DYNAMIC_READS.some((entry) => entry.path === found.path && entry.read === found.read);
 
 /** One variable a `.env.example` lists, set (`NAME=value`) or shown commented out (`# NAME=value`). */
 interface Listed {
@@ -127,6 +117,8 @@ interface Compose {
       readonly configs?: readonly { readonly source: string; readonly target: string }[];
       readonly env_file?: string;
       readonly ports?: readonly string[];
+      readonly entrypoint?: readonly string[];
+      readonly network_mode?: string;
     }
   >;
   readonly volumes: Record<string, unknown>;
@@ -148,6 +140,20 @@ describe("the environment variables Pathways reads", () => {
         "XDG_RUNTIME_DIR",
       ]),
     );
+  });
+
+  it("are each read by a name the scan sees, but at the reads whose name configuration gives", () => {
+    expect(engineReads().unresolved.filter((found) => !isDynamic(found))).toEqual([]);
+  });
+
+  // An entry left after its read is gone would let a new read at the same place pass unseen.
+  it("allow no dynamic read that src/ no longer makes", () => {
+    const { unresolved } = engineReads();
+    expect(
+      DYNAMIC_READS.filter(
+        (entry) => !unresolved.some((f) => f.path === entry.path && f.read === entry.read),
+      ),
+    ).toEqual([]);
   });
 
   for (const file of ENV_FILES) {
@@ -243,6 +249,14 @@ describe("the Docker Compose example", () => {
     expect(services["postgres"]?.volumes).toContain("postgres-data:/var/lib/postgresql/data");
     expect(services["pathways"]?.volumes).toContain("pathways-data:/project/data");
     expect(services["pathways"]?.volumes).toContain("./channels:/project/channels:ro");
+  });
+
+  it("gives the message folders' volume to the engine's user alone, offline, and touches no more", () => {
+    const owner = compose().services["data-owner"];
+    expect(owner?.entrypoint).toEqual(["sh", "-c", "chown 65532:65532 /data && chmod 700 /data"]);
+    expect(owner?.network_mode).toBe("none");
+    expect(owner?.volumes).toEqual(["pathways-data:/data"]);
+    expect(owner?.image).toBe(compose().services["postgres"]?.image);
   });
 
   it("hands the engine a pathways.yaml the schema accepts: PostgreSQL, a key from .env, probes", () => {

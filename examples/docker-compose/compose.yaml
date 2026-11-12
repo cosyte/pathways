@@ -36,20 +36,21 @@ services:
     restart: unless-stopped
 
   # The engine runs as uid 65532, and a new volume belongs to root: this gives the message folders'
-  # volume to that user, then exits. It reuses the PostgreSQL image, which has chown, so nothing more
-  # is pulled.
+  # volume to that user alone (mode 700), then exits. It reuses the PostgreSQL image, which has sh,
+  # chown and chmod, so nothing more is pulled.
   data-owner:
     image: postgres@sha256:ff87138949ad9a46f32ff23bd6852b52ce024a13dffe9b4087be98292cdd3b4f
     user: "0:0"
-    entrypoint: ["chown", "65532:65532", "/data"]
+    entrypoint: ["sh", "-c", "chown 65532:65532 /data && chmod 700 /data"]
     network_mode: none
     volumes:
       - pathways-data:/data
     restart: "no"
 
   pathways:
-    # A version tag of ghcr.io/cosyte/pathways, from .env. Pin it by digest for production:
-    # docs-content/run-in-docker.md says how to check the image's signature.
+    # A version tag of ghcr.io/cosyte/pathways, from .env. Pin it by digest for production, as
+    # PATHWAYS_VERSION=0.1.0@sha256:<digest>: docs-content/run-in-docker.md says how to check the
+    # image's signature.
     image: ghcr.io/cosyte/pathways:${PATHWAYS_VERSION:?set PATHWAYS_VERSION in .env}
     depends_on:
       postgres:
