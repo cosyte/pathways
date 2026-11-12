@@ -1,7 +1,10 @@
 import { Worker } from "node:worker_threads";
 
+import type { ChannelConfig } from "../config/schema.js";
 import { ownsBuffer } from "../storage/ownership.js";
 import type {
+  DestinationReply,
+  DestinationSetup,
   FailureSummary,
   MessageContext,
   TransformReply,
@@ -11,9 +14,28 @@ import type {
   WorkerSetup,
 } from "./worker-entry.js";
 
-/** The result of one message's transform. */
+/**
+ * What one destination's transform gave for one message: its outputs, none when it filtered the
+ * message for that destination, or why it failed, which fails that destination's delivery only.
+ *
+ * @example
+ * ```ts
+ * const filtered = (result: DestinationResult): boolean => result.ok && result.outputs.length === 0;
+ * ```
+ */
+export type DestinationResult = DestinationReply;
+
+/**
+ * The result of one message's transform. `destinations` is set on a channel with destination
+ * transforms: one result per destination, in order, a destination without a transform holding the
+ * channel's `outputs`.
+ */
 export type TransformOutcome =
-  | { readonly ok: true; readonly outputs: readonly Uint8Array[] }
+  | {
+      readonly ok: true;
+      readonly outputs: readonly Uint8Array[];
+      readonly destinations?: readonly DestinationResult[];
+    }
   | { readonly ok: false; readonly failure: FailureSummary };
 
 /**
@@ -31,17 +53,69 @@ export type TransformOutcome =
 export class TransformLoadError extends Error {
   readonly channel: string;
   readonly failure: FailureSummary;
+  /** The destination whose transform failed to load, by index and `name:`; absent for the channel's. */
+  readonly destination: { readonly index: number; readonly name: string | undefined } | undefined;
 
   /**
    * @param channel The channel whose transform failed to load.
    * @param failure What went wrong, without message content.
+   * @param destination The destination whose own transform it was, if it was one.
    */
-  constructor(channel: string, failure: FailureSummary) {
-    super(`the transform of channel ${channel} could not be loaded (${failure.name})`);
+  constructor(
+    channel: string,
+    failure: FailureSummary,
+    destination?: { readonly index: number; readonly name: string | undefined },
+  ) {
+    super(
+      destination === undefined
+        ? `the transform of channel ${channel} could not be loaded (${failure.name})`
+        : `the transform of destination ${destinationLabel(destination)} of channel ${channel} could not be loaded (${failure.name})`,
+    );
     this.name = "TransformLoadError";
     this.channel = channel;
     this.failure = failure;
+    this.destination = destination;
   }
+}
+
+/**
+ * How a destination is named in a message: its `name:`, else its place in the list from 1.
+ *
+ * @example
+ * ```ts
+ * destinationLabel({ index: 1, name: undefined }); // "2"
+ * destinationLabel({ index: 0, name: "lab" }); // "lab"
+ * ```
+ */
+export function destinationLabel(destination: {
+  readonly index: number;
+  readonly name: string | undefined;
+}): string {
+  return destination.name ?? String(destination.index + 1);
+}
+
+/**
+ * The destinations a channel's worker runs transforms for, or `undefined` when none of them has a
+ * transform, so a channel without destination transforms runs as it always has.
+ *
+ * @example
+ * ```ts
+ * new ChannelWorker({ ...options, destinations: destinationSetups(channel) });
+ * ```
+ */
+export function destinationSetups(
+  channel: Pick<ChannelConfig, "format" | "destinations">,
+): DestinationSetup[] | undefined {
+  if (!channel.destinations.some((destination) => destination.transform !== undefined)) {
+    return undefined;
+  }
+  return channel.destinations.map((destination, index) => ({
+    index,
+    name: destination.name,
+    kind: destination.kind,
+    format: destination.format ?? channel.format,
+    transformFile: destination.transform,
+  }));
 }
 
 /**
@@ -72,6 +146,12 @@ export interface ChannelWorkerOptions {
    * holds as `config`. Defaults to none.
    */
   readonly config?: Readonly<Record<string, unknown>>;
+  /**
+   * The channel's destinations, given when one of them has a transform: each runs after the
+   * channel's transform, in the same request, under the same timeout and memory cap. Leave it out
+   * when none has one.
+   */
+  readonly destinations?: readonly DestinationSetup[] | undefined;
   readonly workerUrl?: URL;
 }
 
@@ -153,6 +233,9 @@ export class ChannelWorker {
       transformFile,
       format,
       config: this.options.config ?? {},
+      ...(this.options.destinations === undefined
+        ? {}
+        : { destinations: this.options.destinations }),
     };
     const worker = new Worker(this.options.workerUrl ?? defaultWorkerUrl(), {
       workerData: setup,
@@ -181,7 +264,19 @@ export class ChannelWorker {
           resolve(worker);
         } else {
           void worker.terminate();
-          reject(new TransformLoadError(channel, hello.failure));
+          const destination =
+            hello.destination === undefined
+              ? undefined
+              : this.options.destinations?.[hello.destination];
+          reject(
+            new TransformLoadError(
+              channel,
+              hello.failure,
+              destination === undefined
+                ? undefined
+                : { index: destination.index, name: destination.name },
+            ),
+          );
         }
       };
       const onError = (error: Error): void => {
@@ -226,10 +321,7 @@ export class ChannelWorker {
         // The transform runs in this worker and can post its own messages through parentPort. Only
         // a reply that carries this message's id settles it; anything else is ignored.
         if (!isReplyTo(reply, id)) return;
-        finish(
-          reply.ok ? { ok: true, outputs: reply.outputs } : { ok: false, failure: reply.failure },
-          false,
-        );
+        finish(reply.ok ? success(reply) : { ok: false, failure: reply.failure }, false);
       };
       const onError = (error: Error): void => {
         finish({ ok: false, failure: describeWorkerError(error, "crash") }, true);
@@ -260,6 +352,20 @@ export class ChannelWorker {
       );
     });
   }
+}
+
+/**
+ * A successful reply as an outcome: a destination without a transform (`null`) holds the channel's
+ * outputs.
+ */
+function success(reply: Extract<TransformReply, { ok: true }>): TransformOutcome {
+  const { outputs, destinations } = reply;
+  if (destinations === undefined) return { ok: true, outputs };
+  return {
+    ok: true,
+    outputs,
+    destinations: destinations.map((result) => result ?? { ok: true, outputs }),
+  };
 }
 
 /** Whether a message from the worker is the reply to request `id`. */

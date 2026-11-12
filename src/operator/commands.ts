@@ -271,7 +271,10 @@ export async function statusCommand(
         // Named only when there are some: a channel that never ran dry reads as it always has.
         (counts["dry-run"] === undefined
           ? ""
-          : `, ${counts["dry-run"]} dry-run (recorded, not sent)`),
+          : `, ${counts["dry-run"]} dry-run (recorded, not sent)`) +
+        (counts.filtered === undefined
+          ? ""
+          : `, ${counts.filtered} filtered (by a destination transform)`),
     );
     for (const d of shown) {
       lines.push(
@@ -467,10 +470,19 @@ export async function showCommand(
   }
 
   const { error, ...summary } = message;
-  const shownDeliveries = deliveries.map((delivery) => ({
-    ...delivery,
-    error: safeError(delivery.error),
-  }));
+  // The destinations' names, from the channel as configured now, when it still is.
+  const names =
+    context.project.channels
+      .find((channel) => channel.name === message.channel)
+      ?.destinations.map((destination) => destination.name) ?? [];
+  const shownDeliveries = deliveries.map((delivery) => {
+    const name = names[delivery.destination];
+    return {
+      ...delivery,
+      ...(name === undefined ? {} : { destinationName: name }),
+      error: safeError(delivery.error),
+    };
+  });
   const lines = [
     `Message ${message.id}`,
     ...table([
@@ -488,7 +500,7 @@ export async function showCommand(
         : [["  content hash", message.contentHash] as [string, string]]),
     ]),
     deliveries.length === 0 ? "No deliveries." : "Deliveries:",
-    ...(deliveries.length === 0 ? [] : indent(deliveryTable(deliveries))),
+    ...(deliveries.length === 0 ? [] : indent(deliveryTable(deliveries, names))),
   ];
   let json: Record<string, unknown> = {
     message: { ...summary, error: safeError(error) },
@@ -932,7 +944,7 @@ function tally(counts: Readonly<Record<string, number>>): string {
 }
 
 function deliverySummary(deliveries: DeliveryTally): string {
-  const parts = (["delivered", "dry-run", "pending", "failed", "cleared"] as const)
+  const parts = (["delivered", "dry-run", "filtered", "pending", "failed", "cleared"] as const)
     .filter((status) => (deliveries[status] ?? 0) > 0)
     .map((status) =>
       status === "pending" && deliveries.retrying > 0
@@ -942,14 +954,20 @@ function deliverySummary(deliveries: DeliveryTally): string {
   return parts.length === 0 ? "-" : parts.join(", ");
 }
 
-function deliveryTable(deliveries: readonly StoredDelivery[]): string[] {
+function deliveryTable(
+  deliveries: readonly StoredDelivery[],
+  names: readonly (string | undefined)[],
+): string[] {
   return table([
     ["ID", "GENERATION", "DESTINATION", "OUTPUT", "STATUS", "ATTEMPTS", "WHEN", "ERROR", "RESENT"],
     ...deliveries.map((d) => [
       String(d.id),
       String(d.generation),
-      String(d.destination),
-      String(d.seq + 1),
+      names[d.destination] === undefined
+        ? String(d.destination)
+        : `${d.destination} (${String(names[d.destination])})`,
+      // A filtered delivery, or one whose destination transform failed, has no output.
+      d.seq < 0 ? "-" : String(d.seq + 1),
       d.status,
       String(d.attempts),
       when(d),

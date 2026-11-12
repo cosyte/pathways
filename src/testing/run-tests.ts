@@ -1,11 +1,17 @@
-import { readdir, readFile, writeFile } from "node:fs/promises";
+import { readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { ChannelConfig, ProjectConfig } from "../config/schema.js";
 import { transformConfigFor } from "../config/transform-config.js";
 import type { Env } from "../connectors/endpoint.js";
-import { ChannelWorker, TransformLoadError } from "../engine/channel-worker.js";
-import type { FailureSummary } from "../engine/worker-entry.js";
+import {
+  ChannelWorker,
+  destinationLabel,
+  destinationSetups,
+  TransformLoadError,
+  type DestinationResult,
+} from "../engine/channel-worker.js";
+import { formatTable, type DestinationSetup, type FailureSummary } from "../engine/worker-entry.js";
 
 /** Options for {@link runChannelTests}. */
 export interface ChannelTestOptions {
@@ -44,11 +50,35 @@ export function expectedName(input: string): string {
   return dot <= 0 ? `${input}.expected` : `${input.slice(0, dot)}.expected${input.slice(dot)}`;
 }
 
+/** Each format's file extension, as the registry gives it. */
+const EXTENSIONS = formatTable("extension");
+
+/**
+ * What one destination expects for `input`, on a channel with destination transforms:
+ * `<input without its extension>.expected.<destination name, or its place from 1>.<the extension of
+ * the destination's format>`.
+ *
+ * @example
+ * ```ts
+ * destinationExpectedName("a01.hl7", { index: 0, name: "lab", kind: "file", format: "fhir", transformFile: undefined }); // "a01.expected.lab.json"
+ * ```
+ */
+export function destinationExpectedName(input: string, destination: DestinationSetup): string {
+  const dot = input.lastIndexOf(".");
+  const stem = dot <= 0 ? input : input.slice(0, dot);
+  return `${stem}.expected.${destinationLabel(destination)}.${EXTENSIONS[destination.format]}`;
+}
+
 /**
  * Runs every input in each channel's `tests/` folder through the channel's transform, in the same
  * worker the engine uses, and compares the output with the saved `<name>.expected.<ext>`, byte for
  * byte, whatever the channel's format. A message the transform filters out expects an empty file;
  * several outputs are joined by a newline.
+ *
+ * On a channel with destination transforms, each destination's outputs are compared with a file of
+ * their own, `<name>.expected.<destination name or place from 1>.<ext>` (see
+ * {@link destinationExpectedName}), and a missing file expects that destination to filter the
+ * input out; with `update`, a destination that filtered it has its file removed.
  *
  * Each transform gets the context of a message that is not stored (`messageId` 0, run 1, no source
  * facts) with its channel's configuration, read from the environment as the engine reads it.
@@ -94,6 +124,7 @@ export async function runChannelTests(
       timeoutMs: channel.settings.timeoutMs,
       memoryMb: channel.settings.memoryMb,
       config: config.resolved,
+      destinations: destinationSetups(channel),
     });
     try {
       await worker.start();
@@ -112,6 +143,22 @@ export async function runChannelTests(
         if (!outcome.ok) {
           options.out(`FAIL ${label}: ${describeFailure(outcome.failure, channel)}`);
           failed += 1;
+          continue;
+        }
+        const setups = destinationSetups(channel);
+        if (setups !== undefined) {
+          const counted = await compareDestinations({
+            label,
+            input,
+            testsDir,
+            channel,
+            setups,
+            results: outcome.destinations,
+            options,
+          });
+          passed += counted.passed;
+          failed += counted.failed;
+          updated += counted.updated;
           continue;
         }
         const actual = joinOutputs(outcome.outputs);
@@ -145,6 +192,86 @@ export async function runChannelTests(
     }
   }
 
+  return { passed, failed, updated };
+}
+
+/** What {@link compareDestinations} compares: one input's results, one per destination. */
+interface DestinationComparison {
+  readonly label: string;
+  readonly input: string;
+  readonly testsDir: string;
+  readonly channel: ChannelConfig;
+  readonly setups: readonly DestinationSetup[];
+  /** One per destination; set whenever the worker was given destinations. */
+  readonly results: readonly DestinationResult[] | undefined;
+  readonly options: ChannelTestOptions;
+}
+
+/** Compares, or saves, each destination's outputs for one input: one line and one count each. */
+async function compareDestinations(comparison: DestinationComparison): Promise<ChannelTestSummary> {
+  const { label, input, testsDir, channel, setups, results, options } = comparison;
+  let passed = 0;
+  let failed = 0;
+  let updated = 0;
+  for (const setup of setups) {
+    const result = results?.[setup.index];
+    const name = destinationLabel(setup);
+    const expectedFile = destinationExpectedName(input, setup);
+    const where = `${label} -> ${name}`;
+    /* v8 ignore next 4 -- the worker replies for every destination it was given */
+    if (result === undefined) {
+      failed += 1;
+      continue;
+    }
+    if (!result.ok) {
+      options.out(`FAIL ${where}: ${describeFailure(result.failure, channel)}`);
+      failed += 1;
+      continue;
+    }
+    const filtered = result.outputs.length === 0;
+    if (options.update) {
+      if (filtered) {
+        await rm(join(testsDir, expectedFile), { force: true });
+        options.out(`UPDATED ${where}: filtered, no ${expectedFile}`);
+      } else {
+        await writeFile(join(testsDir, expectedFile), joinOutputs(result.outputs));
+        options.out(`UPDATED ${where} -> ${expectedFile}`);
+      }
+      updated += 1;
+      continue;
+    }
+    let expected: Uint8Array | undefined;
+    try {
+      expected = new Uint8Array(await readFile(join(testsDir, expectedFile)));
+    } catch {
+      expected = undefined;
+    }
+    if (expected === undefined) {
+      if (filtered) {
+        options.out(`PASS ${where} (filtered)`);
+        passed += 1;
+      } else {
+        options.out(
+          `FAIL ${where}: no ${expectedFile}, which expects this destination to filter the input out; run "pathways test --update" to save the current output`,
+        );
+        failed += 1;
+      }
+      continue;
+    }
+    if (filtered) {
+      options.out(`FAIL ${where}: filtered, and ${expectedFile} expects an output`);
+      failed += 1;
+      continue;
+    }
+    const actual = joinOutputs(result.outputs);
+    if (Buffer.from(actual).equals(Buffer.from(expected))) {
+      options.out(`PASS ${where}`);
+      passed += 1;
+    } else {
+      options.out(`FAIL ${where}: ${firstDifference(actual, expected)} (${expectedFile})`);
+      failed += 1;
+    }
+  }
   return { passed, failed, updated };
 }
 

@@ -415,7 +415,7 @@ an API key header included.
 ### Destinations
 
 Each entry is exactly one of `file`, `http`, `mllp` or `module`, and may add a [`retry`](#retry)
-block of its own and `dryRun`, beside that key:
+block of its own, `dryRun`, `name`, `transform` and `format`, beside that key:
 
 ```yaml title="channels/results-out/channel.yaml"
 source:
@@ -428,6 +428,11 @@ destinations:
 | Key      | Type    | Default | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | -------- | ------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `dryRun` | boolean | `false` | transform and record each output, mark its delivery `dry-run`, and never send it: no connector is built, so no TLS file is read and no connection opened, and none of its secrets is read or resolved at start, a provider's (`secret:`) included, so a missing or expired one does not stop the start. Takes an environment reference. When `dryRun` is read from an environment variable, setting that variable to `false` makes the destination send for real, and the audit log does not record that change |
+
+`name` (lowercase letters, digits and hyphens, unique in the channel), `transform` (a module path,
+relative to `channel.yaml`) and `format` (one of the channel formats, the channel's by default) give a
+destination a transform of its own: see
+[Transform or filter for one destination](./transform-and-filter-messages.md#transform-or-filter-for-one-destination).
 
 A `file` or `module` destination may also set `timeout`, a duration (`30s` by default): how long one
 delivery may take in all before it is cut off and retried. See

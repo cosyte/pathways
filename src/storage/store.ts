@@ -67,14 +67,17 @@ export type MessageStatus = "received" | "transformed" | "filtered" | "failed" |
 /**
  * Where one delivery of a message to one destination stands. `cleared`: it failed for good, and an
  * operator cleared it, or replayed its message. `dry-run`: its destination runs dry (`dryRun: true`,
- * or `pathways start --dry-run`), so its output was recorded and never sent.
+ * or `pathways start --dry-run`), so its output was recorded and never sent. `filtered`: the
+ * destination's own transform returned nothing for the message, so nothing goes to it; done, as a
+ * delivered one is.
  *
  * @example
  * ```ts
  * const open = (status: DeliveryStatus): boolean => status === "pending";
  * ```
  */
-export type DeliveryStatus = "pending" | "delivered" | "failed" | "cleared" | "dry-run";
+export type DeliveryStatus =
+  "pending" | "delivered" | "failed" | "cleared" | "dry-run" | "filtered";
 
 /**
  * Every state a message can be in, as an operator sees it. {@link messageState} says how each is
@@ -107,16 +110,20 @@ export const MESSAGE_STATES = [
 export type MessageState = (typeof MESSAGE_STATES)[number];
 
 /**
- * How many deliveries stand at each status. `dry-run` is there only when some delivery ran dry, so
- * the counts of a project that never runs a destination dry read as they did before dry runs.
+ * How many deliveries stand at each status. `dry-run` is there only when some delivery ran dry, and
+ * `filtered` only when a destination's transform filtered one, so the counts of a project that does
+ * neither read as they did before.
  *
  * @example
  * ```ts
  * const recorded = (counts: DeliveryCounts): number => counts.delivered + (counts["dry-run"] ?? 0);
  * ```
  */
-export type DeliveryCounts = Readonly<Record<Exclude<DeliveryStatus, "dry-run">, number>> & {
+export type DeliveryCounts = Readonly<
+  Record<Exclude<DeliveryStatus, "dry-run" | "filtered">, number>
+> & {
   readonly "dry-run"?: number;
+  readonly filtered?: number;
 };
 
 /**
@@ -414,7 +421,10 @@ export interface StoredMessage extends MessageSummary {
 export interface StoredDelivery {
   readonly id: number;
   readonly destination: number;
-  /** Which output of the transform this is, from 0. */
+  /**
+   * Which output of the transform this is, from 0; -1 for a delivery with no output, which its
+   * destination's own transform filtered (`filtered`) or failed (`failed`, then `cleared`).
+   */
   readonly seq: number;
   readonly generation: number;
   readonly status: DeliveryStatus;
@@ -661,6 +671,67 @@ export interface Page<T> {
 }
 
 /**
+ * What one destination's transform gave for a message, as storage records it: its outputs, in
+ * order, none meaning it filtered the message for that destination; or why it failed, as stored,
+ * which fails that destination's delivery only.
+ *
+ * @example
+ * ```ts
+ * const results: DestinationOutcome[] = [{ outputs: [body] }, { outputs: [] }, { failure: "transform: TypeError: ..." }];
+ * ```
+ */
+export type DestinationOutcome = (
+  { readonly outputs: readonly Uint8Array[] } | { readonly failure: string }
+) & {
+  /**
+   * For a destination with no output: the body its one delivery row holds, as the store keeps it.
+   * A layer that encodes every body on its way in (encryption at rest) passes its encoding of an
+   * empty body here, so no row holds a body that did not pass through it. Empty when not given.
+   */
+  readonly emptyBody?: Uint8Array | undefined;
+};
+
+/**
+ * What a transform gave, as {@link MessageStore.completeTransform} records it: the same outputs for
+ * every destination, or, on a channel with destination transforms, one {@link DestinationOutcome}
+ * per destination, in order.
+ *
+ * @example
+ * ```ts
+ * const same: TransformOutputs = [body];
+ * const each: TransformOutputs = { byDestination: [{ outputs: [body] }, { outputs: [] }] };
+ * ```
+ */
+export type TransformOutputs =
+  readonly Uint8Array[] | { readonly byDestination: readonly DestinationOutcome[] };
+
+/**
+ * Whether a transform's outputs were given one destination at a time.
+ *
+ * @example
+ * ```ts
+ * isByDestination({ byDestination: [] }); // true
+ * ```
+ */
+export function isByDestination(
+  outputs: TransformOutputs,
+): outputs is { readonly byDestination: readonly DestinationOutcome[] } {
+  return !Array.isArray(outputs);
+}
+
+/**
+ * The status a message takes from what its transform gave: `filtered` when no destination has an
+ * output or a failure, else `transformed`.
+ */
+function transformedStatus(outputs: TransformOutputs): MessageStatus {
+  if (!isByDestination(outputs)) return outputs.length === 0 ? "filtered" : "transformed";
+  const filtered = outputs.byDestination.every(
+    (outcome) => "outputs" in outcome && outcome.outputs.length === 0,
+  );
+  return filtered ? "filtered" : "transformed";
+}
+
+/**
  * What a replay or a resend asks storage to record. Storage checks the message still stands where
  * the caller found it, and changes nothing otherwise.
  *
@@ -683,6 +754,11 @@ export interface RequeueRequest {
   readonly failure?: string | undefined;
   /** How many destinations the channel has now. */
   readonly destinations: number;
+  /**
+   * On a channel with destination transforms: what each destination gets, in order, in place of
+   * `outputs` for every one. A destination's failure is recorded as its failed delivery.
+   */
+  readonly byDestination?: readonly DestinationOutcome[] | undefined;
 }
 
 /**
@@ -945,10 +1021,17 @@ export interface MessageStore {
     options?: StoreReceiveOptions,
   ): Promise<ReceivedMessage>;
   nextToTransform(channel: string): Promise<PendingMessage | undefined>;
-  /** Fenced by `epoch` when it is given: see the lease methods above. */
+  /**
+   * Records a transform's outputs and the message's new status, all or nothing: given a list, one
+   * pending delivery per output per destination, and the message `filtered` when the list is
+   * empty; given `{ byDestination }`, each destination's own outputs as pending deliveries, a
+   * destination with none as one `filtered` delivery and one that failed as one `failed` delivery
+   * with its error, and the message `filtered` only when every destination filtered it. Fenced by
+   * `epoch` when it is given: see the lease methods above.
+   */
   completeTransform(
     messageId: number,
-    outputs: readonly Uint8Array[],
+    outputs: TransformOutputs,
     destinations: number,
     epoch?: number,
   ): Promise<void>;
@@ -1036,8 +1119,12 @@ export interface MessageStore {
   messageBody(id: number): Promise<Uint8Array | undefined>;
   /** A message's deliveries, every generation, oldest first, without bodies. */
   deliveries(messageId: number): Promise<StoredDelivery[]>;
-  /** The outputs of a message's current generation, in order; none when it has none or they were dropped. */
-  outputs(messageId: number): Promise<Uint8Array[]>;
+  /**
+   * The outputs of a message's current generation, in order; none when it has none or they were
+   * dropped. Those of `destination` when it is given, else those of the first destination that has
+   * any.
+   */
+  outputs(messageId: number, destination?: number): Promise<Uint8Array[]>;
   /** A page of messages, newest first, without bodies or errors. */
   listMessages(query: MessageQuery): Promise<Page<MessageSummary>>;
   /**
@@ -1667,8 +1754,9 @@ function readStatus(status: StoredStatus): MessageStatus {
 }
 
 /** A tally being counted: `dry-run` is added by the first delivery that ran dry. */
-type Tallying = Record<Exclude<DeliveryStatus, "dry-run"> | "retrying", number> & {
+type Tallying = Record<Exclude<DeliveryStatus, "dry-run" | "filtered"> | "retrying", number> & {
   "dry-run"?: number;
+  filtered?: number;
 };
 
 function emptyTally(): Tallying {
@@ -2064,11 +2152,11 @@ export class Store implements MessageStore, ContentStore, MetaStore {
   }
 
   /**
-   * The outputs of a message's current generation, in order, or none once they were dropped. Each
-   * destination was queued the same outputs, so they are read from the first destination's
-   * deliveries.
+   * The outputs of a message's current generation, in order, or none once they were dropped: those
+   * of `destination`, or else of the first destination with any. Without destination transforms,
+   * each destination was queued the same outputs. A delivery with no output (`seq` -1) is none.
    */
-  async outputs(messageId: number): Promise<Uint8Array[]> {
+  async outputs(messageId: number, destination?: number): Promise<Uint8Array[]> {
     const rows = await this.db
       .selectFrom("deliveries")
       .innerJoin("messages", "messages.id", "deliveries.message_id")
@@ -2076,6 +2164,10 @@ export class Store implements MessageStore, ContentStore, MetaStore {
       .where("deliveries.message_id", "=", messageId)
       .whereRef("deliveries.generation", "=", "messages.generation")
       .where("messages.content_dropped_at", "is", null)
+      .where("deliveries.seq", ">=", 0)
+      .$if(destination !== undefined, (q) =>
+        q.where("deliveries.destination", "=", destination as number),
+      )
       .orderBy("deliveries.destination")
       .orderBy("deliveries.seq")
       .execute();
@@ -2243,12 +2335,13 @@ export class Store implements MessageStore, ContentStore, MetaStore {
   }
 
   /**
-   * Records a transform's outputs: one pending delivery per output per destination, in order, and
-   * the message as `transformed`, or as `filtered` when there were no outputs. All or nothing.
+   * Records a transform's outputs: one pending delivery per output per destination, in order, or
+   * each destination's own (see {@link MessageStore.completeTransform}), and the message as
+   * `transformed`, or as `filtered` when no destination has anything. All or nothing.
    */
   async completeTransform(
     messageId: number,
-    outputs: readonly Uint8Array[],
+    outputs: TransformOutputs,
     destinations: number,
     epoch?: number,
   ): Promise<void> {
@@ -2258,7 +2351,7 @@ export class Store implements MessageStore, ContentStore, MetaStore {
       const updated = await tx
         .updateTable("messages")
         .set({
-          status: outputs.length === 0 ? "filtered" : "transformed",
+          status: transformedStatus(outputs),
           updated_at: at.toISOString(),
         })
         .where("id", "=", messageId)
@@ -2409,7 +2502,7 @@ export class Store implements MessageStore, ContentStore, MetaStore {
                 .select("deliveries.id")
                 .whereRef("deliveries.message_id", "=", "messages.id")
                 .whereRef("deliveries.generation", "=", "messages.generation")
-                .where("deliveries.status", "<>", "delivered"),
+                .where("deliveries.status", "not in", ["delivered", "filtered"]),
             ),
           ),
         )
@@ -2719,10 +2812,10 @@ export class Store implements MessageStore, ContentStore, MetaStore {
    */
   async requeue(messageId: number, request: RequeueRequest, actor: string): Promise<RequeueResult> {
     const at = this.now().toISOString();
-    const { mode, expected, outputs, failure, destinations } = request;
-    let status: MessageStatus = "transformed";
-    if (failure !== undefined) status = "failed";
-    else if (outputs.length === 0) status = "filtered";
+    const { mode, expected, failure, destinations, byDestination } = request;
+    const outputs: TransformOutputs =
+      byDestination === undefined ? request.outputs : { byDestination };
+    const status: MessageStatus = failure === undefined ? transformedStatus(outputs) : "failed";
     try {
       return await this.db.transaction().execute(async (tx) => {
         const moved = await tx
@@ -2975,17 +3068,51 @@ export class Store implements MessageStore, ContentStore, MetaStore {
     }
   }
 
-  /** Inserts one pending delivery per output per destination, in order; returns how many. */
+  /**
+   * Inserts one pending delivery per output per destination, in order, or each destination's own
+   * outputs, and one row for a destination with none (`filtered`) or that failed (`failed`, with its
+   * error); returns how many deliveries were queued to be sent.
+   */
   private async queue(
     tx: Transaction<Tables>,
     messageId: number,
     message: { readonly channel: string; readonly generation: number },
-    outputs: readonly Uint8Array[],
+    given: TransformOutputs,
     destinations: number,
   ): Promise<number> {
+    // The same outputs for every destination, and none: the message was filtered, with no rows.
+    if (!isByDestination(given) && given.length === 0) return 0;
+    const outcomes: readonly DestinationOutcome[] = isByDestination(given)
+      ? given.byDestination
+      : Array.from({ length: destinations }, () => ({ outputs: given }));
     let queued = 0;
-    for (let destination = 0; destination < destinations; destination += 1) {
-      for (const [seq, body] of outputs.entries()) {
+    for (const [destination, outcome] of outcomes.entries()) {
+      if ("failure" in outcome || outcome.outputs.length === 0) {
+        // No output: one row says why, so the message settles and shows what this destination got.
+        // Its body is empty, never read: only a delivery with an output (seq 0 and up) is sent.
+        await tx
+          .insertInto("deliveries")
+          .values({
+            message_id: messageId,
+            channel: message.channel,
+            destination,
+            seq: -1,
+            // An empty value goes in as each database takes one: see EMPTY_BODY.
+            body:
+              outcome.emptyBody === undefined || outcome.emptyBody.byteLength === 0
+                ? EMPTY_BODY[this.kind]
+                : blob(outcome.emptyBody),
+            status: "failure" in outcome ? "failed" : "filtered",
+            attempts: 0,
+            next_attempt_at: 0,
+            last_error: "failure" in outcome ? outcome.failure : null,
+            delivered_at: null,
+            generation: message.generation,
+          })
+          .execute();
+        continue;
+      }
+      for (const [seq, body] of outcome.outputs.entries()) {
         await tx
           .insertInto("deliveries")
           .values({

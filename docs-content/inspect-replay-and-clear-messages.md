@@ -34,9 +34,9 @@ content. A message's state is one of:
 | `received`  | stored, waiting for its transform                                                   |
 | `queued`    | transformed; a delivery waits for its first try                                     |
 | `retrying`  | transformed; a delivery failed and waits to be tried again                          |
-| `delivered` | every delivery is done                                                              |
+| `delivered` | every delivery is done: delivered, or filtered by its destination's transform       |
 | `dry-run`   | every delivery is done, and at least one destination ran dry: recorded, never sent  |
-| `filtered`  | the transform returned no output                                                    |
+| `filtered`  | the transform returned no output, or every destination's transform filtered it      |
 | `failed`    | the transform failed, the source stored it as failed, or a delivery failed for good |
 | `cleared`   | it failed, and an operator cleared it                                               |
 
@@ -48,7 +48,9 @@ npx pathways messages show 17 --content
 ```
 
 `show` prints the message's state, times, size and duplicate flag, the stored error cut to its stage,
-name, code and location, and each delivery with its attempts and last error. It prints the content
+name, code and location, and each delivery with its destination (by its place in the list, and its
+`name:` when it has one), status, attempts and last error. A delivery a destination's transform
+filtered is listed as `filtered`, with `-` for its output. It prints the content
 only with `--content`: the message as received and its current outputs. That view is PHI, so it is
 written to the audit log first, and not shown if the entry cannot be written. For a message whose
 content was [dropped after delivery](./set-message-retention.md#drop-content-after-delivery), it
@@ -88,6 +90,11 @@ npx pathways replay 17 --resend
 
 `--resend` queues the outputs stored from the last transform, without running the transform again:
 for a destination that lost what it was sent, or one that rejected a message and has since been fixed.
+
+On a channel with destination transforms, a resend queues each destination the outputs stored for
+it, even when its transform has changed since; a destination its transform filtered stays
+`filtered`, and one whose transform failed keeps its failure. A replay runs the channel's transform
+and every destination's transform as they are on disk now.
 
 ## Clear a failed message
 

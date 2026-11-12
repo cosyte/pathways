@@ -9,6 +9,7 @@ import type {
   DeliveryCounts,
   DeliveryStatus,
   DeliveryTally,
+  DestinationOutcome,
   ExpireResult,
   MessageQuery,
   MessageState,
@@ -29,7 +30,17 @@ import type {
   StoredMessage,
   StoreFactory,
   StoreReceiveOptions,
+  TransformOutputs,
 } from "../src/index.js";
+
+/** The status a message takes from what its transform gave, as the store works it out. */
+function statusOf(outputs: TransformOutputs): MessageStatus {
+  if (Array.isArray(outputs)) return outputs.length === 0 ? "filtered" : "transformed";
+  const { byDestination } = outputs as { readonly byDestination: readonly DestinationOutcome[] };
+  return byDestination.every((o) => "outputs" in o && o.outputs.length === 0)
+    ? "filtered"
+    : "transformed";
+}
 
 interface MessageRow {
   readonly id: number;
@@ -108,12 +119,12 @@ export class MemoryStore implements MessageStore {
 
   completeTransform(
     messageId: number,
-    outputs: readonly Uint8Array[],
+    outputs: TransformOutputs,
     destinations: number,
   ): Promise<void> {
     const message = this.row(messageId);
     this.queue(message, outputs, destinations);
-    message.status = outputs.length === 0 ? "filtered" : "transformed";
+    message.status = statusOf(outputs);
     message.updatedAt = now();
     return Promise.resolve();
   }
@@ -261,12 +272,12 @@ export class MemoryStore implements MessageStore {
     );
   }
 
-  outputs(messageId: number): Promise<Uint8Array[]> {
+  outputs(messageId: number, destination?: number): Promise<Uint8Array[]> {
     const message = this.messageRows.find((m) => m.id === messageId);
     const current = this.deliveryRows.filter(
-      (d) => d.messageId === messageId && d.generation === message?.generation,
+      (d) => d.messageId === messageId && d.generation === message?.generation && d.seq >= 0,
     );
-    const first = Math.min(...current.map((d) => d.destination));
+    const first = destination ?? Math.min(...current.map((d) => d.destination));
     return Promise.resolve(
       current
         .filter((d) => d.destination === first)
@@ -311,7 +322,9 @@ export class MemoryStore implements MessageStore {
   }
 
   requeue(messageId: number, request: RequeueRequest, actor: string): Promise<RequeueResult> {
-    const { mode, expected, outputs, failure, destinations } = request;
+    const { mode, expected, failure, destinations, byDestination } = request;
+    const outputs: TransformOutputs =
+      byDestination === undefined ? request.outputs : { byDestination };
     const message = this.messageRows.find((m) => m.id === messageId);
     const refuse = (reason: "not-found" | "changed" | "pending"): Promise<RequeueResult> => {
       const entry = this.audit(actor, {
@@ -329,8 +342,7 @@ export class MemoryStore implements MessageStore {
     if (mine.some((d) => d.status === "pending")) return refuse("pending");
     const superseded = mine.filter((d) => d.status === "failed");
     for (const d of superseded) d.status = "cleared";
-    message.status =
-      failure !== undefined ? "failed" : outputs.length === 0 ? "filtered" : "transformed";
+    message.status = failure !== undefined ? "failed" : statusOf(outputs);
     message.error = failure ?? null;
     message.updatedAt = now();
     message.generation += 1;
@@ -446,10 +458,35 @@ export class MemoryStore implements MessageStore {
     return row;
   }
 
-  private queue(message: MessageRow, outputs: readonly Uint8Array[], destinations: number): number {
+  private queue(message: MessageRow, given: TransformOutputs, destinations: number): number {
+    if (Array.isArray(given) && given.length === 0) return 0;
     let queued = 0;
     for (let destination = 0; destination < destinations; destination += 1) {
-      for (const [seq, body] of outputs.entries()) {
+      const outcome: DestinationOutcome = Array.isArray(given)
+        ? { outputs: given as readonly Uint8Array[] }
+        : ((given as { readonly byDestination: readonly DestinationOutcome[] }).byDestination[
+            destination
+          ] ?? { outputs: [] });
+      if ("failure" in outcome || outcome.outputs.length === 0) {
+        this.deliveryRows.push({
+          id: this.deliveryRows.reduce((max, d) => Math.max(max, d.id), 0) + 1,
+          messageId: message.id,
+          channel: message.channel,
+          destination,
+          seq: -1,
+          body: new Uint8Array(),
+          generation: message.generation,
+          status: "failure" in outcome ? "failed" : "filtered",
+          attempts: 0,
+          nextAttemptAt: 0,
+          error: "failure" in outcome ? outcome.failure : null,
+          deliveredAt: null,
+          sending: undefined,
+          interruptedAttempt: undefined,
+        });
+        continue;
+      }
+      for (const [seq, body] of outcome.outputs.entries()) {
         this.deliveryRows.push({
           id: this.deliveryRows.reduce((max, d) => Math.max(max, d.id), 0) + 1,
           messageId: message.id,

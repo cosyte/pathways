@@ -1313,6 +1313,36 @@ Releases what the destination keeps open between deliveries, such as connections
 
 ***
 
+### DestinationFacts
+
+Which destination a destination transform runs for: its place in the channel's `destinations:`
+list, from 0, its `name:` when the block sets one, and its kind.
+
+#### Example
+
+```ts
+import type { Transform } from "@cosyte/pathways";
+export default ((msg, ctx) => (ctx?.destination?.name === "billing" ? msg : null)) satisfies Transform;
+```
+
+#### Properties
+
+##### index
+
+> `readonly` **index**: `number`
+
+##### kind
+
+> `readonly` **kind**: `string`
+
+`file`, `http`, `mllp` or `module`.
+
+##### name
+
+> `readonly` **name**: `string` \| `undefined`
+
+***
+
 ### ExpireResult
 
 What retention deleted, or would delete, from one channel.
@@ -2374,7 +2404,12 @@ is nothing failed. The audit entry is written in the same transaction.
 
 > **completeTransform**(`messageId`, `outputs`, `destinations`, `epoch?`): `Promise`\<`void`\>
 
-Fenced by `epoch` when it is given: see the lease methods above.
+Records a transform's outputs and the message's new status, all or nothing: given a list, one
+pending delivery per output per destination, and the message `filtered` when the list is
+empty; given `{ byDestination }`, each destination's own outputs as pending deliveries, a
+destination with none as one `filtered` delivery and one that failed as one `failed` delivery
+with its error, and the message `filtered` only when every destination filtered it. Fenced by
+`epoch` when it is given: see the lease methods above.
 
 ###### Parameters
 
@@ -2384,7 +2419,7 @@ Fenced by `epoch` when it is given: see the lease methods above.
 
 ###### outputs
 
-readonly `Uint8Array`\<`ArrayBufferLike`\>[]
+[`TransformOutputs`](#transformoutputs)
 
 ###### destinations
 
@@ -2756,13 +2791,19 @@ searched by metadata.
 
 ##### outputs()
 
-> **outputs**(`messageId`): `Promise`\<`Uint8Array`\<`ArrayBufferLike`\>[]\>
+> **outputs**(`messageId`, `destination?`): `Promise`\<`Uint8Array`\<`ArrayBufferLike`\>[]\>
 
-The outputs of a message's current generation, in order; none when it has none or they were dropped.
+The outputs of a message's current generation, in order; none when it has none or they were
+dropped. Those of `destination` when it is given, else those of the first destination that has
+any.
 
 ###### Parameters
 
 ###### messageId
+
+`number`
+
+###### destination?
 
 `number`
 
@@ -3692,6 +3733,13 @@ const request: RequeueRequest = { mode: "resend", expected: "transformed", outpu
 
 #### Properties
 
+##### byDestination?
+
+> `readonly` `optional` **byDestination?**: readonly [`DestinationOutcome`](#destinationoutcome)[]
+
+On a channel with destination transforms: what each destination gets, in order, in place of
+`outputs` for every one. A destination's failure is recorded as its failed delivery.
+
 ##### destinations
 
 > `readonly` **destinations**: `number`
@@ -4273,7 +4321,8 @@ Epoch milliseconds before which it is not tried again; 0 when due at once.
 
 > `readonly` **seq**: `number`
 
-Which output of the transform this is, from 0.
+Which output of the transform this is, from 0; -1 for a delivery with no output, which its
+destination's own transform filtered (`filtered`) or failed (`failed`, then `cleared`).
 
 ##### status
 
@@ -4587,6 +4636,13 @@ replay or resend before this one.
 > `readonly` **config**: `Readonly`\<[`TransformConfig`](#transformconfig)\>
 
 The channel's configuration, resolved when the engine (or the command) started.
+
+##### destination?
+
+> `readonly` `optional` **destination?**: [`DestinationFacts`](#destinationfacts)
+
+The destination whose own transform this is: set only for a destination's `transform:`, never
+for the channel's.
 
 ##### messageId
 
@@ -5022,16 +5078,21 @@ const table: ContentTable = "deliveries";
 
 ### DeliveryCounts
 
-> **DeliveryCounts** = `Readonly`\<`Record`\<`Exclude`\<[`DeliveryStatus`](#deliverystatus), `"dry-run"`\>, `number`\>\> & `object`
+> **DeliveryCounts** = `Readonly`\<`Record`\<`Exclude`\<[`DeliveryStatus`](#deliverystatus), `"dry-run"` \| `"filtered"`\>, `number`\>\> & `object`
 
-How many deliveries stand at each status. `dry-run` is there only when some delivery ran dry, so
-the counts of a project that never runs a destination dry read as they did before dry runs.
+How many deliveries stand at each status. `dry-run` is there only when some delivery ran dry, and
+`filtered` only when a destination's transform filtered one, so the counts of a project that does
+neither read as they did before.
 
 #### Type Declaration
 
 ##### dry-run?
 
 > `readonly` `optional` **dry-run?**: `number`
+
+##### filtered?
+
+> `readonly` `optional` **filtered?**: `number`
 
 #### Example
 
@@ -5043,11 +5104,13 @@ const recorded = (counts: DeliveryCounts): number => counts.delivered + (counts[
 
 ### DeliveryStatus
 
-> **DeliveryStatus** = `"pending"` \| `"delivered"` \| `"failed"` \| `"cleared"` \| `"dry-run"`
+> **DeliveryStatus** = `"pending"` \| `"delivered"` \| `"failed"` \| `"cleared"` \| `"dry-run"` \| `"filtered"`
 
 Where one delivery of a message to one destination stands. `cleared`: it failed for good, and an
 operator cleared it, or replayed its message. `dry-run`: its destination runs dry (`dryRun: true`,
-or `pathways start --dry-run`), so its output was recorded and never sent.
+or `pathways start --dry-run`), so its output was recorded and never sent. `filtered`: the
+destination's own transform returned nothing for the message, so nothing goes to it; done, as a
+delivered one is.
 
 #### Example
 
@@ -5120,6 +5183,32 @@ export default ((options) => ({
     if (status !== 200) throw Object.assign(new Error("not stored"), { code: `HTTP_${status}` });
   },
 })) satisfies DestinationFactory<{ bucket: string }>;
+```
+
+***
+
+### DestinationOutcome
+
+> **DestinationOutcome** = (\{ `outputs`: readonly `Uint8Array`[]; \} \| \{ `failure`: `string`; \}) & `object`
+
+What one destination's transform gave for a message, as storage records it: its outputs, in
+order, none meaning it filtered the message for that destination; or why it failed, as stored,
+which fails that destination's delivery only.
+
+#### Type Declaration
+
+##### emptyBody?
+
+> `readonly` `optional` **emptyBody?**: `Uint8Array`
+
+For a destination with no output: the body its one delivery row holds, as the store keeps it.
+A layer that encodes every body on its way in (encryption at rest) passes its encoding of an
+empty body here, so no row holds a body that did not pass through it. Empty when not given.
+
+#### Example
+
+```ts
+const results: DestinationOutcome[] = [{ outputs: [body] }, { outputs: [] }, { failure: "transform: TypeError: ..." }];
 ```
 
 ***
@@ -5878,6 +5967,23 @@ What a transform may return: a message, a string or bytes to send on, several of
 ```ts
 const filtered: TransformOutput<string> = null;
 const bytes: TransformOutput<string> = Buffer.from("MSH|^~\\&|LAB", "latin1");
+```
+
+***
+
+### TransformOutputs
+
+> **TransformOutputs** = readonly `Uint8Array`[] \| \{ `byDestination`: readonly [`DestinationOutcome`](#destinationoutcome)[]; \}
+
+What a transform gave, as [MessageStore.completeTransform](#completetransform) records it: the same outputs for
+every destination, or, on a channel with destination transforms, one [DestinationOutcome](#destinationoutcome)
+per destination, in order.
+
+#### Example
+
+```ts
+const same: TransformOutputs = [body];
+const each: TransformOutputs = { byDestination: [{ outputs: [body] }, { outputs: [] }] };
 ```
 
 ***

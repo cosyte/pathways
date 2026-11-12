@@ -15,6 +15,7 @@ export { VERSION } from "./version.js";
 export type { Format } from "./config/schema.js";
 export type {
   CcdaDocument,
+  DestinationFacts,
   FhirResource,
   FileSourceFacts,
   Hl7Message,
@@ -117,6 +118,7 @@ export type {
   DeliveryCounts,
   DeliveryStatus,
   DeliveryTally,
+  DestinationOutcome,
   ExpireResult,
   LeaseStore,
   MessageQuery,
@@ -143,6 +145,7 @@ export type {
   StoredMessage,
   StoredMeta,
   StoreReceiveOptions,
+  TransformOutputs,
 } from "./storage/store.js";
 export {
   ENGINE_LEASE,

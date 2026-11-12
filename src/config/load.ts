@@ -251,8 +251,25 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
         ...resolveDestination(destination, channelDir, channelSettings),
         // Set only when true, so a destination that sends resolves as it always has.
         ...(destination.dryRun === true ? { dryRun: true } : {}),
+        // Each set only when the block sets it, likewise.
+        ...(destination.name === undefined ? {} : { name: destination.name }),
+        ...(destination.transform === undefined
+          ? {}
+          : { transform: resolve(channelDir, destination.transform) }),
+        ...(destination.format === undefined ? {} : { format: destination.format }),
       }),
     );
+    const missingTransforms: string[] = [];
+    for (const [index, destination] of destinations.entries()) {
+      if (destination.transform === undefined || (await exists(destination.transform))) continue;
+      missingTransforms.push(
+        `${show(file)}: destinations.${index}.transform: ${absent(destination.transform, `destinations.${index}.transform`, channelEnv, show)}`,
+      );
+    }
+    if (missingTransforms.length > 0) {
+      problems.push(...missingTransforms);
+      continue;
+    }
     const channelRetry: RetryLevel = { key: "retry", block: channel.retry, fromEnv: channelEnv };
     const badRetry = [
       ...retryProblems(show(file), [channelRetry, projectRetry], channelSettings.retry),

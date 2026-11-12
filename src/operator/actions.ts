@@ -2,10 +2,15 @@ import type { ChannelConfig, ProjectConfig } from "../config/schema.js";
 import { transformConfigFor } from "../config/transform-config.js";
 import type { Env } from "../connectors/endpoint.js";
 import { EncryptionError } from "../encryption/envelope.js";
-import { ChannelWorker, TransformLoadError } from "../engine/channel-worker.js";
-import { storedFailure } from "../engine/engine.js";
+import { ChannelWorker, destinationSetups, TransformLoadError } from "../engine/channel-worker.js";
+import { destinationOutcomes, storedFailure } from "../engine/engine.js";
 import type { FailureSummary } from "../engine/worker-entry.js";
-import type { MessageStatus, MessageStore, RequeueResult } from "../storage/store.js";
+import type {
+  DestinationOutcome,
+  MessageStatus,
+  MessageStore,
+  RequeueResult,
+} from "../storage/store.js";
 import { describeFailure } from "../testing/run-tests.js";
 import type { AuditLog } from "./audit.js";
 
@@ -14,7 +19,7 @@ import type { AuditLog } from "./audit.js";
  *
  * - `waiting`: it has not been transformed yet, and the engine will;
  * - `pending`: some of its deliveries still wait to be sent;
- * - `no-output`: a resend, but its current transform produced nothing to send;
+ * - `no-output`: a resend, but its current transform produced nothing to send, to any destination;
  * - `no-channel`: its channel is no longer configured;
  * - `transform-load`: its channel's transform could not be loaded;
  * - `changed`: it changed while the replay ran, so nothing was recorded;
@@ -160,11 +165,31 @@ export async function replayMessages(
     if (message.contentDroppedAt !== undefined) return refuse(id, channel.name, "content-dropped");
     if (message.deliveries.pending > 0) return refuse(id, channel.name, "pending");
 
-    let outputs: readonly Uint8Array[];
+    let outputs: readonly Uint8Array[] = [];
+    let byDestination: DestinationOutcome[] | undefined;
     let failure: FailureSummary | undefined;
     if (resend) {
-      outputs = message.status === "transformed" ? await store.outputs(id) : [];
-      if (outputs.length === 0) return refuse(id, channel.name, "no-output");
+      if (message.status === "transformed") {
+        byDestination = await storedByDestination(
+          store,
+          id,
+          message.generation,
+          channel.destinations.length,
+        );
+        const same = byDestination === undefined ? undefined : sameForEvery(byDestination);
+        if (same !== undefined) {
+          // Every destination has the same outputs: queued as one list, as a store always took them.
+          outputs = same;
+          byDestination = undefined;
+        } else if (byDestination === undefined) {
+          outputs = await store.outputs(id);
+        }
+      }
+      const sends =
+        byDestination === undefined
+          ? outputs.length > 0
+          : byDestination.some((o) => "outputs" in o && o.outputs.length > 0);
+      if (!sends) return refuse(id, channel.name, "no-output");
     } else {
       const worker = await workerFor(project, channel, workers, context.env ?? process.env);
       if (!(worker instanceof ChannelWorker)) {
@@ -181,6 +206,7 @@ export async function replayMessages(
         context: { messageId: id, attempt: message.generation + 2, source: undefined, meta: {} },
       });
       outputs = outcome.ok ? outcome.outputs : [];
+      byDestination = outcome.ok ? destinationOutcomes(outcome) : undefined;
       failure = outcome.ok ? undefined : outcome.failure;
     }
 
@@ -192,6 +218,7 @@ export async function replayMessages(
         outputs,
         failure: failure === undefined ? undefined : storedFailure(failure),
         destinations: channel.destinations.length,
+        ...(byDestination === undefined ? {} : { byDestination }),
       },
       audit.actor,
     );
@@ -290,6 +317,7 @@ async function workerFor(
     timeoutMs: channel.settings.timeoutMs,
     memoryMb: channel.settings.memoryMb,
     config: config.resolved,
+    destinations: destinationSetups(channel),
   });
   try {
     await worker.start();
@@ -301,6 +329,50 @@ async function workerFor(
     workers.set(channel.name, error.failure);
     return error.failure;
   }
+}
+
+/**
+ * What a resend sends to each destination: the outputs stored for it in the message's current
+ * generation, so a destination transform changed since is not run again. A destination whose
+ * transform filtered the message stays filtered, and one whose transform failed keeps its failure.
+ * `undefined` when a destination has no delivery of that generation (it was added since): the
+ * resend then queues the first destination's outputs for every destination, as it always has.
+ */
+async function storedByDestination(
+  store: MessageStore,
+  id: number,
+  generation: number,
+  destinations: number,
+): Promise<DestinationOutcome[] | undefined> {
+  const current = (await store.deliveries(id)).filter((d) => d.generation === generation);
+  const outcomes: DestinationOutcome[] = [];
+  for (let destination = 0; destination < destinations; destination += 1) {
+    const rows = current.filter((d) => d.destination === destination);
+    if (rows.length === 0) return undefined;
+    const none = rows.find((d) => d.seq < 0);
+    if (none === undefined) {
+      outcomes.push({ outputs: await store.outputs(id, destination) });
+    } else if (none.status === "filtered") {
+      outcomes.push({ outputs: [] });
+    } else {
+      // Its transform failed: there is nothing stored to send, and the failure stands. A row with
+      // no output that is not filtered was written failed, with its error.
+      outcomes.push({ failure: String(none.error) });
+    }
+  }
+  return outcomes;
+}
+
+/** The outputs every destination has, when each has the same ones, byte for byte; else undefined. */
+function sameForEvery(outcomes: readonly DestinationOutcome[]): readonly Uint8Array[] | undefined {
+  const [first] = outcomes;
+  if (first === undefined || !("outputs" in first)) return undefined;
+  const equal = (a: readonly Uint8Array[], b: readonly Uint8Array[]): boolean =>
+    a.length === b.length &&
+    a.every((output, index) => Buffer.from(output).equals(b[index] ?? new Uint8Array()));
+  return outcomes.every((o) => "outputs" in o && equal(o.outputs, first.outputs))
+    ? first.outputs
+    : undefined;
 }
 
 function describeRequeue(

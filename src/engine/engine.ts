@@ -50,11 +50,18 @@ import {
   channelStateStore,
   type AuditAction,
   type ChannelRunState,
+  type DestinationOutcome,
   type MessageStore,
   type ReceivedMessage,
 } from "../storage/store.js";
 import type { SourceFacts } from "../transform.js";
-import { ChannelWorker, TransformLoadError, type TransformOutcome } from "./channel-worker.js";
+import {
+  ChannelWorker,
+  destinationSetups,
+  TransformLoadError,
+  type DestinationResult,
+  type TransformOutcome,
+} from "./channel-worker.js";
 import type { EngineFence } from "./lease.js";
 import { channelStatus, type ChannelHealth, type EngineHealth } from "./health.js";
 import { formatTable, type FailureSummary } from "./worker-entry.js";
@@ -292,6 +299,34 @@ export function storedFailure(failure: FailureSummary): string {
   return `${failure.kind}: ${failure.name}${code}${where}: ${failure.detail}`;
 }
 
+/**
+ * What each destination gets from a transform's outcome, as storage records it, on a channel with
+ * destination transforms; `undefined` on one without, or when the channel's transform filtered the
+ * message, which then has no deliveries at all.
+ *
+ * @example
+ * ```ts
+ * const byDestination = destinationOutcomes(outcome);
+ * ```
+ */
+export function destinationOutcomes(
+  outcome: Extract<TransformOutcome, { ok: true }>,
+): DestinationOutcome[] | undefined {
+  if (outcome.destinations === undefined || outcome.outputs.length === 0) return undefined;
+  return outcome.destinations.map((result) =>
+    result.ok ? { outputs: result.outputs } : { failure: storedFailure(result.failure) },
+  );
+}
+
+/** Frees every output of an outcome once stored, each buffer once. */
+function releaseOutputs(outcome: Extract<TransformOutcome, { ok: true }>): void {
+  const all = new Set(outcome.outputs);
+  for (const result of outcome.destinations ?? []) {
+    if (result.ok) for (const output of result.outputs) all.add(output);
+  }
+  for (const output of all) release(output);
+}
+
 /** A channel's connectors. */
 export interface ChannelConnectors {
   readonly source: SourceConnector;
@@ -466,7 +501,7 @@ export async function connectorsFor(
         destinations.push(
           new FileDestination({
             dir: destination.dir,
-            extension: EXTENSIONS[channel.format],
+            extension: EXTENSIONS[destination.format ?? channel.format],
             ...(destination.sftp === undefined
               ? {}
               : {
@@ -485,7 +520,7 @@ export async function connectorsFor(
           new HttpDestination({
             url: destination.url,
             headers: resolveHeaders(
-              { "Content-Type": CONTENT_TYPES[channel.format] },
+              { "Content-Type": CONTENT_TYPES[destination.format ?? channel.format] },
               destination.headers,
               secrets,
               where,
@@ -827,6 +862,7 @@ export class Engine {
           memoryMb: config.settings.memoryMb,
           // Read here, in the engine's process, so a worker never sees the environment.
           config: resolveTransformConfig(project.config, config, env),
+          destinations: destinationSetups(config),
         });
         const hooks = await HookSet.open(config.hooks, {
           file: `channels/${config.name}/channel.yaml`,
@@ -1606,6 +1642,7 @@ export class Engine {
       timeoutMs: next.settings.timeoutMs,
       memoryMb: next.settings.memoryMb,
       config,
+      destinations: destinationSetups(next),
     });
     try {
       // A fresh worker, so the transform's module and every module it imports are read anew.
@@ -1890,14 +1927,22 @@ export class Engine {
       });
       if (outcome.ok) {
         faultPoint("after-transform-before-complete");
+        const byDestination = destinationOutcomes(outcome);
         await store.completeTransform(
           next.id,
-          outcome.outputs,
+          byDestination === undefined ? outcome.outputs : { byDestination },
           config.destinations.length,
           ...this.epoch(),
         );
-        if (owned) for (const output of outcome.outputs) release(output);
-        const outputs = outcome.outputs.length;
+        if (owned) releaseOutputs(outcome);
+        if (outcome.destinations !== undefined && byDestination !== undefined) {
+          this.reportDestinations(config.name, next.id, outcome.destinations);
+        }
+        // Filtered when every destination's transform filtered it too, as storage records it.
+        const outputs =
+          byDestination?.every((o) => "outputs" in o && o.outputs.length === 0) === true
+            ? 0
+            : outcome.outputs.length;
         logger.info({
           event: outputs === 0 ? "filtered" : "transformed",
           channel: config.name,
@@ -1934,6 +1979,31 @@ export class Engine {
           where,
         }));
       }
+    }
+  }
+
+  /**
+   * Logs each destination whose own transform failed for a message: its index, the failure's kind,
+   * name, code and where, never the error's text, which is stored with its delivery.
+   */
+  private reportDestinations(
+    channel: string,
+    message: number,
+    results: readonly DestinationResult[],
+  ): void {
+    for (const [destination, result] of results.entries()) {
+      if (result.ok) continue;
+      const { kind, name, code, where } = result.failure;
+      this.options.logger.warn({
+        event: "destination-transform-failed",
+        channel,
+        message,
+        destination,
+        kind,
+        name,
+        code,
+        where,
+      });
     }
   }
 
