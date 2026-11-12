@@ -62,9 +62,9 @@ destinations:
   engine then logs `mllp-tls-refused` with the code `ERR_TLS_HANDSHAKE_TIMEOUT`. `receiveTimeout`
   does not cover that wait, since its clock starts once the handshake is done. Pathways has no key for
   the handshake timeout, as `@cosyte/mllp` passes none through. To shorten it, end TLS in front of
-  the source, at a proxy whose own handshake timeout is shorter, and run the source on `127.0.0.1` with `plaintext: true` behind it; to make stalled
-  handshakes harmless without that, set `maxConnections` well above the senders you expect, so a few
-  of them cannot fill it.
+  the source, at a proxy whose own handshake timeout is shorter, and run the source on `127.0.0.1`
+  with `plaintext: true` behind it; to make stalled handshakes harmless without that, set
+  `maxConnections` well above the senders you expect, so a few of them cannot fill it.
 - **`receiveTimeout`** (no limit by default) closes a connection that goes this long without a whole
   message: one left idle, and one that sent part of a message and stopped. The clock starts again at
   each message. A part-sent message is never stored, so the sender sends it again on a new connection.
@@ -119,7 +119,8 @@ the engine logs `source-lost` with a `code` such as `ECONNREFUSED`, `CONNECT_TIM
 `receiveTimeout` and `maxMessageSize` apply to the dialled connection as to any other: past either,
 the connection closes and is dialled again. A source that dials out listens on no port, so `port`,
 `host`, `maxConnections`, `keepOpen` and `replyTo` cannot be set with `connect`. A stop closes the
-connection once the messages on it are answered.
+connection once the message it is handling has been stored and answered, and cuts it off at
+[`drain.timeout`](./stop-and-upgrade-a-node.md) as it does a listening source's connections.
 
 ## Send each ACK to another address
 
@@ -147,11 +148,13 @@ destinations:
   against `tls.ca`, or Node.js's built-in roots when the source has none, and the source's own
   certificate is presented to it, so a reply host that requires a client certificate needs that
   certificate to allow client authentication.
-- **`connectTimeout`** (10 seconds by default) bounds opening each reply connection.
+- **`connectTimeout`** (10 seconds by default) bounds opening each reply connection, and then
+  writing the ACK on it, so a reply host that takes the connection and never reads cannot hold the
+  ACKs behind it for longer.
 
 Each message is stored before its ACK is sent, as always. When the reply address refuses, or does not
 answer in time, the message stays stored and the engine logs `mllp-reply-failed` with the message id
-and a code such as `ECONNREFUSED` or `CONNECT_TIMEOUT`, never content. The sender, with no ACK, sends
+and a code such as `ECONNREFUSED`, `CONNECT_TIMEOUT` or `SEND_TIMEOUT`, never content. The sender, with no ACK, sends
 the message again, and the copy is flagged as a possible duplicate. Messages on one connection are
 still answered one at a time, in order, so a slow reply address holds the next ACK behind it.
 

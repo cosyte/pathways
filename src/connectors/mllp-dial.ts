@@ -96,7 +96,9 @@ export function dial(
 /**
  * Opens a new connection to `address`, writes `frame` on it and closes it: how an MLLP source with
  * `replyTo` sends an ACK. Resolves once the frame is written out; rejects with an
- * {@link MllpDialError} when the connection cannot be opened in `timeoutMs`.
+ * {@link MllpDialError} when the connection cannot be opened in `timeoutMs` (`CONNECT_TIMEOUT`), or
+ * when, once open, the frame cannot be written out in `timeoutMs` more (`SEND_TIMEOUT`), as with a
+ * peer that takes the connection and never reads.
  *
  * @example
  * ```ts
@@ -112,8 +114,18 @@ export async function sendOnce(
   const socket = await dial(address, tls, timeoutMs, new AbortController().signal);
   // The peer may reset the connection once it has the frame; nothing waits on it any more.
   socket.on("error", ignore);
-  await new Promise<void>((resolve) => socket.end(frame, resolve));
-  socket.destroy();
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      timer = setTimeout(() => {
+        reject(new MllpDialError("SEND_TIMEOUT"));
+      }, timeoutMs);
+      socket.end(frame, resolve);
+    });
+  } finally {
+    clearTimeout(timer);
+    socket.destroy();
+  }
 }
 
 /* v8 ignore next 3: a listener for an error nothing waits on any more, so none reaches a test */

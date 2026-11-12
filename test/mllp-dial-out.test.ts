@@ -22,6 +22,7 @@ import {
   type MllpEvent,
   type MllpSourceOptions,
 } from "../src/connectors/mllp.js";
+import { sendOnce, type MllpDialError } from "../src/connectors/mllp-dial.js";
 import type { MessageSink, ReceiveOptions } from "../src/connectors/types.js";
 import { Engine } from "../src/engine/engine.js";
 import { Store } from "../src/storage/store.js";
@@ -290,6 +291,29 @@ describe("an MLLP source with replyTo", () => {
   });
 });
 
+describe("sendOnce", () => {
+  it("gives up on a reply address that takes the connection but never reads, once its time is up", async () => {
+    // A peer that never reads: a frame larger than the kernel's buffers cannot be written out.
+    const silent = await startSilent();
+    const started = Date.now();
+    const sending = sendOnce(
+      { host: "127.0.0.1", port: silent },
+      undefined,
+      200,
+      Buffer.alloc(64 * 1024 * 1024, 0x41),
+    );
+    const outcome = await Promise.race([
+      sending.then(
+        () => "sent",
+        (error: unknown) => (error as MllpDialError).code,
+      ),
+      sleep(3_000).then(() => "still waiting"),
+    ]);
+    expect(outcome).toBe("SEND_TIMEOUT");
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+});
+
 describe("an MLLP source that connects", () => {
   it("dials the sender, stores each message it sends and answers on that connection", async () => {
     const sender = await startPeer({
@@ -396,6 +420,34 @@ describe("an MLLP source that connects", () => {
     await sender.connections[0]?.closed;
     await sleep(150);
     expect(sender.connections).toHaveLength(1);
+  });
+
+  it("stops while a message is being stored: answers it on the dialled connection, then closes", async () => {
+    const sender = await startPeer({
+      onConnection: (connection) => {
+        connection.socket.write(frame(MSG(6)));
+      },
+    });
+    const stored: string[] = [];
+    let storing = false;
+    const sink: MessageSink = {
+      receive: async (body) => {
+        storing = true;
+        await sleep(100);
+        stored.push(Buffer.from(body).toString("latin1"));
+        return stored.length;
+      },
+      sourceDown: () => 20,
+    };
+    const { source } = await startSource(sink, {
+      connect: { host: "127.0.0.1", port: sender.port },
+    });
+    await until(() => storing);
+    await sleep(10);
+    await source.stop();
+    await sender.connections[0]?.closed;
+    expect(stored).toEqual([MSG(6)]);
+    expect(sender.connections[0]?.frames.map((ack) => msaOf(ack))).toEqual([["AA", "MSG00006"]]);
   });
 
   it("stops while it waits to redial, and while a dial is under way", async () => {
