@@ -25,9 +25,15 @@ The example's channel, `vet-results-to-fhir`, does four things. Its files are on
 2. **Accept one exact shape, then read species and breed by name.** The transform filters out
    every message that is not an `ORU^R01`, and fails a result unless it has this shape:
 
+   - exactly one MSH segment. `@cosyte/hl7` reads a segment id in any case, so a second header in
+     the same text, `MSH` or `msh`, starts a second message, and its results would be sent on as
+     the first patient's;
    - exactly one PID segment. A second patient group, a person's or another animal's, would have
      its results sent on as the first patient's;
-   - a control id in MSH-10, from which the Bundle's entry ids are made;
+   - no patient or visit segment (PID, PD1, NK1, PV1 or PV2) after the first OBR. In an `ORU^R01`
+     these open the message, so one after an order starts a second patient's group;
+   - a control id in MSH-10, not empty and not only spaces, from which the Bundle's entry ids are
+     made;
    - PID-35 holding exactly one species, as `CODE^Text^SYSTEM`: one repetition, the code and the
      coding system each one plain value (no subcomponent, no escape sequence, no space, and not the
      HL7 null `""`), and a text with no subcomponent. Nothing may follow the coding system;
@@ -45,6 +51,11 @@ The example's channel, `vet-results-to-fhir`, does four things. Its files are on
    Once the shape holds, `msg.patient.species` and `msg.patient.breed` give PID-35 and PID-36 as
    coded elements, each with its `identifier`, `text` and `nameOfCodingSystem`. `@cosyte/hl7`
    infers neither from anything else.
+
+   The text (the second component) is not checked against the code: it is free display text, and
+   the transform does not hold a list of the codes it knows. `CAT^Dog^99COSYTE` is sent with the
+   code `CAT` and the display `Dog`. If your receiver shows the display, check the pair against your
+   lab's code list in the transform.
 
 3. **Convert with `@cosyte/transform`.** `toFhir` turns the message into a FHIR R4 message Bundle.
    The species and breed go into the Patient's `patient-animal` extension
@@ -90,8 +101,10 @@ CI runs these on every change to Pathways, on synthetic messages only:
   and PID-36 of the message carried. Each entry of the Bundle passes `@cosyte/fhir`'s
   `validateResource` with no error.
 - The transform fails a lab result with a second PID (a person's patient group after the animal's,
-  a person's PID right after the animal's, a second animal's PID), and one whose MSH-10 is empty or
-  HL7 null. It fails one whose species is absent, empty, HL7 null (`""`), text with no code,
+  a person's PID right after the animal's, a second animal's PID), one followed in the same text by
+  a second header (`msh`, `MSH` or `Msh`) and a person's OBR and OBX, one with a PV1 (upper or lower
+  case), PD1, PV2 or NK1 after an OBX followed by another OBR and OBX, and one whose MSH-10 is
+  empty, HL7 null or only spaces. It fails one whose species is absent, empty, HL7 null (`""`), text with no code,
   repeated, a code with no coding system, two codes or two coding systems in subcomponents, the HL7
   null as its code or coding system, an escaped delimiter or a hex escape in its code, or an
   alternate code after its coding system, and one whose breed is HL7 null, repeated, has no code or

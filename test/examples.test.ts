@@ -818,6 +818,68 @@ describe("the veterinary example's messages and transform", () => {
     );
   });
 
+  it.each([
+    ["one space", " "],
+    ["spaces and a tab", "  \t "],
+  ])("refuses a lab result whose control id (MSH-10) is %s", async (_case, controlId) => {
+    const transform = await vetTransform();
+    const segments = (await vetSegments()).map((segment) => {
+      if (!segment.startsWith("MSH|")) return segment;
+      const fields = segment.split("|");
+      fields[9] = controlId;
+      return fields.join("|");
+    });
+    expect(() => transform(parseHL7(segments.join("\r")))).toThrow(
+      "MSH-10 must hold the message's control id",
+    );
+  });
+
+  /** The person's OBR and OBX segments, from the same `@cosyte/synth` seed with no animal subject. */
+  const personResults = (): string[] =>
+    personSegments().filter((segment) => segment.startsWith("OBR|") || segment.startsWith("OBX|"));
+
+  it.each([
+    ["lower case", "msh"],
+    ["upper case", "MSH"],
+    ["mixed case", "Msh"],
+  ])(
+    "refuses a lab result followed by a second MSH in %s and a person's OBR and OBX",
+    async (_case, id) => {
+      const transform = await vetTransform();
+      const segments = await vetSegments();
+      const header = personSegments()[0] ?? "";
+      expect(header.startsWith("MSH|")).toBe(true);
+      const results = personResults();
+      expect(results.some((segment) => segment.startsWith("OBX|"))).toBe(true);
+      segments.push(`${id}${header.slice(3)}`, ...results);
+      const msg = parseHL7(segments.join("\r"));
+      expect(msg.segments("MSH")).toHaveLength(2);
+      expect(msg.segments("PID")).toHaveLength(1);
+      expect(() => transform(msg)).toThrow("the message must hold exactly one MSH segment");
+    },
+  );
+
+  it.each([
+    ["a PV1", "PV1|1|O"],
+    ["a lower case pv1", "pv1|1|O"],
+    ["a PD1", "PD1|||SYNTH CLINIC"],
+    ["a PV2", "PV2|||SYNTH^Synthetic visit"],
+    ["an NK1", "NK1|1|Testerson^Sampleton|OWN^Owner^HL70063"],
+  ])(
+    "refuses a lab result with %s after an OBX, followed by another OBR and OBX",
+    async (_case, segment) => {
+      const transform = await vetTransform();
+      const segments = await vetSegments();
+      segments.push(segment, ...personResults());
+      const msg = parseHL7(segments.join("\r"));
+      expect(msg.segments("PID")).toHaveLength(1);
+      expect(msg.segments("MSH")).toHaveLength(1);
+      expect(() => transform(msg)).toThrow(
+        "no patient or visit segment (PID, PD1, NK1, PV1, PV2) may follow the first OBR",
+      );
+    },
+  );
+
   /** The example's synthetic lab result under the delimiters `|#~\&`: `#` separates components. */
   async function underHash(species: string): Promise<Hl7Message> {
     const segments = (await vetSegments()).map((segment) => {

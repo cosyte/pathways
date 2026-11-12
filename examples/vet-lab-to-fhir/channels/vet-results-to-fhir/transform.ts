@@ -1,7 +1,8 @@
 // Turns each veterinary lab result (ORU^R01) into a FHIR R4 message Bundle with @cosyte/transform,
 // keeping the animal's species and breed, and filters every other message out. A result fails
-// unless it has one patient, a control id, one plain coded species and no breed or one plain coded
-// breed: one exact shape is accepted, and everything else fails rather than going on in part.
+// unless it has one header, one patient, no patient or visit segment after its first order, a
+// control id, one plain coded species and no breed or one plain coded breed: one exact shape is
+// accepted, and everything else fails rather than going on in part.
 import { createHash } from "node:crypto";
 
 import { serializeResource } from "@cosyte/fhir";
@@ -46,6 +47,9 @@ function animalPart(bundle: string, part: "species" | "breed"): string | undefin
   return coded?.valueCodeableConcept?.coding?.[0]?.code;
 }
 
+/** The segments of an ORU^R01's patient and visit, which come before its first order (OBR). */
+const PATIENT_OR_VISIT: ReadonlySet<string> = new Set(["PID", "PD1", "NK1", "PV1", "PV2"]);
+
 /** The message a transform is given: an HL7 v2 message parsed by @cosyte/hl7. */
 type Message = Parameters<Transform>[0];
 
@@ -85,6 +89,13 @@ function oneCodedValue(field: Field, msg: Message): boolean {
 export default ((msg) => {
   if (!msg.is("ORU^R01")) return null;
 
+  // One header per message. The parser reads a segment id in any case, so a second header (`MSH`
+  // or `msh`) in the same text starts what is in truth a second message, and the results after it,
+  // with no PID of their own, would be sent as this patient's. The message fails instead.
+  if (msg.segments("MSH").length !== 1) {
+    throw new Error("the message must hold exactly one MSH segment");
+  }
+
   // One patient per message. A second PID, a person's or another animal's, would have its results
   // sent as the first one's, so the message fails instead.
   const pids = msg.segments("PID");
@@ -93,9 +104,25 @@ export default ((msg) => {
     throw new Error("the message must hold exactly one PID segment");
   }
 
-  // The Bundle's entry ids are made from MSH-10, so two messages without one would share them.
+  // In ORU^R01 the patient and visit segments open the message, before the first order (OBR). One
+  // after it starts a second patient's group, whatever its header says, so the message fails.
+  const firstOrder = msg.allSegments().findIndex((segment) => segment.type === "OBR");
+  if (
+    firstOrder !== -1 &&
+    msg
+      .allSegments()
+      .slice(firstOrder)
+      .some((segment) => PATIENT_OR_VISIT.has(segment.type))
+  ) {
+    throw new Error(
+      "no patient or visit segment (PID, PD1, NK1, PV1, PV2) may follow the first OBR",
+    );
+  }
+
+  // The Bundle's entry ids are made from MSH-10, so two messages without one would share them. A
+  // control id of only spaces is no id.
   const controlId = msg.segments("MSH")[0]?.field(10);
-  if (controlId === undefined || controlId.isNull || controlId.text === "") {
+  if (controlId === undefined || controlId.isNull || controlId.text.trim() === "") {
     throw new Error("MSH-10 must hold the message's control id");
   }
 
