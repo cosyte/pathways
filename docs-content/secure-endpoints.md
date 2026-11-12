@@ -70,6 +70,15 @@ destinations:
 MLLP and tcp have no credentials of their own, so on an MLLP or tcp source `tls.ca` is the way to
 check who sends.
 
+## Choose TLS versions and cipher suites for MLLP
+
+An MLLP source or destination accepts TLS 1.2 and later, and offers only suites with forward secrecy
+and authenticated encryption (the `bcp195` profile) unless its `tls` block says otherwise:
+`minVersion: TLSv1.3` raises the floor, `profile: atna` offers the IHE ATNA suites, and `ciphers`
+names an OpenSSL list for a peer neither profile reaches. A PKCS#12 file can stand in for `cert` and
+`key`, its passphrase read from a secret reference. See
+[Choose the TLS version and cipher suites](./send-and-receive-mllp.md#choose-the-tls-version-and-cipher-suites).
+
 ## Present a client certificate
 
 A destination, a webhook or a database server that requires mutual TLS gets a client certificate from
