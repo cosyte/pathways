@@ -368,8 +368,8 @@ for (const database of TEST_DATABASES) {
       };
       expect(await retentionCommand(context, true)).toBe(0);
       expect(out.join("")).toMatch(/Content would be dropped from 1 message\./);
-      expect(out.join("")).toMatch(/    content: 1 message \(done, and last active before /);
-      expect(out.join("")).toMatch(/    failed: 0 messages, 0 deliveries \(last active before /);
+      expect(out.join("")).toMatch(/ {4}content: 1 message \(done, and last active before /);
+      expect(out.join("")).toMatch(/ {4}failed: 0 messages, 0 deliveries \(last active before /);
       out.length = 0;
       expect(await retentionCommand({ ...context, keys: undefined }, false)).toBe(1);
       expect(out.join("")).toMatch(/left alone from here: ERR_PATHWAYS_ARCHIVE_NO_KEYS/);
