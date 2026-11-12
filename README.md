@@ -27,6 +27,7 @@ version is 0.0.x, and a release may still change a key or an API, which its chan
 - [Quickstart](#quickstart)
 - [Why this exists](#why-this-exists)
 - [What the latest release ships](#what-the-latest-release-ships)
+- [In the next release](#in-the-next-release)
 - [Status](#status)
 - [Build from source](#build-from-source)
 - [Layout](#layout)
@@ -203,6 +204,18 @@ What follows is in 0.0.4, the version on npm:
 - **Examples.** Seven example projects in `examples/`, each running on synthetic messages with its
   tests and a docs page, and CI runs each on every change. The package description on npm now says
   only what Pathways is, and the README that more than one engine can share a database.
+
+---
+
+## In the next release
+
+These are on `main` and land in the next release, not in 0.0.4:
+
+- **Empty bodies on SQL Server.** A message one channel hands to another with an empty body, a
+  transform output that is empty, and an empty body that `pathways rekey` replaces or writes are
+  now stored on SQL Server, as on every other database. SQL Server refused them before, and the
+  write failed.
+  <!-- changesets: sqlserver-empty-body -->
 
 ---
 
