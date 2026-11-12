@@ -102,7 +102,7 @@ Its messages are synthetic, made by `@cosyte/synth` (the patient in `a04.hl7` wa
     "test": "pathways test"
   },
   "devDependencies": {
-    "@cosyte/pathways": "^0.0.4"
+    "@cosyte/pathways": "^0.0.5"
   }
 }
 ```

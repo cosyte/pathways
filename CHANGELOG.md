@@ -1,5 +1,39 @@
 # @cosyte/pathways
 
+## 0.0.5
+
+### Patch Changes
+
+- cca9c3e: Each delivery keeps its own queue time, so the oldest pending age per destination no longer restarts, and the health body and `/metrics` hold one set of reads on a database that hangs.
+
+  - Schema step `0017-delivery-queued-at` adds a `queued_at` column to `deliveries`, set when a delivery is queued (a transform, a replay or a resend) and never moved by a retry, a failure or a clear. It is an expand step, applied at start: a column that may be null, with no default and no index, so it changes no row and is safe while deliveries are in flight. Its `down` drops the column and the step's record again.
+  - `pathways_oldest_pending_age_seconds`, and `oldestPendingSince` in what `destinationQueues` returns, now count from that time. Before, they counted from the message's last update, so an operator clearing a failed delivery of a message restarted the age of its deliveries still pending at other destinations. A delivery queued before the step, or by an older Pathways on the same database, counts from its message's last update as before.
+  - The health body waits at most 5 seconds for its store reads, as readiness does. A database that hangs now answers 503 with `storage: "unreachable"` and each channel `unknown`, rather than a request that hangs. While a set of reads has not ended no new set starts: a request in its first 5 seconds shares it, and a later one answers unreachable at once.
+  - The `/metrics` store reads stay marked in flight until every read has ended. Before, the first read to fail cleared the mark while another channel's read still hung, so a new set could start beside the hung one.
+  - The logs page says that an error thrown from a destination connector's send is retried and only its code is stored, where a transform's error fails the message, and that `console.error` and `console.warn` write to standard error. The hl7-to-fhir example's page says the patient in `a04.hl7` was set by hand.
+  - What a caller must change: nothing. A custom store's `destinationQueues` may go on reporting the message's last update; a tool that reads the `deliveries` table by column sees one more.
+
+- a7ad416: The docs say what is safe to log from a channel, and no example prints a value that identifies a person or a whole message.
+
+  - A new section of the logs page, "What is safe to log from a channel": log `ctx.messageId`, `ctx.attempt`, the channel's and the destination's names, counts, sizes and codes; never the message, an output or a body, a segment, a field that identifies a person, `ctx.source`, `ctx.config`, `ctx.meta` or an error's own text. It says how each way of writing behaves: `ctx.logger` in `onStart` keeps a code and numbers only (a code is still words the script chooses, so never build one from the message), `console` in a transform writes to the process's standard output unfiltered, and a thrown error's text is never logged or printed. That text is stored with the message, encrypted when the store is encrypted and in the clear under `encryption: none`; a channel that stores nothing keeps none. So an error's message must never carry a value from the message.
+  - Two samples in the reference that printed counts named `messages` now read them into a variable, and the samples that named an operator by a person's first name now use `ops`.
+  - What a caller must change: nothing. No code, type or output changes.
+
+- 089c186: A scrape of `/metrics` no longer hangs on a database that hangs.
+
+  - The store reads behind the gauges now wait at most 5 seconds, as long as the readiness check waits. A database that neither answers nor fails in that time reads as `pathways_store_up 0`, with `pathways_store_latency_seconds` at 5 or more, and the store gauges are left out, so the scrape answers and the documented store-down alert can fire. Before, the scrape waited on the database for as long as it hung, and the collector saw a failed scrape rather than a store that is down.
+  - Reads that time out are left running. A set of reads counts as in flight from when it starts until every read in it has ended, and while it is in flight no new set starts: a scrape shares its reading, and once it is 5 seconds old answers `pathways_store_up 0` at once, with the latency counted from when the hung set began. The readiness check does the same with its storage read, however often it is asked. So a database that hangs holds one set of metrics reads and one readiness read, not a new one every few seconds that would queue behind it and run ahead of message processing when it recovers.
+  - The metrics docs say what ends a read that hangs on each database, and that the store gauges are absent, not 0, while the store is down, so the queue alerts go quiet and the store-down alert is the one that fires.
+  - The help text of `pathways_store_up` and `pathways_store_latency_seconds` now names the 5 seconds.
+  - What a caller must change: nothing.
+
+- 1597ef9: An empty body is now stored on SQL Server wherever one is written, as receive already stored it.
+
+  - A message one channel hands to another (a `channel:` destination or `ctx.route`) with an empty body, and a transform output that is empty, were bound to SQL Server as an empty buffer, which the server refuses: the hand-off or the transform's result failed and its transaction was rolled back. Both are now written as the empty binary literal `0x`, as receive writes an empty body.
+  - `pathways rekey` (through `Store.replaceContent`) now also replaces a row whose stored body is empty on SQL Server, and writes an empty body when that is what it keeps; before, the comparison or the write bound an empty buffer and failed.
+  - A non-empty body is written as before, and the other databases are unchanged.
+  - What a caller must change: nothing.
+
 ## 0.0.4
 
 ### Patch Changes

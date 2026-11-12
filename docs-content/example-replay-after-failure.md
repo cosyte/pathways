@@ -123,7 +123,7 @@ Its messages are synthetic, made by `@cosyte/synth`, and are on GitHub with the 
     "test": "pathways test"
   },
   "devDependencies": {
-    "@cosyte/pathways": "^0.0.4"
+    "@cosyte/pathways": "^0.0.5"
   }
 }
 ```
