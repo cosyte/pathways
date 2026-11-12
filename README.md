@@ -179,8 +179,10 @@ These are on `main` and land in the next release, not in 0.0.3:
   answer with the health body, so a monitor that read the body there now reads it from another
   path, such as `/`.
   <!-- changesets: metrics-endpoint -->
-- **HTTP destination options.** An HTTP destination takes a `method:`, fills its URL path and
-  `query:` from each message's metadata, and can send an `idempotencyHeader:`. It checks every
+- **HTTP destination options.** An HTTP destination takes a `method:`, a `query:` and URL
+  placeholders that name a message metadata key, and can send an `idempotencyHeader:`. Message
+  metadata is still empty in this release, so a URL with a placeholder fails each delivery until
+  it can be set. It checks every
   address it connects to, so one whose host is or resolves to a loopback, link-local or private
   address now needs `allowNetworks:` naming the network; until then its deliveries wait with
   `ADDRESS_REFUSED`.
@@ -191,8 +193,8 @@ These are on `main` and land in the next release, not in 0.0.3:
   <!-- changesets: xml-format -->
 - **HL7 v2 XML acknowledgements.** With `ack: xml`, an HTTP destination settles each delivery by the
   HL7 v2 XML acknowledgement in the answer: `AA` or `CA` is delivered, `AE` or `CE` retried, and
-  `AR` or `CR` failed. A new example and how-to send a veterinary lab result as v2 XML over HTTPS
-  with a client certificate.
+  `AR` or `CR` failed. A new example and how-to show a veterinary lab result sent as v2 XML over
+  HTTPS with a client certificate.
   <!-- changesets: http-xml-ack, v2-xml-example -->
 - **One HL7 v2 message per frame or body.** On an `hl7v2` channel, a frame or body holding a second
   `MSH`, `FHS` or `BHS` header, in any letter case, behind bytes that are not printable ASCII, or
@@ -209,8 +211,8 @@ These are on `main` and land in the next release, not in 0.0.3:
   `UNENCODABLE_CHARACTER`: have the sender declare MSH-18, or set the channel's
   `hl7v2: { assumeCharset }`.
   <!-- changesets: hl7v2-declared-charset -->
-- **One message per idempotency key.** Two hand-ins of one message under one idempotency key at
-  the same moment, on two connections or two nodes, are stored once on SQLite, PostgreSQL, MySQL,
+- **One message per idempotency key.** When two hand-ins of one message under one idempotency key
+  arrive at the same moment, on two connections or two nodes, a resumed one finds the first and nothing new is stored on SQLite, PostgreSQL, MySQL,
   MariaDB and SQL Server, through a claim that a new schema step adds when the engine starts.
   <!-- changesets: idempotency-claims -->
 - **Docker Compose.** `pathways init` now also writes `compose.yaml`, which runs the project's
