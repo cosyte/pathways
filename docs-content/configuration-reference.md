@@ -79,8 +79,8 @@ health:
   `weakAlgorithms`: turning a SHA-1 algorithm back on stays in the file too. Nor are a channel
   destination's `name` and `carryMeta`: the links between channels, which start checks for loops, and
   the identifiers a message carries across them, stay in the file. Nor is a `csv` channel's
-  `csv:` block or an `hl7v2` channel's `hl7v2:` block: how its bodies are read and written belongs
-  with its `format`.
+  `csv:` block, an `hl7v2` channel's `hl7v2:` block or an `xml` channel's `xml:` block: how its
+  bodies are read and written belongs with its `format`.
 - `pathways validate --print` prints the configuration as `start` reads it, with every setting the
   environment gave and the variable it named; see
   [Command reference](./command-reference.md#pathways-validate). The query string of a URL read
@@ -316,9 +316,10 @@ by key. See [Use the message context](./use-the-message-context.md).
 | Key                                                              | Type                                                                                                                                                                                        | Default                                              |
 | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
 | `name`                                                           | lowercase letters, digits and hyphens                                                                                                                                                       | the folder's name; must match it                     |
-| `format`                                                         | `hl7v2`, `fhir`, `x12`, `ccda`, `json`, `text` or `csv`                                                                                                                                     | `hl7v2`                                              |
+| `format`                                                         | `hl7v2`, `fhir`, `x12`, `ccda`, `json`, `text`, `csv` or `xml`                                                                                                                              | `hl7v2`                                              |
 | `csv`                                                            | how a `csv` channel reads and writes; see [Read delimited and fixed-width text](./work-with-formats.md#read-delimited-and-fixed-width-text)                                                 | comma-delimited, with a header                       |
 | `hl7v2`                                                          | how an `hl7v2` channel reads and writes: `assumeCharset`, the character set to assume when MSH-18 is blank; see [Character sets in HL7 v2](./work-with-formats.md#character-sets-in-hl7-v2) | none: a blank MSH-18 means ASCII                     |
+| `xml`                                                            | the caps an `xml` channel reads under: `maxBytes`, `maxDepth` and `maxElements`; see [Read XML](./work-with-formats.md#read-xml)                                                            | 10 MiB, 1000 deep, 1000000 elements                  |
 | `source`                                                         | exactly one [source](#sources)                                                                                                                                                              | required                                             |
 | `transform`                                                      | path to the transform module                                                                                                                                                                | none: messages pass through                          |
 | `destinations`                                                   | a list of at least one [destination](#destinations)                                                                                                                                         | required                                             |
@@ -669,6 +670,7 @@ A file source's or destination's `azblob:`. The identity is Azure's default chai
 | `resendHeader`      | a header name                                           | none                     |
 | `idempotencyHeader` | a header name                                           | none                     |
 | `allowNetworks`     | a list of addresses or CIDR ranges                      | none                     |
+| `ack`               | `xml`                                                   | none: the status decides |
 
 The URL may not hold a user name or password. A header whose name holds `auth`, `cookie`, `token`,
 `secret`, `password`, `key`, `signature` or `credential` must be a secret reference. `Content-Length`,
@@ -706,6 +708,15 @@ waiting longer when a 429 or a 503 asks with `Retry-After`, never more than `ret
 by default); a 3xx is held, never followed, and retried every `retry.max`; a 101 or any other 4xx
 fails the delivery for good. The destination's [`retry`](#retry) block sets the waits and any limit. Any other 1xx is an interim answer: the attempt waits for the final
 answer after it, and is retried when none comes within `timeout` or the connection closes. See [Send and receive over HTTP](./send-and-receive-http.md).
+
+With `ack: xml`, a 2xx answer is read as an HL7 v2 XML acknowledgement and settles the delivery:
+`AA` or `CA` delivered, `AR` or `CR` failed, and `AE` or `CE`, an answer that is not exactly one
+acknowledgement or one that answers another `MSH.10`, retried. `AE` and `AR` settle the other way
+round from an MLLP destination. A message sent as XML the reader refuses fails at once, unsent,
+with the reason `SENT_XML_UNREADABLE`, and one sent as XML without exactly one `MSH` holding one
+`MSH.10` with the reason `SENT_XML_NO_CONTROL_ID`; the control ID check is skipped only for a body that is not
+XML at all. The destination's format must be `hl7v2` or `text`. See
+[Settle by an HL7 v2 XML acknowledgement](./send-and-receive-http.md#settle-by-an-hl7-v2-xml-acknowledgement).
 
 #### MLLP destination
 

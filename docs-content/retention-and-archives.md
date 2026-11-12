@@ -85,9 +85,10 @@ stored messages, under a fresh data key for each file:
   master key it is sealed under), `created`, the retention `step` (`content`, `metadata` or
   `failed`), and `mac`, the trailer's key, wrapped under that master key;
 - each line after it is one message: its id, channel, status, times, size, generation, duplicate
-  and idempotency keys, content hash, error text, `ctx.meta`, and its body in base64; `outputs`, the
-  current generation's outputs in order; and `deliveries`, every delivery of every generation with
-  its status, attempts, times, error text and body in base64;
+  and idempotency keys, whether it held its key's claim (`idempotencyClaim`, absent from an archive
+  written before Pathways kept claims), content hash, error text, `ctx.meta`, and its body in
+  base64; `outputs`, the current generation's outputs in order; and `deliveries`, every delivery of
+  every generation with its status, attempts, times, error text and body in base64;
 - the last line is the trailer: the `count` of messages and an HMAC-SHA-256 over the header and every
   message line.
 

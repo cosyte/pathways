@@ -687,6 +687,7 @@ export async function connectorsFor(
             query: destination.query,
             idempotencyHeader: destination.idempotencyHeader,
             addressGuard: new AddressGuard(destination.allowNetworks),
+            ack: destination.ack,
             now,
             ...(destination.tls === undefined
               ? {}
@@ -2153,6 +2154,7 @@ export class Engine {
       format: config.format,
       csv: config.csv,
       hl7v2: config.hl7v2,
+      xml: config.xml,
       timeoutMs: config.settings.timeoutMs,
       scriptTimeoutMs: config.settings.scriptTimeoutMs,
       memoryMb: config.settings.memoryMb,

@@ -70,7 +70,7 @@ Pathways never reads what it added, and none has a rollback step:
 - The `nodes` table, migration `0012-nodes`, holds one row per running engine, by the database's clock
   (see [nodes and heartbeats](./check-status-and-health.md#nodes-and-heartbeats)). Dropping it, with
   every engine stopped, loses only who was running.
-- Migration `0014-channel-links` adds five columns to `messages` (`parent_channel`,
+- Migration `0015-channel-links` adds five columns to `messages` (`parent_channel`,
   `parent_message`, `parent_delivery`, `parent_generation` and `hops`) and an index on
   `parent_message`: the link from a message one channel handed to another back to where it came from
   (see [route messages between channels](./route-between-channels.md)). It only adds columns that may
@@ -78,7 +78,7 @@ Pathways never reads what it added, and none has a rollback step:
   handed-over message then reads as one a source took in. A custom store may implement `handOff`,
   `children` and `messageMeta` (which `carryMeta` reads); without `handOff`, the engine hands over
   through `receive` under an idempotency key.
-- Migration `0015-settled` adds a `settled_generation` column to `messages`: the generation whose
+- Migration `0016-settled` adds a `settled_generation` column to `messages`: the generation whose
   [settled event](./add-lifecycle-hooks.md#the-settled-event) was recorded, so it is sent once. It
   marks every message that had ended already as settled, so no event is sent for a message that
   ended before it. It only adds a column that may be null. To remove it, stop every engine and drop

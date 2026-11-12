@@ -18,6 +18,6 @@ A file source reads a batch file twice, a chunk at a time (once for its size, ha
 
 On a channel with `storage.content: none`, a batch passes one piece at a time, and the pieces before one that fails were already sent and are not undone. A piece refused for good (its transform throws, or a destination rejects it) stops the batch: an HTTP source answers 422 with its code, and a file source moves the file into `errorDir`, or into `.claimed/<channel>/failed/` when `errorDir` cannot take it, so no pass reads it again and no piece is sent twice. A failure that may pass answers 503 with `Retry-After`, or leaves the file claimed, and the whole batch is sent again.
 
-`@cosyte/hl7` moves to `^0.1.12`, the first release range with `readMessages`.
+The `hl7` cut uses `readMessages` from `@cosyte/hl7`, which the range the package already depends on, `^0.1.13`, includes: the dependency does not change.
 
 Nothing a caller must change: without `batch:` a source reads each file or body as one message, as before. A custom `MessageSink` needs none of the new methods; a batch read through one without `receivePiece` counts no duplicates, and one without `heldOrigin` stores a changed body sent under a used key as a batch of its own rather than answering 422. A custom store without `heldIdempotencyKey` does the same.

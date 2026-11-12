@@ -20,6 +20,7 @@ import type {
   WorkerFormat,
   WorkerHello,
   WorkerSetup,
+  XmlSettings,
 } from "./worker-entry.js";
 
 /**
@@ -176,6 +177,8 @@ export interface ChannelWorkerOptions {
    * that failed or ran past its limit is noted. Without it they are dropped.
    */
   readonly logger?: Logger | undefined;
+  /** An `xml` channel's `xml:` block, as validated: the caps its bodies are read under. */
+  readonly xml?: XmlSettings | undefined;
   readonly workerUrl?: URL;
 }
 
@@ -318,12 +321,15 @@ export class ChannelWorker {
         ? {}
         : { destinations: this.options.destinations }),
       channel,
-      ...(this.options.csv === undefined && this.options.hl7v2 === undefined
+      ...(this.options.csv === undefined &&
+      this.options.hl7v2 === undefined &&
+      this.options.xml === undefined
         ? {}
         : {
             formatSettings: {
               ...(this.options.csv === undefined ? {} : { csv: this.options.csv }),
               ...(this.options.hl7v2 === undefined ? {} : { hl7v2: this.options.hl7v2 }),
+              ...(this.options.xml === undefined ? {} : { xml: this.options.xml }),
             },
           }),
     };

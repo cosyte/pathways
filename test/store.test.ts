@@ -215,34 +215,34 @@ for (const database of TEST_DATABASES) {
         resumed: true,
       });
       const unkeyed = await restarted.receive("a", bytes("3"), { resumed: true });
+      // Ids only rise; a server may spend one on the hand-in that found its message stored.
+      expect(next.id).toBeGreaterThan(other.id);
+      expect(unkeyed.id).toBeGreaterThan(next.id);
       expect([first, other, again, next, unkeyed]).toEqual([
         { id: 1, duplicateOf: undefined },
         { id: 2, duplicateOf: undefined },
         { id: 1, duplicateOf: undefined, alreadyStored: true },
-        { id: 4, duplicateOf: undefined },
-        { id: 5, duplicateOf: undefined },
+        { id: next.id, duplicateOf: undefined },
+        { id: unkeyed.id, duplicateOf: undefined },
       ]);
       expect((await restarted.messageCounts("a")).received).toBe(3);
       expect(
         (await restarted.listMessages({ channel: "a", limit: 10 })).items.map((m) => m.id),
-      ).toEqual([5, 4, 1]);
+      ).toEqual([unkeyed.id, next.id, 1]);
       await restarted.close();
     });
 
     it("looks an idempotency key up only for a resumed message: one handed in for the first time is stored", async () => {
       const { store } = await openStore(database);
       await store.receive("a", bytes("1"), { idempotencyKey: "k" });
-      // Not resumed: the source says it never handed this one in, so the key is not looked up.
-      expect(await store.receive("a", bytes("2"), { idempotencyKey: "k" })).toEqual({
-        id: 2,
-        duplicateOf: undefined,
-      });
-      expect(await store.receive("a", bytes("3"), { idempotencyKey: "k", resumed: false })).toEqual(
-        {
-          id: 3,
-          duplicateOf: undefined,
-        },
-      );
+      // Not resumed: the source says it never handed this one in, so it is stored, without the
+      // claim the first holds. A server may spend an id on the claim it could not take.
+      const second = await store.receive("a", bytes("2"), { idempotencyKey: "k" });
+      expect(second).toEqual({ id: second.id, duplicateOf: undefined });
+      expect(second.id).toBeGreaterThan(1);
+      const third = await store.receive("a", bytes("3"), { idempotencyKey: "k", resumed: false });
+      expect(third).toEqual({ id: third.id, duplicateOf: undefined });
+      expect(third.id).toBeGreaterThan(second.id);
       // Resumed, it is the first message stored under the key that comes back.
       expect(await store.receive("a", bytes("1"), { idempotencyKey: "k", resumed: true })).toEqual({
         id: 1,
@@ -384,6 +384,7 @@ const CURRENT_SCHEMA = [
   `CREATE INDEX "deliveries_by_destination_status" on "deliveries" ("channel", "destination", "status", "id")`,
   `CREATE INDEX "deliveries_by_message" on "deliveries" ("message_id", "status")`,
   `CREATE INDEX "messages_by_channel_dedup_key" on "messages" ("channel", "dedup_key", "id")`,
+  `CREATE UNIQUE INDEX "messages_by_channel_idempotency_claim" on "messages" ("channel", "idempotency_claim")`,
   `CREATE INDEX "messages_by_channel_idempotency_key" on "messages" ("channel", "idempotency_key", "id")`,
   `CREATE INDEX "messages_by_channel_settled" on "messages" ("channel", "settled_generation", "status")`,
   `CREATE INDEX "messages_by_channel_status" on "messages" ("channel", "status", "id")`,
@@ -396,7 +397,7 @@ const CURRENT_SCHEMA = [
   `CREATE TABLE "kysely_migration" ("name" varchar(255) not null primary key, "timestamp" varchar(255) not null)`,
   `CREATE TABLE "kysely_migration_lock" ("id" varchar(255) not null primary key, "is_locked" integer default 0 not null)`,
   `CREATE TABLE "leases" ("name" text primary key, "owner" text not null, "host" text not null, "epoch" integer not null, "since" integer not null, "expires_at" integer not null)`,
-  `CREATE TABLE "messages" ("id" integer primary key autoincrement, "channel" text not null, "received_at" text not null, "body" blob not null, "status" text not null, "error" text, "updated_at" text not null, "dedup_key" text, "duplicate_of" integer, "size" integer, "generation" integer default 0 not null, "idempotency_key" text, "content_hash" text, "content_dropped_at" text, "meta" text, "parent_channel" text, "parent_message" integer, "parent_delivery" integer, "parent_generation" integer, "hops" integer, "settled_generation" integer)`,
+  `CREATE TABLE "messages" ("id" integer primary key autoincrement, "channel" text not null, "received_at" text not null, "body" blob not null, "status" text not null, "error" text, "updated_at" text not null, "dedup_key" text, "duplicate_of" integer, "size" integer, "generation" integer default 0 not null, "idempotency_key" text, "content_hash" text, "content_dropped_at" text, "meta" text, "idempotency_claim" text, "parent_channel" text, "parent_message" integer, "parent_delivery" integer, "parent_generation" integer, "hops" integer, "settled_generation" integer)`,
   `CREATE TABLE "meta_index" ("id" integer primary key autoincrement, "message_id" integer not null, "channel" text not null, "index_name" text not null, "key_id" text not null, "tag" text not null)`,
   `CREATE TABLE "nodes" ("node" text primary key, "host" text not null, "pid" integer not null, "started_at" integer not null, "version" text not null, "schema_generation" integer, "role" text not null, "draining" integer not null, "stale_after_ms" integer not null, "heartbeat_at" integer not null)`,
   `CREATE TABLE "schema_info" ("step" text primary key, "generation" integer not null, "tag" text not null, "min_engine" text not null, "applied_by" text not null, "applied_at" text not null)`,
@@ -476,8 +477,9 @@ describe("Store on SQLite files the first slice made", () => {
       "0011-delivery-failed-at",
       "0012-nodes",
       "0013-destination-keys",
-      "0014-channel-links",
-      "0015-settled",
+      "0014-idempotency-claims",
+      "0015-channel-links",
+      "0016-settled",
     ]);
     db.close();
   });

@@ -52,6 +52,8 @@ export type {
   TransformFor,
   TransformOutput,
   X12Interchange,
+  XmlDocument,
+  XmlSettings,
 } from "./transform.js";
 export {
   DeliveryRejected,

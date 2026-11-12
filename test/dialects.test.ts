@@ -7,6 +7,7 @@ import { ConfigError } from "../src/config/load.js";
 import type { ServerStorage } from "../src/config/schema.js";
 import {
   dialectFor,
+  repeatsUniqueKey,
   serverBinds,
   type DriverImport,
   type DriverPackage,
@@ -437,5 +438,40 @@ describe("MySQL and MariaDB: values bound on the server", () => {
       });
     });
     expect(error).toBe(refused);
+  });
+});
+
+describe("repeatsUniqueKey", () => {
+  const INDEX = "synthetic_unique_index";
+
+  it("reads MySQL's and MariaDB's refusal, and SQL Server's alone or in the driver's array", () => {
+    const mysql = Object.assign(new Error(`Duplicate entry 'x' for key 'messages.${INDEX}'`), {
+      errno: 1062,
+      code: "ER_DUP_ENTRY",
+    });
+    const sqlServer = Object.assign(
+      new Error(
+        `Cannot insert duplicate key row in object 'dbo.messages' with unique index '${INDEX}'.`,
+      ),
+      { number: 2601 },
+    );
+    const ended = Object.assign(new Error("The statement has been terminated."), { number: 3621 });
+    expect(repeatsUniqueKey(mysql, INDEX)).toBe(true);
+    expect(repeatsUniqueKey(sqlServer, INDEX)).toBe(true);
+    expect(repeatsUniqueKey([sqlServer, ended], INDEX)).toBe(true);
+  });
+
+  it("is false for another index, another error, or something that is not an error", () => {
+    const other = Object.assign(new Error("Duplicate entry 'x' for key 'PRIMARY'"), {
+      errno: 1062,
+    });
+    const deadlock = Object.assign(new Error(`a deadlock on ${INDEX}`), { number: 1205 });
+    const noText = { errno: 1062, message: 42 };
+    expect(repeatsUniqueKey(other, INDEX)).toBe(false);
+    expect(repeatsUniqueKey(deadlock, INDEX)).toBe(false);
+    expect(repeatsUniqueKey(noText, INDEX)).toBe(false);
+    expect(repeatsUniqueKey([], INDEX)).toBe(false);
+    expect(repeatsUniqueKey(undefined, INDEX)).toBe(false);
+    expect(repeatsUniqueKey(null, INDEX)).toBe(false);
   });
 });

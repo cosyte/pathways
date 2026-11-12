@@ -367,6 +367,7 @@ async function workerFor(
     format: channel.format,
     csv: channel.csv,
     hl7v2: channel.hl7v2,
+    xml: channel.xml,
     timeoutMs: channel.settings.timeoutMs,
     memoryMb: channel.settings.memoryMb,
     config: config.resolved,
