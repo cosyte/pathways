@@ -48,10 +48,14 @@ wait_for() {
 
 old_file() { touch -d '-1 minute' "$@"; }
 
-# stop_engine <signal>: signals the engine started in the background, waits up to 60 seconds for
-# it to exit, and kills what is left of it after that.
+# Job control on: each engine started in the background gets a process group of its own, and keeps
+# SIGINT, which a script without job control ignores in its background jobs.
+set -m
+
+# stop_engine <signal>: signals the engine's process group (npm and pathways under it), as Ctrl+C
+# in its terminal does, waits up to 60 seconds for it to exit, and kills what is left after that.
 stop_engine() {
-  kill "-$1" "$ENGINE"
+  kill "-$1" -- "-$ENGINE"
   local i
   for ((i = 0; i < 120; i++)); do
     if ! kill -0 "$ENGINE" 2>/dev/null; then
@@ -62,7 +66,7 @@ stop_engine() {
     sleep 0.5
   done
   stall "the engine did not exit within 60 seconds of SIG$1"
-  pkill -KILL -f "pathways start" || true
+  kill -KILL -- "-$ENGINE" || true
   ENGINE_EXIT=killed
 }
 
@@ -119,7 +123,8 @@ source:
 destinations:
   - mllp: { host: 127.0.0.1, port: 18575, plaintext: true }
 YAML
-cat >channels/mllp-in/channel.yaml <<'YAML'
+if grep -q '"tcp"' node_modules/@cosyte/pathways/schema/channel.json; then
+  cat >channels/mllp-in/channel.yaml <<'YAML'
 format: hl7v2
 source:
   mllp: { port: 18575, plaintext: true }
@@ -130,7 +135,18 @@ destinations:
       plaintext: true
       framing: { startEnd: { start: "02", end: "03" } }
 YAML
-cat >channels/tcp-in/channel.yaml <<'YAML'
+else
+  stall "the published $LATEST has no tcp source or destination, which the configuration reference names; the chain skips tcp"
+  rmdir channels/tcp-in
+  cat >channels/mllp-in/channel.yaml <<'YAML'
+format: hl7v2
+source:
+  mllp: { port: 18575, plaintext: true }
+destinations:
+  - http: { url: "http://127.0.0.1:18081/", plaintext: true }
+YAML
+fi
+[ -d channels/tcp-in ] && cat >channels/tcp-in/channel.yaml <<'YAML'
 format: text
 source:
   tcp:
