@@ -124,7 +124,7 @@ for (const database of TEST_DATABASES) {
         const operatorStore = await open();
         const audit = new AuditLog(operatorStore, { actor: "tester" });
         const context = { project, store: operatorStore, audit, resend: true };
-        const keys = destinationKeys(root, project.channels[0]?.destinations ?? []);
+        const keys = destinationKeys(project.root, project.channels[0]?.destinations ?? []);
         for (let i = 1; i <= NOTES; i += 1) {
           const { id } = await engineStore.receive("notes", bytes(`synthetic note ${String(i)}`));
           await engineStore.completeTransform(
@@ -263,7 +263,7 @@ for (const database of TEST_DATABASES) {
         const store = await testStorage(database, project.databaseFile).then((s) => s.open());
         try {
           const { id } = await store.receive("notes", bytes("synthetic note 1"));
-          const keys = destinationKeys(root, project.channels[0]?.destinations ?? []);
+          const keys = destinationKeys(project.root, project.channels[0]?.destinations ?? []);
           await store.completeTransform(id, [bytes("synthetic note 1")], 1, undefined, keys);
           const delivery = await store.nextDelivery("notes", 0);
           await store.markDelivered(delivery?.id ?? -1);

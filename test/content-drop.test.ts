@@ -523,7 +523,7 @@ describe("the operator commands on a message whose content was dropped", () => {
     const raw = await Store.open(join(root, "pathways.db"));
     closables.push(raw);
     const { id } = await raw.receive("adt", bytes("MSH|SYNTH"));
-    const keys = destinationKeys(root, project.channels[0]?.destinations ?? []);
+    const keys = destinationKeys(project.root, project.channels[0]?.destinations ?? []);
     await raw.completeTransform(id, [bytes("out")], 1, undefined, keys);
     const [delivery] = await raw.deliveries(id);
     // A store that drops the content just after the replay read the message, as the engine can.

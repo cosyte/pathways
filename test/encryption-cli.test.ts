@@ -209,7 +209,7 @@ describe("pathways rekey", () => {
     const store =
       id === undefined ? new UnencryptedStore(raw) : new EncryptedStore(raw, await keyOf(root, id));
     const { id: first } = await store.receive("adt", Buffer.from(ADT_A01));
-    const keys = destinationKeys(root, project.channels[0]?.destinations ?? []);
+    const keys = destinationKeys(project.root, project.channels[0]?.destinations ?? []);
     await store.completeTransform(first, [Buffer.from("out")], 1, undefined, keys);
     const { id: second } = await store.receive("adt", Buffer.from(ADT_A01));
     await store.failTransform(second, `transform: Error: ${ADT_A01}`);
