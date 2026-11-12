@@ -656,9 +656,10 @@ destinations:
     // configuration-reference.md, "Settings from the environment": plaintext, a channel's or a
     // destination's name and format, the header names an HTTP source hands a transform, a channel's
     // index: entries, the SHA-1 algorithms an SFTP block turns back on, a channel destination's
-    // target and the ctx.meta keys it carries (the links start checks), and a csv channel's csv:
-    // block, an hl7v2 channel's hl7v2: block and an xml channel's xml: block (how its bodies are
-    // read, which belongs with its format), are never read from the environment (encryption: none and auth: none are the short form of a
+    // target and the ctx.meta keys it carries (the links start checks), the health endpoint's
+    // metrics.allowUnauthenticated, and a csv channel's csv: block, an hl7v2 channel's hl7v2: block
+    // and an xml channel's xml: block (how its bodies are read, which belongs with its format), are
+    // never read from the environment (encryption: none and auth: none are the short form of a
     // block, and blocks are not scalars, so the walk passes over them). Matched by the whole path,
     // so a new key that only shares one of these names is still checked.
     const EXCEPTIONS: readonly string[] = [
@@ -667,6 +668,7 @@ destinations:
       "pathways.yaml.storage.sqlserver.plaintext",
       "pathways.yaml.hooks.[].webhook.plaintext",
       "pathways.yaml.health.plaintext",
+      "pathways.yaml.health.metrics.allowUnauthenticated",
       "pathways.yaml.probes.plaintext",
       "channel.yaml.name",
       "channel.yaml.format",
@@ -760,6 +762,21 @@ destinations:
   it("refuse plaintext read from the environment, as Zod does", () => {
     expect(project({ health: { port: 9090, plaintext: { env: "PLAIN" } } })).toBe(false);
     expect(project({ probes: { port: 9091, plaintext: { env: "PLAIN" } } })).toBe(false);
+    expect(
+      project({
+        health: {
+          port: 9090,
+          plaintext: true,
+          auth: "none",
+          metrics: { allowUnauthenticated: { env: "OPEN" } },
+        },
+      }),
+    ).toBe(false);
+    expect(
+      project({
+        health: { port: 9090, plaintext: true, metrics: { enabled: { env: "METRICS" } } },
+      }),
+    ).toBe(true);
     expect(
       channel({
         source: { file: { dir: "./inbox" } },

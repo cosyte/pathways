@@ -421,8 +421,12 @@ describe("an MLLP source that connects", () => {
       connect: { host: "127.0.0.1", port: sender.port },
     });
     await until(() => sender.connections.length === 1);
+    // The connection it dialled counts as one it holds open, for /metrics.
+    await until(() => source.openConnections === 1);
+    expect(source.openConnections).toBe(1);
     await source.stop();
     await sender.connections[0]?.closed;
+    expect(source.openConnections).toBe(0);
     await sleep(150);
     expect(sender.connections).toHaveLength(1);
   });

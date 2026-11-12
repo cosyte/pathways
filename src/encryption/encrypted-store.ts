@@ -6,6 +6,7 @@ import type {
   ChannelRunState,
   ClearResult,
   DeliveryCounts,
+  DestinationQueue,
   DestinationOutcome,
   ExpireResult,
   HandOff,
@@ -221,6 +222,8 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
   readonly setChannelState?: (channel: string, state: ChannelRunState) => Promise<void>;
   /** Straight through, present only when the store underneath has it. */
   readonly markDryRun?: (deliveryId: number, epoch?: number) => Promise<void>;
+  /** Counts and a time, no content, so straight through, present only when the store underneath has it. */
+  readonly destinationQueues?: (channel: string) => Promise<DestinationQueue[]>;
   /** Hashes in and a hash out, no body, so straight through, present only when the store underneath has it. */
   readonly heldIdempotencyKey?: (
     channel: string,
@@ -290,6 +293,9 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
       this.setChannelState = states.setChannelState;
     }
     if (inner.markDryRun !== undefined) this.markDryRun = inner.markDryRun.bind(inner);
+    if (inner.destinationQueues !== undefined) {
+      this.destinationQueues = inner.destinationQueues.bind(inner);
+    }
     if (inner.holdDeliveries !== undefined) {
       const hold = inner.holdDeliveries.bind(inner);
       this.holdDeliveries = async (channel, keys, error, epoch) =>

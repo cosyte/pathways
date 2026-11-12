@@ -499,6 +499,7 @@ destinations:
       tls: { cert: join(root, "tls/h.crt"), key: join(root, "tls/h.key"), ca: undefined },
       plaintext: false,
       auth: { kind: "bearer", env: "PATHWAYS_HEALTH_TOKEN" },
+      metrics: { enabled: true, allowUnauthenticated: false },
     });
     const without = await loadProject(await makeProject({ "channels/a/channel.yaml": MINIMAL }));
     expect(without.health).toBeUndefined();

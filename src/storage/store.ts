@@ -9,6 +9,7 @@ import {
   type ExpressionBuilder,
   type Generated,
   type Insertable,
+  type InsertObject,
   type RawBuilder,
   type Selectable,
   type SelectQueryBuilder,
@@ -157,6 +158,46 @@ export type DeliveryCounts = Readonly<
  * ```
  */
 export type DeliveryTally = DeliveryCounts & { readonly retrying: number };
+
+/** A type with its fields made writable, for building one up. */
+type Writable<T> = { -readonly [K in keyof T]: T[K] };
+
+/**
+ * One destination's queue, as `/metrics` reports it: counts and a time, never content. A channel's
+ * deliveries made under one destination key, or, for those made before keys, at one place in its
+ * list, make one queue.
+ *
+ * @example
+ * ```ts
+ * const queue: DestinationQueue = {
+ *   destination: 0, destinationKey: undefined, pending: 3, retrying: 1, failed: 0,
+ *   oldestPendingSince: "2026-11-10T07:52:16.000Z",
+ * };
+ * ```
+ */
+export interface DestinationQueue {
+  /**
+   * The destination's index in the channel's `destinations:` list when its deliveries were made;
+   * where it stands now is found by {@link destinationKey} when there is one.
+   */
+  readonly destination: number;
+  /**
+   * The key the deliveries were made under, which names the destination wherever it stands in the
+   * list now; undefined for deliveries made before destinations had keys.
+   */
+  readonly destinationKey: string | undefined;
+  /** Its deliveries pending, those waiting for a retry among them. */
+  readonly pending: number;
+  /** Its pending deliveries that failed at least once and wait for a retry. */
+  readonly retrying: number;
+  /** Its deliveries that failed for good and are not cleared. */
+  readonly failed: number;
+  /**
+   * When the oldest of its pending deliveries was queued (its message transformed, replayed or
+   * resent, as the message's last update), ISO 8601 in UTC; undefined when none is pending.
+   */
+  readonly oldestPendingSince: string | undefined;
+}
 
 /**
  * Retention marks the messages it is about to delete with this status, inside the transaction that
@@ -1648,6 +1689,12 @@ export interface MessageStore {
   deliveryCounts(channel: string): Promise<DeliveryCounts>;
   /** How many of a channel's pending deliveries have failed at least once and wait for a retry. */
   retryingDeliveries(channel: string): Promise<number>;
+  /**
+   * Each destination of a channel with a delivery pending or failed: its counts, and when its
+   * oldest pending delivery was queued. A destination with neither is left out. Optional: without
+   * it, `/metrics` serves no queue gauges for the store's channels.
+   */
+  destinationQueues?(channel: string): Promise<DestinationQueue[]>;
 
   /** Every channel with a stored message, by name. */
   channels(): Promise<string[]>;
@@ -2883,10 +2930,12 @@ export class Store implements MessageStore, ContentStore, MetaStore {
     const meta =
       options.storedMeta ?? (options.meta === undefined ? null : JSON.stringify(options.meta));
     const tags = options.metaTags ?? [];
-    const row = (claim: string | null): Insertable<MessagesTable> => ({
+    const row = (claim: string | null): MessageInsert => ({
       channel,
       received_at: at,
-      body: blob(body),
+      // A message a source could not read, such as a batch piece, is kept with an empty body, which
+      // goes in as each database takes one: see EMPTY_BODY.
+      body: body.byteLength === 0 ? EMPTY_BODY[this.kind] : blob(body),
       status: failure === undefined ? "received" : "failed",
       error: failure ?? null,
       updated_at: at,
@@ -4074,6 +4123,84 @@ export class Store implements MessageStore, ContentStore, MetaStore {
   }
 
   /**
+   * Each destination of `channel` with a delivery pending or failed, by its key (or, for deliveries
+   * made before keys, its place): its counts, and the oldest last update of a message with a
+   * delivery pending there. Three reads, each on the deliveries' index by channel, destination and
+   * status.
+   */
+  async destinationQueues(channel: string): Promise<DestinationQueue[]> {
+    const counts = await this.db
+      .selectFrom("deliveries")
+      .select([
+        "destination",
+        "destination_key",
+        "status",
+        (eb) => eb.fn.countAll<number | string>().as("count"),
+      ])
+      .where("channel", "=", channel)
+      .where("status", "in", ["pending", "failed"])
+      .groupBy(["destination", "destination_key", "status"])
+      .orderBy("destination")
+      .execute();
+    const retrying = await this.db
+      .selectFrom("deliveries")
+      .select([
+        "destination",
+        "destination_key",
+        (eb) => eb.fn.countAll<number | string>().as("count"),
+      ])
+      .where("channel", "=", channel)
+      .where("status", "=", "pending")
+      .where("attempts", ">", 0)
+      .groupBy(["destination", "destination_key"])
+      .execute();
+    const oldest = await this.db
+      .selectFrom("deliveries")
+      .innerJoin("messages", "messages.id", "deliveries.message_id")
+      .select([
+        "deliveries.destination as destination",
+        "deliveries.destination_key as destination_key",
+        // Never null: each group has a pending delivery, and its message an update time.
+        (eb) => eb.fn.min<string>("messages.updated_at").as("since"),
+      ])
+      .where("deliveries.channel", "=", channel)
+      .where("deliveries.status", "=", "pending")
+      .groupBy(["deliveries.destination", "deliveries.destination_key"])
+      .execute();
+    const queues = new Map<string, Writable<DestinationQueue>>();
+    const queue = (row: {
+      readonly destination: number | string;
+      readonly destination_key: string | null;
+    }): Writable<DestinationQueue> => {
+      const destination = Number(row.destination);
+      const destinationKey = row.destination_key ?? undefined;
+      const id = JSON.stringify([destination, destinationKey ?? null]);
+      let found = queues.get(id);
+      if (found === undefined) {
+        found = {
+          destination,
+          destinationKey,
+          pending: 0,
+          retrying: 0,
+          failed: 0,
+          oldestPendingSince: undefined,
+        };
+        queues.set(id, found);
+      }
+      return found;
+    };
+    for (const row of counts) {
+      const found = queue(row);
+      if (row.status === "pending") found.pending = Number(row.count);
+      else found.failed = Number(row.count);
+    }
+    for (const row of retrying) queue(row).retrying = Number(row.count);
+    for (const row of oldest) queue(row).oldestPendingSince = row.since;
+    // In the destinations' order: every one with a row here appeared first in the ordered counts.
+    return [...queues.values()];
+  }
+
+  /**
    * Records a replay or a resend. The guarded update of the message comes first, so on SQLite the
    * transaction holds the write lock before it reads anything, and on a server it holds the
    * message's row: nothing the engine writes can come between the checks and the inserts. The new
@@ -4772,7 +4899,7 @@ export class Store implements MessageStore, ContentStore, MetaStore {
    */
   private async insertClaiming(
     db: Kysely<Tables>,
-    values: Insertable<MessagesTable>,
+    values: MessageInsert,
   ): Promise<number | undefined> {
     switch (this.kind) {
       case "postgres":
@@ -4797,10 +4924,7 @@ export class Store implements MessageStore, ContentStore, MetaStore {
   }
 
   /** Inserts a message and returns its id, which each database hands back its own way. */
-  private async insertMessage(
-    db: Kysely<Tables>,
-    values: Insertable<MessagesTable>,
-  ): Promise<number> {
+  private async insertMessage(db: Kysely<Tables>, values: MessageInsert): Promise<number> {
     const insert = db.insertInto("messages").values(values);
     switch (this.kind) {
       case "mysql":
@@ -4814,6 +4938,9 @@ export class Store implements MessageStore, ContentStore, MetaStore {
     }
   }
 }
+
+/** A message row to insert, whose body may be a literal (see EMPTY_BODY). */
+type MessageInsert = InsertObject<Tables, "messages">;
 
 /** The unique index that holds one message per channel to each idempotency key. */
 const CLAIM_INDEX = "messages_by_channel_idempotency_claim";

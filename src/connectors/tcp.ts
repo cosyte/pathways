@@ -223,6 +223,11 @@ export class TcpSource implements SourceConnector {
     return this.refused;
   }
 
+  /** How many connections the source holds open now: a count only, never who connected. */
+  get openConnections(): number {
+    return this.connections.size;
+  }
+
   /** The port the source listens on, or undefined when it is not listening. */
   get port(): number | undefined {
     const address = this.server?.address();
