@@ -89,6 +89,15 @@ for (const database of TEST_DATABASES) {
       }
     });
 
+    it("lets one of two nodes joining under one id at once in, and tells the other the holder", async () => {
+      const { a, b } = await twoEngines();
+      const joins = await Promise.all([a.joinNode(A), b.joinNode({ ...A, pid: 3333 })]);
+      expect(joins.filter((join) => join.joined)).toHaveLength(1);
+      const refused = joins.flatMap((join) => (join.joined ? [] : [join.holder]));
+      expect(refused).toHaveLength(1);
+      expect(refused[0]?.pid).toBe(joins[0]?.joined === true ? 1111 : 3333);
+    });
+
     it("refuses a live node's id to another, and takes it over from an earlier run it names", async () => {
       const { a, b } = await twoEngines();
       await a.joinNode(A);
@@ -144,7 +153,10 @@ for (const database of TEST_DATABASES) {
       );
       const nodes = nodeStore(wrapped);
       expect(nodes).toBeDefined();
-      expect(await nodes?.joinNode(A)).toEqual({ joined: true });
+      expect(await nodes?.joinNode({ ...A, role: "draining", draining: true })).toEqual({
+        joined: true,
+      });
+      expect((await nodes?.nodes())?.[0]).toMatchObject({ role: "draining", draining: true });
       expect(await nodes?.nodeHeartbeat(self(A), A)).toBe(true);
       expect((await nodes?.nodes())?.map((row) => row.node)).toEqual(["engine-a"]);
       expect(await nodes?.forgetNode("engine-a")).toBe(false);

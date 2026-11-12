@@ -316,6 +316,11 @@ describe("A node id", () => {
     expect(unsaved).toMatchObject({ from: "unsaved" });
     expect(unsaved).toHaveProperty("code");
     expect(unsaved.id).toMatch(/^[0-9a-f]{16}$/);
+    // A project folder under a file: no folder can be made at all.
+    const underFile = join(await makeProject({ plain: "" }), "plain");
+    const nowhere = await resolveNodeId(underFile, undefined);
+    expect(nowhere).toMatchObject({ from: "unsaved" });
+    expect(nowhere).not.toMatchObject({ code: "EEXIST" });
     // A kept file that holds no node id is left as it is.
     const garbled = await makeProject({ [NODE_ID_FILE]: "not a node id!\n" });
     expect(await resolveNodeId(garbled, undefined)).toMatchObject({

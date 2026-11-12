@@ -264,11 +264,13 @@ This engine's node: the id it runs under, and how often it writes its heartbeat.
 | `id`        | node id                 | generated, kept in `.pathways/node-id` | 1 to 64 letters, digits, dots, hyphens and underscores, starting with a letter or a digit; unique among the engines on the database, or a second is refused |
 | `heartbeat` | duration, at least `1s` | `5s`                                   | how often the engine writes its heartbeat; a node whose last heartbeat is three of these old shows stale                                                    |
 
-```yaml
+```yaml title="pathways.yaml"
 node:
-  id: { env: HOSTNAME }
+  id: engine-a
   heartbeat: 5s
 ```
+
+Written as `id: { env: HOSTNAME }`, each container takes its host name as its node id.
 
 ### Migrations
 
