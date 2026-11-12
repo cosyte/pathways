@@ -133,6 +133,7 @@ export type {
   ExpireResult,
   LeaseStore,
   MessageQuery,
+  MessageRows,
   MetaCandidate,
   MetaCandidateQuery,
   MetaStore,
@@ -149,12 +150,17 @@ export type {
   RefusalReason,
   RequeueRequest,
   RequeueResult,
+  RetentionQuery,
+  RetentionStep,
+  RetentionStore,
   RetryingDelivery,
   SendingMarker,
   SendStart,
   StoredContent,
   StoredDelivery,
+  StoredDeliveryRow,
   StoredMessage,
+  StoredMessageRow,
   StoredMeta,
   StoreReceiveOptions,
 } from "./storage/store.js";
@@ -175,3 +181,9 @@ export {
   type NodeState,
 } from "./storage/nodes.js";
 export type { AuditListener } from "./operator/audit.js";
+export type {
+  ArchivedDelivery,
+  ArchivedMessage,
+  ArchiveErrorCode,
+  ArchiveHeader,
+} from "./operator/archive.js";

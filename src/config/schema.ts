@@ -281,6 +281,48 @@ const retryBlock = z
       "How a failed delivery is retried. The narrowest of defaults, the channel and the destination wins, key by key. Default: 1s, doubling to 5m, no jitter, no limit and no age.",
   });
 
+/** The shorthand `retention: 30d`: how long a done message is kept, its metadata clock. */
+const retentionPeriod = duration(
+  "How long a delivered, filtered or cleared message is kept after its last activity before it is deleted: a duration such as 30d, or a number of milliseconds. Default 30d.",
+);
+
+/** The clocks of a `retention:` block, which a channel can set as well as `pathways.yaml`. */
+const retentionClocks = {
+  content: duration(
+    "How long a done message keeps its content (its body, its outputs, its error texts and its ctx.meta) after its last activity; then the content goes and the row stays. Default: kept as long as the row.",
+  ).optional(),
+  metadata: duration(
+    "How long a done message's row is kept after its last activity before it is deleted: its ids, times and statuses. Never shorter than content. Default 30d.",
+  ).optional(),
+  failed: duration(
+    "How long a failed message is kept after its last activity before it is deleted. Default: kept until it is replayed or cleared.",
+  ).optional(),
+};
+
+/** The keys of a `retention:` block only `pathways.yaml` sets: they are engine-wide. */
+const retentionProjectKeys = {
+  archive: z
+    .strictObject({
+      dir: envable(z.string().min(1)).meta({
+        description:
+          "The folder sealed archives are written to, relative to pathways.yaml. Each is checked before anything it holds is deleted.",
+      }),
+    })
+    .meta({
+      description:
+        "Write every message to a sealed archive before retention changes or deletes it. Needs encryption keys.",
+    })
+    .optional(),
+  audit: envable(
+    z
+      .literal("never")
+      .meta({ description: "How long the audit log is kept: never pruned. Default never." }),
+  ).optional(),
+};
+
+const RETENTION_DESCRIPTION =
+  "How long stored messages are kept: a duration such as 30d (the metadata clock), or { content, metadata, failed } with archive and audit in pathways.yaml. Default 30d.";
+
 /** Settings an engine sets as defaults and a channel can override. */
 const settingsShape = {
   timeout: duration(
@@ -294,9 +336,10 @@ const settingsShape = {
   ackTimeout: duration(
     "How long an MLLP destination waits to connect, and then for each ACK: a duration such as 10s, or a number of milliseconds. Default 10s.",
   ).optional(),
-  retention: duration(
-    "How long a delivered, filtered or cleared message is kept after its last activity before it is deleted: a duration such as 30d, or a number of milliseconds. Default 30d.",
-  ).optional(),
+  retention: z
+    .union([retentionPeriod, z.strictObject({ ...retentionClocks, ...retentionProjectKeys })])
+    .meta({ description: RETENTION_DESCRIPTION })
+    .optional(),
   resendFlag: envable(
     z.boolean().meta({
       description:
@@ -2175,6 +2218,183 @@ function sftpPaths(keys: readonly string[]) {
   };
 }
 
+/** An object store's endpoint: an `https://` URL, or `http://` with `plaintext: true`. */
+function objectEndpoint(description: string) {
+  return envable(
+    z
+      .string()
+      .refine((value) => {
+        const url = URL.parse(value);
+        return (
+          url !== null &&
+          (url.protocol === "https:" || url.protocol === "http:") &&
+          url.username === "" &&
+          url.password === ""
+        );
+      }, "an https:// URL with no user name or password, or http:// with plaintext: true")
+      .meta({ description }),
+  );
+}
+
+/** How an object store's claim and write behave, the keys an `s3:` and an `azblob:` block share. */
+const objectStoreKeys = {
+  plaintext: z
+    .boolean()
+    .meta({
+      description:
+        "Allow an http:// endpoint, for a local emulator. Never read from the environment. Default false.",
+    })
+    .optional(),
+  singleNode: envable(
+    z.boolean().meta({
+      description:
+        "A source only: run on a store that does not honour If-None-Match, deleting each object once stored and claiming none. Safe only when one engine and one channel read dir. Default false, which refuses such a store at start.",
+    }),
+  ).optional(),
+  mode: envable(
+    z.enum(["create", "overwrite"]).meta({
+      description:
+        "A destination only: create (the default) writes an object only where none is (If-None-Match: *); overwrite replaces one.",
+    }),
+  ).optional(),
+};
+
+/** A file source's or destination's `s3:` block: the bucket `dir` is a key prefix in. */
+const s3Block = z
+  .strictObject({
+    bucket: envable(
+      z
+        .string()
+        .regex(/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/, "an S3 bucket name, such as inbound-adt")
+        .meta({ description: "The bucket's name." }),
+    ),
+    region: envable(
+      z.string().min(1).meta({
+        description: "The bucket's region, such as us-east-1. Default: the AWS SDK's own chain.",
+      }),
+    ).optional(),
+    endpoint: objectEndpoint(
+      "Another endpoint than Amazon's, for an S3-compatible server, such as https://s3.example.test.",
+    ).optional(),
+    pathStyle: envable(
+      z.boolean().meta({
+        description:
+          "Name the bucket in the path rather than the host, as most S3-compatible servers need. Default false.",
+      }),
+    ).optional(),
+    timeout: duration("How long one request may take. Default 30s.", {
+      ms: 1,
+      message: 'a duration of at least 1ms, such as "30s"',
+    }).optional(),
+    ...objectStoreKeys,
+  })
+  .meta({
+    description:
+      "Read or write objects in an Amazon S3 bucket, with dir as the key prefix. Credentials come from the AWS SDK's default chain, never the YAML.",
+  });
+
+/** A file source's or destination's `azblob:` block: the container `dir` is a prefix in. */
+const azblobBlock = z
+  .strictObject({
+    account: envable(
+      z
+        .string()
+        .regex(/^[a-z0-9]{3,24}$/, "a storage account name: 3 to 24 lowercase letters and digits")
+        .meta({ description: "The storage account's name." }),
+    ),
+    container: envable(
+      z
+        .string()
+        .regex(/^[a-z0-9](?!.*--)[a-z0-9-]{1,61}[a-z0-9]$/, "a container name, such as inbound")
+        .meta({ description: "The container's name." }),
+    ),
+    endpoint: objectEndpoint(
+      "The blob service's address. Default https://<account>.blob.core.windows.net; Azurite listens on http://127.0.0.1:10000/<account>.",
+    ).optional(),
+    connectionString: secretSource("a connection string")
+      .meta({
+        description:
+          "A connection string with the account key, read at start: { env: NAME }, { file: path } or { secret: { provider, name } }. Default: none, so the identity is Azure's default chain (a managed identity, a workload identity, or the environment).",
+      })
+      .optional(),
+    ...objectStoreKeys,
+  })
+  .meta({
+    description:
+      "Read or write blobs in an Azure Blob Storage container, with dir as the name prefix.",
+  });
+
+/** The kinds of remote location a file block can name, at most one. */
+const REMOTE_KINDS = ["sftp", "s3", "azblob"] as const;
+
+/** The source keys an object store has no use for: it claims by a marker and never moves a file. */
+const OBJECT_UNUSED_SOURCE_KEYS = ["keepProcessed", "doneFile", "errorDir", "readTries"] as const;
+
+/**
+ * With `s3:` or `azblob:`, `dir` is a key prefix: no slash at either end, and no empty, `.` or `..`
+ * part. At most one remote kind, and on a source none of the keys an object store does not use.
+ * `singleNode` goes on a source and `mode` on a destination.
+ */
+function objectRules(role: "source" | "destination") {
+  return (value: Readonly<Record<string, unknown>>, ctx: z.RefinementCtx): void => {
+    const named = REMOTE_KINDS.filter((kind) => value[kind] !== undefined);
+    if (named.length > 1) {
+      ctx.addIssue({ code: "custom", message: `name at most one of ${REMOTE_KINDS.join(", ")}` });
+    }
+    const kind = named.find((name) => name !== "sftp");
+    if (kind === undefined) return;
+    const dir = value["dir"];
+    if (
+      typeof dir === "string" &&
+      dir.split("/").some((part) => part === "" || part === "." || part === "..")
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["dir"],
+        message: "a key prefix such as inbox or adt/in, with no slash at either end",
+      });
+    }
+    const block = value[kind] as Readonly<Record<string, unknown>>;
+    const endpoint = block["endpoint"];
+    if (typeof endpoint === "string") {
+      const plain = endpoint.toLowerCase().startsWith("http:");
+      if (plain !== (block["plaintext"] === true)) {
+        ctx.addIssue({
+          code: "custom",
+          path: [kind, plain ? "endpoint" : "plaintext"],
+          message: plain
+            ? "an http:// endpoint sends in the clear: set plaintext: true to allow it"
+            : "plaintext: true goes only with an http:// endpoint",
+        });
+      }
+    } else if (block["plaintext"] === true && kind === "s3") {
+      ctx.addIssue({
+        code: "custom",
+        path: [kind, "plaintext"],
+        message: "plaintext: true goes only with an http:// endpoint",
+      });
+    }
+    const wrong = role === "source" ? "mode" : "singleNode";
+    if (block[wrong] !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: [kind, wrong],
+        message: `goes on a ${role === "source" ? "destination" : "source"} only`,
+      });
+    }
+    if (role === "destination") return;
+    for (const key of OBJECT_UNUSED_SOURCE_KEYS) {
+      if (value[key] !== undefined) {
+        ctx.addIssue({
+          code: "custom",
+          path: [key],
+          message: `is not used with ${kind}: an object store claims by a marker and moves no file`,
+        });
+      }
+    }
+  };
+}
+
 /** A channel's `source:` block: exactly one kind. */
 const source = restate(
   z
@@ -2265,9 +2485,12 @@ const source = restate(
             }),
           ).optional(),
           sftp: sftpBlock.optional(),
+          s3: s3Block.optional(),
+          azblob: azblobBlock.optional(),
         })
         .meta({ description: "Read each file dropped into dir as one message." })
         .superRefine(sftpPaths(["dir", "errorDir"]))
+        .superRefine(objectRules("source"))
         .optional(),
       http: httpSource.optional(),
       mllp: mllpSource.optional(),
@@ -2304,9 +2527,12 @@ const destination = restate(
             description: "The folder to write into, relative to this file. Created if missing.",
           }),
           sftp: sftpBlock.optional(),
+          s3: s3Block.optional(),
+          azblob: azblobBlock.optional(),
         })
         .meta({ description: "Write each output into dir as a file of its own." })
         .superRefine(sftpPaths(["dir"]))
+        .superRefine(objectRules("destination"))
         .optional(),
       http: httpDestination.optional(),
       mllp: mllpDestination.optional(),
@@ -2555,7 +2781,10 @@ export const channelSchema = restate(
       memory: settingsShape.memory,
       onStoreFailure: settingsShape.onStoreFailure,
       ackTimeout: settingsShape.ackTimeout,
-      retention: settingsShape.retention,
+      retention: z
+        .union([retentionPeriod, z.strictObject(retentionClocks)])
+        .meta({ description: RETENTION_DESCRIPTION })
+        .optional(),
       resendFlag: settingsShape.resendFlag,
       config: transformConfig.optional(),
       retry: settingsShape.retry,
@@ -2687,6 +2916,12 @@ export interface Settings {
   readonly resendFlag: boolean;
   /** How often `pathways start` runs retention, in milliseconds. Engine-wide. */
   readonly retentionIntervalMs: number;
+  /**
+   * The content and failed clocks, set only when a `retention:` block is written out
+   * (`retention: { content, metadata, failed }`); `retentionMs` is then the metadata clock. Without
+   * it, retention runs as `retention: 30d` always has.
+   */
+  readonly retentionClocks?: RetentionClocks | undefined;
   /** How a failed delivery is retried. A destination can override it, key by key. */
   readonly retry: RetryPolicy;
   /**
@@ -2694,6 +2929,38 @@ export interface Settings {
    * `keep`, or `dropAfterDelivery` to delete the bodies once every delivery is delivered.
    */
   readonly content: ContentPolicy;
+}
+
+/**
+ * The clocks of a written-out `retention:` block, beside `Settings.retentionMs`, the metadata clock.
+ * A clock left `undefined` never runs.
+ *
+ * @example
+ * ```ts
+ * const clocks: RetentionClocks = { contentMs: 7 * 86_400_000, failedMs: 180 * 86_400_000 };
+ * ```
+ */
+export interface RetentionClocks {
+  /**
+   * How long a done message keeps its content after its last activity, in milliseconds: then its
+   * bodies, error texts and `ctx.meta` go and its row stays. Never longer than the metadata clock.
+   */
+  readonly contentMs?: number | undefined;
+  /** How long a failed message is kept after its last activity before it is deleted, in milliseconds. */
+  readonly failedMs?: number | undefined;
+}
+
+/**
+ * Where retention writes its sealed archives, from `retention.archive` in `pathways.yaml`.
+ *
+ * @example
+ * ```ts
+ * const archive: ArchiveConfig = { dir: "/srv/pathways/archive" };
+ * ```
+ */
+export interface ArchiveConfig {
+  /** The folder, absolute. */
+  readonly dir: string;
 }
 
 /**
@@ -2927,6 +3194,37 @@ export interface FileSource {
   readonly readTries: number;
   /** The SFTP server `dir` and `errorDir` are on, or `undefined` for a folder on this machine. */
   readonly sftp?: SftpConfig | undefined;
+  /** The S3 bucket `dir` is a key prefix in, or `undefined`. */
+  readonly s3?: S3Config | undefined;
+  /** The Azure Blob Storage container `dir` is a prefix in, or `undefined`. */
+  readonly azblob?: AzblobConfig | undefined;
+}
+
+/** How an object store block's source claims and its destination writes. */
+export interface ObjectStoreConfig {
+  /** A source runs on a store without conditional writes, claiming nothing. */
+  readonly singleNode: boolean;
+  /** How a destination writes: only where no object is, or over one. */
+  readonly mode: "create" | "overwrite";
+}
+
+/** An `s3:` block, resolved. Credentials come from the AWS SDK's default chain. */
+export interface S3Config extends ObjectStoreConfig {
+  readonly bucket: string;
+  readonly region: string | undefined;
+  readonly endpoint: string | undefined;
+  readonly pathStyle: boolean;
+  readonly timeoutMs: number | undefined;
+}
+
+/** An `azblob:` block, resolved, with its connection string as a reference. */
+export interface AzblobConfig extends ObjectStoreConfig {
+  readonly account: string;
+  readonly container: string;
+  readonly endpoint: string | undefined;
+  readonly connectionString: SecretSource | undefined;
+  /** Whether an http endpoint, in `endpoint` or the connection string, is allowed. */
+  readonly plaintext: boolean;
 }
 
 /**
@@ -2959,6 +3257,10 @@ export interface FileDestination {
   readonly dir: string;
   /** The SFTP server `dir` is on, or `undefined` for a folder on this machine. */
   readonly sftp?: SftpConfig | undefined;
+  /** The S3 bucket `dir` is a key prefix in, or `undefined`. */
+  readonly s3?: S3Config | undefined;
+  /** The Azure Blob Storage container `dir` is a prefix in, or `undefined`. */
+  readonly azblob?: AzblobConfig | undefined;
 }
 
 /**
@@ -3584,6 +3886,11 @@ export interface ProjectConfig {
   /** The secret providers `secrets:` names; `env` and `file` are built in and not listed. */
   readonly secrets: readonly SecretProviderConfig[];
   readonly channels: readonly ChannelConfig[];
+  /**
+   * Where retention writes a sealed archive of what it is about to prune or delete, from
+   * `retention.archive` in `pathways.yaml`; `undefined` when it writes none.
+   */
+  readonly archive?: ArchiveConfig | undefined;
   /**
    * Each setting `pathways.yaml` and the channels' `channel.yaml` files read from the environment
    * with `{ env: NAME }`: its key and the variable it names, never the value. Empty when none does;

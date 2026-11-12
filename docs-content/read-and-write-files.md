@@ -89,11 +89,13 @@ polling one location at once store each file once.
 | A folder on this machine | Rename to a unique claim name, checked after the move by the file's id; the moves are flushed to disk before anything is stored. | Available       |
 | SFTP                     | Rename to a unique claim name. A rename that finds the file gone means another engine claimed it first.                          | Available       |
 | FTPS and WebDAV          | Decided with their support.                                                                                                      | Planned         |
-| S3 and Azure Blob        | An object store cannot rename an object, so the claim is not a rename. Decided with their support.                               | Planned         |
+| S3 and Azure Blob        | A marker object written only where none is (`If-None-Match: *`): the store lets one engine write it and refuses the others.      | Available       |
 | SMB                      | Not decided yet.                                                                                                                 | Not planned yet |
 
 A location the source reads must rename a file in one step, so that of two engines renaming one file
-only one succeeds.
+only one succeeds. An object store has no rename, so its claim is a conditional write instead:
+[Read and write Amazon S3](./read-and-write-amazon-s3.md) and
+[Read and write Azure Blob Storage](./read-and-write-azure-blob-storage.md) say how.
 
 ### Put the folder on a file system that keeps file ids
 

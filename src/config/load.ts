@@ -33,6 +33,7 @@ import {
   DEFAULT_TCP_STALL_TIMEOUT_MS,
   DEFAULT_TCP_TIMEOUT_MS,
   projectSchema,
+  type AzblobConfig,
   type ChannelConfig,
   type ClientTlsFiles,
   type MllpClientTlsFiles,
@@ -53,6 +54,7 @@ import {
   type ProjectConfig,
   type RetryPolicy,
   type SecretProviderConfig,
+  type S3Config,
   type ServerTlsFiles,
   type SftpConfig,
   type Settings,
@@ -163,10 +165,19 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
     fromEnv: projectEnv,
   };
   problems.push(...retryProblems(show(projectFile), [projectRetry], settings.retry));
+  problems.push(...retentionProblem(show(projectFile), settings));
   const databaseFile = resolve(projectRoot, project.storage?.sqlite?.file ?? DEFAULT_DATABASE_FILE);
   const storage = resolveStorage(project.storage, projectRoot, databaseFile);
   const hooks = (project.hooks ?? []).map((hook) => resolveHook(hook, projectRoot));
   const encryption = resolveEncryption(project.encryption, projectRoot);
+  const retention = project.defaults?.retention;
+  const archiveDir = typeof retention === "object" ? retention.archive?.dir : undefined;
+  const archive = archiveDir === undefined ? undefined : { dir: resolve(projectRoot, archiveDir) };
+  if (archive !== undefined && encryption?.kind === "none") {
+    problems.push(
+      `${show(projectFile)}: defaults.retention.archive: an archive is sealed under encryption keys, and pathways.yaml sets encryption: none`,
+    );
+  }
   const secrets: SecretProviderConfig[] = Object.entries(project.secrets ?? {}).map(
     ([name, provider]) => ({
       name,
@@ -281,6 +292,7 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
         ),
       ),
     ];
+    badRetry.push(...retentionProblem(show(file), channelSettings));
     if (badRetry.length > 0) {
       problems.push(...badRetry);
       continue;
@@ -397,6 +409,8 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
     channels,
     environment,
     ...(warnings.length > 0 ? { warnings } : {}),
+    // Set only when pathways.yaml names one, so a project without resolves as it always has.
+    ...(archive === undefined ? {} : { archive }),
   };
 }
 
@@ -589,8 +603,11 @@ function resolveSource(
   // The schema lets exactly one kind through, so a source that is not HTTP is a file source.
   const file = source.file as NonNullable<typeof source.file>;
   const sftp = resolveSftp(file.sftp, dir);
-  // On an SFTP server the folders are the server's own absolute paths, never this machine's.
-  const place = (written: string): string => (sftp === undefined ? resolve(dir, written) : written);
+  const objects = resolveObjectStores(file, dir);
+  // On an SFTP server the folders are the server's own absolute paths, never this machine's, and
+  // in an object store dir is a key prefix.
+  const remote = sftp !== undefined || objects.s3 !== undefined || objects.azblob !== undefined;
+  const place = (written: string): string => (remote ? written : resolve(dir, written));
   return {
     kind: "file",
     dir: place(file.dir),
@@ -609,7 +626,52 @@ function resolveSource(
     errorDir: file.errorDir === undefined ? undefined : place(file.errorDir),
     readTries: file.readTries ?? DEFAULT_READ_TRIES,
     sftp,
+    ...objects,
   };
+}
+
+/** An `s3:` and an `azblob:` block as the YAML wrote them. */
+type ObjectYaml = Pick<NonNullable<DestinationYaml["file"]>, "s3" | "azblob">;
+
+/**
+ * A file block's `s3:` and `azblob:`, resolved, each only when written: the connection string's
+ * file against `dir`.
+ */
+function resolveObjectStores(
+  file: ObjectYaml,
+  dir: string,
+): { s3?: S3Config; azblob?: AzblobConfig } {
+  const { s3, azblob } = file;
+  if (s3 !== undefined) {
+    return {
+      s3: {
+        bucket: s3.bucket,
+        region: s3.region,
+        endpoint: s3.endpoint,
+        pathStyle: s3.pathStyle ?? false,
+        timeoutMs: s3.timeout,
+        singleNode: s3.singleNode ?? false,
+        mode: s3.mode ?? "create",
+      },
+    };
+  }
+  if (azblob !== undefined) {
+    return {
+      azblob: {
+        account: azblob.account,
+        container: azblob.container,
+        endpoint: azblob.endpoint,
+        connectionString:
+          azblob.connectionString === undefined
+            ? undefined
+            : secretSourceOf(azblob.connectionString, dir),
+        plaintext: azblob.plaintext === true,
+        singleNode: azblob.singleNode ?? false,
+        mode: azblob.mode ?? "create",
+      },
+    };
+  }
+  return {};
 }
 
 /** An MLLP block's TLS keys beyond the shared ones, as the YAML wrote them. */
@@ -747,7 +809,9 @@ function resolveConnector(
     // The schema lets exactly one kind through, so a destination that is not HTTP is a file one.
     const file = destination.file as NonNullable<typeof destination.file>;
     const sftp = resolveSftp(file.sftp, dir);
-    return { kind: "file", dir: sftp === undefined ? resolve(dir, file.dir) : file.dir, sftp };
+    const objects = resolveObjectStores(file, dir);
+    const remote = sftp !== undefined || objects.s3 !== undefined || objects.azblob !== undefined;
+    return { kind: "file", dir: remote ? file.dir : resolve(dir, file.dir), sftp, ...objects };
   }
   return {
     kind: "http",
@@ -886,7 +950,7 @@ function mergeSettings(
     pollInterval?: number | undefined;
     onStoreFailure?: OnStoreFailure | undefined;
     ackTimeout?: number | undefined;
-    retention?: number | undefined;
+    retention?: RetentionYaml;
     resendFlag?: boolean | undefined;
     retentionInterval?: number | undefined;
     content?: ContentPolicy | undefined;
@@ -899,12 +963,54 @@ function mergeSettings(
     pollIntervalMs: override.pollInterval ?? base.pollIntervalMs,
     onStoreFailure: override.onStoreFailure ?? base.onStoreFailure,
     ackTimeoutMs: override.ackTimeout ?? base.ackTimeoutMs,
-    retentionMs: override.retention ?? base.retentionMs,
     resendFlag: override.resendFlag ?? base.resendFlag,
     retentionIntervalMs: override.retentionInterval ?? base.retentionIntervalMs,
+    ...mergeRetention(base, override.retention),
     content: override.content ?? base.content,
     retry: override.retry === undefined ? base.retry : mergeRetry(base.retry, override.retry),
   };
+}
+
+/** A `retention:` value as parsed: the shorthand duration, or the block written out. */
+type RetentionYaml =
+  | number
+  | {
+      readonly content?: number | undefined;
+      readonly metadata?: number | undefined;
+      readonly failed?: number | undefined;
+    }
+  | undefined;
+
+/**
+ * `retention`'s clocks over `base`'s, key by key. The shorthand sets the metadata clock alone; a
+ * block written out sets the clocks it names and turns the others on with what `base` holds.
+ */
+function mergeRetention(
+  base: Settings,
+  retention: RetentionYaml,
+): Pick<Settings, "retentionMs" | "retentionClocks"> {
+  const inherited =
+    base.retentionClocks === undefined ? {} : { retentionClocks: base.retentionClocks };
+  if (retention === undefined) return { retentionMs: base.retentionMs, ...inherited };
+  if (typeof retention === "number") return { retentionMs: retention, ...inherited };
+  const contentMs = retention.content ?? base.retentionClocks?.contentMs;
+  const failedMs = retention.failed ?? base.retentionClocks?.failedMs;
+  return {
+    retentionMs: retention.metadata ?? base.retentionMs,
+    retentionClocks: {
+      ...(contentMs === undefined ? {} : { contentMs }),
+      ...(failedMs === undefined ? {} : { failedMs }),
+    },
+  };
+}
+
+/** A problem when the metadata clock in force is shorter than the content clock. */
+function retentionProblem(file: string, settings: Settings): string[] {
+  const contentMs = settings.retentionClocks?.contentMs;
+  if (contentMs === undefined || settings.retentionMs >= contentMs) return [];
+  return [
+    `${file}: retention.metadata: ${String(settings.retentionMs)}ms is shorter than retention.content, ${String(contentMs)}ms; a message's row must outlive its content`,
+  ];
 }
 
 /** `override`'s retry keys over `base`'s, key by key; `none` lifts a limit `base` set. */

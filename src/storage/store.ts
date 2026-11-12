@@ -797,6 +797,180 @@ export interface ExpireResult {
 }
 
 /**
+ * One step of retention, each with its own clock:
+ *
+ * - `content`: a done message's bodies, error texts and `ctx.meta` go, and its row stays;
+ * - `metadata`: a done message's row goes, with its deliveries;
+ * - `failed`: a failed message's row goes, with its deliveries.
+ *
+ * @example
+ * ```ts
+ * const step: RetentionStep = "content";
+ * ```
+ */
+export type RetentionStep = "content" | "metadata" | "failed";
+
+/**
+ * Which messages one retention step reaches: those of its kind whose last activity is before
+ * `cutoff`.
+ *
+ * @example
+ * ```ts
+ * const query: RetentionQuery = { step: "metadata", cutoff: "2026-08-01T00:00:00.000Z", includeDropped: true };
+ * ```
+ */
+export interface RetentionQuery {
+  readonly step: RetentionStep;
+  /** ISO 8601, UTC. */
+  readonly cutoff: string;
+  /**
+   * For the `metadata` step: also delete a message whose content was dropped, after delivery or by
+   * the `content` step. Without it such a message is kept, as `retention: 30d` always has.
+   */
+  readonly includeDropped?: boolean | undefined;
+}
+
+/**
+ * Every column of one message's row, as storage holds it, for an archive: nothing a retention step
+ * nulls or deletes is left out. `body` is `null` once the content was dropped; `meta` is the
+ * metadata as stored (JSON, sealed under encryption), and a store wrapper reads it back.
+ *
+ * @example
+ * ```ts
+ * const mrnHeld = (row: StoredMessageRow): boolean => row.meta !== null;
+ * ```
+ */
+export interface StoredMessageRow {
+  readonly id: number;
+  readonly channel: string;
+  readonly status: MessageStatus;
+  readonly receivedAt: string;
+  readonly updatedAt: string;
+  readonly body: Uint8Array | null;
+  /** Why it failed, as stored: can quote the message. */
+  readonly error: string | null;
+  readonly dedupKey: string | null;
+  readonly duplicateOf: number | null;
+  readonly size: number | null;
+  readonly generation: number;
+  readonly idempotencyKey: string | null;
+  readonly contentHash: string | null;
+  readonly contentDroppedAt: string | null;
+  readonly meta: string | null;
+}
+
+/**
+ * Every column of one delivery's row, of any generation, as storage holds it, for an archive.
+ * `body` is `null` once its message's content was dropped; its message id and channel are those of
+ * the {@link StoredMessageRow} it comes with.
+ *
+ * @example
+ * ```ts
+ * const old = (row: StoredDeliveryRow, current: number): boolean => row.generation < current;
+ * ```
+ */
+export interface StoredDeliveryRow {
+  readonly id: number;
+  readonly destination: number;
+  readonly seq: number;
+  readonly generation: number;
+  readonly status: DeliveryStatus;
+  readonly attempts: number;
+  readonly nextAttemptAt: number;
+  readonly deliveredAt: string | null;
+  readonly body: Uint8Array | null;
+  /** Its last error text, as stored: can quote the message. */
+  readonly error: string | null;
+  readonly sendingAt: number | null;
+  readonly sendingAttempt: number | null;
+  readonly interruptedAttempt: number | null;
+}
+
+/**
+ * One message's row and every delivery row of it, oldest first: what retention archives before it
+ * changes or deletes them. The index tags of its metadata are left out: they are derived from
+ * `meta` under the master keys, and are derived again from it.
+ *
+ * @example
+ * ```ts
+ * const rows: MessageRows | undefined = await store.archiveRows(12);
+ * ```
+ */
+export interface MessageRows {
+  readonly message: StoredMessageRow;
+  readonly deliveries: readonly StoredDeliveryRow[];
+}
+
+/**
+ * What retention needs from storage to archive before it changes anything: the messages a step
+ * would reach, a batch at a time, every column of each, and a way to change exactly those. Each
+ * method is optional on {@link MessageStore}; {@link Store} has all four.
+ *
+ * @example
+ * ```ts
+ * const ids = await store.listExpiring("adt", query, 500);
+ * await store.applyExpiry("adt", ids, query);
+ * ```
+ */
+export interface RetentionStore {
+  /** How many messages, and their deliveries, `query` reaches on `channel` now. */
+  countExpiring(channel: string, query: RetentionQuery): Promise<ExpireResult>;
+  /**
+   * Every column of one message's row and of each of its delivery rows, every generation, bodies
+   * included: what an archive holds. `undefined` when the message is gone.
+   */
+  archiveRows(id: number): Promise<MessageRows | undefined>;
+  /** Up to `limit` ids of the messages `query` reaches on `channel`, lowest first, above `after`. */
+  listExpiring(
+    channel: string,
+    query: RetentionQuery,
+    limit: number,
+    after?: number,
+  ): Promise<number[]>;
+  /**
+   * Applies `query`'s step to those of `ids` it still reaches, in one transaction, re-checking each,
+   * so a message replayed or given a new delivery meanwhile is left alone. `content` empties the
+   * bodies and error texts, drops `ctx.meta` and its index tags, and marks the message's content
+   * dropped; `metadata` and `failed` delete the rows. Returns how many messages and deliveries it
+   * changed.
+   */
+  applyExpiry(
+    channel: string,
+    ids: readonly number[],
+    query: RetentionQuery,
+  ): Promise<ExpireResult>;
+}
+
+/**
+ * `store`'s retention methods, or `undefined` when it lacks any of the four: such a store runs
+ * only the metadata clock, through `expire`, and cannot archive. {@link Store} has them.
+ *
+ * @example
+ * ```ts
+ * const steps: RetentionStore | undefined = retentionStore(store);
+ * ```
+ */
+export function retentionStore(store: MessageStore): RetentionStore | undefined {
+  const candidate = store as MessageStore & Partial<RetentionStore>;
+  if (
+    typeof candidate.countExpiring !== "function" ||
+    typeof candidate.listExpiring !== "function" ||
+    typeof candidate.applyExpiry !== "function" ||
+    typeof candidate.archiveRows !== "function"
+  ) {
+    return undefined;
+  }
+  const steps = candidate as MessageStore & RetentionStore;
+  return {
+    countExpiring: (channel, query) => steps.countExpiring(channel, query),
+    archiveRows: (id) => steps.archiveRows(id),
+    listExpiring: (channel, query, limit, after) =>
+      steps.listExpiring(channel, query, limit, after),
+    applyExpiry: (channel, ids, query) => steps.applyExpiry(channel, ids, query),
+  };
+}
+
+/**
  * Every action the audit log records:
  *
  * - `search`: messages listed; `view`: one message's details shown, without content;
@@ -810,6 +984,8 @@ export interface ExpireResult {
  *   the `pathways channel` commands of the same names asked, with the user the client named.
  * - `verify`: `pathways verify` read a stored message's content, to run it through a candidate
  *   project's transform; written before the content is read.
+ * - `archive`: retention wrote and checked a sealed archive of messages it is about to prune or
+ *   delete; written before it changes them.
  * - `node-forget`: `pathways nodes forget` removed a stale node's row, or was refused.
  *
  * @example
@@ -834,6 +1010,7 @@ export const AUDIT_ACTIONS = [
   "channel-halt",
   "channel-reload",
   "verify",
+  "archive",
   "node-forget",
 ] as const;
 
@@ -1747,10 +1924,60 @@ function stateIs(eb: MessagesBuilder, state: MessageState): Expression<SqlBool> 
  * content was not dropped.
  */
 function expirable(eb: MessagesBuilder, cutoff: string): Expression<SqlBool> {
+  // A message whose content was dropped keeps its metadata: retention leaves it.
+  return eb.and([eb("messages.content_dropped_at", "is", null), doneBefore(eb, cutoff)]);
+}
+
+/** Whether the step `query` names reaches the message. */
+function reaches(eb: MessagesBuilder, query: RetentionQuery): Expression<SqlBool> {
+  const { step, cutoff } = query;
+  if (step === "failed") return failedBefore(eb, cutoff);
+  if (step === "metadata" && query.includeDropped === true) return doneBefore(eb, cutoff);
+  return expirable(eb, cutoff);
+}
+
+/**
+ * Whether the message has failed (its transform, or a delivery for good, with none pending) and
+ * nothing about it happened since `cutoff`. A failed delivery keeps no time of its own, so its next
+ * attempt's time stands for its last: the time its final attempt was due.
+ */
+function failedBefore(eb: MessagesBuilder, cutoff: string): Expression<SqlBool> {
+  const cutoffMs = Date.parse(cutoff);
+  const deliveries = (statuses?: readonly DeliveryStatus[]) => {
+    let query = eb
+      .selectFrom("deliveries")
+      .select("deliveries.id")
+      .whereRef("deliveries.message_id", "=", "messages.id");
+    if (statuses !== undefined) query = query.where("deliveries.status", "in", statuses);
+    return query;
+  };
   return eb.and([
     eb("messages.updated_at", "<", cutoff),
-    // A message whose content was dropped keeps its metadata: retention leaves it.
-    eb("messages.content_dropped_at", "is", null),
+    eb.or([
+      eb("messages.status", "=", "failed"),
+      eb.and([eb("messages.status", "=", "transformed"), eb.exists(deliveries(["failed"]))]),
+    ]),
+    eb.not(
+      eb.exists(
+        deliveries().where((d) =>
+          d.or([
+            d("deliveries.status", "=", "pending"),
+            d("deliveries.next_attempt_at", ">=", cutoffMs),
+            d("deliveries.delivered_at", ">=", cutoff),
+          ]),
+        ),
+      ),
+    ),
+  ]);
+}
+
+/**
+ * Whether the message is done (filtered, cleared, or transformed with every delivery delivered,
+ * dry-run or cleared) and nothing about it happened since `cutoff`.
+ */
+function doneBefore(eb: MessagesBuilder, cutoff: string): Expression<SqlBool> {
+  return eb.and([
+    eb("messages.updated_at", "<", cutoff),
     eb.or([
       eb("messages.status", "in", ["filtered", "cleared"]),
       eb.and([
@@ -3160,6 +3387,177 @@ export class Store implements MessageStore, ContentStore, MetaStore {
       if (ids.length < EXPIRE_BATCH || removed.messages === 0) break;
     }
     return { messages, deliveries };
+  }
+
+  /** How many messages, and their deliveries, a retention step reaches on `channel` now. */
+  async countExpiring(channel: string, query: RetentionQuery): Promise<ExpireResult> {
+    const messages = await this.db
+      .selectFrom("messages")
+      .select((eb) => eb.fn.countAll<number | string>().as("count"))
+      .where("channel", "=", channel)
+      .where((eb) => reaches(eb, query))
+      .executeTakeFirstOrThrow();
+    const deliveries = await this.db
+      .selectFrom("deliveries")
+      .select((eb) => eb.fn.countAll<number | string>().as("count"))
+      .where("message_id", "in", (eb) =>
+        eb
+          .selectFrom("messages")
+          .select("messages.id")
+          .where("messages.channel", "=", channel)
+          .where((m) => reaches(m, query)),
+      )
+      .executeTakeFirstOrThrow();
+    return { messages: Number(messages.count), deliveries: Number(deliveries.count) };
+  }
+
+  /**
+   * Every column of one message's row and of each of its delivery rows, every generation, bodies
+   * included and as stored: what an archive holds. Bodies are `null` once the content was dropped.
+   */
+  async archiveRows(id: number): Promise<MessageRows | undefined> {
+    const row = await this.db
+      .selectFrom("messages")
+      .selectAll()
+      .where("id", "=", id)
+      .executeTakeFirst();
+    if (row === undefined) return undefined;
+    const kept = row.content_dropped_at === null;
+    const deliveries = await this.db
+      .selectFrom("deliveries")
+      .selectAll()
+      .where("message_id", "=", id)
+      .orderBy("id")
+      .execute();
+    return {
+      message: {
+        id: Number(row.id),
+        channel: row.channel,
+        status: readStatus(row.status),
+        receivedAt: row.received_at,
+        updatedAt: row.updated_at,
+        body: kept ? row.body : null,
+        error: row.error,
+        dedupKey: row.dedup_key,
+        duplicateOf: int64OrNull(row.duplicate_of),
+        size: int64OrNull(row.size),
+        generation: row.generation,
+        idempotencyKey: row.idempotency_key,
+        contentHash: row.content_hash,
+        contentDroppedAt: row.content_dropped_at,
+        meta: row.meta,
+      },
+      deliveries: deliveries.map((delivery) => ({
+        id: Number(delivery.id),
+        destination: delivery.destination,
+        seq: delivery.seq,
+        generation: delivery.generation,
+        status: delivery.status,
+        attempts: delivery.attempts,
+        nextAttemptAt: Number(delivery.next_attempt_at),
+        deliveredAt: delivery.delivered_at,
+        body: kept ? delivery.body : null,
+        error: delivery.last_error,
+        sendingAt: int64OrNull(delivery.sending_at),
+        sendingAttempt: delivery.sending_attempt,
+        interruptedAttempt: delivery.interrupted_attempt,
+      })),
+    };
+  }
+
+  /** Up to `limit` ids a retention step reaches on `channel`, lowest first, above `after`. */
+  async listExpiring(
+    channel: string,
+    query: RetentionQuery,
+    limit: number,
+    after = 0,
+  ): Promise<number[]> {
+    const rows = await this.db
+      .selectFrom("messages")
+      .select("id")
+      .where("channel", "=", channel)
+      .where("id", ">", after)
+      .where((eb) => reaches(eb, query))
+      .orderBy("id")
+      .$call((q) => this.take(q, limit))
+      .execute();
+    return rows.map((row) => Number(row.id));
+  }
+
+  /**
+   * Applies a retention step to those of `ids` it still reaches, in one transaction that writes
+   * first: it marks them (`expiring` for a delete, the drop time for content), re-checking each,
+   * then changes exactly the marked rows.
+   */
+  async applyExpiry(
+    channel: string,
+    ids: readonly number[],
+    query: RetentionQuery,
+  ): Promise<ExpireResult> {
+    if (ids.length === 0) return { messages: 0, deliveries: 0 };
+    const batch = [...ids];
+    if (query.step === "content") return this.pruneContent(channel, batch, query);
+    return this.db.transaction().execute(async (tx) => {
+      await tx
+        .updateTable("messages")
+        .set({ status: EXPIRING })
+        .where("channel", "=", channel)
+        .where("id", "in", batch)
+        .where((eb) => reaches(eb, query))
+        .execute();
+      const marked = (eb: ExpressionBuilder<Tables, keyof Tables>) =>
+        eb
+          .selectFrom("messages")
+          .select("messages.id")
+          .where("messages.id", "in", batch)
+          .where("messages.status", "=", EXPIRING);
+      await tx.deleteFrom("meta_index").where("message_id", "in", marked).execute();
+      const gone = await tx
+        .deleteFrom("deliveries")
+        .where("message_id", "in", marked)
+        .executeTakeFirst();
+      const deleted = await tx
+        .deleteFrom("messages")
+        .where("id", "in", batch)
+        .where("status", "=", EXPIRING)
+        .executeTakeFirst();
+      return { messages: Number(deleted.numDeletedRows), deliveries: Number(gone.numDeletedRows) };
+    });
+  }
+
+  /** The `content` step: empties the bodies and error texts of those of `ids` it still reaches. */
+  private pruneContent(
+    channel: string,
+    ids: readonly number[],
+    query: RetentionQuery,
+  ): Promise<ExpireResult> {
+    const at = this.now().toISOString();
+    return this.db.transaction().execute(async (tx) => {
+      const pruned = await tx
+        .updateTable("messages")
+        .set({ body: EMPTY_BODY[this.kind], error: null, meta: null, content_dropped_at: at })
+        .where("channel", "=", channel)
+        .where("id", "in", ids)
+        .where((eb) => reaches(eb, query))
+        .executeTakeFirst();
+      if (pruned.numUpdatedRows === 0n) return { messages: 0, deliveries: 0 };
+      const marked = (eb: ExpressionBuilder<Tables, keyof Tables>) =>
+        eb
+          .selectFrom("messages")
+          .select("messages.id")
+          .where("messages.id", "in", ids)
+          .where("messages.content_dropped_at", "=", at);
+      const deliveries = await tx
+        .updateTable("deliveries")
+        .set({ body: EMPTY_BODY[this.kind], last_error: null })
+        .where("message_id", "in", marked)
+        .executeTakeFirst();
+      await tx.deleteFrom("meta_index").where("message_id", "in", marked).execute();
+      return {
+        messages: Number(pruned.numUpdatedRows),
+        deliveries: Number(deliveries.numUpdatedRows),
+      };
+    });
   }
 
   /** Appends entries to the audit log, in one transaction, stamped with the time and `actor`. */

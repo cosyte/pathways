@@ -78,32 +78,33 @@ A `transform-failed` line's `kind` is `load`, `parse`, `transform`, `output`, `t
 
 ### Configuration and storage
 
-| Event                    | Meaning                                                                                                                                                                                |
-| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `plaintext`              | an endpoint runs without TLS (`endpoint` says which); logged at every start                                                                                                            |
-| `unauthenticated`        | a listening endpoint has neither a token nor `tls.ca`                                                                                                                                  |
-| `plaintext-copies`       | a file source keeps plaintext copies (`keepProcessed: true`)                                                                                                                           |
-| `unencrypted-storage`    | `encryption: none`                                                                                                                                                                     |
-| `dry-run`                | `pathways start --dry-run`: every destination runs dry (`destinations` is `all`)                                                                                                       |
-| `dry-run-destinations`   | at start, the destinations that run dry, by index under each channel's name (`channels`); a destination not named sends                                                                |
-| `dry-run-pending`        | a channel with a destination that runs dry (`destinations`, by index) has `pending` deliveries at start, of every destination; each of a dry destination is marked `dry-run`, not sent |
-| `retention`              | a retention run, with the `messages` and `deliveries` it deleted                                                                                                                       |
-| `retention-failed`       | a retention run failed, by `code`; the next run tries again                                                                                                                            |
-| `lease-acquired`         | the engine took the engine lease, with its `node` and `epoch`                                                                                                                          |
-| `lease-lost`             | the engine lost its lease, with the `reason` and `epoch`; it stops and exits 1                                                                                                         |
-| `lease-unsupported`      | a custom store has no lease methods: the engine runs unfenced, and a second one is not refused                                                                                         |
-| `lease-release-failed`   | the lease could not be freed at a stop, by `code`; it lapses instead                                                                                                                   |
-| `standby`                | started as a standby, with its `node`                                                                                                                                                  |
-| `standby-waiting`        | a standby is waiting for the lease another engine holds (`holder`, `epoch`)                                                                                                            |
-| `node-id-unsaved`        | the generated node id could not be kept in `.pathways/node-id`, by `code`; this run uses it (`node`), and the next start generates another                                             |
-| `heartbeat-failed`       | a heartbeat could not be written, by `code`; the next one is tried an interval later                                                                                                   |
-| `node-rejoined`          | this engine's node row was gone (forgotten while it showed stale), and the heartbeat wrote it again                                                                                    |
-| `node-duplicate`         | this engine's node row was gone, and another live engine now runs under its id (`holder`, `host`); fix the ids                                                                         |
-| `node-leave-failed`      | the node row could not be removed at a stop, by `code`; it shows stale three heartbeats later                                                                                          |
-| `channel-state`          | a channel's `state` changed (`running`, `paused` or `stopped`), here or on another engine                                                                                              |
-| `channel-states-unread`  | the channel states could not be read at the top of a pass, by `code`; the last ones stand                                                                                              |
-| `channel-state-unstored` | a pause, resume, stop or halt could not be stored, by `code`; the channel was put back as it was                                                                                       |
-| `channel-reloaded`       | `pathways channel reload` swapped in the channel's new transform and settings                                                                                                          |
+| Event                    | Meaning                                                                                                                                                                                 |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `plaintext`              | an endpoint runs without TLS (`endpoint` says which); logged at every start                                                                                                             |
+| `unauthenticated`        | a listening endpoint has neither a token nor `tls.ca`                                                                                                                                   |
+| `plaintext-copies`       | a file source keeps plaintext copies (`keepProcessed: true`)                                                                                                                            |
+| `unencrypted-storage`    | `encryption: none`                                                                                                                                                                      |
+| `dry-run`                | `pathways start --dry-run`: every destination runs dry (`destinations` is `all`)                                                                                                        |
+| `dry-run-destinations`   | at start, the destinations that run dry, by index under each channel's name (`channels`); a destination not named sends                                                                 |
+| `dry-run-pending`        | a channel with a destination that runs dry (`destinations`, by index) has `pending` deliveries at start, of every destination; each of a dry destination is marked `dry-run`, not sent  |
+| `retention`              | a retention run, with the `messages` and `deliveries` it deleted                                                                                                                        |
+| `retention-failed`       | a retention run failed, by `code`; the next run tries again                                                                                                                             |
+| `retention-skipped`      | retention left a `channel` alone part way, by `code`: its archive could not be written, checked or audited; nothing of it was deleted without its archive, and the next run tries again |
+| `lease-acquired`         | the engine took the engine lease, with its `node` and `epoch`                                                                                                                           |
+| `lease-lost`             | the engine lost its lease, with the `reason` and `epoch`; it stops and exits 1                                                                                                          |
+| `lease-unsupported`      | a custom store has no lease methods: the engine runs unfenced, and a second one is not refused                                                                                          |
+| `lease-release-failed`   | the lease could not be freed at a stop, by `code`; it lapses instead                                                                                                                    |
+| `standby`                | started as a standby, with its `node`                                                                                                                                                   |
+| `standby-waiting`        | a standby is waiting for the lease another engine holds (`holder`, `epoch`)                                                                                                             |
+| `node-id-unsaved`        | the generated node id could not be kept in `.pathways/node-id`, by `code`; this run uses it (`node`), and the next start generates another                                              |
+| `heartbeat-failed`       | a heartbeat could not be written, by `code`; the next one is tried an interval later                                                                                                    |
+| `node-rejoined`          | this engine's node row was gone (forgotten while it showed stale), and the heartbeat wrote it again                                                                                     |
+| `node-duplicate`         | this engine's node row was gone, and another live engine now runs under its id (`holder`, `host`); fix the ids                                                                          |
+| `node-leave-failed`      | the node row could not be removed at a stop, by `code`; it shows stale three heartbeats later                                                                                           |
+| `channel-state`          | a channel's `state` changed (`running`, `paused` or `stopped`), here or on another engine                                                                                               |
+| `channel-states-unread`  | the channel states could not be read at the top of a pass, by `code`; the last ones stand                                                                                               |
+| `channel-state-unstored` | a pause, resume, stop or halt could not be stored, by `code`; the channel was put back as it was                                                                                        |
+| `channel-reloaded`       | `pathways channel reload` swapped in the channel's new transform and settings                                                                                                           |
 
 ### Hooks and the audit log
 
@@ -199,6 +200,34 @@ package stops the engine at the first pass that needs it.
 | `ERR_PATHWAYS_SFTP_EOF`              | the server said the file ended where it should not have                     |
 | `ERR_PATHWAYS_SFTP_BAD_MESSAGE`      | the server could not read a request                                         |
 | `ERR_PATHWAYS_SFTP_STATUS_<n>`       | any other SFTP status, by number                                            |
+
+## Object store codes
+
+A file source or destination on Amazon S3 or Azure Blob Storage gives a failed request one of these
+codes, never the service's own text. `ENOENT` is an object that is not there. The codes marked
+down mark the source `down` until a pass runs again. A missing package, bucket or container stops
+the engine at the first pass that needs it, with its own code.
+
+| Code                                       | Meaning                                                                        |
+| ------------------------------------------ | ------------------------------------------------------------------------------ |
+| `ERR_PATHWAYS_OBJECT_NO_CONDITIONAL_WRITE` | the store does not honour `If-None-Match`, and the source has no `singleNode`  |
+| `ERR_PATHWAYS_OBJECT_CHANGED`              | an object was replaced between its claim and its read; it is taken again later |
+| `ERR_PATHWAYS_S3_CREDENTIALS`              | down: the AWS SDK's chain found no credentials                                 |
+| `ERR_PATHWAYS_S3_UNREACHABLE`              | down: the endpoint did not answer                                              |
+| `ERR_PATHWAYS_S3_HTTP_<status>`            | down: the endpoint answered with this HTTP status                              |
+| `ERR_PATHWAYS_S3_NOT_IMPLEMENTED`          | the server does not do what was asked                                          |
+| `ERR_PATHWAYS_S3_SIZE_MISMATCH`            | a read gave a different number of bytes than the object's length               |
+| `ERR_PATHWAYS_S3_NOT_INSTALLED`            | the `@aws-sdk/client-s3` package is not installed                              |
+| `ERR_PATHWAYS_S3_NO_SUCH_BUCKET`           | the bucket is not there                                                        |
+| `ERR_PATHWAYS_AZBLOB_CREDENTIALS`          | down: no Azure identity could be had                                           |
+| `ERR_PATHWAYS_AZBLOB_UNREACHABLE`          | down: the blob service did not answer                                          |
+| `ERR_PATHWAYS_AZBLOB_HTTP_<status>`        | down: the blob service answered with this HTTP status                          |
+| `ERR_PATHWAYS_AZBLOB_NOT_INSTALLED`        | the `@azure/storage-blob` or `@azure/identity` package is not installed        |
+| `ERR_PATHWAYS_AZBLOB_NO_SUCH_CONTAINER`    | the container is not there                                                     |
+| `ERR_PATHWAYS_AZBLOB_SNAPSHOTS_PRESENT`    | a stored blob has snapshots, so it was not deleted; the pass ends              |
+
+A destination that finds an object of other bytes at its key in `create` mode rejects the message
+with the reason `OBJECT_EXISTS`.
 
 ## Encryption errors
 

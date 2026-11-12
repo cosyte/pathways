@@ -316,7 +316,8 @@ export interface SourceUpEvent extends LifecycleEventBase {
  * the engine started), `lease-release` (the engine lease freed by force), `migrate` (schema steps
  * applied by `pathways migrate`), `channel-pause`, `channel-resume`, `channel-stop`,
  * `channel-halt` and `channel-reload` (a `pathways channel` command), `verify` (a stored
- * message read by `pathways verify`), and `node-forget` (a stale node's row removed by
+ * message read by `pathways verify`), `archive` (a sealed archive retention wrote and checked
+ * before changing what it holds), and `node-forget` (a stale node's row removed by
  * `pathways nodes forget`). Kept equal to the audit log's own list by a test.
  *
  * @example
@@ -341,6 +342,7 @@ export type AuditEventAction =
   | "channel-halt"
   | "channel-reload"
   | "verify"
+  | "archive"
   | "node-forget";
 
 /**
