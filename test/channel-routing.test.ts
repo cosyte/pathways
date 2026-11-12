@@ -1,6 +1,6 @@
 // Channel-to-channel routing: a channel destination and ctx.route hand a message to another
 // channel's store, with the parent link, the hop count, the pending cap and the checks at start.
-import { readdir } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import fc from "fast-check";
@@ -604,6 +604,54 @@ export default (msg: string, ctx: { route(name: string, message: string): void }
       expect((await store.message(lost?.id ?? 0))?.error).toContain(UNKNOWN_ROUTE_CODE);
       expect(await readdir(join(root, "data", "out"))).toHaveLength(1);
     });
+
+    for (const [label, wrap] of [
+      ["through handOff", (opened: Store): MessageStore => new UnencryptedStore(opened)],
+      ["on a store without handOff", (opened: Store) => fallbackStore(opened, { armed: false })],
+    ] as const) {
+      it(`routes from a channel with destination transforms and a named channel destination, ${label}`, async () => {
+        const { root, engine, store } = await setUp(
+          database,
+          {
+            "channels/a/channel.yaml": `
+format: text
+source:
+  file: { dir: ../../data/inbox, minAge: 0 }
+transform: ./transform.ts
+destinations:
+  - name: upper
+    file: { dir: ../../data/a-upper }
+    transform: ./upper.ts
+  - name: handed
+    channel: { name: b }
+`,
+            "channels/a/transform.ts": `
+export default (msg: string, ctx: { route(name: string, message: string): void }) => {
+  ctx.route("b", msg + "-routed");
+  return msg;
+};
+`,
+            "channels/a/upper.ts": "export default (msg: string) => msg.toUpperCase();\n",
+            "channels/b/channel.yaml": target(),
+          },
+          { wrap },
+        );
+        await dropFile(join(root, "data", "inbox", "1.txt"), "synthetic-1");
+        await engine.tick();
+        const [source] = await messagesOf(store, "a");
+        expect(source?.state).toBe("delivered");
+        const upper = await readdir(join(root, "data", "a-upper"));
+        expect(upper).toHaveLength(1);
+        expect(await readFile(join(root, "data", "a-upper", upper[0] ?? ""), "utf8")).toBe(
+          "SYNTHETIC-1",
+        );
+        const handed = await messagesOf(store, "b");
+        expect(handed.map((message) => [message.body, message.parent?.deliveryId])).toEqual([
+          ["synthetic-1-routed", undefined],
+          ["synthetic-1", expect.any(Number)],
+        ]);
+      });
+    }
 
     it("fails a message past maxHops, which catches a loop made through ctx.route", async () => {
       const { root, engine, store } = await setUp(database, {
