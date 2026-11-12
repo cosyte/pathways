@@ -275,19 +275,20 @@ export class ObjectSource implements SourceConnector {
   }
 
   /**
-   * Whether the store honours `If-None-Match: *`: a probe object written twice under one new key,
-   * where the second write must be refused. A store that fails the conditional write outright (a
-   * `501 Not Implemented`) does not.
+   * Whether the store honours `If-None-Match: *`: a probe object written twice under one new key.
+   * Only a second write that succeeds, or a conditional write the store fails as not implemented
+   * (a code ending `_NOT_IMPLEMENTED`, as for a `501`), says it does not; a write it refuses says
+   * it does. Every other error, a missing package or bucket among them, is thrown with its own code
+   * and decides nothing, so the next pass asks again.
    */
   private async probe(): Promise<boolean> {
     const key = `${this.claims}.probe/${randomBytes(8).toString("hex")}`;
     const empty = new Uint8Array(0);
     try {
-      if (!(await this.store.create(key, empty))) return false;
-      return !(await this.store.create(key, empty));
+      return !((await this.store.create(key, empty)) && (await this.store.create(key, empty)));
     } catch (error) {
-      if (isLocationDown(error)) throw error;
-      return false;
+      if (notImplemented(error)) return false;
+      throw error;
     } finally {
       await this.store.remove(key).catch(() => undefined);
     }
@@ -438,6 +439,12 @@ export class ObjectSource implements SourceConnector {
     await this.store.remove(info.key, info.etag);
     return true;
   }
+}
+
+/** Whether `error` says the store does not do what was asked: a code ending `_NOT_IMPLEMENTED`. */
+function notImplemented(error: unknown): boolean {
+  const code = (error as { code?: unknown } | undefined)?.code;
+  return typeof code === "string" && code.endsWith("_NOT_IMPLEMENTED");
 }
 
 /** Whether `error` says an object is gone, or is no longer the version asked for. */

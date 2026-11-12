@@ -81,11 +81,20 @@ source lists the prefix, a page at a time, and for each blob that is ready:
 A blob lease would also let one engine read a blob, but it lasts at most 60 seconds unless renewed,
 and a large blob can take longer to store; the marker needs no renewal, and is the one rule both
 object stores share. Each pass first finishes the markers its own channel left, so a stop at any step
-stores nothing twice. Every write to a blob gives it a new tag, so a blob written again at the same
+stores nothing twice. A marker names its channel, and recovery is keyed on the channel's name: two
+engines that store into separate databases must not read one prefix with channels of the same name,
+or each could finish the other's markers and the blob would be stored in both. Every write to a blob gives it a new tag, so a blob written again at the same
 name is always taken as a new one.
 
+A blob that has snapshots is not deleted: Blob Storage refuses the delete, and the engine stops with
+`ERR_PATHWAYS_AZBLOB_SNAPSHOTS_PRESENT`, never as a service that is down. The blob was stored once,
+and its marker stays, so once its snapshots are removed the next run finishes it without storing it
+again. Do not take snapshots of blobs in a prefix a source reads.
+
 Before its first claim the source writes one probe blob twice to check that the second write is
-refused. `singleNode: true` runs on a service that does not refuse it, as on
+refused. Any other error the probe meets is given with its own code and checked again on the next
+pass: `ERR_PATHWAYS_AZBLOB_NOT_INSTALLED` when a package is not installed, and
+`ERR_PATHWAYS_AZBLOB_NO_SUCH_CONTAINER` when the container is not there. `singleNode: true` runs on a service that does not refuse it, as on
 [S3](./read-and-write-amazon-s3.md#a-server-without-conditional-writes): safe only while one engine
 and one channel read the prefix.
 

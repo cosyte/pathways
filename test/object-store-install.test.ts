@@ -29,6 +29,33 @@ describe("the object store packages", () => {
     }
   });
 
+  it("says a missing package by its code from a source's first poll, never as a store without conditional writes", async () => {
+    const { ObjectSource } = await import("../src/connectors/object-store.js");
+    const sink = { receive: () => Promise.resolve(1) };
+    vi.doMock("@aws-sdk/client-s3", missing);
+    const { S3Bucket } = await import("../src/connectors/s3.js");
+    const s3 = new ObjectSource({
+      store: new S3Bucket({ bucket: "b-1" }),
+      prefix: "inbox",
+      channel: "adt",
+      minAgeMs: 0,
+    });
+    for (let tries = 0; tries < 2; tries += 1) {
+      await expect(s3.poll(sink)).rejects.toMatchObject({ code: "ERR_PATHWAYS_S3_NOT_INSTALLED" });
+    }
+    vi.doMock("@azure/storage-blob", missing);
+    const { AzureContainer } = await import("../src/connectors/azblob.js");
+    const azure = new ObjectSource({
+      store: new AzureContainer({ account: "examplestore", container: "inbound" }),
+      prefix: "inbox",
+      channel: "adt",
+      minAgeMs: 0,
+    });
+    await expect(azure.poll(sink)).rejects.toMatchObject({
+      code: "ERR_PATHWAYS_AZBLOB_NOT_INSTALLED",
+    });
+  });
+
   it("makes an Azure client from a connection string, or from the default identity and endpoint", async () => {
     const made: unknown[][] = [];
     class BlobServiceClient {

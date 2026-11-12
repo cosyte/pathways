@@ -13,10 +13,11 @@ import { OBJECT_CHANGED } from "../src/connectors/object-store.js";
 // statusCode). The same adapter runs against Azurite in test/object-store-server.test.ts.
 
 /** An Azure error as the SDK throws one. */
-function restError(status: number | undefined, name = "RestError"): Error {
+function restError(status: number | undefined, name = "RestError", code?: string): Error {
   return Object.assign(new Error("the service's own text, never shown"), {
     name,
     ...(status === undefined ? {} : { statusCode: status }),
+    ...(code === undefined ? {} : { code }),
   });
 }
 
@@ -265,6 +266,47 @@ describe("AzureContainer", () => {
       ["delete", "k", { conditions: { ifMatch: "0x4" } }],
       ["delete", "k", {}],
     ]);
+  });
+
+  it("says a missing container, and a blob a delete leaves for its snapshots, by their own codes", async () => {
+    const missing = azure(
+      fakeContainer(() => {
+        throw restError(404, "RestError", "ContainerNotFound");
+      }),
+    );
+    for (const make of [
+      () => missing.put("k", bytes("v")),
+      () => missing.create("k", bytes("v")),
+      () => missing.head("k"),
+      () => missing.remove("k"),
+    ]) {
+      const caught = (await make().catch((thrown: unknown) => thrown)) as object;
+      expect(caught).toMatchObject({
+        code: "ERR_PATHWAYS_AZBLOB_NO_SUCH_CONTAINER",
+        message: "the container is not there",
+      });
+      expect(caught).not.toHaveProperty("down");
+    }
+    const kept = azure(
+      fakeContainer(() => {
+        throw restError(409, "RestError", "SnapshotsPresent");
+      }),
+    );
+    const caught = (await kept.remove("k", "0x4").catch((thrown: unknown) => thrown)) as object;
+    expect(caught).toMatchObject({
+      code: "ERR_PATHWAYS_AZBLOB_SNAPSHOTS_PRESENT",
+      message: "the blob has snapshots, so it was not deleted",
+    });
+    expect(caught).not.toHaveProperty("down");
+    const busy = azure(
+      fakeContainer(() => {
+        throw restError(409, "RestError", "LeaseIdMissing");
+      }),
+    );
+    await expect(busy.remove("k")).rejects.toMatchObject({
+      code: "ERR_PATHWAYS_AZBLOB_HTTP_409",
+      down: true,
+    });
   });
 
   it("says an identity that could not be had as down", async () => {

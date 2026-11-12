@@ -629,20 +629,56 @@ describe("ObjectSource", () => {
     expect(objects.keys()).toEqual([markerOf("b.hl7")]);
   });
 
-  it("takes a store that fails a conditional write as one without, and one whose probe key is taken", async () => {
+  it("takes only a second create that succeeds, or a NOT_IMPLEMENTED code, as no conditional write", async () => {
     const failing = new FakeObjectStore();
     failing.trap("create", () => objectFailure("ERR_PATHWAYS_S3_NOT_IMPLEMENTED", "no"));
     await expect(source(failing).poll(store().sink)).rejects.toMatchObject({
       code: NO_CONDITIONAL_WRITE,
     });
+    // A store that refuses even the first create kept the condition: it is not one without.
     const taken = new FakeObjectStore();
+    taken.drop("inbox/a.hl7", "msg-a");
     taken.trap("create", (key) => {
-      taken.objects.set(key, { body: new Uint8Array(0), etag: '"p"', modifiedMs: 1 });
+      if (key.includes(".probe")) {
+        taken.objects.set(key, { body: new Uint8Array(0), etag: '"p"', modifiedMs: 1 });
+      }
       return undefined;
     });
-    await expect(source(taken).poll(store().sink)).rejects.toMatchObject({
-      code: NO_CONDITIONAL_WRITE,
-    });
+    const { sink, stored } = store();
+    await source(taken).poll(sink);
+    expect(bodies(stored)).toEqual(["msg-a"]);
+  });
+
+  it("throws any other error the probe meets with its own code, and asks again on the next pass", async () => {
+    for (const code of [
+      "ERR_PATHWAYS_S3_NOT_INSTALLED",
+      "ERR_PATHWAYS_AZBLOB_NOT_INSTALLED",
+      "ERR_PATHWAYS_S3_NO_SUCH_BUCKET",
+      "ERR_PATHWAYS_AZBLOB_NO_SUCH_CONTAINER",
+      "ENOENT",
+    ]) {
+      for (const call of [1, 2]) {
+        const objects = new FakeObjectStore();
+        objects.drop("inbox/a.hl7", "msg-a");
+        let creates = 0;
+        let failing = true;
+        objects.trap("create", () => {
+          creates += 1;
+          return failing && creates === call ? objectFailure(code, "no") : undefined;
+        });
+        const reader = source(objects);
+        const { sink, stored } = store();
+        await expect(reader.poll(sink)).rejects.toMatchObject({ code });
+        expect(stored.size).toBe(0);
+        failing = false;
+        await reader.poll(sink);
+        expect(bodies(stored)).toEqual(["msg-a"]);
+      }
+    }
+    const bare = new Error("no code");
+    const plain = new FakeObjectStore();
+    plain.trap("create", () => bare);
+    await expect(source(plain).poll(store().sink)).rejects.toBe(bare);
   });
 
   it("says a probe the store is down for as down, and still tries to delete it", async () => {

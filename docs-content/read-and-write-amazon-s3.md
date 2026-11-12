@@ -59,7 +59,10 @@ page at a time, and for each object that is ready:
    written at that key since stays;
 4. deletes the marker.
 
-Each pass first finishes the markers its own channel left. A stop at any step stores nothing twice:
+Each pass first finishes the markers its own channel left. A marker names its channel, and recovery
+is keyed on the channel's name: two engines that store into separate databases must not read one
+prefix with channels of the same name, or each could finish the other's markers and the object
+would be stored in both. A stop at any step stores nothing twice:
 the store answers a message handed in again under its key with the message it already holds, and a
 marker whose object is gone, or was replaced, is deleted. An object written again at the same key
 with the same bytes in the same second as the one taken has the same tag and time, and is taken as
@@ -67,7 +70,11 @@ the same object.
 
 Before its first claim the source writes one probe object twice, under `<dir>/.claimed/.probe/`, to
 check that the bucket refuses the second write. A server that does not honour `If-None-Match` (some
-S3-compatible servers) is refused with `ERR_PATHWAYS_OBJECT_NO_CONDITIONAL_WRITE`.
+S3-compatible servers) is refused with `ERR_PATHWAYS_OBJECT_NO_CONDITIONAL_WRITE`: only a second
+write that succeeds, or a write the server answers `501 Not Implemented`, says that. Any other error
+the probe meets is given with its own code and checked again on the next pass:
+`ERR_PATHWAYS_S3_NOT_INSTALLED` when `@aws-sdk/client-s3` is not installed, and
+`ERR_PATHWAYS_S3_NO_SUCH_BUCKET` when the bucket is not there. Neither is fixed by `singleNode`.
 
 The keys `minAge`, `minSize`, `maxSize`, `maxPerPoll`, `sortBy`, `stable`, `include`, `exclude`,
 `recursive` and `ignoreDot` work as they do on a folder. `keepProcessed`, `doneFile`, `errorDir` and

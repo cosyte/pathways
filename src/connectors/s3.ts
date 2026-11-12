@@ -62,14 +62,17 @@ function statusOf(error: unknown): { status: number | undefined; name: unknown }
 }
 
 /**
- * An S3 error as one of ours, with a code and never the server's text: `ENOENT` for a missing
- * object, {@link OBJECT_CHANGED} for a condition that failed, `ERR_PATHWAYS_S3_NOT_IMPLEMENTED` for a
+ * An S3 error as one of ours, with a code and never the server's text:
+ * `ERR_PATHWAYS_S3_NO_SUCH_BUCKET` for a missing bucket, `ENOENT` for a missing object, {@link OBJECT_CHANGED} for a condition that failed, `ERR_PATHWAYS_S3_NOT_IMPLEMENTED` for a
  * server that does not do what was asked, and otherwise a down error: `ERR_PATHWAYS_S3_CREDENTIALS`
  * when no credentials were found, `ERR_PATHWAYS_S3_HTTP_<status>` for an answer, and
  * `ERR_PATHWAYS_S3_UNREACHABLE` for none.
  */
 function s3Error(error: unknown): Error {
   const { status, name } = statusOf(error);
+  if (name === "NoSuchBucket") {
+    return objectFailure("ERR_PATHWAYS_S3_NO_SUCH_BUCKET", "the bucket is not there");
+  }
   if (status === 404 || name === "NoSuchKey" || name === "NotFound") {
     return objectFailure("ENOENT", "the object is not there");
   }

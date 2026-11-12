@@ -35,7 +35,9 @@ const NAME = `pathways-test-${randomBytes(4).toString("hex")}`;
 interface Emulator {
   readonly name: string;
   readonly enabled: boolean;
-  store(): ObjectStore;
+  /** The code a request into a bucket or container that is not there fails with. */
+  readonly missing: string;
+  store(name?: string): ObjectStore;
   make(): Promise<void>;
 }
 
@@ -43,9 +45,10 @@ const emulators: Emulator[] = [
   {
     name: "S3 on LocalStack",
     enabled: S3_ENDPOINT !== undefined,
-    store: () =>
+    missing: "ERR_PATHWAYS_S3_NO_SUCH_BUCKET",
+    store: (name = NAME) =>
       new S3Bucket({
-        bucket: NAME,
+        bucket: name,
         region: "us-east-1",
         endpoint: S3_ENDPOINT,
         pathStyle: true,
@@ -65,10 +68,11 @@ const emulators: Emulator[] = [
   {
     name: "Azure Blob on Azurite",
     enabled: AZURITE !== undefined,
-    store: () =>
+    missing: "ERR_PATHWAYS_AZBLOB_NO_SUCH_CONTAINER",
+    store: (name = NAME) =>
       new AzureContainer({
         account: "devstoreaccount1",
-        container: NAME,
+        container: name,
         connectionString: AZURITE,
       }),
     async make() {
@@ -83,8 +87,8 @@ const emulators: Emulator[] = [
 const stores: ObjectStore[] = [];
 
 /** A store on `emulator`, closed after the suite. */
-function open(emulator: Emulator): ObjectStore {
-  const store = emulator.store();
+function open(emulator: Emulator, name?: string): ObjectStore {
+  const store = emulator.store(name);
   stores.push(store);
   return store;
 }
@@ -175,6 +179,16 @@ describe.each(emulators.filter((emulator) => emulator.enabled))(
       expect(await store.create(key, encode("b"))).toBe(false);
       await store.remove(key);
       expect(await store.head(key)).toBeUndefined();
+    });
+
+    it("says a bucket or container that is not there by its own code from a source", async () => {
+      const store = open(emulator, `${NAME}-none`);
+      const { sink, stored } = sinkOf();
+      const source = new ObjectSource({ store, prefix: "inbox", channel: "adt", minAgeMs: 0 });
+      for (let tries = 0; tries < 2; tries += 1) {
+        await expect(source.poll(sink)).rejects.toMatchObject({ code: emulator.missing });
+      }
+      expect(stored.size).toBe(0);
     });
 
     it("claims, stores and deletes each object, and writes each output only where none is", async () => {
@@ -277,6 +291,32 @@ describe.each(emulators.filter((emulator) => emulator.enabled))(
     });
   },
 );
+
+describe.skipIf(AZURITE === undefined)("a blob with snapshots on Azurite", () => {
+  it("is left in place with its own code, never as a store that is down", async () => {
+    const { BlobServiceClient } = await import("@azure/storage-blob");
+    const name = `${NAME}-snap`;
+    const container = BlobServiceClient.fromConnectionString(String(AZURITE)).getContainerClient(
+      name,
+    );
+    await container.create();
+    const blob = container.getBlockBlobClient("inbox/msg-00.hl7");
+    await blob.upload(encode("msg-00"), 6);
+    await blob.createSnapshot();
+    const store = new AzureContainer({
+      account: "devstoreaccount1",
+      container: name,
+      connectionString: AZURITE,
+    });
+    const caught = (await store
+      .remove("inbox/msg-00.hl7")
+      .catch((thrown: unknown) => thrown)) as object;
+    expect(caught).toMatchObject({ code: "ERR_PATHWAYS_AZBLOB_SNAPSHOTS_PRESENT" });
+    expect(caught).not.toHaveProperty("down");
+    expect(await store.head("inbox/msg-00.hl7")).toBeDefined();
+    await container.delete();
+  });
+});
 
 describe.skipIf(emulators.some((emulator) => emulator.enabled))(
   "the object store emulators",

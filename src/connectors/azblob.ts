@@ -117,19 +117,30 @@ const defaultConnect: AzureConnect = async (options) => {
 };
 
 /** What an Azure error says of itself: its HTTP status, when a response came, and its name. */
-function statusOf(error: unknown): { status: number | undefined; name: unknown } {
-  const value = error as { statusCode?: number; name?: unknown } | undefined;
-  return { status: value?.statusCode, name: value?.name };
+function statusOf(error: unknown): { status: number | undefined; name: unknown; code: unknown } {
+  const value = error as { statusCode?: number; name?: unknown; code?: unknown } | undefined;
+  return { status: value?.statusCode, name: value?.name, code: value?.code };
 }
 
 /**
- * An Azure error as one of ours, with a code and never the service's text: `ENOENT` for a missing
- * blob, {@link OBJECT_CHANGED} for a condition that failed, and otherwise a down error:
+ * An Azure error as one of ours, with a code and never the service's text:
+ * `ERR_PATHWAYS_AZBLOB_NO_SUCH_CONTAINER` for a missing container,
+ * `ERR_PATHWAYS_AZBLOB_SNAPSHOTS_PRESENT` for a delete refused because the blob has snapshots,
+ * `ENOENT` for a missing blob, {@link OBJECT_CHANGED} for a condition that failed, and otherwise a down error:
  * `ERR_PATHWAYS_AZBLOB_CREDENTIALS` when no identity could be had,
  * `ERR_PATHWAYS_AZBLOB_HTTP_<status>` for an answer, and `ERR_PATHWAYS_AZBLOB_UNREACHABLE` for none.
  */
 function azureError(error: unknown): Error {
-  const { status, name } = statusOf(error);
+  const { status, name, code } = statusOf(error);
+  if (code === "ContainerNotFound") {
+    return objectFailure("ERR_PATHWAYS_AZBLOB_NO_SUCH_CONTAINER", "the container is not there");
+  }
+  if (code === "SnapshotsPresent") {
+    return objectFailure(
+      "ERR_PATHWAYS_AZBLOB_SNAPSHOTS_PRESENT",
+      "the blob has snapshots, so it was not deleted",
+    );
+  }
   if (status === 404) return objectFailure("ENOENT", "the blob is not there");
   if (status === 412) return objectFailure(OBJECT_CHANGED, "the blob changed since it was read");
   if (name === "CredentialUnavailableError" || name === "AuthenticationError") {

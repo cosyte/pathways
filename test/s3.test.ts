@@ -301,11 +301,22 @@ describe("S3Bucket", () => {
       code: "ERR_PATHWAYS_S3_UNREACHABLE",
       down: true,
     });
-    error = sdkError(404, "NoSuchBucket");
+    error = sdkError(404, "NoSuchKey");
     await expect(bucket.put("k", bytes("v"))).rejects.toMatchObject({ code: "ENOENT" });
-    expect(
-      (await bucket.put("k", bytes("v")).catch((caught: unknown) => caught)) as object,
-    ).not.toHaveProperty("down");
+    error = sdkError(404, "NoSuchBucket");
+    for (const make of [
+      () => bucket.put("k", bytes("v")),
+      () => bucket.create("k", bytes("v")),
+      () => bucket.list("", undefined, undefined),
+      () => bucket.remove("k"),
+    ]) {
+      const caught = (await make().catch((thrown: unknown) => thrown)) as object;
+      expect(caught).toMatchObject({
+        code: "ERR_PATHWAYS_S3_NO_SUCH_BUCKET",
+        message: "the bucket is not there",
+      });
+      expect(caught).not.toHaveProperty("down");
+    }
   });
 
   it("destroys its client on close, and makes a new one on the next request", async () => {
