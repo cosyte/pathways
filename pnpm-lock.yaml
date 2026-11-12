@@ -18,13 +18,13 @@ importers:
         version: 0.1.6
       '@cosyte/fhir':
         specifier: ^0.1.9
-        version: 0.1.9(fast-check@4.10.2)
+        version: 0.1.16(fast-check@4.10.2)
       '@cosyte/hl7':
-        specifier: ^0.1.13
-        version: 0.1.13(fast-check@4.10.2)
+        specifier: ^0.1.14
+        version: 0.1.14(fast-check@4.10.2)
       '@cosyte/mllp':
         specifier: ^0.1.12
-        version: 0.1.12(@cosyte/hl7@0.1.13(fast-check@4.10.2))(fast-check@4.10.2)
+        version: 0.1.12(@cosyte/hl7@0.1.14(fast-check@4.10.2))(fast-check@4.10.2)
       '@cosyte/x12':
         specifier: ^0.1.11
         version: 0.1.11(fast-check@4.10.2)
@@ -81,11 +81,14 @@ importers:
         specifier: ^0.1.11
         version: 0.1.11
       '@cosyte/synth':
-        specifier: ^0.1.5
-        version: 0.1.5(@cosyte/ccda@0.1.6)(@cosyte/fhir@0.1.9(fast-check@4.10.2))(@cosyte/hl7@0.1.13(fast-check@4.10.2))(@cosyte/x12@0.1.11(fast-check@4.10.2))
+        specifier: ^0.1.10
+        version: 0.1.10(@cosyte/ccda@0.1.6)(@cosyte/fhir@0.1.16(fast-check@4.10.2))(@cosyte/hl7@0.1.14(fast-check@4.10.2))(@cosyte/x12@0.1.11(fast-check@4.10.2))
       '@cosyte/test-utils':
         specifier: ^0.1.4
         version: 0.1.4(fast-check@4.10.2)
+      '@cosyte/transform':
+        specifier: ^0.2.4
+        version: 0.2.4(@cosyte/fhir@0.1.16(fast-check@4.10.2))(@cosyte/hl7@0.1.14(fast-check@4.10.2))
       '@cosyte/tsconfig':
         specifier: ^0.1.2
         version: 0.1.2
@@ -432,8 +435,8 @@ packages:
       eslint: ^9.0.0 || ^10.0.0
       typescript: '>=5.0.0'
 
-  '@cosyte/fhir@0.1.9':
-    resolution: {integrity: sha512-wT5IEf2kYCCka1/a58DZOHjBzjvTJqUoFHq/TlCJ2+s8xGsOTAZvrsVguAewWNhm4du4G3u4MLvGWKO9ZAbfeA==}
+  '@cosyte/fhir@0.1.16':
+    resolution: {integrity: sha512-EmqWqCyNgWgSji8Y3cmUKwjY7ZIlmk2psfIYSCKYrxufznyzYCgjl9NiFVjBe7NzgwaunvOyd4Uq7LiymHsNVw==}
     engines: {node: '>=22.0.0'}
     peerDependencies:
       fast-check: ^4.0.0
@@ -441,8 +444,8 @@ packages:
       fast-check:
         optional: true
 
-  '@cosyte/hl7@0.1.13':
-    resolution: {integrity: sha512-eMN1xqKDoSZ0hzXu+xiXaQ1hv1xgCdYiJla97XY7VRDNmTr0NwkXLjRVWQKG2G9HHoJ+MM4F6qEVXD4EdP7gHA==}
+  '@cosyte/hl7@0.1.14':
+    resolution: {integrity: sha512-MSaHNjfjA1mmv4B2KKxeqbMs09P2m+BAlDtG8S7eZVrOc87gWoEHe6cdw1Fsazb+a1KZDNFtVjhxcvCM3xrhVQ==}
     engines: {node: '>=22.0.0'}
     peerDependencies:
       fast-check: ^4.0.0
@@ -475,17 +478,17 @@ packages:
     engines: {node: '>=22.14'}
     hasBin: true
 
-  '@cosyte/synth@0.1.5':
-    resolution: {integrity: sha512-TukqcmkF8nYsAKkM7oTYy44t3/UdIujnyPlev8eZARXaEENB75y2lfWINquft5YzW4OBFvdapJTaMVABSRqCgA==}
-    engines: {node: '>=22.0.0'}
+  '@cosyte/synth@0.1.10':
+    resolution: {integrity: sha512-d9S8xSfpC8RCeoYWpOaDm/Yy3fWjDqXlqbTvinvWV33Qe3tu1tzLmPt/hlpJ1UcJLu0UAKjYmiq2B2s0OmF1MA==}
+    engines: {node: '>=22.12.0'}
     peerDependencies:
-      '@cosyte/astm': ^0.1.0
-      '@cosyte/ccda': ^0.1.0
-      '@cosyte/deid': ^0.1.0
-      '@cosyte/fhir': ^0.1.0
-      '@cosyte/hl7': ^0.1.0
-      '@cosyte/ncpdp': ^0.1.0
-      '@cosyte/x12': ^0.1.0
+      '@cosyte/astm': ^0.1.6
+      '@cosyte/ccda': ^0.1.6
+      '@cosyte/deid': ^0.1.5 || ^0.2.0
+      '@cosyte/fhir': ^0.1.8
+      '@cosyte/hl7': ^0.1.8
+      '@cosyte/ncpdp': ^0.1.6
+      '@cosyte/x12': ^0.1.10
     peerDependenciesMeta:
       '@cosyte/astm':
         optional: true
@@ -507,6 +510,13 @@ packages:
     engines: {node: '>=22.0.0'}
     peerDependencies:
       fast-check: ^3.0.0 || ^4.0.0
+
+  '@cosyte/transform@0.2.4':
+    resolution: {integrity: sha512-6rW3kymYQa3NPEXLmlSUAZiGM0/kxVwmqsVLZDIJIoB3k87fAGuBAe9bSiPcFDes6zexJyRJfRD4kFK49L6TBA==}
+    engines: {node: '>=22.0.0'}
+    peerDependencies:
+      '@cosyte/fhir': ^0.1.12
+      '@cosyte/hl7': ^0.1.8
 
   '@cosyte/tsconfig@0.1.2':
     resolution: {integrity: sha512-ZTWC9cgdccJwL+EWTEWCtJr/a87TTZWlegTZWHpN7LGW3rALE1glnffOFMVraj4XSUam+DuHVOdGmKF8BhJPlA==}
@@ -3411,17 +3421,17 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  '@cosyte/fhir@0.1.9(fast-check@4.10.2)':
+  '@cosyte/fhir@0.1.16(fast-check@4.10.2)':
     optionalDependencies:
       fast-check: 4.10.2
 
-  '@cosyte/hl7@0.1.13(fast-check@4.10.2)':
+  '@cosyte/hl7@0.1.14(fast-check@4.10.2)':
     optionalDependencies:
       fast-check: 4.10.2
 
-  '@cosyte/mllp@0.1.12(@cosyte/hl7@0.1.13(fast-check@4.10.2))(fast-check@4.10.2)':
+  '@cosyte/mllp@0.1.12(@cosyte/hl7@0.1.14(fast-check@4.10.2))(fast-check@4.10.2)':
     optionalDependencies:
-      '@cosyte/hl7': 0.1.13(fast-check@4.10.2)
+      '@cosyte/hl7': 0.1.14(fast-check@4.10.2)
       fast-check: 4.10.2
 
   '@cosyte/prettier-config@0.1.2': {}
@@ -3460,16 +3470,21 @@ snapshots:
 
   '@cosyte/script-utils@0.1.11': {}
 
-  '@cosyte/synth@0.1.5(@cosyte/ccda@0.1.6)(@cosyte/fhir@0.1.9(fast-check@4.10.2))(@cosyte/hl7@0.1.13(fast-check@4.10.2))(@cosyte/x12@0.1.11(fast-check@4.10.2))':
+  '@cosyte/synth@0.1.10(@cosyte/ccda@0.1.6)(@cosyte/fhir@0.1.16(fast-check@4.10.2))(@cosyte/hl7@0.1.14(fast-check@4.10.2))(@cosyte/x12@0.1.11(fast-check@4.10.2))':
     optionalDependencies:
       '@cosyte/ccda': 0.1.6
-      '@cosyte/fhir': 0.1.9(fast-check@4.10.2)
-      '@cosyte/hl7': 0.1.13(fast-check@4.10.2)
+      '@cosyte/fhir': 0.1.16(fast-check@4.10.2)
+      '@cosyte/hl7': 0.1.14(fast-check@4.10.2)
       '@cosyte/x12': 0.1.11(fast-check@4.10.2)
 
   '@cosyte/test-utils@0.1.4(fast-check@4.10.2)':
     dependencies:
       fast-check: 4.10.2
+
+  '@cosyte/transform@0.2.4(@cosyte/fhir@0.1.16(fast-check@4.10.2))(@cosyte/hl7@0.1.14(fast-check@4.10.2))':
+    dependencies:
+      '@cosyte/fhir': 0.1.16(fast-check@4.10.2)
+      '@cosyte/hl7': 0.1.14(fast-check@4.10.2)
 
   '@cosyte/tsconfig@0.1.2': {}
 

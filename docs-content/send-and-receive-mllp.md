@@ -202,6 +202,12 @@ list.
 Each message is stored before it is acknowledged, and messages on one connection are handled one at a
 time, in order.
 
+A frame is one message. A frame that holds a second message is refused with `MULTIPLE_MESSAGES`,
+however its second header is written: a segment id of `MSH`, `FHS` or `BHS` in any case (`msh`,
+`Msh`), after any line ending the HL7 parser accepts (CR, LF, CR LF, mixed, or a blank line between).
+The parser would read it as one message with two MSH segments, the second message's segments counted
+as the first's. Send each message in its own frame.
+
 | The message                                                         | Stored         | Answer                                 |
 | ------------------------------------------------------------------- | -------------- | -------------------------------------- |
 | has a usable MSH segment with an MSH-10 control ID                  | yes            | `AA`                                   |

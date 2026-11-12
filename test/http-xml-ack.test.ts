@@ -5,7 +5,7 @@ import type * as Ccda from "@cosyte/ccda";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { ConfigError, loadProject } from "../src/config/load.js";
-import type { ChannelConfig } from "../src/config/schema.js";
+import { configJsonSchemas, type ChannelConfig } from "../src/config/schema.js";
 import { HttpDestination, type HttpDestinationOptions } from "../src/connectors/http.js";
 import { RetryableError } from "../src/connectors/http-core.js";
 import { DeliveryRejected } from "../src/connectors/types.js";
@@ -360,6 +360,27 @@ describe("an http destination's ack setting", () => {
     expect(target).toBeInstanceOf(HttpDestination);
     destinations.push(target as HttpDestination);
     expect(await deliver(target as HttpDestination)).toMatchObject({ reason: "AR" });
+  });
+
+  it("is described in the channel's JSON Schema with the two reasons a message sent fails at once", () => {
+    // Every description of an http destination's ack key, wherever the schema restates it.
+    const found: string[] = [];
+    const walk = (node: unknown): void => {
+      if (Array.isArray(node)) node.forEach(walk);
+      else if (typeof node === "object" && node !== null) {
+        for (const [key, value] of Object.entries(node)) {
+          if (key === "description" && typeof value === "string" && value.startsWith("xml: ")) {
+            found.push(value);
+          } else walk(value);
+        }
+      }
+    };
+    walk(configJsonSchemas().channel);
+    expect(found.length).toBeGreaterThan(0);
+    for (const description of found) {
+      expect(description).toContain("SENT_XML_UNREADABLE");
+      expect(description).toContain("SENT_XML_NO_CONTROL_ID");
+    }
   });
 
   it("is unset by default", async () => {

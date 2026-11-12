@@ -100,6 +100,8 @@ synthetic messages, with its tests, which CI runs on every change. Each has a pa
 - [HL7 v2 to FHIR](https://github.com/cosyte/pathways/blob/main/docs-content/example-hl7-to-fhir.md)
 - [Filter, then send to two destinations](https://github.com/cosyte/pathways/blob/main/docs-content/example-filter-and-route.md)
 - [Replay after a failure](https://github.com/cosyte/pathways/blob/main/docs-content/example-replay-after-failure.md)
+- [A veterinary lab result to FHIR](https://github.com/cosyte/pathways/blob/main/docs-content/example-vet-lab-to-fhir.md)
+- [A veterinary lab result as v2 XML over HTTPS](https://github.com/cosyte/pathways/blob/main/docs-content/example-vet-lab-to-v2-xml.md)
 
 ---
 
@@ -108,7 +110,8 @@ synthetic messages, with its tests, which CI runs on every change. Each has a pa
 Pathways is for a developer who writes and runs integrations: someone who would rather review a
 channel in a pull request and test a transform with sample messages than configure both in a product.
 So a channel is a file in git, a transform is TypeScript, and both go through review and tests like
-the rest of a project's code. Pathways runs on one machine, from the command line or in Docker.
+the rest of a project's code. Pathways runs from the command line or in Docker, and more than one engine can share a database
+through the engine lease: one is active and the rest wait as standbys.
 
 It is not a web UI, not a drop-in replacement for another engine (it does not import channels from
 one), and not a sandbox: a transform is your own trusted code.

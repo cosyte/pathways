@@ -118,7 +118,8 @@ destinations:
 - The message is stored first, and the ACK is sent only once it is: `AA`, built the way the
   [MLLP source](./send-and-receive-mllp.md) builds it, with MSA-2 echoing the message's MSH-10.
 - A message with no usable MSH header (none that parses, no MSH-10, or more than one message in the
-  body) is stored as failed and answered `AE`, at 200. The engine logs `http-unreadable` with the
+  body: a second `MSH`, `FHS` or `BHS` header in any letter case) is stored as failed and answered
+  `AE`, at 200. A body is one message. The engine logs `http-unreadable` with the
   message id and the problem's code.
 - The request's `Content-Type` must be `x-application/hl7-v2+er7` or `application/hl7-v2`, in any
   letter case, with any parameters. The ACK goes back in the same one, with `charset=utf-8`, or
@@ -371,6 +372,8 @@ destinations:
   is refused at load with `ack: xml`, since what it sends is not an HL7 v2 message.
 - **The body is sent as the transform returned it.** Writing the message in the v2 XML encoding is
   the transform's work; `ack: xml` reads the answer only.
+  [Send a lab result as v2 XML over HTTPS](./send-a-lab-result-as-v2-xml.md) writes it with
+  `toHl7Xml` from `@cosyte/hl7`, in a project to copy.
 
 ### For the animal diagnostic lab network
 

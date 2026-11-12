@@ -39,6 +39,14 @@ rather than being rounded; use `text` to pass it through untouched.
 A message that does not parse is marked failed with the parser's stable code, such as
 `NO_MSH_SEGMENT` or `X12_NO_ISA_HEADER`, and the transform never sees it.
 
+An HL7 v2 body is one message. A body that holds a second message (a later `MSH`, `FHS` or `BHS`
+segment, in any case and after any line ending) is stored as failed with
+`inbound: MULTIPLE_MESSAGES` as it arrives, from any source, and never reaches the transform or a
+destination; on a channel that stores nothing it is counted as unreadable. The transform worker
+refuses such a body with `MULTIPLE_MESSAGES` too, so a replay of one stored before this check does
+not reach the transform either. Split a file of several messages into one file per message before you
+drop it in.
+
 An HL7 v2 body is read in the character set its MSH-18 declares, and written back in that same
 set; [Character sets in HL7 v2](#character-sets-in-hl7-v2) has the detail.
 

@@ -667,9 +667,32 @@ function readHl7(
   body: Buffer,
   assumeCharset: string | undefined,
 ): Hl7.Hl7Message {
-  const message = library.parseHL7(body);
-  if (assumeCharset === undefined || !msh18Blank(message)) return message;
-  return library.parseHL7(body, { charset: assumeCharset });
+  const first = library.parseHL7(body);
+  const message =
+    assumeCharset === undefined || !msh18Blank(first)
+      ? first
+      : library.parseHL7(body, { charset: assumeCharset });
+  if (OPENERS.reduce((count, id) => count + message.segments(id).length, 0) > 1) {
+    throw new MultipleMessagesError();
+  }
+  return message;
+}
+
+/** Segment ids that open a message or a batch: one message holds exactly one, its MSH. */
+const OPENERS = ["MSH", "FHS", "BHS"] as const;
+
+/**
+ * An `hl7v2` body that parsed as one message with a second header in it: the second message's
+ * segments would reach the transform as the first's. The engine refuses such a body as it enters,
+ * so this holds a body stored before it did, and any other way a body reaches a transform.
+ */
+class MultipleMessagesError extends Error {
+  readonly code = "MULTIPLE_MESSAGES";
+
+  constructor() {
+    super("the body holds more than one HL7 v2 message: send one message per body");
+    this.name = "MultipleMessagesError";
+  }
 }
 
 /**

@@ -42,7 +42,7 @@ import { SftpLocation } from "../connectors/sftp.js";
 import { AddressGuard } from "../connectors/address-guard.js";
 import { HttpDestination, HttpSource } from "../connectors/http.js";
 import { RedirectHeld, RetryableError } from "../connectors/http-core.js";
-import { MllpDestination, MllpSource } from "../connectors/mllp.js";
+import { holdsSecondMessage, MllpDestination, MllpSource } from "../connectors/mllp.js";
 import { loadMllpClientTls, loadMllpServerTls } from "../connectors/mllp-tls.js";
 import {
   TcpDestination,
@@ -2255,10 +2255,11 @@ export class Engine {
     const { store, logger } = this.options;
     const receivePiece = async (
       body: Uint8Array,
-      options: ReceiveOptions = {},
+      given: ReceiveOptions = {},
     ): Promise<ReceivedPiece> => {
       // Before anything is stored: the source keeps the message for a later pass.
       if (cut?.aborted === true) throw new PassCut();
+      const options = oneMessage(config.format, body, given);
       if (channel.config.settings.content === "none") {
         return { id: await this.passThrough(channel, body, options), alreadyStored: false };
       }
@@ -3640,6 +3641,23 @@ function auditDetail(
 /** An error's name, or the type of what was thrown when it is not an error: never its text. */
 function errorName(error: unknown): string {
   return error instanceof Error ? error.name : typeof error;
+}
+
+/**
+ * What a source handed in, with `failure` set to `inbound: MULTIPLE_MESSAGES` when an `hl7v2` body
+ * holds a second message: one header after another, in any case and after any line ending the HL7
+ * parser accepts. The parser would read it as one message with two MSH segments, and hand the
+ * transform the second message's segments as the first's. Here, where every source's messages enter
+ * the engine, so a file, HTTP, database or any other source is held to it as MLLP is. The body is
+ * stored as failed, or on a channel that stores nothing counted as unreadable, and never reaches a
+ * transform or a destination.
+ */
+function oneMessage(format: Format, body: Uint8Array, options: ReceiveOptions): ReceiveOptions {
+  if (format !== "hl7v2" || options.failure !== undefined || !holdsSecondMessage(body)) {
+    return options;
+  }
+  // No duplicate key, as for any message a source could not read: its header is not one message's.
+  return { ...options, duplicateKey: undefined, failure: "inbound: MULTIPLE_MESSAGES" };
 }
 
 /** A key's SHA-256 in hex, as storage keeps it, or undefined when there is no key. */
