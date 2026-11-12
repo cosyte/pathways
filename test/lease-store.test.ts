@@ -137,9 +137,16 @@ for (const database of TEST_DATABASES) {
           () => a.markDelivered(delivery, 1),
           () => a.scheduleRetry(delivery, 1, Date.now() + 1_000, "delivery: ECONNREFUSED", 1),
           () => a.failDelivery(delivery, "rejected: AR", 1),
+          () => a.recordWarnings(second, ["ENCODING_MISMATCH"], 1),
         ];
         for (const write of stale) await expect(write()).rejects.toBeInstanceOf(LeaseLostError);
         expect(await b.message(second)).toMatchObject({ status: "received" });
+        expect((await b.message(second))?.warnings).toBeUndefined();
+        // Under the lease's epoch the warnings are stored, and an empty list clears them.
+        await b.recordWarnings(second, ["ENCODING_MISMATCH"], 2);
+        expect((await b.message(second))?.warnings).toEqual(["ENCODING_MISMATCH"]);
+        await b.recordWarnings(second, [], 2);
+        expect((await b.message(second))?.warnings).toBeUndefined();
         expect(await b.deliveries(second)).toEqual([]);
         expect(await b.deliveries(first)).toMatchObject([
           { id: delivery, status: "pending", attempts: 0 },
