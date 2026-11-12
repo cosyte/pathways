@@ -20,6 +20,9 @@
  *     id or an SSN, DMG02 (the date of birth), and the PER contact name and numbers.
  *   - C-CDA: `given` and `family` anywhere, a `name` written as plain text in a document,
  *     `birthTime`, the `id` of a `patientRole`, and `tel:` telecoms.
+ *   - CSV: a header line, split on a comma, tab, pipe or semicolon, that names an identifying
+ *     column (`last_name`, `DOB`, `MRN`, `phone` and the rest in `CSV_COLUMNS`), then the cells of
+ *     that column on each line after it with as many cells.
  *
  * WHAT COUNTS AS A HIT. A name token, a birth date or an identifier that the allow-list does not
  * declare synthetic:
@@ -464,6 +467,122 @@ function scanXml(ctx: FieldContext, text: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// Delimited text (CSV)
+// ---------------------------------------------------------------------------
+
+/** The delimiters a CSV file is tried with, in order. */
+const CSV_DELIMITERS = [",", "\t", "|", ";"] as const;
+
+/** A header cell, folded: lower case with every character but a letter or digit dropped. */
+function foldHeader(cell: string): string {
+  return cell.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+/** Header names, folded, that carry a person's name, a birth date, an identifier or a phone. */
+const CSV_COLUMNS: Readonly<Record<string, "name" | "dob" | "id" | "phone">> = {
+  name: "name",
+  patientname: "name",
+  fullname: "name",
+  lastname: "name",
+  firstname: "name",
+  middlename: "name",
+  familyname: "name",
+  givenname: "name",
+  surname: "name",
+  patientlastname: "name",
+  patientfirstname: "name",
+  dob: "dob",
+  dateofbirth: "dob",
+  birthdate: "dob",
+  birthdt: "dob",
+  patientdob: "dob",
+  mrn: "id",
+  medicalrecordnumber: "id",
+  patientid: "id",
+  memberid: "id",
+  subscriberid: "id",
+  ssn: "id",
+  phone: "phone",
+  phonenumber: "phone",
+  telephone: "phone",
+  homephone: "phone",
+  mobilephone: "phone",
+  cellphone: "phone",
+};
+
+/** One line's cells, a quoted cell unquoted; a quote left open keeps the rest of the line. */
+function csvCells(line: string, delimiter: string): string[] {
+  const cells: string[] = [];
+  let cell = "";
+  let quoted = false;
+  for (let at = 0; at < line.length; at++) {
+    const char = line.charAt(at);
+    if (quoted) {
+      if (char === '"' && line.charAt(at + 1) === '"') {
+        cell += '"';
+        at++;
+      } else if (char === '"') {
+        quoted = false;
+      } else {
+        cell += char;
+      }
+    } else if (char === '"' && cell === "") {
+      quoted = true;
+    } else if (char === delimiter) {
+      cells.push(cell);
+      cell = "";
+    } else {
+      cell += char;
+    }
+  }
+  cells.push(cell);
+  return cells;
+}
+
+/** A header line: two or more cells, each a column name, at least one an identifying column. */
+function csvHeader(line: string, delimiter: string): string[] | undefined {
+  if (!line.includes(delimiter)) return undefined;
+  const cells = csvCells(line, delimiter).map((cell) => cell.trim());
+  if (cells.length < 2 || !cells.every((cell) => /^[A-Za-z][\w .#-]{0,63}$/.test(cell))) {
+    return undefined;
+  }
+  return cells.some((cell) => CSV_COLUMNS[foldHeader(cell)] !== undefined) ? cells : undefined;
+}
+
+/**
+ * A CSV table in the file's own lines: a header that names an identifying column, then each line
+ * after it with as many cells, until one has a different count. Each identifying column's cells are
+ * checked as the field they name. A table written inside one string literal, its lines joined by
+ * escape sequences, is not read.
+ */
+function scanCsv(ctx: FieldContext, text: string): void {
+  const lines = text.split(/\r\n|\n|\r/);
+  for (let at = 0; at < lines.length; at++) {
+    const line = lines[at] ?? "";
+    for (const delimiter of CSV_DELIMITERS) {
+      const header = csvHeader(line, delimiter);
+      if (header === undefined) continue;
+      const kinds = header.map((cell) => CSV_COLUMNS[foldHeader(cell)]);
+      let row = at + 1;
+      for (; row < lines.length; row++) {
+        const cells = csvCells(lines[row] ?? "", delimiter);
+        if (cells.length !== header.length) break;
+        for (const [index, kind] of kinds.entries()) {
+          const value = cells[index] ?? "";
+          const label = `csv ${header[index] ?? ""}`;
+          if (kind === "name") checkName(ctx, label, value);
+          else if (kind === "dob") checkDob(ctx, label, value);
+          else if (kind === "id") checkId(ctx, label, value);
+          else if (kind === "phone") checkPhone(ctx, label, value);
+        }
+      }
+      at = row - 1;
+      break;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // The detector
 // ---------------------------------------------------------------------------
 
@@ -479,4 +598,5 @@ export function detectFields(ctx: FieldContext): void {
   if (!scanX12Interchange(ctx, text)) scanEmbeddedX12(ctx, text);
   scanFhir(ctx, text);
   scanXml(ctx, text);
+  scanCsv(ctx, text);
 }

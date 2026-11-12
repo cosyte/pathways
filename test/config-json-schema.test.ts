@@ -151,7 +151,18 @@ const REFUSED: readonly (readonly [string, Kind, string])[] = [
   ["a bad duration", "channel", channel("timeout: 5 seconds\n")],
   ["a negative duration", "project", "defaults: { pollInterval: -1 }\n"],
   ["a bad size", "project", "defaults: { memory: 1GB }\n"],
-  ["an unknown format", "channel", channel("format: csv\n")],
+  ["an unknown format", "channel", channel("format: yaml\n")],
+  [
+    "a csv delimiter of two characters",
+    "channel",
+    channel("format: csv\ncsv: { delimiter: ab }\n"),
+  ],
+  [
+    "a csv column that starts at 0",
+    "channel",
+    channel("format: csv\ncsv:\n  columns: [{ name: code, start: 0, length: 8 }]\n"),
+  ],
+  ["an unknown csv key", "channel", channel("format: csv\ncsv: { separator: ; }\n")],
   [
     "options without module",
     "channel",
@@ -319,6 +330,22 @@ const ACCEPTED: readonly (readonly [string, Kind, string])[] = [
       "storage:\n  module: ./store.ts\n  options: { table: messages }\n",
   ],
   ["an empty pathways.yaml", "project", ""],
+  [
+    "a csv channel with every delimited setting",
+    "channel",
+    channel(
+      'format: csv\ncsv:\n  delimiter: "|"\n  quote: "\'"\n  escape: "\\\\"\n  header: false\n' +
+        "  encoding: latin1\n  newline: lf\n  pad: true\n  escapeFormulas: true\n  maxRowLength: 4096\n",
+    ),
+  ],
+  [
+    "a fixed-width csv channel",
+    "channel",
+    channel(
+      "format: csv\ncsv:\n  pad: true\n  columns:\n    - { name: code, start: 1, length: 8 }\n" +
+        "    - { name: name, start: 10, length: 6 }\n",
+    ),
+  ],
 ];
 
 describe("a document at the edge of a restated rule", () => {
@@ -372,6 +399,46 @@ const LEFT_TO_START: readonly (readonly [string, Kind, string])[] = [
     "encryption:\n  keys: [{ id: dev, file: ./a.key }, { id: dev, file: ./b.key }]\n  current: dev\n",
   ],
   ["a hook timeout of zero", "project", "hooks:\n  - { module: ./a.ts, timeout: 0 }\n"],
+  [
+    "a csv block on a channel of another format",
+    "channel",
+    channel("format: text\ncsv: { pad: true }\n"),
+  ],
+  ["a csv block with no format", "channel", channel("csv: { pad: true }\n")],
+  [
+    "a csv delimiter that is a line ending",
+    "channel",
+    channel('format: csv\ncsv: { delimiter: "\\n" }\n'),
+  ],
+  [
+    "a csv quote that is the delimiter",
+    "channel",
+    channel('format: csv\ncsv: { delimiter: "\'", quote: "\'" }\n'),
+  ],
+  ["a csv escape that is the delimiter", "channel", channel('format: csv\ncsv: { escape: "," }\n')],
+  [
+    "a delimiter on fixed-width columns",
+    "channel",
+    channel(
+      'format: csv\ncsv:\n  delimiter: ";"\n  columns: [{ name: code, start: 1, length: 8 }]\n',
+    ),
+  ],
+  [
+    "fixed-width columns that overlap",
+    "channel",
+    channel(
+      "format: csv\ncsv:\n  columns:\n    - { name: name, start: 8, length: 6 }\n" +
+        "    - { name: code, start: 1, length: 8 }\n",
+    ),
+  ],
+  [
+    "a fixed-width column named twice",
+    "channel",
+    channel(
+      "format: csv\ncsv:\n  columns:\n    - { name: code, start: 1, length: 8 }\n" +
+        "    - { name: code, start: 10, length: 6 }\n",
+    ),
+  ],
 ];
 
 describe("a rule the JSON Schema leaves to start", () => {

@@ -23,11 +23,18 @@ import type {
   RequeueRequest,
   RequeueResult,
   RetryingDelivery,
+  MessageRows,
   StoredDelivery,
+  StoredDeliveryRow,
   StoredMessage,
   StoreReceiveOptions,
 } from "../storage/store.js";
-import { channelStateStore, leaseStore } from "../storage/store.js";
+import {
+  channelStateStore,
+  leaseStore,
+  retentionStore,
+  type RetentionStore,
+} from "../storage/store.js";
 import { copiesBodies, markCopiesBodies, release } from "../storage/ownership.js";
 import {
   decrypt,
@@ -198,6 +205,16 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
   readonly setChannelState?: (channel: string, state: ChannelRunState) => Promise<void>;
   /** Straight through, present only when the store underneath has it. */
   readonly markDryRun?: (deliveryId: number, epoch?: number) => Promise<void>;
+  /**
+   * The retention steps: ids and counts, and rows changed whole or emptied, so straight through,
+   * present only when the store underneath has all four; the rows an archive holds come back
+   * through the codec.
+   */
+  readonly countExpiring?: RetentionStore["countExpiring"];
+  readonly listExpiring?: RetentionStore["listExpiring"];
+  readonly applyExpiry?: RetentionStore["applyExpiry"];
+  /** Every column of a message and its deliveries, each body, error text and metadata read back. */
+  readonly archiveRows?: RetentionStore["archiveRows"];
 
   protected constructor(inner: MessageStore, codec: Codec, indexer?: MetaIndexer) {
     this.#inner = inner;
@@ -220,6 +237,14 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
       this.setChannelState = states.setChannelState;
     }
     if (inner.markDryRun !== undefined) this.markDryRun = inner.markDryRun.bind(inner);
+    const steps = retentionStore(inner);
+    if (steps !== undefined) {
+      this.countExpiring = (channel, query) => steps.countExpiring(channel, query);
+      this.listExpiring = (channel, query, limit, after) =>
+        steps.listExpiring(channel, query, limit, after);
+      this.applyExpiry = (channel, ids, query) => steps.applyExpiry(channel, ids, query);
+      this.archiveRows = (id) => this.#archiveRows(steps, id);
+    }
     this.#innerCopies = copiesBodies(inner);
     // A codec that copies keeps no body it is handed and reads each into a new buffer; one that does
     // not passes bodies straight through, so this store copies when the one underneath does.
@@ -239,6 +264,30 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
     const result = await write(stored);
     if (this.#codec.copies && this.#innerCopies) for (const copy of stored) release(copy);
     return result;
+  }
+
+  /** One message's rows, each body, error text and the metadata read back through the codec. */
+  async #archiveRows(steps: RetentionStore, id: number): Promise<MessageRows | undefined> {
+    const rows = await steps.archiveRows(id);
+    if (rows === undefined) return undefined;
+    const { message } = rows;
+    const deliveries: StoredDeliveryRow[] = [];
+    for (const delivery of rows.deliveries) {
+      deliveries.push({
+        ...delivery,
+        body: delivery.body === null ? null : await this.#read(delivery.body),
+        error: await this.#readText(delivery.error),
+      });
+    }
+    return {
+      message: {
+        ...message,
+        body: message.body === null ? null : await this.#read(message.body),
+        error: await this.#readText(message.error),
+        meta: await this.#readText(message.meta),
+      },
+      deliveries,
+    };
   }
 
   /** Reads a stored body back through the codec, then frees the stored copy when it is this store's own. */

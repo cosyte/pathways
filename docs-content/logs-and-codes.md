@@ -16,24 +16,25 @@ text or a source file's name. Commands whose standard output is their report (`s
 
 ### Messages
 
-| Event                 | Level | Fields                                                                                 | Meaning                                                                                                                         |
-| --------------------- | ----- | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `received`            | info  | `channel`, `message`, `bytes`, `failed`                                                | a message is stored; `failed` when the source stored it as failed                                                               |
-| `already-stored`      | info  | `channel`, `message`                                                                   | a source handed in again a message it had stored before a stop                                                                  |
-| `possible-duplicate`  | warn  | `channel`, `message`, `duplicateOf`                                                    | same sender and control ID as an earlier message                                                                                |
-| `possible-duplicate`  | warn  | `channel`, `message`, `delivery`, `destination`, `reason`, `interruptedAttempt`        | a delivery was found cut off after its send (`reason` `send-interrupted`), and is sent again, flagged                           |
-| `receive-failed`      | error | `channel`, `code`                                                                      | a message could not be stored, and was not acknowledged                                                                         |
-| `transformed`         | info  | `channel`, `message`, `outputs`                                                        | the transform returned outputs                                                                                                  |
-| `filtered`            | info  | `channel`, `message`, `outputs`                                                        | the transform returned none                                                                                                     |
-| `transform-failed`    | warn  | `channel`, `message`, `kind`, `name`, `code`, `where`                                  | the message is marked failed; `kind` is the stage                                                                               |
-| `delivered`           | info  | `channel`, `destination`, `delivery`, `resend`                                         | a destination accepted an output; `resend` only on a flagged resend                                                             |
-| `content-dropped`     | info  | `channel`, `message`, `delivery`                                                       | the last delivery was delivered, and the message's content dropped (`storage.content: dropAfterDelivery`)                       |
-| `dry-run`             | info  | `channel`, `destination`, `delivery`                                                   | a destination that runs dry recorded an output and sent nothing                                                                 |
-| `delivery-retry`      | warn  | `channel`, `destination`, `delivery`, `attempt`, `retryInMs`, `code`                   | it is tried again after `retryInMs`                                                                                             |
-| `delivery-redirected` | warn  | `channel`, `destination`, `delivery`, `attempt`, `retryInMs`, `status`, `locationHost` | an HTTP destination answered a 3xx; held, never followed, and tried again after `retryInMs` (`retry.max`, 5 minutes by default) |
-| `delivery-rejected`   | warn  | `channel`, `destination`, `delivery`, `reason`                                         | the destination rejected it for good                                                                                            |
-| `delivery-exhausted`  | warn  | `channel`, `destination`, `delivery`, `attempt`, `reason`, `code`                      | out of retries (`reason` `limit` or `maxAge`): marked failed, its body kept for a resend                                        |
-| `delivery-halted`     | warn  | `channel`, `destination`, `delivery`, `attempt`                                        | `pathways channel halt` cut the send off; it stays pending and is sent again, flagged, after a resume                           |
+| Event                     | Level | Fields                                                                                 | Meaning                                                                                                                                                                |
+| ------------------------- | ----- | -------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `received`                | info  | `channel`, `message`, `bytes`, `failed`                                                | a message is stored; `failed` when the source stored it as failed                                                                                                      |
+| `already-stored`          | info  | `channel`, `message`                                                                   | a source handed in again a message it had stored before a stop                                                                                                         |
+| `possible-duplicate`      | warn  | `channel`, `message`, `duplicateOf`                                                    | same sender and control ID as an earlier message                                                                                                                       |
+| `possible-duplicate`      | warn  | `channel`, `message`, `delivery`, `destination`, `reason`, `interruptedAttempt`        | a delivery was found cut off after its send (`reason` `send-interrupted`), and is sent again, flagged                                                                  |
+| `receive-failed`          | error | `channel`, `code`                                                                      | a message could not be stored, and was not acknowledged                                                                                                                |
+| `transformed`             | info  | `channel`, `message`, `outputs`                                                        | the transform returned outputs                                                                                                                                         |
+| `filtered`                | info  | `channel`, `message`, `outputs`                                                        | the transform returned none                                                                                                                                            |
+| `transform-failed`        | warn  | `channel`, `message`, `kind`, `name`, `code`, `where`                                  | the message is marked failed; `kind` is the stage                                                                                                                      |
+| `delivered`               | info  | `channel`, `destination`, `delivery`, `resend`                                         | a destination accepted an output; `resend` only on a flagged resend                                                                                                    |
+| `content-dropped`         | info  | `channel`, `message`, `delivery`                                                       | the last delivery was delivered, and the message's content dropped (`storage.content: dropAfterDelivery`)                                                              |
+| `dry-run`                 | info  | `channel`, `destination`, `delivery`                                                   | a destination that runs dry recorded an output and sent nothing                                                                                                        |
+| `delivery-retry`          | warn  | `channel`, `destination`, `delivery`, `attempt`, `retryInMs`, `code`                   | it is tried again after `retryInMs`                                                                                                                                    |
+| `delivery-redirected`     | warn  | `channel`, `destination`, `delivery`, `attempt`, `retryInMs`, `status`, `locationHost` | an HTTP destination answered a 3xx; held, never followed, and tried again after `retryInMs` (`retry.max`, 5 minutes by default)                                        |
+| `delivery-rejected`       | warn  | `channel`, `destination`, `delivery`, `reason`                                         | the destination rejected it for good                                                                                                                                   |
+| `delivery-exhausted`      | warn  | `channel`, `destination`, `delivery`, `attempt`, `reason`, `code`                      | out of retries (`reason` `limit` or `maxAge`): marked failed, its body kept for a resend                                                                               |
+| `delivery-halted`         | warn  | `channel`, `destination`, `delivery`, `attempt`                                        | `pathways channel halt` cut the send off; it stays pending and is sent again, flagged, after a resume                                                                  |
+| `smtp-recipients-refused` | warn  | `channel`, `destination`, `message`, `seq`, `refused`, `outcome`                       | an SMTP server took the email for some recipients and refused `refused` of them; `outcome` is `rejected` or `delivered` (`onPartialRefusal`), and no address is logged |
 
 A `transform-failed` line's `kind` is `load`, `parse`, `transform`, `output`, `timeout`, `memory` or
 `crash`. `where` is `file:line:column` in the transform, when it threw.
@@ -61,30 +62,46 @@ A `transform-failed` line's `kind` is `load`, `parse`, `transform`, `output`, `t
 | `mllp-ack-builder-failed`                                          | a custom ACK builder threw or ran out of time; the default ACK was sent                                                                               |
 | `mllp-ack-unsendable`                                              | an ACK held an MLLP framing byte, so none was sent                                                                                                    |
 | `mllp-source-error`, `mllp-source-failed`, `mllp-security-warning` | the MLLP server reported an error or a warning, by name and code                                                                                      |
+| `tcp-listening`                                                    | a tcp source is listening, on `port`, with `tls` true or false                                                                                        |
+| `tcp-store-failed`                                                 | a tcp message could not be stored; no reply was sent and the connection closed                                                                        |
+| `tcp-oversize`                                                     | a frame was longer than `maxMessageSize`; the connection closed, the frame unstored                                                                   |
+| `tcp-bad-length`                                                   | an inclusive length prefix was smaller than the prefix; the connection closed                                                                         |
+| `tcp-stalled`                                                      | a frame begun sent no byte for `stallTimeout`; the connection closed, the part dropped                                                                |
+| `tcp-idle`                                                         | a connection began no frame for `idleTimeout`, and was closed                                                                                         |
+| `tcp-partial-frame`                                                | a connection ended mid-frame; the part, `bytes` long, was dropped                                                                                     |
+| `tcp-connection-refused`                                           | a tcp source closed a connection at accept because it held `maxConnections` already; with the cap, never who connected                                |
+| `tcp-frames-dropped`                                               | `count` whole frames a tcp source could not store: a store or reply failure closed the connection, or it was closing or stopping                      |
+| `tcp-empty-frame`                                                  | an empty frame came, and was skipped                                                                                                                  |
+| `tcp-discarded-bytes`                                              | `bytes` came outside a start and end frame, and were dropped                                                                                          |
+| `tcp-reply-failed`                                                 | a reply builder threw, ran out of time or returned neither bytes nor a string, for `message`; the connection closed                                   |
+| `tcp-reply-unsendable`                                             | a reply held the delimiter or the end bytes, or was too long for the prefix (`code`); the connection closed                                           |
+| `tcp-tls-refused`, `tcp-connection-error`, `tcp-source-error`      | a TLS handshake failed, a connection reset or the server reported an error, by name and code                                                          |
 
 ### Configuration and storage
 
-| Event                    | Meaning                                                                                                                                                                                |
-| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `plaintext`              | an endpoint runs without TLS (`endpoint` says which); logged at every start                                                                                                            |
-| `unauthenticated`        | a listening endpoint has neither a token nor `tls.ca`                                                                                                                                  |
-| `plaintext-copies`       | a file source keeps plaintext copies (`keepProcessed: true`)                                                                                                                           |
-| `unencrypted-storage`    | `encryption: none`                                                                                                                                                                     |
-| `dry-run`                | `pathways start --dry-run`: every destination runs dry (`destinations` is `all`)                                                                                                       |
-| `dry-run-destinations`   | at start, the destinations that run dry, by index under each channel's name (`channels`); a destination not named sends                                                                |
-| `dry-run-pending`        | a channel with a destination that runs dry (`destinations`, by index) has `pending` deliveries at start, of every destination; each of a dry destination is marked `dry-run`, not sent |
-| `retention`              | a retention run, with the `messages` and `deliveries` it deleted                                                                                                                       |
-| `retention-failed`       | a retention run failed, by `code`; the next run tries again                                                                                                                            |
-| `lease-acquired`         | the engine took the engine lease, with its `node` and `epoch`                                                                                                                          |
-| `lease-lost`             | the engine lost its lease, with the `reason` and `epoch`; it stops and exits 1                                                                                                         |
-| `lease-unsupported`      | a custom store has no lease methods: the engine runs unfenced, and a second one is not refused                                                                                         |
-| `lease-release-failed`   | the lease could not be freed at a stop, by `code`; it lapses instead                                                                                                                   |
-| `standby`                | started as a standby, with its `node`                                                                                                                                                  |
-| `standby-waiting`        | a standby is waiting for the lease another engine holds (`holder`, `epoch`)                                                                                                            |
-| `channel-state`          | a channel's `state` changed (`running`, `paused` or `stopped`), here or on another engine                                                                                              |
-| `channel-states-unread`  | the channel states could not be read at the top of a pass, by `code`; the last ones stand                                                                                              |
-| `channel-state-unstored` | a pause, resume, stop or halt could not be stored, by `code`; the channel was put back as it was                                                                                       |
-| `channel-reloaded`       | `pathways channel reload` swapped in the channel's new transform and settings                                                                                                          |
+| Event                    | Meaning                                                                                                                                                                                 |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `plaintext`              | an endpoint runs without TLS (`endpoint` says which); logged at every start                                                                                                             |
+| `unauthenticated`        | a listening endpoint has neither a token nor `tls.ca`                                                                                                                                   |
+| `plaintext-copies`       | a file source keeps plaintext copies (`keepProcessed: true`)                                                                                                                            |
+| `smtp-attach`            | an SMTP destination attaches each message to its email (`attach: true`), which every mail server on the way can read; logged at every start                                             |
+| `unencrypted-storage`    | `encryption: none`                                                                                                                                                                      |
+| `dry-run`                | `pathways start --dry-run`: every destination runs dry (`destinations` is `all`)                                                                                                        |
+| `dry-run-destinations`   | at start, the destinations that run dry, by index under each channel's name (`channels`); a destination not named sends                                                                 |
+| `dry-run-pending`        | a channel with a destination that runs dry (`destinations`, by index) has `pending` deliveries at start, of every destination; each of a dry destination is marked `dry-run`, not sent  |
+| `retention`              | a retention run, with the `messages` and `deliveries` it deleted                                                                                                                        |
+| `retention-failed`       | a retention run failed, by `code`; the next run tries again                                                                                                                             |
+| `retention-skipped`      | retention left a `channel` alone part way, by `code`: its archive could not be written, checked or audited; nothing of it was deleted without its archive, and the next run tries again |
+| `lease-acquired`         | the engine took the engine lease, with its `node` and `epoch`                                                                                                                           |
+| `lease-lost`             | the engine lost its lease, with the `reason` and `epoch`; it stops and exits 1                                                                                                          |
+| `lease-unsupported`      | a custom store has no lease methods: the engine runs unfenced, and a second one is not refused                                                                                          |
+| `lease-release-failed`   | the lease could not be freed at a stop, by `code`; it lapses instead                                                                                                                    |
+| `standby`                | started as a standby, with its `node`                                                                                                                                                   |
+| `standby-waiting`        | a standby is waiting for the lease another engine holds (`holder`, `epoch`)                                                                                                             |
+| `channel-state`          | a channel's `state` changed (`running`, `paused` or `stopped`), here or on another engine                                                                                               |
+| `channel-states-unread`  | the channel states could not be read at the top of a pass, by `code`; the last ones stand                                                                                               |
+| `channel-state-unstored` | a pause, resume, stop or halt could not be stored, by `code`; the channel was put back as it was                                                                                        |
+| `channel-reloaded`       | `pathways channel reload` swapped in the channel's new transform and settings                                                                                                           |
 
 ### Hooks and the audit log
 
@@ -101,17 +118,27 @@ A `transform-failed` line's `kind` is `load`, `parse`, `transform`, `output`, `t
 A retried delivery stores and logs a code. These come from Pathways' own connectors; a network error
 keeps the operating system's code, such as `ECONNREFUSED` or `ENOTFOUND`.
 
-| Code                      | Connector | Meaning                                       |
-| ------------------------- | --------- | --------------------------------------------- |
-| `CONNECT_TIMEOUT`         | MLLP      | no connection within `ackTimeout`             |
-| `ACK_TIMEOUT`             | MLLP      | no ACK within `ackTimeout`                    |
-| `ACK_AR`, `ACK_CR`        | MLLP      | the receiver answered with a reject code      |
-| `ACK_UNREADABLE`          | MLLP      | the answer was not an ACK Pathways could read |
-| `ACK_CONTROL_ID_MISMATCH` | MLLP      | the ACK answered another message's MSH-10     |
-| `MLLP_CONNECTION`         | MLLP      | the connection ended with no other code       |
-| `HTTP_<status>`           | HTTP      | a 408, 425, 429 or 5xx answer, or a held 3xx  |
-| `ETIMEDOUT`               | HTTP      | no answer within `timeout`                    |
-| `DELIVERY_TIMEOUT`        | any       | the attempt ran past its deadline, cut off    |
+| Code                      | Connector | Meaning                                                             |
+| ------------------------- | --------- | ------------------------------------------------------------------- |
+| `CONNECT_TIMEOUT`         | MLLP      | no connection within `ackTimeout`                                   |
+| `ACK_TIMEOUT`             | MLLP      | no ACK within `ackTimeout`                                          |
+| `ACK_AR`, `ACK_CR`        | MLLP      | the receiver answered with a reject code                            |
+| `ACK_UNREADABLE`          | MLLP      | the answer was not an ACK Pathways could read                       |
+| `ACK_CONTROL_ID_MISMATCH` | MLLP      | the ACK answered another message's MSH-10                           |
+| `MLLP_CONNECTION`         | MLLP      | the connection ended with no other code                             |
+| `CONNECT_TIMEOUT`         | tcp       | no connection within `timeout`                                      |
+| `REPLY_TIMEOUT`           | tcp       | no whole reply within `timeout`                                     |
+| `WRITE_TIMEOUT`           | tcp       | the output was not taken in within `timeout`, with no `expectReply` |
+| `REPLY_OVERSIZE`          | tcp       | the reply was longer than `maxMessageSize`                          |
+| `REPLY_BAD_LENGTH`        | tcp       | the reply's inclusive length prefix was smaller than the prefix     |
+| `CONNECTION_CLOSED`       | tcp       | the receiver closed before a whole reply                            |
+| `REPLY_RETRY`             | tcp       | the reply check said `retry`                                        |
+| `REPLY_CHECK_FAILED`      | tcp       | the reply check threw, ran out of time or said something else       |
+| `ABORTED`                 | tcp       | the channel was halted while the delivery ran                       |
+| `TCP_CONNECTION`          | tcp       | the connection failed with no other code                            |
+| `HTTP_<status>`           | HTTP      | a 408, 425, 429 or 5xx answer, or a held 3xx                        |
+| `ETIMEDOUT`               | HTTP      | no answer within `timeout`                                          |
+| `DELIVERY_TIMEOUT`        | any       | the attempt ran past its deadline, cut off                          |
 
 A `delivery-retry` line's `retryInMs` is the backoff, or the wait a 429's or a 503's `Retry-After`
 asked for when that is longer, up to the destination's `retry.max`, 5 minutes by default. A
@@ -122,8 +149,10 @@ host (and port, when it names one) of the 3xx answer's `Location`, never its pat
 absent when there is no `Location` or it names no host.
 
 A delivery rejected for good stores its reason: the ACK code (`AE`, `CE`), `HTTP <status>` for a
-101 or a 4xx other than 408, 425 and 429, or `MLLP_PAYLOAD_CONTAINS_...` for an output that
-holds a framing byte.
+101 or a 4xx other than 408, 425 and 429, `MLLP_PAYLOAD_CONTAINS_...` for an output that
+holds a framing byte, `REPLY_REJECTED` when a tcp reply check said `rejected`, or
+`TCP_PAYLOAD_CONTAINS_DELIMITER`, `TCP_PAYLOAD_CONTAINS_END` or `TCP_PAYLOAD_TOO_LONG` for an output
+a tcp destination's framing cannot carry.
 
 ## MLLP problem codes
 
@@ -168,6 +197,54 @@ package stops the engine at the first pass that needs it.
 | `ERR_PATHWAYS_SFTP_EOF`              | the server said the file ended where it should not have                     |
 | `ERR_PATHWAYS_SFTP_BAD_MESSAGE`      | the server could not read a request                                         |
 | `ERR_PATHWAYS_SFTP_STATUS_<n>`       | any other SFTP status, by number                                            |
+
+## SMTP codes
+
+An SMTP destination's code names the stage and the server's reply code, or what went wrong instead:
+`SMTP_<stage>_<reply>`, such as `SMTP_RCPT_452`, or `SMTP_CONNECT_ECONNREFUSED`. The stages are
+`CONNECT`, `TLS`, `GREETING`, `EHLO`, `STARTTLS`, `AUTH`, `MAIL`, `RCPT` and `DATA`. A retried or held
+delivery logs it as `code`; a rejected one stores it as its reason. Besides reply codes and the
+operating system's codes:
+
+| Code                     | Meaning                                                                         |
+| ------------------------ | ------------------------------------------------------------------------------- |
+| `SMTP_AUTH_NOT_OFFERED`  | a login is set, and the server offers no AUTH at all; held                      |
+| `SMTP_AUTH_ERROR`        | the login could not be sent, such as an empty password; held                    |
+| `SMTP_RCPT_PARTIAL`      | some recipients refused and others taken, with `onPartialRefusal: rejected`     |
+| `SMTP_TLS_<code>`        | the TLS handshake failed, such as `SMTP_TLS_ERR_TLS_CERT_ALTNAME_INVALID`; held |
+| `SMTP_<stage>_ETIMEDOUT` | the connection, the greeting or an answer took longer than its time limit       |
+| `SMTP_<stage>_CLOSED`    | the server closed the connection before the email was delivered                 |
+| `SMTP_<stage>_PROTOCOL`  | the server sent something that is not an SMTP reply, or a reply over 64 KB      |
+| `SMTP_MAIL_TOO_LARGE`    | the email is larger than the size the server takes; rejected                    |
+| `SMTP_TOO_LARGE`         | the email is larger than `maxSize`; rejected without connecting                 |
+
+## Object store codes
+
+A file source or destination on Amazon S3 or Azure Blob Storage gives a failed request one of these
+codes, never the service's own text. `ENOENT` is an object that is not there. The codes marked
+down mark the source `down` until a pass runs again. A missing package, bucket or container stops
+the engine at the first pass that needs it, with its own code.
+
+| Code                                       | Meaning                                                                        |
+| ------------------------------------------ | ------------------------------------------------------------------------------ |
+| `ERR_PATHWAYS_OBJECT_NO_CONDITIONAL_WRITE` | the store does not honour `If-None-Match`, and the source has no `singleNode`  |
+| `ERR_PATHWAYS_OBJECT_CHANGED`              | an object was replaced between its claim and its read; it is taken again later |
+| `ERR_PATHWAYS_S3_CREDENTIALS`              | down: the AWS SDK's chain found no credentials                                 |
+| `ERR_PATHWAYS_S3_UNREACHABLE`              | down: the endpoint did not answer                                              |
+| `ERR_PATHWAYS_S3_HTTP_<status>`            | down: the endpoint answered with this HTTP status                              |
+| `ERR_PATHWAYS_S3_NOT_IMPLEMENTED`          | the server does not do what was asked                                          |
+| `ERR_PATHWAYS_S3_SIZE_MISMATCH`            | a read gave a different number of bytes than the object's length               |
+| `ERR_PATHWAYS_S3_NOT_INSTALLED`            | the `@aws-sdk/client-s3` package is not installed                              |
+| `ERR_PATHWAYS_S3_NO_SUCH_BUCKET`           | the bucket is not there                                                        |
+| `ERR_PATHWAYS_AZBLOB_CREDENTIALS`          | down: no Azure identity could be had                                           |
+| `ERR_PATHWAYS_AZBLOB_UNREACHABLE`          | down: the blob service did not answer                                          |
+| `ERR_PATHWAYS_AZBLOB_HTTP_<status>`        | down: the blob service answered with this HTTP status                          |
+| `ERR_PATHWAYS_AZBLOB_NOT_INSTALLED`        | the `@azure/storage-blob` or `@azure/identity` package is not installed        |
+| `ERR_PATHWAYS_AZBLOB_NO_SUCH_CONTAINER`    | the container is not there                                                     |
+| `ERR_PATHWAYS_AZBLOB_SNAPSHOTS_PRESENT`    | a stored blob has snapshots, so it was not deleted; the pass ends              |
+
+A destination that finds an object of other bytes at its key in `create` mode rejects the message
+with the reason `OBJECT_EXISTS`.
 
 ## Encryption errors
 

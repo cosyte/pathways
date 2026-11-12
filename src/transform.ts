@@ -60,13 +60,20 @@ export type X12Interchange = X12.X12Interchange;
 export type CcdaDocument = Ccda.CcdaDocument;
 
 // Declared beside the format registry, in the worker, which imports nothing of the package's own.
-export type { JsonValue } from "./engine/worker-entry.js";
+export type {
+  CsvColumn,
+  CsvRecord,
+  CsvSettings,
+  CsvTable,
+  JsonValue,
+} from "./engine/worker-entry.js";
 
 /**
  * The message each format hands a transform, by the `format` a channel declares, read from the
  * format registry: `hl7v2` an {@link Hl7Message}, `fhir` a {@link FhirResource}, `x12` an
  * {@link X12Interchange}, `ccda` a {@link CcdaDocument}, `json` a {@link JsonValue} (a string a
- * `json` transform returns is sent as it is, not JSON-quoted), and `text` the body as a string.
+ * `json` transform returns is sent as it is, not JSON-quoted), `text` the body as a string, and
+ * `csv` a `CsvTable`.
  *
  * @example
  * ```ts
@@ -182,6 +189,25 @@ export interface MllpSourceFacts {
 }
 
 /**
+ * What a tcp source knows about a message: the sender's address and, over mutual TLS, the common
+ * name in the subject of the certificate the sender presented.
+ *
+ * @example
+ * ```ts
+ * const peer = (source: TcpSourceFacts): string => source.tlsPeerSubject ?? "unknown";
+ * ```
+ */
+export interface TcpSourceFacts {
+  readonly kind: "tcp";
+  /** The sender's IP address, when the connection had one. */
+  readonly remoteAddress: string | undefined;
+  /** The common name (CN) in the subject of the sender's TLS certificate, when it presented one. */
+  readonly tlsPeerSubject: string | undefined;
+  /** When the message was stored, as an ISO 8601 time. */
+  readonly receivedAt: string;
+}
+
+/**
  * What a custom source knows about a message: whatever it passed as `source` to `sink.receive`.
  *
  * @example
@@ -206,7 +232,8 @@ export interface ModuleSourceFacts {
  *   source.kind === "http" || source.kind === "mllp" ? source.remoteAddress : undefined;
  * ```
  */
-export type SourceFacts = FileSourceFacts | HttpSourceFacts | MllpSourceFacts | ModuleSourceFacts;
+export type SourceFacts =
+  FileSourceFacts | HttpSourceFacts | MllpSourceFacts | TcpSourceFacts | ModuleSourceFacts;
 
 /**
  * The second argument a transform receives: a frozen plain object, built for each message.

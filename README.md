@@ -19,7 +19,7 @@ are TypeScript functions, and both are tested like any other code.
   transform is a TypeScript file that receives the parsed message and returns what to send.
 - **Formats.** HL7 v2, FHIR, X12, and C-CDA arrive parsed, through Cosyte's open-source
   [`@cosyte/*`](https://github.com/cosyte) libraries. Anything else passes through as text or JSON.
-- **Connectors.** MLLP, HTTP, and files, in and out.
+- **Connectors.** MLLP, HTTP, TCP with your own framing, and files, in and out.
 - **Nothing lost.** Every message is stored before it is acknowledged. When a destination is down,
   Pathways retries and keeps that destination's messages in order. A failed message can be replayed
   once the transform is fixed.
@@ -35,10 +35,10 @@ are TypeScript functions, and both are tested like any other code.
 
 Today the repository holds working slices; nothing is released yet:
 
-- Sources and destinations for MLLP, HTTP, and files, over TLS by default, with a bearer token or
+- Sources and destinations for MLLP, HTTP, TCP, and files, over TLS by default, with a bearer token or
   mutual TLS on every endpoint that listens.
-- HL7 v2, FHIR R4 JSON, X12, C-CDA, JSON, and text, each parsed for a TypeScript transform that
-  runs in its own worker thread.
+- HL7 v2, FHIR R4 JSON, X12, C-CDA, JSON, CSV and fixed-width text, and text, each parsed for a
+  TypeScript transform that runs in its own worker thread.
 - Storage on SQLite, PostgreSQL, MySQL or MariaDB, and SQL Server, with every stored message
   encrypted at rest.
 - An audit log of every operator action, and the commands to inspect, replay, and clear messages.

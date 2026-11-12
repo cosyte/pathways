@@ -11,13 +11,13 @@ Every endpoint Pathways opens or connects to runs over TLS unless its block says
 and every endpoint that listens binds to `127.0.0.1` and asks for credentials by default. Secrets and
 TLS files are read when a command starts, never from the YAML.
 
-| Endpoint                            | TLS by default                              | Who may call, by default                        |
-| ----------------------------------- | ------------------------------------------- | ----------------------------------------------- |
-| HTTP source                         | HTTPS, with `tls: { cert, key }`            | a bearer token, from `PATHWAYS_HTTP_TOKEN`      |
-| Health endpoint                     | HTTPS, with `tls: { cert, key }`            | a bearer token, from `PATHWAYS_HEALTH_TOKEN`    |
-| MLLP source                         | TLS, with `tls: { cert, key }`              | anyone who can connect; `tls.ca` for mutual TLS |
-| MLLP, HTTP and webhook destinations | the server's certificate is always verified | (they call out)                                 |
-| Database server                     | TLS, with `tls: {}` or `tls: { ca }`        | (it calls out)                                  |
+| Endpoint                                 | TLS by default                              | Who may call, by default                        |
+| ---------------------------------------- | ------------------------------------------- | ----------------------------------------------- |
+| HTTP source                              | HTTPS, with `tls: { cert, key }`            | a bearer token, from `PATHWAYS_HTTP_TOKEN`      |
+| Health endpoint                          | HTTPS, with `tls: { cert, key }`            | a bearer token, from `PATHWAYS_HEALTH_TOKEN`    |
+| MLLP and tcp sources                     | TLS, with `tls: { cert, key }`              | anyone who can connect; `tls.ca` for mutual TLS |
+| MLLP, tcp, HTTP and webhook destinations | the server's certificate is always verified | (they call out)                                 |
+| Database server                          | TLS, with `tls: {}` or `tls: { ca }`        | (it calls out)                                  |
 
 ## Choose the address
 
@@ -67,7 +67,8 @@ destinations:
   - file: { dir: ../../data/results-in/out }
 ```
 
-MLLP has no credentials of its own, so on an MLLP source `tls.ca` is the way to check who sends.
+MLLP and tcp have no credentials of their own, so on an MLLP or tcp source `tls.ca` is the way to
+check who sends.
 
 ## Choose TLS versions and cipher suites for MLLP
 
