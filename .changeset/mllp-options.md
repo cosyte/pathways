@@ -1,0 +1,11 @@
+---
+"@cosyte/pathways": patch
+---
+
+An MLLP source can bound its connections and messages, and both MLLP ends choose their TLS version and cipher suites by a named profile.
+
+- New `source.mllp` keys: `maxConnections` (1 to 100,000), `receiveTimeout` (a duration), `maxMessageSize` (a size such as `4MB`) and `keepOpen` (a boolean). A connection over `maxConnections` is closed at accept, before any byte is read or any TLS handshake starts; the engine logs the new event `mllp-connection-refused` with the cap and the code `MLLP_CONNECTION_LIMIT_REACHED`, never who connected. `receiveTimeout` closes a connection that goes that long without a whole message, an idle one and one that sent part of a message and stopped; it is off by default. A frame over `maxMessageSize` closes the connection and nothing of it is stored. `keepOpen: false` closes each connection once every message it brought has been stored and answered, its ACKs written out first.
+- New keys in an MLLP source's or destination's `tls` block: `minVersion` (`TLSv1.2`, the default, or `TLSv1.3`), `profile` (`bcp195`, the default, or `atna`), `ciphers` (an OpenSSL cipher list, refused together with `profile`), and `pfx` with `passphrase` (a PKCS#12 file in place of `cert` and `key`, its passphrase read at start from a secret reference). A pfx that does not open, or a cipher list OpenSSL takes nothing from, stops the start naming the key, never a path or the passphrase.
+- The health body gains `connections: { refused }` on each channel whose source is MLLP: how many connections that source closed at accept since the engine started. Other channels are unchanged.
+- Three changes in behaviour. An MLLP source now holds at most 100 connections at once where it had no cap, and takes messages up to 4 MB where `@cosyte/mllp` allowed 16 MB; set `maxConnections` or `maxMessageSize` to keep more. Both MLLP ends now offer only the `bcp195` cipher suites (TLS 1.3's, and for TLS 1.2 ECDHE with AES-GCM) where they offered Node.js's default list, so a TLS 1.2 peer that can use none of them now fails the handshake; set `profile: atna` or a `ciphers` list for it.
+- `@cosyte/mllp` moves to `^0.1.12`, which brings the connection cap, the client connect timeout and PKCS#12 support these keys use.

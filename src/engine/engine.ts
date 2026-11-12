@@ -35,7 +35,8 @@ import { SftpLocation } from "../connectors/sftp.js";
 import { HttpDestination, HttpSource } from "../connectors/http.js";
 import { RedirectHeld, RetryableError } from "../connectors/http-core.js";
 import { MllpDestination, MllpSource } from "../connectors/mllp.js";
-import { loadClientTls, loadServerTls } from "../connectors/tls.js";
+import { loadMllpClientTls, loadMllpServerTls } from "../connectors/mllp-tls.js";
+import { loadClientTls } from "../connectors/tls.js";
 import {
   DeliveryRejected,
   type DestinationConnector,
@@ -453,7 +454,11 @@ export async function connectorsFor(
         tls:
           source.tls === undefined
             ? undefined
-            : loadServerTls(source.tls, `${file}: source.mllp.tls`),
+            : loadMllpServerTls(source.tls, secretsOf(secrets), `${file}: source.mllp.tls`),
+        maxConnections: source.maxConnections,
+        receiveTimeoutMs: source.receiveTimeoutMs,
+        maxMessageSize: source.maxMessageSize,
+        keepOpen: source.keepOpen,
         onStoreFailure: source.onStoreFailure,
         ...(source.ackBuilder === undefined
           ? {}
@@ -544,7 +549,11 @@ export async function connectorsFor(
             tls:
               destination.tls === undefined
                 ? undefined
-                : loadClientTls(destination.tls, `${file}: destinations.${index}.mllp.tls`),
+                : loadMllpClientTls(
+                    destination.tls,
+                    secretsOf(secrets),
+                    `${file}: destinations.${index}.mllp.tls`,
+                  ),
             ackTimeoutMs: destination.ackTimeoutMs,
           }),
         );
@@ -1305,6 +1314,7 @@ export class Engine {
           state: states[name] ?? "running",
           messages,
           deliveries,
+          ...this.connectionCounts(name),
         };
       }
     } catch {
@@ -1320,6 +1330,17 @@ export class Engine {
     }
     const broken = storage !== "ok" || down.size > 0;
     return { status: broken ? "unavailable" : "ok", storage, channels };
+  }
+
+  /**
+   * How many connections a channel's MLLP source closed at accept for being over its cap, for the
+   * health body; nothing for any other source. A count only, never who connected.
+   */
+  private connectionCounts(name: string): Pick<ChannelHealth, "connections"> {
+    const source = this.channels.find((channel) => channel.config.name === name)?.connectors.source;
+    return source instanceof MllpSource
+      ? { connections: { refused: source.refusedConnections } }
+      : {};
   }
 
   private warnInsecure(config: ChannelConfig): void {
