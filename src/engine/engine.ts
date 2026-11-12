@@ -2282,13 +2282,14 @@ export class Engine {
           deadline.clear();
           halt.removeEventListener("abort", onHalt);
         };
-        // Read only for a destination that fills its URL from it: the metadata stays in storage
-        // otherwise. A store that keeps none hands over none, and a placeholder fails the delivery.
-        const meta =
-          destination instanceof HttpDestination && destination.usesMeta
-            ? await this.messageMeta(delivery.messageId)
-            : undefined;
         try {
+          // Read only for a destination that fills its URL from it: the metadata stays in storage
+          // otherwise. A store that keeps none hands over none, and a placeholder fails the
+          // delivery. Read inside the attempt, so `ended` runs however the read settles.
+          const meta =
+            destination instanceof HttpDestination && destination.usesMeta
+              ? await this.messageMeta(delivery.messageId)
+              : undefined;
           await untilAborted(
             () =>
               destination.deliver({

@@ -515,7 +515,7 @@ describe("the HTTP destination's options in the engine", () => {
   async function pass(
     http: (r: Receiver) => string,
     metas: readonly (Readonly<Record<string, string | number | boolean>> | undefined)[],
-    memory = false,
+    memory: boolean | (() => MessageStore) = false,
   ): Promise<{
     r: Receiver;
     store: MessageStore;
@@ -532,7 +532,12 @@ destinations:
       "channels/adt/transform.ts": LAB_TRANSFORM,
     });
     const project = await loadProject(root);
-    const store: MessageStore = memory ? new MemoryStore() : await Store.open(project.databaseFile);
+    const store: MessageStore =
+      typeof memory === "function"
+        ? memory()
+        : memory
+          ? new MemoryStore()
+          : await Store.open(project.databaseFile);
     stores.push(store);
     for (const meta of metas) {
       await store.receive("adt", Buffer.from(ADT_A01), meta === undefined ? {} : { meta });
@@ -580,6 +585,23 @@ destinations:
       status: "failed",
       error: "rejected: URL_TEMPLATE_MISSING mrn",
     });
+  });
+
+  it("fails the attempt when the metadata read throws, and holds it for a retry", async () => {
+    class FailingMetaStore extends MemoryStore {
+      messageMeta(): Promise<string | undefined> {
+        return Promise.reject(new Error("synthetic metadata read failure"));
+      }
+    }
+    const { r, store, events } = await pass(
+      (lab) =>
+        `url: "http://127.0.0.1:${lab.port}/patients/{mrn}", plaintext: true, allowNetworks: [127.0.0.1]`,
+      [{ mrn: "SYN-0001" }],
+      () => new FailingMetaStore(),
+    );
+    expect(r.received).toHaveLength(0);
+    expect(events.some((e) => e.event === "delivery-retry")).toBe(true);
+    expect((await store.deliveries(1))[0]).toMatchObject({ status: "pending" });
   });
 
   it("refuses a loopback destination the channel does not allow, and holds it for a retry", async () => {

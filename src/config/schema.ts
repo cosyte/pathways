@@ -360,10 +360,10 @@ const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 export const HEADER_VALUE = /^[\t\x20-\x7e\x80-\xff]*$/;
 /** Header names that carry a credential, by the words they usually contain. */
 const SECRET_HEADER = /auth|cookie|token|secret|password|key|signature|credential/i;
-/** Headers Pathways sets itself, from the request it sends. */
 /** The methods an HTTP destination sends by. */
 const HTTP_DESTINATION_METHODS = ["POST", "PUT", "PATCH", "DELETE", "GET"] as const;
 
+/** Headers Pathways sets itself, from the request it sends. */
 const MANAGED_HEADERS = new Set([
   "content-length",
   "transfer-encoding",
