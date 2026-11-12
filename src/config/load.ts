@@ -335,6 +335,7 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
       name: folder,
       dir: channelDir,
       format: channel.format ?? "hl7v2",
+      ...(channel.csv === undefined ? {} : { csv: channel.csv }),
       source,
       transform,
       destinations,

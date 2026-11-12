@@ -132,6 +132,8 @@ export interface WorkerSetup {
    * transform then runs after the channel's, once per channel output, in the same request.
    */
   readonly destinations?: readonly DestinationSetup[] | undefined;
+  /** How the channel's format reads and writes its bodies, from the channel's own block. */
+  readonly formatSettings?: FormatSettings;
 }
 
 /**
@@ -182,6 +184,8 @@ const lenientUtf8 = new TextDecoder();
  * `ERR_ENCODING_INVALID_ENCODED_DATA` rather than being changed in silence.
  */
 const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
+/** `csv` reads strict UTF-8 too, keeping a byte order mark so it is written back. */
+const strictUtf8Keep = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 let hl7: Promise<typeof Hl7> | undefined;
 let fhir: Promise<typeof Fhir> | undefined;
@@ -214,6 +218,117 @@ export type JsonValue =
  */
 export type Written = string | Uint8Array;
 
+/**
+ * One column of a fixed-width `csv` channel: its name, the position of its first character counting
+ * from 1, and how many characters it holds, all counted in decoded characters (code points).
+ *
+ * @example
+ * ```ts
+ * const column: CsvColumn = { name: "code", start: 1, length: 8 };
+ * ```
+ */
+export interface CsvColumn {
+  readonly name: string;
+  readonly start: number;
+  readonly length: number;
+}
+
+/**
+ * How a `csv` channel reads and writes its bodies, from the channel's `csv:` block. Every key is
+ * optional; see {@link CSV_DEFAULTS} for what an unset key means. With `columns`, the channel reads
+ * fixed-width lines rather than delimited ones, and `delimiter`, `quote`, `escape`, `header` and
+ * `escapeFormulas` do not apply.
+ *
+ * @example
+ * ```ts
+ * const settings: CsvSettings = { delimiter: "|", header: true, newline: "lf" };
+ * ```
+ */
+export interface CsvSettings {
+  /** The one character between cells. Default `,`. */
+  readonly delimiter?: string | undefined;
+  /** The one character a cell is quoted with. Default `"`. */
+  readonly quote?: string | undefined;
+  /** The one character that escapes a quote inside a quoted cell. Default: the quote, doubled. */
+  readonly escape?: string | undefined;
+  /** Whether the first line names the columns. Default `true`. */
+  readonly header?: boolean | undefined;
+  /** How the body's bytes are read and written: `utf-8` (strict, the default) or `latin1`. */
+  readonly encoding?: "utf-8" | "latin1" | undefined;
+  /**
+   * The line ending written after a line a transform changed or added. Default: the first one the
+   * body used, or `crlf` when it has none. Lines are read on CRLF, LF and a bare CR alike.
+   */
+  readonly newline?: "crlf" | "lf" | "cr" | undefined;
+  /** Whether a short line is padded (with empty cells, or spaces) rather than refused. Default `false`. */
+  readonly pad?: boolean | undefined;
+  /**
+   * Whether a cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return is written with a
+   * leading `'`, quoted, so a spreadsheet does not run it as a formula. Default `false`.
+   */
+  readonly escapeFormulas?: boolean | undefined;
+  /** The longest line read, in decoded characters. Default 1,048,576. */
+  readonly maxRowLength?: number | undefined;
+  /** The columns of a fixed-width body. Unset for a delimited one. */
+  readonly columns?: readonly CsvColumn[] | undefined;
+}
+
+/**
+ * What each unset key of {@link CsvSettings} means.
+ *
+ * @example
+ * ```ts
+ * CSV_DEFAULTS.delimiter; // ","
+ * ```
+ */
+export const CSV_DEFAULTS = Object.freeze({
+  delimiter: ",",
+  quote: '"',
+  header: true,
+  encoding: "utf-8",
+  pad: false,
+  escapeFormulas: false,
+  maxRowLength: 1_048_576,
+} as const);
+
+/**
+ * The settings a format reads a channel's bodies with, beside its name: for now, a `csv` channel's
+ * `csv:` block. Plain data, sent to the worker as it starts.
+ *
+ * @example
+ * ```ts
+ * const settings: FormatSettings = { csv: { delimiter: ";" } };
+ * ```
+ */
+export interface FormatSettings {
+  readonly csv?: CsvSettings | undefined;
+}
+
+/**
+ * One row of a `csv` table read with a header, or of a fixed-width one: its cells by column name, on
+ * an object with no prototype, so a column named `__proto__` or `constructor` is a cell like any
+ * other.
+ *
+ * @example
+ * ```ts
+ * const row: CsvRecord = Object.assign(Object.create(null), { code: "TEST-001" });
+ * ```
+ */
+export type CsvRecord = Record<string, string>;
+
+/**
+ * What a `csv` channel's transform receives, and may return: the header and the rows. With a header
+ * (and in fixed-width mode, where the header is the column names), each row is a {@link CsvRecord};
+ * without one, `header` is `null` and each row is an array of cells. A transform may change it in
+ * place or build a new one; rows it leaves untouched are written back byte for byte.
+ *
+ * @example
+ * ```ts
+ * const table: CsvTable = { header: null, rows: [["TEST-001", "Example"]] };
+ * ```
+ */
+export type CsvTable = { header: string[]; rows: CsvRecord[] } | { header: null; rows: string[][] };
+
 /** How a format writes its own library's model, on a channel of any format. */
 export interface ModelWriter {
   /**
@@ -239,15 +354,18 @@ export interface FormatEntry<Message> {
   readonly contentType: string;
   /** Loads the library the format reads with, so the first message does not wait. Absent for none. */
   readonly load?: () => Promise<unknown>;
-  /** Parses a stored body into what the transform receives; a throw is a parse failure. */
-  readonly decode: (body: Uint8Array) => Message | Promise<Message>;
+  /**
+   * Parses a stored body into what the transform receives, with the channel's format settings; a
+   * throw is a parse failure.
+   */
+  readonly decode: (body: Uint8Array, settings: FormatSettings) => Message | Promise<Message>;
   /** Writes this format's model, on a channel of any format. */
   readonly model?: ModelWriter;
   /**
    * Writes any other value a transform returns on a channel of this format, or gives `undefined` to
    * refuse it. Asked after every model writer.
    */
-  readonly value?: (output: unknown) => Written | undefined;
+  readonly value?: (output: unknown, settings: FormatSettings) => Written | undefined;
 }
 
 /** An entry, frozen, with the type its `decode` gives kept for {@link FormatModel}. */
@@ -264,7 +382,8 @@ function defineFormat<Message>(entry: FormatEntry<Message>): FormatEntry<Message
  * - `x12`: an `X12Interchange` from `@cosyte/x12`;
  * - `ccda`: a `CcdaDocument` from `@cosyte/ccda`;
  * - `json`: the value `JSON.parse` returns;
- * - `text`: the body as a string.
+ * - `text`: the body as a string;
+ * - `csv`: a {@link CsvTable}, read by the reader below with the channel's `csv:` settings.
  *
  * @example
  * ```ts
@@ -331,6 +450,13 @@ export const FORMAT_REGISTRY = Object.freeze({
     extension: "txt",
     contentType: "text/plain",
     decode: (body) => lenientUtf8.decode(body),
+  }),
+  csv: defineFormat<CsvTable>({
+    extension: "csv",
+    contentType: "text/csv",
+    decode: (body, settings) => readCsv(body, settings.csv ?? {}),
+    value: (output, settings) =>
+      isCsvTable(output) ? writeCsv(output, settings.csv ?? {}) : undefined,
   }),
 });
 
@@ -411,12 +537,13 @@ export async function loadFormat(format: WorkerFormat): Promise<void> {
 export async function decode<F extends WorkerFormat>(
   format: F,
   body: Uint8Array,
+  settings: FormatSettings = {},
 ): Promise<FormatModel<F>> {
   const entry = FORMAT_REGISTRY[format] as FormatEntry<FormatModel<F>>;
   // Called inside this async function, so a parser that throws as it is called rejects like one that
   // rejects. Only a parser's promise is awaited: a parser that returns its value at once (json,
   // text) leaves nothing waiting, so a run of calls that never yields piles up no continuations.
-  const message = entry.decode(body);
+  const message = entry.decode(body, settings);
   return message instanceof Promise ? await message : message;
 }
 
@@ -624,6 +751,498 @@ function jsonValue(output: unknown): Written | undefined {
   return undefined;
 }
 
+/**
+ * A `csv` body that cannot be read, or a table that cannot be written. Its text names a line or a
+ * column position and never a cell, since a cell can carry a patient's details.
+ *
+ * Codes: `CSV_UNTERMINATED_QUOTE`, `CSV_INVALID_QUOTE` (a quote inside an unquoted cell, or text
+ * after a closing quote), `CSV_RAGGED_ROW`, `CSV_DUPLICATE_HEADER`, `CSV_ROW_TOO_LONG`,
+ * `CSV_SHORT_LINE`, `CSV_VALUE_TOO_WIDE`, `CSV_UNKNOWN_COLUMN`, `CSV_INVALID_CELL` and
+ * `CSV_NOT_ENCODABLE`.
+ */
+class CsvError extends Error {
+  readonly code: string;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = "CsvError";
+    this.code = code;
+  }
+}
+
+/** A {@link CsvSettings} with every default filled in, read once per settings object. */
+interface CsvPlan {
+  readonly delimiter: string;
+  readonly quote: string;
+  readonly escape: string;
+  readonly header: boolean;
+  readonly latin1: boolean;
+  readonly newline: string | undefined;
+  readonly pad: boolean;
+  readonly escapeFormulas: boolean;
+  readonly maxRowLength: number;
+  readonly columns: readonly CsvColumn[] | undefined;
+  /** In fixed-width mode, the end of the last column: the width every line is read at. */
+  readonly width: number;
+}
+
+const NEWLINES = { crlf: "\r\n", lf: "\n", cr: "\r" } as const;
+
+const plans = new WeakMap<CsvSettings, CsvPlan>();
+
+function planOf(settings: CsvSettings): CsvPlan {
+  let plan = plans.get(settings);
+  if (plan === undefined) {
+    const quote = settings.quote ?? CSV_DEFAULTS.quote;
+    const columns = settings.columns;
+    plan = {
+      delimiter: settings.delimiter ?? CSV_DEFAULTS.delimiter,
+      quote,
+      escape: settings.escape ?? quote,
+      header: settings.header ?? CSV_DEFAULTS.header,
+      latin1: settings.encoding === "latin1",
+      newline: settings.newline === undefined ? undefined : NEWLINES[settings.newline],
+      pad: settings.pad ?? CSV_DEFAULTS.pad,
+      escapeFormulas: settings.escapeFormulas ?? CSV_DEFAULTS.escapeFormulas,
+      maxRowLength: settings.maxRowLength ?? CSV_DEFAULTS.maxRowLength,
+      columns,
+      width: Math.max(0, ...(columns ?? []).map(({ start, length }) => start - 1 + length)),
+    };
+    plans.set(settings, plan);
+  }
+  return plan;
+}
+
+/** One line as it was read: its text without its ending, the ending, and its cells. */
+interface CsvLine {
+  readonly raw: string;
+  readonly end: string;
+  readonly cells: readonly string[];
+}
+
+/** What a table was read from, so what a transform leaves untouched is written back as it was. */
+interface CsvOrigin {
+  readonly bom: boolean;
+  /** Whether the body's last line ended with a line ending (true for an empty body). */
+  readonly trailing: boolean;
+  /** The first line ending the body used, if any. */
+  readonly newline: string | undefined;
+  /** The header line, when the table has one read from the body. */
+  readonly header: CsvLine | undefined;
+}
+
+/** Each table read in this worker, to where it came from. */
+const origins = new WeakMap<object, CsvOrigin>();
+/** Each row read in this worker, to its line. */
+const rowLines = new WeakMap<object, CsvLine>();
+
+/**
+ * Reads a `csv` body into a {@link CsvTable}: delimited cells, or fixed-width columns when the
+ * settings name `columns`. Lines end at CRLF, LF or a bare CR; a quoted cell may hold any of them.
+ * A UTF-8 byte order mark is dropped, and written back.
+ *
+ * @example
+ * ```ts
+ * readCsv(new TextEncoder().encode("code,name\r\nTEST-001,Example\r\n"), {}).rows[0]?.["code"]; // "TEST-001"
+ * ```
+ */
+export function readCsv(body: Uint8Array, settings: CsvSettings): CsvTable {
+  const plan = planOf(settings);
+  let text = plan.latin1
+    ? Buffer.from(body.buffer, body.byteOffset, body.byteLength).toString("latin1")
+    : strictUtf8Keep.decode(body);
+  const bom = !plan.latin1 && text.charCodeAt(0) === 0xfeff;
+  if (bom) text = text.slice(1);
+  const lines =
+    plan.columns === undefined ? delimitedLines(text, plan) : fixedLines(text, plan, plan.columns);
+  const last = lines.at(-1);
+  const origin: CsvOrigin = {
+    bom,
+    trailing: last === undefined || last.end !== "",
+    newline: lines.find(({ end }) => end !== "")?.end,
+    header: plan.columns === undefined && plan.header ? lines[0] : undefined,
+  };
+  let table: CsvTable;
+  if (plan.columns !== undefined) {
+    const names = plan.columns.map(({ name }) => name);
+    table = { header: names, rows: lines.map((line) => recordOf(names, line)) };
+  } else if (plan.header) {
+    const names = [...(lines[0]?.cells ?? [])];
+    const seen = new Set<string>();
+    for (const [at, name] of names.entries()) {
+      if (seen.has(name)) {
+        throw new CsvError("CSV_DUPLICATE_HEADER", `header column ${at + 1} repeats a name`);
+      }
+      seen.add(name);
+    }
+    table = {
+      header: names,
+      rows: lines
+        .slice(1)
+        .map((line, at) => recordOf(names, fitted(line, names.length, at + 2, plan))),
+    };
+  } else {
+    const width = lines[0]?.cells.length ?? 0;
+    table = {
+      header: null,
+      rows: lines.map((line, at) => {
+        const fit = fitted(line, width, at + 1, plan);
+        const row = [...fit.cells];
+        rowLines.set(row, fit);
+        return row;
+      }),
+    };
+  }
+  origins.set(table, origin);
+  return table;
+}
+
+/** A line held to `width` cells: padded with empty ones when the settings say so, else refused. */
+function fitted(line: CsvLine, width: number, number: number, plan: CsvPlan): CsvLine {
+  const count = line.cells.length;
+  if (count === width) return line;
+  if (count < width && plan.pad) {
+    return { ...line, cells: [...line.cells, ...Array<string>(width - count).fill("")] };
+  }
+  throw new CsvError(
+    "CSV_RAGGED_ROW",
+    `line ${number} has ${count} cells where the first has ${width}; set pad: true to pad a short one`,
+  );
+}
+
+/** A row on an object with no prototype, its cells by column name, remembered against its line. */
+function recordOf(names: readonly string[], line: CsvLine): CsvRecord {
+  const row = Object.create(null) as CsvRecord;
+  // The line holds one cell per name: fitted to the header, or cut into the columns.
+  for (const [at, cell] of line.cells.entries()) row[names[at] as string] = cell;
+  rowLines.set(row, line);
+  return row;
+}
+
+/** The line ending at `at` in `text`: CRLF, LF, a bare CR, or none. */
+function endingAt(text: string, at: number): string {
+  const code = text.charCodeAt(at);
+  if (code === 0x0d) return text.charCodeAt(at + 1) === 0x0a ? "\r\n" : "\r";
+  return code === 0x0a ? "\n" : "";
+}
+
+function tooLong(number: number, plan: CsvPlan): CsvError {
+  return new CsvError(
+    "CSV_ROW_TOO_LONG",
+    `line ${number} is longer than maxRowLength (${plan.maxRowLength} characters)`,
+  );
+}
+
+/** Splits delimited text into lines of cells, as RFC 4180 reads them, with the settings' characters. */
+function delimitedLines(text: string, plan: CsvPlan): CsvLine[] {
+  const { delimiter, quote, escape, maxRowLength } = plan;
+  const length = text.length;
+  const lines: CsvLine[] = [];
+  let at = 0;
+  while (at < length) {
+    const start = at;
+    const number = lines.length + 1;
+    const cells: string[] = [];
+    for (;;) {
+      let cell = "";
+      if (text[at] === quote) {
+        at++;
+        let run = at;
+        for (;;) {
+          if (at >= length) {
+            throw new CsvError(
+              "CSV_UNTERMINATED_QUOTE",
+              `line ${number} opens a quote it never closes`,
+            );
+          }
+          if (at - start > maxRowLength) throw tooLong(number, plan);
+          const char = text[at];
+          if (
+            char === escape &&
+            escape !== quote &&
+            (text[at + 1] === quote || text[at + 1] === escape)
+          ) {
+            cell += text.slice(run, at) + text[at + 1];
+            at += 2;
+            run = at;
+          } else if (char === quote) {
+            if (escape === quote && text[at + 1] === quote) {
+              cell += text.slice(run, at + 1);
+              at += 2;
+              run = at;
+            } else {
+              cell += text.slice(run, at);
+              at++;
+              break;
+            }
+          } else {
+            at++;
+          }
+        }
+        if (at < length && text[at] !== delimiter && endingAt(text, at) === "") {
+          throw new CsvError("CSV_INVALID_QUOTE", `line ${number} has text after a closing quote`);
+        }
+      } else {
+        const run = at;
+        while (at < length && text[at] !== delimiter) {
+          const code = text.charCodeAt(at);
+          if (code === 0x0d || code === 0x0a) break;
+          if (text[at] === quote) {
+            throw new CsvError(
+              "CSV_INVALID_QUOTE",
+              `line ${number} has a quote inside an unquoted cell`,
+            );
+          }
+          at++;
+        }
+        cell = text.slice(run, at);
+      }
+      if (at - start > maxRowLength) throw tooLong(number, plan);
+      cells.push(cell);
+      if (at < length && text[at] === delimiter) {
+        at++;
+        continue;
+      }
+      break;
+    }
+    const end = endingAt(text, at);
+    lines.push({ raw: text.slice(start, at), end, cells });
+    at += end.length;
+  }
+  return lines;
+}
+
+/** Splits fixed-width text into lines, each cut into the settings' columns by code point. */
+function fixedLines(text: string, plan: CsvPlan, columns: readonly CsvColumn[]): CsvLine[] {
+  const length = text.length;
+  const lines: CsvLine[] = [];
+  let at = 0;
+  while (at < length) {
+    const number = lines.length + 1;
+    let stop = at;
+    while (stop < length && endingAt(text, stop) === "") stop++;
+    const raw = text.slice(at, stop);
+    const end = endingAt(text, stop);
+    at = stop + end.length;
+    const chars = Array.from(raw);
+    if (chars.length > plan.maxRowLength) throw tooLong(number, plan);
+    if (chars.length < plan.width) {
+      if (!plan.pad) {
+        throw new CsvError(
+          "CSV_SHORT_LINE",
+          `line ${number} has ${chars.length} characters where the columns need ${plan.width}; set pad: true to pad it with spaces`,
+        );
+      }
+      while (chars.length < plan.width) chars.push(" ");
+    }
+    const cells = columns.map(({ start, length: size }) =>
+      chars.slice(start - 1, start - 1 + size).join(""),
+    );
+    lines.push({ raw, end, cells });
+  }
+  return lines;
+}
+
+/** Whether a transform's output is a {@link CsvTable}: an object with `rows` and a `header`. */
+function isCsvTable(output: unknown): output is CsvTable {
+  if (typeof output !== "object" || output === null || Array.isArray(output)) return false;
+  const { header, rows } = output as { header?: unknown; rows?: unknown };
+  return Array.isArray(rows) && (header === null || Array.isArray(header));
+}
+
+/** A cell's text: a string as it is, a number, boolean or bigint as written, nothing as empty. */
+function cellText(value: unknown, number: number): string {
+  if (typeof value === "string") return value;
+  if (value === undefined || value === null) return "";
+  if (
+    (typeof value === "number" && Number.isFinite(value)) ||
+    typeof value === "boolean" ||
+    typeof value === "bigint"
+  ) {
+    return String(value);
+  }
+  throw new CsvError(
+    "CSV_INVALID_CELL",
+    `row ${number} holds a cell that is not a string, a finite number or a boolean`,
+  );
+}
+
+/** A cell a spreadsheet would run as a formula. */
+const FORMULA = /^[=+\-@\t\r]/;
+
+/** Whether `cells` equal what `line` was read as, so the line can be written as it was. */
+function untouched(cells: readonly string[], line: CsvLine | undefined, plan: CsvPlan): boolean {
+  if (line?.cells.length !== cells.length) return false;
+  for (const [at, cell] of cells.entries()) {
+    if (cell !== line.cells[at]) return false;
+    if (plan.escapeFormulas && plan.columns === undefined && FORMULA.test(cell)) return false;
+  }
+  return true;
+}
+
+/**
+ * Writes a {@link CsvTable} back to a body. A line whose cells are as they were read is written as
+ * it was, ending and all; a changed or new line is written with the settings' quoting and newline.
+ * So a table no transform touched comes back byte for byte.
+ *
+ * @example
+ * ```ts
+ * writeCsv({ header: null, rows: [["TEST-001", "a,b"]] }, {}); // 'TEST-001,"a,b"\r\n'
+ * ```
+ */
+export function writeCsv(table: CsvTable, settings: CsvSettings): Written {
+  const plan = planOf(settings);
+  const origin = origins.get(table);
+  const newline = plan.newline ?? origin?.newline ?? "\r\n";
+  const lines: { readonly text: string; readonly end: string | undefined }[] = [];
+  const header = table.header;
+  if (plan.columns !== undefined) {
+    const columns = plan.columns;
+    const names = columns.map(({ name }) => name);
+    for (const [at, row] of (table.rows as unknown[]).entries()) {
+      const cells = cellsByName(row, names, at + 1);
+      // cellsByName refused anything but an object.
+      const line = rowLines.get(row as object);
+      lines.push(
+        untouched(cells, line, plan) && line !== undefined
+          ? { text: line.raw, end: line.end }
+          : { text: fixedText(cells, plan.width, columns, at + 1), end: undefined },
+      );
+    }
+  } else if (header !== null) {
+    const names = header.map((name, at) => cellText(name, at + 1));
+    if (names.length > 0) {
+      const line = origin?.header;
+      lines.push(
+        untouched(names, line, plan) && line !== undefined
+          ? { text: line.raw, end: line.end }
+          : { text: delimitedText(names, plan), end: undefined },
+      );
+    }
+    for (const [at, row] of (table.rows as unknown[]).entries()) {
+      const cells = cellsByName(row, names, at + 1);
+      // cellsByName refused anything but an object.
+      const line = rowLines.get(row as object);
+      lines.push(
+        untouched(cells, line, plan) && line !== undefined
+          ? { text: line.raw, end: line.end }
+          : { text: delimitedText(cells, plan), end: undefined },
+      );
+    }
+  } else {
+    for (const [at, row] of (table.rows as unknown[]).entries()) {
+      if (!Array.isArray(row)) {
+        throw new CsvError(
+          "CSV_INVALID_CELL",
+          `row ${at + 1} is not an array, and the table has no header`,
+        );
+      }
+      const cells = row.map((value) => cellText(value, at + 1));
+      const line = rowLines.get(row);
+      lines.push(
+        untouched(cells, line, plan) && line !== undefined
+          ? { text: line.raw, end: line.end }
+          : { text: delimitedText(cells, plan), end: undefined },
+      );
+    }
+  }
+  let text = origin?.bom === true ? "﻿" : "";
+  const trailing = origin?.trailing ?? true;
+  for (const [at, { text: line, end }] of lines.entries()) {
+    const last = at === lines.length - 1;
+    // A line keeps its own ending; the last keeps the body's choice of ending with one or not.
+    text += line + (last && !trailing ? "" : end === undefined || end === "" ? newline : end);
+  }
+  if (!plan.latin1) return text;
+  for (let at = 0; at < text.length; at++) {
+    if (text.charCodeAt(at) > 0xff) {
+      throw new CsvError("CSV_NOT_ENCODABLE", "the table holds a character Latin-1 cannot write");
+    }
+  }
+  return new Uint8Array(Buffer.from(text, "latin1"));
+}
+
+/** A row's cells in the order of `names`, refusing a key that names no column. */
+function cellsByName(row: unknown, names: readonly string[], number: number): string[] {
+  if (typeof row !== "object" || row === null || Array.isArray(row)) {
+    throw new CsvError(
+      "CSV_INVALID_CELL",
+      `row ${number} is not an object of cells by column name`,
+    );
+  }
+  const known = new Set(names);
+  for (const key of Object.keys(row)) {
+    if (!known.has(key)) {
+      throw new CsvError(
+        "CSV_UNKNOWN_COLUMN",
+        `row ${number} has a cell under a name the header does not hold`,
+      );
+    }
+  }
+  const cells = row as Record<string, unknown>;
+  return names.map((name) =>
+    cellText(Object.hasOwn(cells, name) ? cells[name] : undefined, number),
+  );
+}
+
+/** One delimited line: each cell quoted when it must be, and guarded when it reads as a formula. */
+function delimitedText(cells: readonly string[], plan: CsvPlan): string {
+  const { delimiter, quote, escape } = plan;
+  return cells
+    .map((cell) => {
+      let value = cell;
+      let quoted = false;
+      if (plan.escapeFormulas && FORMULA.test(value)) {
+        value = `'${value}`;
+        quoted = true;
+      }
+      if (
+        quoted ||
+        value.includes(delimiter) ||
+        value.includes(quote) ||
+        value.includes(escape) ||
+        value.includes("\r") ||
+        value.includes("\n")
+      ) {
+        let inner = "";
+        for (const char of value) {
+          inner += char === quote || (char === escape && escape !== quote) ? escape + char : char;
+        }
+        return quote + inner + quote;
+      }
+      return value;
+    })
+    .join(delimiter);
+}
+
+/** One fixed-width line: each cell at its column, padded with spaces, refused when it is too wide. */
+function fixedText(
+  cells: readonly string[],
+  width: number,
+  columns: readonly CsvColumn[],
+  number: number,
+): string {
+  const chars = Array<string>(width).fill(" ");
+  for (const [at, column] of columns.entries()) {
+    // One cell per column: cellsByName read them by the columns' names.
+    const value = Array.from(cells[at] as string);
+    if (value.length > column.length) {
+      throw new CsvError(
+        "CSV_VALUE_TOO_WIDE",
+        `row ${number}: the value for column ${at + 1} is ${value.length} characters, wider than its ${column.length}`,
+      );
+    }
+    if (value.some((char) => char === "\r" || char === "\n")) {
+      throw new CsvError(
+        "CSV_INVALID_CELL",
+        `row ${number}: the value for column ${at + 1} holds a line ending`,
+      );
+    }
+    for (const [offset, char] of value.entries()) chars[column.start - 1 + offset] = char;
+  }
+  return chars.join("");
+}
+
 /** The model writers told by shape, in the registry's order. */
 const shapeWriters: ModelWriter[] = [];
 /** The model writers told by class, with their formats, in the registry's order. */
@@ -692,14 +1311,18 @@ export function bytesOf(written: Written): Uint8Array {
  * const json = await encode("json", { status: "ok" }); // {"status":"ok"}
  * ```
  */
-export async function encode(format: WorkerFormat, output: unknown): Promise<Uint8Array> {
+export async function encode(
+  format: WorkerFormat,
+  output: unknown,
+  settings: FormatSettings = {},
+): Promise<Uint8Array> {
   if (typeof output === "string" || output instanceof Uint8Array) return bytesOf(output);
   if (typeof output === "object" && output !== null) {
     const written = await writeModel(format, output);
     if (written !== undefined) return bytesOf(written);
   }
   const entry: FormatEntry<unknown> = FORMAT_REGISTRY[format];
-  const written = entry.value?.(output);
+  const written = entry.value?.(output, settings);
   if (written !== undefined) return bytesOf(written);
   throw new TypeError("the transform returned something that is neither a message nor a string");
 }
@@ -748,9 +1371,10 @@ export function buildContext(
 /**
  * Runs one message through `transform`: parse, call with its context, serialize. `null` or
  * `undefined` filters the message out; an array sends several. Without a context, the transform
- * gets that of a message that is not stored, with no configuration. The outputs are written in
- * `outFormat`, the format read by default: a destination's transform reads the channel's format and
- * writes its destination's.
+ * gets that of a message that is not stored, with no configuration. `settings` is how the channel's
+ * own block reads and writes its format's bodies (a `csv` channel's `csv:`). The outputs are
+ * written in `outFormat`, the format read by default: a destination's transform reads the channel's
+ * format and writes its destination's.
  *
  * @example
  * ```ts
@@ -762,11 +1386,12 @@ export async function runTransform(
   format: WorkerFormat,
   body: Uint8Array,
   ctx: unknown = buildContext(UNSTORED, {}),
+  settings: FormatSettings = {},
   outFormat: WorkerFormat = format,
 ): Promise<Uint8Array[]> {
   let message: unknown;
   try {
-    message = await decode(format, body);
+    message = await decode(format, body, settings);
   } catch (error) {
     throw new StageError("parse", error);
   }
@@ -779,7 +1404,7 @@ export async function runTransform(
   if (result === null || result === undefined) return [];
   const outputs: unknown[] = Array.isArray(result) ? result : [result];
   try {
-    return await Promise.all(outputs.map((output) => encode(outFormat, output)));
+    return await Promise.all(outputs.map((output) => encode(outFormat, output, settings)));
   } catch (error) {
     throw new StageError("output", error);
   }
@@ -818,7 +1443,7 @@ export interface LoadedDestination {
  * is written in its destination's format. A destination transform that throws, or whose output cannot be read or written, fails that
  * destination only: the others go on. A destination without a transform sends the channel's
  * outputs, and its entry is `null`. A failure of the channel's own transform rejects, as
- * {@link runTransform} does.
+ * {@link runTransform} does. `settings` is the channel's, as {@link runTransform} takes it.
  *
  * @example
  * ```ts
@@ -831,8 +1456,9 @@ export async function runDestinations(
   body: Uint8Array,
   ctx: object,
   destinations: readonly LoadedDestination[],
+  settings: FormatSettings = {},
 ): Promise<{ outputs: Uint8Array[]; destinations: (DestinationReply | null)[] }> {
-  const outputs = await runTransform(transform, format, body, ctx);
+  const outputs = await runTransform(transform, format, body, ctx, settings);
   const replies: (DestinationReply | null)[] = [];
   for (const { setup, transform: own } of destinations) {
     if (own === undefined) {
@@ -843,7 +1469,7 @@ export async function runDestinations(
     try {
       const sent: Uint8Array[] = [];
       for (const output of outputs) {
-        sent.push(...(await runTransform(own, format, output, context, setup.format)));
+        sent.push(...(await runTransform(own, format, output, context, settings, setup.format)));
       }
       replies.push({ ok: true, outputs: sent });
     } catch (error) {
@@ -1034,6 +1660,7 @@ if (!isMainThread && parentPort !== null && isWorkerSetup(workerData)) {
   });
   // Frozen once: every message's context shares it.
   const config = freezeDeep(setup.config);
+  const formatSettings = freezeDeep(setup.formatSettings ?? {});
   Promise.all([loadTransform(setup.transformFile), parser])
     .then(async ([transform]) => ({
       transform,
@@ -1049,10 +1676,17 @@ if (!isMainThread && parentPort !== null && isWorkerSetup(workerData)) {
             destinations?: (DestinationReply | null)[];
           }> =
             destinations === undefined
-              ? runTransform(transform, setup.format, request.body, ctx).then((outputs) => ({
-                  outputs,
-                }))
-              : runDestinations(transform, setup.format, request.body, ctx, destinations);
+              ? runTransform(transform, setup.format, request.body, ctx, formatSettings).then(
+                  (outputs) => ({ outputs }),
+                )
+              : runDestinations(
+                  transform,
+                  setup.format,
+                  request.body,
+                  ctx,
+                  destinations,
+                  formatSettings,
+                );
           run.then(
             (result) =>
               port.postMessage(

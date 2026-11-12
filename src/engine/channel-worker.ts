@@ -3,6 +3,7 @@ import { Worker } from "node:worker_threads";
 import type { ChannelConfig } from "../config/schema.js";
 import { ownsBuffer } from "../storage/ownership.js";
 import type {
+  CsvSettings,
   DestinationReply,
   DestinationSetup,
   FailureSummary,
@@ -152,6 +153,8 @@ export interface ChannelWorkerOptions {
    * when none has one.
    */
   readonly destinations?: readonly DestinationSetup[] | undefined;
+  /** A `csv` channel's `csv:` block, as validated: how its bodies are read and written. */
+  readonly csv?: CsvSettings | undefined;
   readonly workerUrl?: URL;
 }
 
@@ -236,6 +239,7 @@ export class ChannelWorker {
       ...(this.options.destinations === undefined
         ? {}
         : { destinations: this.options.destinations }),
+      ...(this.options.csv === undefined ? {} : { formatSettings: { csv: this.options.csv } }),
     };
     const worker = new Worker(this.options.workerUrl ?? defaultWorkerUrl(), {
       workerData: setup,

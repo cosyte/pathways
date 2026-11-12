@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 import { normalisePath } from "../connectors/http-path.js";
-import { FORMATS } from "../engine/worker-entry.js";
+import { FORMATS, type CsvSettings } from "../engine/worker-entry.js";
 import { LIFECYCLE_EVENTS, type LifecycleEventType } from "../extensions/events.js";
 import type { JsonValue } from "../transform.js";
 import { cronClass } from "./cron.js";
@@ -29,7 +29,8 @@ export { FORMATS };
  * - `x12`: an X12 interchange, parsed with `@cosyte/x12`;
  * - `ccda`: a C-CDA document, parsed with `@cosyte/ccda`;
  * - `json`: any JSON, as `JSON.parse` reads it;
- * - `text`: the body as a string, unparsed.
+ * - `text`: the body as a string, unparsed;
+ * - `csv`: delimited or fixed-width lines, as a table of rows.
  *
  * @example
  * ```ts
@@ -2163,6 +2164,145 @@ const metaIndex = z.union([
     .meta({ description: "A ctx.meta key to index, with its tag's bit length." }),
 ]);
 
+/** One character a CSV line is split or quoted with: never a line ending. */
+const csvCharacter = (what: string) =>
+  z
+    .string()
+    .length(1, `${what}: one character`)
+    .refine((value) => value !== "\r" && value !== "\n", `${what}: not a line ending`);
+
+/** The keys of a `csv:` block that a fixed-width one (with `columns`) does not take. */
+const DELIMITED_ONLY = ["delimiter", "quote", "escape", "header", "escapeFormulas"] as const;
+
+/** A `csv` channel's `csv:` block. */
+const csvBlock = z
+  .strictObject({
+    delimiter: csvCharacter("delimiter")
+      .meta({ description: "The one character between cells. Default: a comma." })
+      .optional(),
+    quote: csvCharacter("quote")
+      .meta({ description: 'The one character a cell is quoted with. Default: ".' })
+      .optional(),
+    escape: csvCharacter("escape")
+      .meta({
+        description:
+          "The one character that escapes a quote inside a quoted cell. Default: the quote, doubled.",
+      })
+      .optional(),
+    header: z
+      .boolean()
+      .meta({
+        description:
+          "Whether the first line names the columns: each row is then an object by name. Default: true.",
+      })
+      .optional(),
+    encoding: z
+      .enum(["utf-8", "latin1"])
+      .meta({ description: "How the bytes are read and written: utf-8 (the default) or latin1." })
+      .optional(),
+    newline: z
+      .enum(["crlf", "lf", "cr"])
+      .meta({
+        description:
+          "The line ending written after a line the transform changed or added. Default: the first one the body used, else crlf.",
+      })
+      .optional(),
+    pad: z
+      .boolean()
+      .meta({
+        description:
+          "Pad a short line (with empty cells, or with spaces in fixed-width mode) rather than refuse it. Default: false.",
+      })
+      .optional(),
+    escapeFormulas: z
+      .boolean()
+      .meta({
+        description:
+          "Write a cell that starts with =, +, -, @, a tab or a carriage return with a leading ' and quoted, so a spreadsheet does not run it. Default: false.",
+      })
+      .optional(),
+    maxRowLength: z
+      .number()
+      .int()
+      .min(1)
+      .meta({ description: "The longest line read, in characters. Default: 1048576." })
+      .optional(),
+    columns: z
+      .array(
+        z
+          .strictObject({
+            name: z.string().min(1).meta({ description: "The column's name: the row's key." }),
+            start: z
+              .number()
+              .int()
+              .min(1)
+              .meta({ description: "The position of its first character, counting from 1." }),
+            length: z.number().int().min(1).meta({ description: "How many characters it holds." }),
+          })
+          .meta({ description: "One fixed-width column." }),
+      )
+      .min(1)
+      .meta({
+        description:
+          "Read fixed-width lines rather than delimited ones: each column's name, start and length, in characters.",
+      })
+      .optional(),
+  })
+  .superRefine((block, ctx) => {
+    const delimiter = block.delimiter ?? ",";
+    const quote = block.quote ?? '"';
+    if (delimiter === quote) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["quote"],
+        message: "the quote and the delimiter are the same character",
+      });
+    }
+    if (block.escape !== undefined && block.escape === delimiter) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["escape"],
+        message: "the escape and the delimiter are the same character",
+      });
+    }
+    if (block.columns === undefined) return;
+    for (const key of DELIMITED_ONLY) {
+      if (block[key] !== undefined) {
+        ctx.addIssue({
+          code: "custom",
+          path: [key],
+          message: `${key} does not apply to fixed-width columns`,
+        });
+      }
+    }
+    const names = new Set<string>();
+    const spans = block.columns
+      .map((column, index) => ({ ...column, index }))
+      .sort((a, b) => a.start - b.start);
+    for (const [at, column] of spans.entries()) {
+      if (names.has(column.name)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["columns", column.index, "name"],
+          message: `${column.name} is a column twice`,
+        });
+      }
+      names.add(column.name);
+      const before = spans[at - 1];
+      if (before !== undefined && before.start + before.length > column.start) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["columns", column.index, "start"],
+          message: "this column overlaps the one before it",
+        });
+      }
+    }
+  })
+  .meta({
+    description:
+      "How a csv channel reads and writes its bodies: delimiter, quote, escape, header, encoding, newline, pad, escapeFormulas and maxRowLength, or columns for fixed-width lines.",
+  });
+
 /** `channels/<name>/channel.yaml`. */
 export const channelSchema = restate(
   z
@@ -2182,9 +2322,10 @@ export const channelSchema = restate(
         .enum(FORMATS)
         .meta({
           description:
-            "What the transform receives: hl7v2 (the default), fhir, x12, ccda, json, or text, the body unparsed. MLLP needs hl7v2.",
+            "What the transform receives: hl7v2 (the default), fhir, x12, ccda, json, text, the body unparsed, or csv, a table of rows. MLLP needs hl7v2.",
         })
         .optional(),
+      csv: csvBlock.optional(),
       source,
       transform: path
         .meta({
@@ -2251,6 +2392,13 @@ export const channelSchema = restate(
         "One Pathways channel: a source, an optional transform and its destinations. This schema checks a subset of what pathways start checks: run pathways validate for the rest.",
     })
     .superRefine((channel, ctx) => {
+      if (channel.csv !== undefined && channel.format !== "csv") {
+        ctx.addIssue({
+          code: "custom",
+          path: ["csv"],
+          message: "a csv: block needs format: csv",
+        });
+      }
       // MLLP frames HL7 v2 and its ACKs are HL7 v2 messages, so an MLLP endpoint needs that format.
       if ((channel.format ?? "hl7v2") === "hl7v2") return;
       const message = `MLLP carries HL7 v2 only, and this channel's format is ${String(channel.format)}; set format: hl7v2, or use another connector`;
@@ -2945,6 +3093,8 @@ export interface ChannelConfig {
   /** The channel's folder. Relative paths in its `channel.yaml` resolve against it. */
   readonly dir: string;
   readonly format: Format;
+  /** A `csv` channel's `csv:` block, as written; unset for another format or no block. */
+  readonly csv?: CsvSettings | undefined;
   readonly source: FileSource | HttpSource | MllpSource | ModuleConnector;
   /** The transform module, or `undefined` to pass each message through unchanged. */
   readonly transform: string | undefined;
