@@ -140,8 +140,8 @@ export default ((msg) => {
     if (msg.get(`OBX[${String(i)}].11`) !== "F") return null;
   }
   // MSH-5 and MSH-6 are the receiving application and facility.
-  msg.setField("MSH.5", "SYNTH-EHR");
-  msg.setField("MSH.6", "SYNTH-HOSP");
+  msg.setField("MSH.5", "EHR");
+  msg.setField("MSH.6", "HOSPITAL");
   return msg;
 }) satisfies Transform;
 ```

@@ -67,11 +67,11 @@ channels/adt-to-http/tests/a01.hl7: AA
 channels/adt-to-http/tests/oru.hl7: AA
 ```
 
-The receiver gets one POST, the admission addressed to `SYNTH-EHR`, and writes it to
+The receiver gets one POST, the admission addressed to `EHR`, and writes it to
 `data/receiver/1.hl7`; the lab result was filtered out. It prints the size, never the content:
 
 ```text
-POST /adt application/hl7-v2: 283 bytes to data/receiver/1.hl7
+POST /adt application/hl7-v2: 275 bytes to data/receiver/1.hl7
 ```
 
 `data/receiver/1.hl7` matches `channels/adt-to-http/tests/a01.expected.hl7`. Stop the engine and the
@@ -155,8 +155,8 @@ import type { Transform } from "@cosyte/pathways";
 export default ((msg) => {
   if (!msg.is("ADT^A01") && !msg.is("ADT^A04") && !msg.is("ADT^A08")) return null;
   // MSH-5 and MSH-6 are the receiving application and facility.
-  msg.setField("MSH.5", "SYNTH-EHR");
-  msg.setField("MSH.6", "SYNTH-HOSP");
+  msg.setField("MSH.5", "EHR");
+  msg.setField("MSH.6", "HOSPITAL");
   return msg;
 }) satisfies Transform;
 ```

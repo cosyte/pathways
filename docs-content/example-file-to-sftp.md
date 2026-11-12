@@ -144,8 +144,8 @@ import type { Transform } from "@cosyte/pathways";
 export default ((msg) => {
   if (!msg.is("ORM^O01")) return null;
   // MSH-5 and MSH-6 are the receiving application and facility.
-  msg.setField("MSH.5", "SYNTH-REFLAB");
-  msg.setField("MSH.6", "SYNTH-REFLAB-FAC");
+  msg.setField("MSH.5", "LAB");
+  msg.setField("MSH.6", "REFLAB");
   return msg;
 }) satisfies Transform;
 ```

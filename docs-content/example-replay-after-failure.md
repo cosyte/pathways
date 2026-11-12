@@ -185,7 +185,7 @@ export default (async (msg) => {
   const code = codes[msg.get("MSH.9.2") ?? ""];
   if (code === undefined) throw new Error("MSH-9.2 is not in event-codes.json");
   msg.setField("EVN.4", code);
-  msg.setField("MSH.5", "SYNTH-REGISTRY");
+  msg.setField("MSH.5", "REGISTRY");
   return msg;
 }) satisfies Transform;
 ```
