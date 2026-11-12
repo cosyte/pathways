@@ -76,6 +76,21 @@ with `ssl` options is refused, and a MySQL or SQL Server URL with any options af
 Errors about the database name the setting at fault and the driver's error code, never the URL, the
 server or the login.
 
+### MySQL and MariaDB: prepared statements
+
+On MySQL and MariaDB, every statement that carries a value runs as a prepared statement: the
+server binds the value apart from the SQL text, so a message, an error text or metadata with quotes
+and backslashes is stored byte for byte under any `sql_mode`, `NO_BACKSLASH_ESCAPES` included.
+CI stores and reads back such values on both servers with that mode set.
+
+Each connection keeps its 128 most recently used prepared statements and closes the rest on the
+server. The server caps prepared statements across all its connections with
+`max_prepared_stmt_count` (16,382 by default), so 128 for every connection Pathways opens to it must
+fit: 1,280 for one engine at the default `pool.max` of 10. If you run several engines, standbys or a
+large pool against one server, raise `max_prepared_stmt_count` to at least 128 times the connections
+they open together, plus what other applications on that server prepare. A statement over the cap
+fails with the server's error 1461 (`ER_MAX_PREPARED_STMT_COUNT_REACHED`).
+
 ## What a database keeps after a delete
 
 Retention deletes messages, and [`storage.content:

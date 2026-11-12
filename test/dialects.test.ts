@@ -1,10 +1,16 @@
 import { EventEmitter } from "node:events";
 
+import { Kysely, sql } from "kysely";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { ConfigError } from "../src/config/load.js";
 import type { ServerStorage } from "../src/config/schema.js";
-import { dialectFor, type DriverImport, type DriverPackage } from "../src/storage/dialects.js";
+import {
+  dialectFor,
+  serverBinds,
+  type DriverImport,
+  type DriverPackage,
+} from "../src/storage/dialects.js";
 import { StorageError, Store } from "../src/storage/store.js";
 import { serverStorage, URL_ENV } from "./databases.js";
 import { makeCertificates, removeCertificates, type Certificates } from "./net-helpers.js";
@@ -221,6 +227,7 @@ describe("dialectFor: what each driver is given", () => {
       maxIdle: 7,
       idleTimeout: 1_234,
       connectTimeout: 4_321,
+      maxPreparedStatements: 128,
     });
     await open(serverStorage("mysql"), "mariadb://db.local:3307/pathways", importDriver);
     expect(seen["mysql2"]).not.toHaveProperty("ssl");
@@ -326,4 +333,109 @@ describe("Store.open on a server that is not there", () => {
       }
     },
   );
+});
+
+/** What a stand-in mysql2 connection was asked to run, and by which of its methods. */
+interface Ran {
+  readonly method: "query" | "execute";
+  readonly text: string;
+  readonly values: unknown;
+}
+
+/** A stand-in mysql2 pool with one connection, which records each statement and answers it. */
+function fakeMysqlPool() {
+  const ran: Ran[] = [];
+  const calls: string[] = [];
+  const answer =
+    (method: Ran["method"]) =>
+    (text: string, values: unknown, callback: (error: unknown, result: unknown) => void) => {
+      ran.push({ method, text, values });
+      callback(null, [{ answered: method }]);
+      return { stream: () => undefined };
+    };
+  const connection = {
+    config: { synthetic: true },
+    threadId: 7,
+    query: answer("query"),
+    execute: answer("execute"),
+    connect: (callback: (error: unknown) => void) => {
+      calls.push("connect");
+      callback(null);
+    },
+    destroy: () => calls.push("destroy"),
+    release: () => calls.push("release"),
+  };
+  const pool = {
+    getConnection: (callback: (error: unknown, connection: unknown) => void) => {
+      callback(null, connection);
+    },
+    end: (callback: (error: unknown) => void) => {
+      calls.push("end");
+      callback(null);
+    },
+  };
+  return { ran, calls, pool };
+}
+
+describe("MySQL and MariaDB: values bound on the server", () => {
+  // mysql2's query() writes each value into the SQL text, escaped for the default sql_mode; under
+  // NO_BACKSLASH_ESCAPES a backslash is stored doubled and a quote after one ends the string.
+  it("sends a statement with values as a prepared statement, and one without as it is", async () => {
+    const { ran, calls, pool } = fakeMysqlPool();
+    const mysql2 = { createPool: () => pool };
+    const dialect = await open(serverStorage("mysql"), "mysql://db.local/pathways", (name) =>
+      Promise.resolve(name === "mysql2" ? mysql2 : {}),
+    );
+    const db = new Kysely<unknown>({ dialect });
+    const value = 'OBX|1|TX|^SYNTHETIC^|| it\\\'s a \\F\\ test "quoted"';
+    const { rows } = await sql<{ answered: string }>`select ${value} as v`.execute(db);
+    expect(rows).toEqual([{ answered: "execute" }]);
+    await sql`select 1`.execute(db);
+    await db.transaction().execute(async (tx) => {
+      await sql`select ${1} as one`.execute(tx);
+    });
+    expect(ran.map(({ method, text }) => `${method}: ${text}`)).toEqual([
+      "execute: select ? as v",
+      "query: select 1",
+      "query: begin",
+      "execute: select ? as one",
+      "query: commit",
+    ]);
+    expect(ran[0]?.values).toEqual([value]);
+    await db.destroy();
+    expect(calls).toContain("release");
+    expect(calls).toContain("end");
+  });
+
+  it("hands Kysely one wrapper per connection, passing each call through, and a pool's error as it is", async () => {
+    const { calls, pool } = fakeMysqlPool();
+    const bound = serverBinds(pool as unknown as Parameters<typeof serverBinds>[0]);
+    const acquire = () =>
+      new Promise<Parameters<Parameters<typeof bound.getConnection>[0]>[1]>((resolve) => {
+        bound.getConnection((_error, connection) => {
+          resolve(connection);
+        });
+      });
+    const first = await acquire();
+    expect(await acquire()).toBe(first);
+    expect(first.config).toEqual({ synthetic: true });
+    expect(first.threadId).toBe(7);
+    first.connect(() => undefined);
+    first.release();
+    first.destroy();
+    expect(calls).toEqual(["connect", "release", "destroy"]);
+
+    const refused = Object.assign(new Error("synthetic"), { code: "ECONNREFUSED" });
+    const failing = serverBinds({
+      getConnection: (callback: (error: unknown, connection: unknown) => void) => {
+        callback(refused, undefined);
+      },
+    } as unknown as Parameters<typeof serverBinds>[0]);
+    const error = await new Promise((resolve) => {
+      failing.getConnection((e) => {
+        resolve(e);
+      });
+    });
+    expect(error).toBe(refused);
+  });
 });
