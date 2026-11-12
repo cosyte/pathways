@@ -648,6 +648,7 @@ A file source's or destination's `azblob:`. The identity is Azure's default chai
 | `plaintext`    | boolean, only with an `http://` URL                  | `false`                  |
 | `timeout`      | duration                                             | `30s`                    |
 | `resendHeader` | a header name                                        | none                     |
+| `ack`          | `xml`                                                | none: the status decides |
 
 The URL may not hold a user name or password. A header whose name holds `auth`, `cookie`, `token`,
 `secret`, `password`, `key`, `signature` or `credential` must be a secret reference. `Content-Length`,
@@ -664,6 +665,11 @@ waiting longer when a 429 or a 503 asks with `Retry-After`, never more than `ret
 by default); a 3xx is held, never followed, and retried every `retry.max`; a 101 or any other 4xx
 fails the delivery for good. The destination's [`retry`](#retry) block sets the waits and any limit. Any other 1xx is an interim answer: the attempt waits for the final
 answer after it, and is retried when none comes within `timeout` or the connection closes. See [Send and receive over HTTP](./send-and-receive-http.md).
+
+With `ack: xml`, a 2xx answer is read as an HL7 v2 XML acknowledgement and settles the delivery as
+an MLLP ACK does: `AA` or `CA` delivered, `AE` or `CE` failed, and `AR` or `CR`, an answer that
+cannot be read or one that answers another `MSH.10`, retried. See
+[Settle by an HL7 v2 XML acknowledgement](./send-and-receive-http.md#settle-by-an-hl7-v2-xml-acknowledgement).
 
 #### MLLP destination
 

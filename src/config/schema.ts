@@ -1142,6 +1142,13 @@ const httpDestination = restate(
             "A header sent only on a possible duplicate, a resend after an attempt was cut off, its value the number of attempts before. Default: none is sent.",
         }),
       ).optional(),
+      ack: z
+        .enum(["xml"])
+        .meta({
+          description:
+            "xml: read each 2xx answer as an HL7 v2 XML acknowledgement and settle by its MSA.1, as an MLLP ACK settles: AA or CA delivered, AE or CE failed, AR or CR (or an answer that is not an acknowledgement or answers another MSH.10) retried. Default: the status alone decides.",
+        })
+        .optional(),
     })
     .meta({ description: "POST each output to url." })
     .superRefine(httpClientChecks)
@@ -3835,6 +3842,8 @@ export interface HttpDestination extends HttpClientConfig {
   readonly timeoutMs: number;
   /** The header that flags a possible duplicate, or undefined to send none. */
   readonly resendHeader: string | undefined;
+  /** `xml` to settle each 2xx answer by its HL7 v2 XML acknowledgement; undefined for the status alone. */
+  readonly ack?: "xml" | undefined;
 }
 
 /**

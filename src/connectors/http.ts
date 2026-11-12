@@ -24,6 +24,7 @@ import {
   type OutgoingMessage,
   type SourceConnector,
 } from "./types.js";
+import { MAX_XML_ACK_BYTES, readXmlAck, settleXmlAck, xmlControlId } from "./xml-ack.js";
 
 /** A method an HTTP source can take a message by. */
 export type HttpSourceMethod = "POST" | "PUT";
@@ -334,6 +335,11 @@ export interface HttpDestinationOptions {
    * off, its value the number of attempts before. Undefined sends none.
    */
   readonly resendHeader?: string | undefined;
+  /**
+   * How a 2xx answer's body is read: undefined to drop it, or `xml` to read it as an HL7 v2 XML
+   * acknowledgement and settle the delivery by its code, as an MLLP ACK settles one.
+   */
+  readonly ack?: "xml" | undefined;
 }
 
 /**
@@ -344,6 +350,13 @@ export interface HttpDestinationOptions {
  * a `DeliveryRejected` whose reason is the status. Node waits past any other 1xx for the final
  * answer, so one with nothing after it ends as a timeout or a network error. The response body is read and dropped,
  * never logged.
+ *
+ * With `ack: "xml"`, a 2xx answer's body is read, up to 1 MiB and within the same time limit, as an
+ * HL7 v2 XML acknowledgement, the way a web service that takes v2 XML answers on the same connection:
+ * `AA` or `CA` is delivered; `AE` or `CE` a `DeliveryRejected`; `AR` or `CR`, an answer that is not
+ * an acknowledgement, a larger one, or one that answers another `MSH.10` than the message sent, a
+ * `RetryableError` coded `ACK_AR`, `ACK_CR`, `ACK_UNREADABLE` or `ACK_CONTROL_ID_MISMATCH`. Only the
+ * code and the control ID are read; the rest is dropped, never logged.
  *
  * @example
  * ```ts
@@ -390,13 +403,32 @@ export class HttpDestination implements DestinationConnector {
         headers: { ...headers, ...flag, "Content-Length": message.body.byteLength },
         ...(message.signal === undefined ? {} : { signal: message.signal }),
       });
-      const timer = setTimeout(() => request.destroy(transientError("ETIMEDOUT")), timeoutMs);
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        request.destroy(transientError("ETIMEDOUT"));
+      }, timeoutMs);
       request.once("response", (response) => {
+        response.on("error", () => undefined);
+        const failure = failureOf(response, this.url, this.now());
+        if (failure === undefined && this.options.ack === "xml") {
+          // The acknowledgement is the answer: read it within the attempt's time limit.
+          readAnswer(response).then(
+            (answer) => {
+              clearTimeout(timer);
+              this.settle(answer, message.body).then(resolve, reject);
+            },
+            () => {
+              clearTimeout(timer);
+              request.destroy();
+              reject(transientError(timedOut ? "ETIMEDOUT" : "ACK_UNREADABLE"));
+            },
+          );
+          return;
+        }
         clearTimeout(timer);
         // Drain and drop the body, so the connection can be reused and nothing of it is kept.
-        response.on("error", () => undefined);
         response.resume();
-        const failure = failureOf(response, this.url, this.now());
         if (failure === undefined) resolve();
         else reject(failure);
       });
@@ -418,9 +450,36 @@ export class HttpDestination implements DestinationConnector {
     });
   }
 
+  /** Settles a delivery by the XML acknowledgement `answer`, matched to the `sent` message. */
+  private async settle(answer: Buffer | "too-large", sent: Uint8Array): Promise<void> {
+    if (answer === "too-large") throw transientError("ACK_UNREADABLE");
+    settleXmlAck(await readXmlAck(answer), await xmlControlId(sent));
+  }
+
   /** Closes the connections kept open between deliveries. */
   stop(): Promise<void> {
     this.agent.destroy();
     return Promise.resolve();
   }
+}
+
+/**
+ * Reads an answer's body of at most {@link MAX_XML_ACK_BYTES}: the bytes, or `too-large`, after
+ * which the rest is drained and dropped. Rejects when the body breaks off.
+ */
+function readAnswer(response: IncomingMessage): Promise<Buffer | "too-large"> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    response.on("data", (chunk: Buffer) => {
+      size += chunk.byteLength;
+      if (size <= MAX_XML_ACK_BYTES) chunks.push(chunk);
+    });
+    response.once("end", () =>
+      resolve(size > MAX_XML_ACK_BYTES ? "too-large" : Buffer.concat(chunks, size)),
+    );
+    response.once("close", () => {
+      if (!response.complete) reject(new Error("the answer broke off"));
+    });
+  });
 }

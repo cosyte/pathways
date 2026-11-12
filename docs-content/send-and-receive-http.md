@@ -230,6 +230,67 @@ every 5 minutes, and the engine logs `delivery-redirected` and sends hooks a `de
 event, each naming the status and the host the `Location` names, never its path or query. Fix the
 destination's `url` and the queue moves on. The response body is read and dropped, never logged.
 
+## Settle by an HL7 v2 XML acknowledgement
+
+Some web services take HL7 v2 in the XML encoding and answer each POST, on the same connection, with
+an XML acknowledgement: an `ACK` whose `MSA.1` says whether the message was taken. With `ack: xml`,
+the destination reads that answer and settles the delivery by its code, as an
+[MLLP destination](./send-and-receive-mllp.md) settles one by its ACK.
+
+```yaml title="channels/results-to-lab-network/channel.yaml"
+source:
+  file: { dir: ../../data/results-out }
+transform: ./transform.ts
+destinations:
+  - http:
+      url: https://results.example.test/hl7
+      headers:
+        Content-Type: application/xml
+      # The client certificate the service issued to the lab, and the CA its server's is signed by.
+      tls: { ca: service-ca.crt, cert: lab.crt, key: lab.key }
+      ack: xml
+```
+
+| A 2xx answer whose body is                                                   | The delivery                              |
+| ---------------------------------------------------------------------------- | ----------------------------------------- |
+| an acknowledgement with `AA` or `CA`                                         | delivered                                 |
+| an acknowledgement with `AE` or `CE`                                         | failed for good; the destination moves on |
+| an acknowledgement with `AR` or `CR`                                         | retried, coded `ACK_AR` or `ACK_CR`       |
+| an acknowledgement whose `MSA.2` is not the `MSH.10` sent                    | retried, coded `ACK_CONTROL_ID_MISMATCH`  |
+| not XML, not an acknowledgement, a code not listed, over 1 MiB, or cut short | retried, coded `ACK_UNREADABLE`           |
+
+- **Any other status** is read by the status table above, whatever its body says.
+- **The answer is read within `timeout`**, from connecting to its last byte.
+- **The XML is read safely**: a document type declaration or an entity is refused, and so is a
+  document deeper than 32 elements or one with more than 20,000 nodes. Elements are matched by their
+  local name, so an answer in the HL7 namespace (`urn:hl7-org:v2xml`) and one in no namespace read
+  the same.
+- **Only `MSA.1` and `MSA.2` are read**, and `MSH.10` of the message sent, to match them. When the
+  message sent has no `MSH.10` in v2 XML, the control ID is not checked. The rest of the answer is
+  dropped, never logged.
+- **The body is sent as the transform returned it.** Writing the message in the v2 XML encoding is
+  the transform's work; `ack: xml` reads the answer only.
+
+### For the animal diagnostic lab network
+
+This setting follows the public description of how labs in the US National Animal Health Laboratory
+Network send results to USDA APHIS: an HTTPS web-service call that carries one message in the HL7
+v2.6 XML encoding, answered on the same connection by an XML `ACK_R25` with `AA`, `AE` or `AR`. We
+have not tested it against the network itself: onboarding needs accounts, a lab OID and certificates
+that only a lab holds. Before production, a lab sends test messages to the network's test endpoint
+until each comes back `AA`, as the network's onboarding asks.
+
+Where the network's public documents and this setting differ, or say nothing:
+
+- The network's results guide says a sender retries after `AE` as well as `AR`. Here `AE` fails the
+  delivery, as it does over MLLP, because sending the same message again will not fix an error in
+  its structure or content: fix the message or the transform, then
+  [replay it](./inspect-replay-and-clear-messages.md#replay-a-failed-message).
+- The destination always POSTs. A public walkthrough of one lab system shows it sending with PUT and
+  an account's credentials in headers; the network's quick guide asks only for an HTTPS web-service
+  call. Send credentials with `headers`, read from a secret (see [Read secrets](./read-secrets.md)),
+  and confirm the method with the network before relying on POST.
+
 ## Related
 
 - [Authenticate endpoints and use TLS](./secure-endpoints.md).

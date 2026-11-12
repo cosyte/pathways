@@ -1,0 +1,236 @@
+import type { IncomingMessage, ServerResponse } from "node:http";
+
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+
+import { ConfigError, loadProject } from "../src/config/load.js";
+import type { ChannelConfig } from "../src/config/schema.js";
+import { HttpDestination, type HttpDestinationOptions } from "../src/connectors/http.js";
+import { RetryableError } from "../src/connectors/http-core.js";
+import { DeliveryRejected } from "../src/connectors/types.js";
+import { connectorsFor } from "../src/engine/engine.js";
+import { captureLogger, cleanUp, makeProject } from "./helpers.js";
+import {
+  makeCertificates,
+  receiver,
+  removeCertificates,
+  type Certificates,
+  type Receiver,
+} from "./net-helpers.js";
+
+/**
+ * The HTTP destination's `ack: xml` mode: a web service that takes HL7 v2 XML answers each POST on
+ * the same connection with an XML acknowledgement, and the delivery is settled by its MSA.1 code the
+ * way an MLLP ACK settles one. Every message and acknowledgement here is synthetic.
+ */
+
+let certs: Certificates;
+beforeAll(() => {
+  certs = makeCertificates();
+});
+afterAll(() => removeCertificates(certs));
+
+const receivers: Receiver[] = [];
+const destinations: HttpDestination[] = [];
+afterEach(async () => {
+  await Promise.all(destinations.splice(0).map((destination) => destination.stop()));
+  await Promise.all(receivers.splice(0).map((r) => r.close()));
+  await cleanUp();
+});
+
+const CONTROL_ID = "SYN-CTL-0001";
+/** The largest acknowledgement the destination reads, 1 MiB. */
+const MAX_XML_ACK_BYTES = 1_048_576;
+const V2XML = "urn:hl7-org:v2xml";
+
+/** A synthetic result in the v2 XML encoding, as much of one as the destination reads. */
+const SENT = Buffer.from(
+  `<?xml version="1.0" encoding="UTF-8"?><OPU_R25 xmlns="${V2XML}"><MSH><MSH.1>|</MSH.1>` +
+    `<MSH.2>^~\\&amp;</MSH.2><MSH.10>${CONTROL_ID}</MSH.10><MSH.11><PT.1>T</PT.1></MSH.11>` +
+    `<MSH.12><VID.1>2.6</VID.1></MSH.12></MSH></OPU_R25>`,
+);
+
+/** An `ACK_R25` with `code`, answering `answers`, in the namespace `namespace` (none when empty). */
+function ack(code: string, answers = CONTROL_ID, namespace = ""): string {
+  const xmlns = namespace === "" ? "" : ` xmlns="${namespace}"`;
+  return (
+    `<?xml version="1.0" encoding="UTF-8"?><ACK${xmlns}><MSH><MSH.1>|</MSH.1>` +
+    `<MSH.2>^~\\&amp;</MSH.2><MSH.10>SYN-ACK-0001</MSH.10></MSH>` +
+    `<MSA><MSA.1>${code}</MSA.1><MSA.2>${answers}</MSA.2></MSA></ACK>`
+  );
+}
+
+/** A handler that answers `status` with `body` as XML. */
+function answer(body: string, status = 200) {
+  return (_request: IncomingMessage, response: ServerResponse): void => {
+    response.writeHead(status, { "Content-Type": "application/xml" }).end(body);
+  };
+}
+
+async function serve(
+  handler: (request: IncomingMessage, response: ServerResponse) => void,
+  tls?: { cert: Buffer; key: Buffer; ca?: Buffer },
+): Promise<Receiver> {
+  const r = await receiver(handler, tls);
+  receivers.push(r);
+  return r;
+}
+
+function destination(options: Partial<HttpDestinationOptions> & { url: string }): HttpDestination {
+  const built = new HttpDestination({ headers: {}, timeoutMs: 2_000, ack: "xml", ...options });
+  destinations.push(built);
+  return built;
+}
+
+async function outcomeOf(promise: Promise<void>): Promise<unknown> {
+  try {
+    await promise;
+    return "delivered";
+  } catch (error) {
+    return error;
+  }
+}
+
+const deliver = (target: HttpDestination, body: Uint8Array = SENT): Promise<unknown> =>
+  outcomeOf(target.deliver({ messageId: 1, seq: 0, body }));
+
+describe("HttpDestination with ack: xml", () => {
+  it.each(["AA", "CA"])("delivers on %s", async (code) => {
+    const r = await serve(answer(ack(code)));
+    expect(await deliver(destination({ url: r.url }))).toBe("delivered");
+  });
+
+  it.each(["AE", "CE"])(
+    "fails the delivery on %s, which sending again will not fix",
+    async (code) => {
+      const r = await serve(answer(ack(code)));
+      const outcome = await deliver(destination({ url: r.url }));
+      expect(outcome).toBeInstanceOf(DeliveryRejected);
+      expect(outcome).toMatchObject({ reason: code });
+    },
+  );
+
+  it.each(["AR", "CR"])("retries %s", async (code) => {
+    const r = await serve(answer(ack(code)));
+    const outcome = await deliver(destination({ url: r.url }));
+    expect(outcome).toBeInstanceOf(RetryableError);
+    expect(outcome).toMatchObject({ code: `ACK_${code}` });
+  });
+
+  it("reads the acknowledgement in the HL7 namespace and in none alike", async () => {
+    const r = await serve(answer(ack("AE", CONTROL_ID, V2XML)));
+    expect(await deliver(destination({ url: r.url }))).toMatchObject({ reason: "AE" });
+  });
+
+  it("retries an acknowledgement that answers another message", async () => {
+    const r = await serve(answer(ack("AA", "SYN-CTL-9999")));
+    expect(await deliver(destination({ url: r.url }))).toMatchObject({
+      code: "ACK_CONTROL_ID_MISMATCH",
+    });
+  });
+
+  it.each([
+    ["an empty body", ""],
+    ["text that is not XML", "accepted"],
+    ["XML with no MSA", "<ACK><MSH/></ACK>"],
+    ["an unknown code", ack("ZZ")],
+    ["a document type declaration", `<!DOCTYPE ACK [<!ENTITY a "AA">]>${ack("&a;")}`],
+  ])("retries %s as unreadable", async (_name, body) => {
+    const r = await serve(answer(body));
+    const outcome = await deliver(destination({ url: r.url }));
+    expect(outcome).toBeInstanceOf(RetryableError);
+    expect(outcome).toMatchObject({ code: "ACK_UNREADABLE" });
+  });
+
+  it("retries an answer larger than the cap as unreadable", async () => {
+    const r = await serve(answer(`<ACK>${" ".repeat(MAX_XML_ACK_BYTES)}</ACK>`));
+    expect(await deliver(destination({ url: r.url }))).toMatchObject({ code: "ACK_UNREADABLE" });
+  });
+
+  it("retries an answer whose body breaks off", async () => {
+    const r = await serve((_request, response) => {
+      response.writeHead(200, { "Content-Length": "1000" });
+      response.write("<ACK>");
+      setTimeout(() => response.socket?.destroy(), 20);
+    });
+    expect(await deliver(destination({ url: r.url }))).toMatchObject({ code: "ACK_UNREADABLE" });
+  });
+
+  it("times out an acknowledgement that never finishes", async () => {
+    const r = await serve((_request, response) => {
+      response.writeHead(200, { "Content-Length": "1000" });
+      response.write("<ACK>");
+    });
+    const outcome = await deliver(destination({ url: r.url, timeoutMs: 200 }));
+    expect(outcome).toMatchObject({ code: "ETIMEDOUT" });
+  });
+
+  it("still reads a status that is not 2xx by the status table, whatever the body", async () => {
+    const rejected = await serve(answer(ack("AA"), 400));
+    expect(await deliver(destination({ url: rejected.url }))).toMatchObject({
+      reason: "HTTP 400",
+    });
+    const busy = await serve(answer(ack("AA"), 503));
+    expect(await deliver(destination({ url: busy.url }))).toMatchObject({ code: "HTTP_503" });
+  });
+
+  it("skips the control ID check when the message sent carries none", async () => {
+    const r = await serve(answer(ack("AA", "SYN-CTL-9999")));
+    expect(await deliver(destination({ url: r.url }), Buffer.from("MSH|^~\\&|"))).toBe("delivered");
+  });
+
+  it("posts over TLS with a client certificate and settles by the acknowledgement", async () => {
+    const r = await serve(answer(ack("AA")), {
+      cert: certs.serverCert,
+      key: certs.serverKey,
+      ca: certs.ca,
+    });
+    const target = destination({
+      url: r.url,
+      headers: { "Content-Type": "application/xml" },
+      tls: { ca: certs.ca, cert: certs.clientCert, key: certs.clientKey },
+    });
+    expect(await deliver(target)).toBe("delivered");
+    // The kept-alive connection carries the next delivery too.
+    expect(await deliver(target)).toBe("delivered");
+    expect(r.received.map((request) => request.authorized)).toEqual([true, true]);
+    expect(r.received[0]?.body).toEqual(SENT);
+  });
+
+  it("without the setting, delivers on any 2xx and reads nothing of the body", async () => {
+    const r = await serve(answer(ack("AE")));
+    expect(await deliver(destination({ url: r.url, ack: undefined }))).toBe("delivered");
+  });
+});
+
+describe("an http destination's ack setting", () => {
+  /** The channel file with `destination` as its one destination. */
+  const channel = (destination: string): Record<string, string> => ({
+    "channels/lab/channel.yaml": `source:\n  file: { dir: in }\ndestinations:\n  - ${destination}\n`,
+  });
+
+  it("is read from the channel, and the destination it builds settles by the acknowledgement", async () => {
+    const r = await serve(answer(ack("AE")));
+    const root = await makeProject(channel(`http: { url: "${r.url}", plaintext: true, ack: xml }`));
+    const [config] = (await loadProject(root)).channels;
+    expect(config?.destinations[0]).toMatchObject({ kind: "http", ack: "xml" });
+    const { logger } = captureLogger();
+    const built = await connectorsFor(config as ChannelConfig, { now: Date.now, logger, env: {} });
+    const [target] = built.destinations;
+    expect(target).toBeInstanceOf(HttpDestination);
+    destinations.push(target as HttpDestination);
+    expect(await deliver(target as HttpDestination)).toMatchObject({ reason: "AE" });
+  });
+
+  it("is unset by default", async () => {
+    const root = await makeProject(channel(`http: { url: "https://lab.example.test/" }`));
+    const [config] = (await loadProject(root)).channels;
+    expect(config?.destinations[0]).toMatchObject({ kind: "http", ack: undefined });
+  });
+
+  it("takes xml alone", async () => {
+    const root = await makeProject(channel(`http: { url: "https://lab.example.test/", ack: er7 }`));
+    const error = await loadProject(root).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ConfigError);
+    expect((error as ConfigError).problems.join("\n")).toContain("destinations.0.http.ack");
+  });
+});
