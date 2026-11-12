@@ -101,9 +101,12 @@ jobs:
         with:
           persist-credentials: false
 
-      # GHCR answers "not found", "manifest unknown" or "name unknown" for a tag it does not have,
-      # and "denied" while the package does not exist yet. Anything else stops the run, so a version
-      # already pushed is never pushed again. "denied" can also hide a version that is there, so the
+      # A tag the registry does not have is told by the registry's own answer, as the whole output of
+      # the look-up, never by words found anywhere in it: the resolver's "ERROR: <image>:<version>:
+      # not found" for this very tag, or one of the registry's error codes "manifest unknown" or
+      # "name unknown" as "ERROR: <code>: <message>" on one line. GHCR answers "denied" in that form
+      # while the package does not exist yet. Anything else, an error that only holds those words
+      # included, stops the run, so a version already pushed is never pushed again. "denied" can also hide a version that is there, so the
       # tag step in `image-publish` looks the tag up once more and does not take "denied" as absent.
       - name: Has this version a GitHub release, and no image yet?
         id: decide
@@ -120,10 +123,13 @@ jobs:
             exit 0
           fi
           echo "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          not_found="ERROR: $IMAGE:$version: not found"
+          error_code='^ERROR: (manifest unknown|name unknown|denied)(: [[:print:]]*)?$'
           if docker buildx imagetools inspect "$IMAGE:$version" > "$RUNNER_TEMP/inspect.txt" 2>&1; then
             echo "$IMAGE:$version is already published."
             echo "publish=false" >> "$GITHUB_OUTPUT"
-          elif grep -qiE 'not found|manifest unknown|name unknown|denied' "$RUNNER_TEMP/inspect.txt"; then
+          elif answer="$(cat "$RUNNER_TEMP/inspect.txt")" &&
+            [[ "$answer" == "$not_found" || "$answer" =~ $error_code ]]; then
             echo "v$version is released and $IMAGE:$version is not published: publishing it."
             echo "publish=true" >> "$GITHUB_OUTPUT"
           else
@@ -206,16 +212,19 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # After the wait for the concurrency group: an earlier run may have published it meanwhile. It
-      # matches the same not-found answers as `image-version`, and any other answer from the registry
-      # stops the run, so an error never reads as "not published".
+      # takes the same whole answers as `image-version`, and any other answer from the registry stops
+      # the run, so an error never reads as "not published".
       - name: The version is still not published
         id: absent
         run: |
           set -euo pipefail
+          not_found="ERROR: $IMAGE:$VERSION: not found"
+          error_code='^ERROR: (manifest unknown|name unknown|denied)(: [[:print:]]*)?$'
           if docker buildx imagetools inspect "$IMAGE:$VERSION" > "$RUNNER_TEMP/absent.txt" 2>&1; then
             echo "::notice::$IMAGE:$VERSION was published by another run; nothing to do"
             echo "absent=false" >> "$GITHUB_OUTPUT"
-          elif grep -qiE 'not found|manifest unknown|name unknown|denied' "$RUNNER_TEMP/absent.txt"; then
+          elif answer="$(cat "$RUNNER_TEMP/absent.txt")" &&
+            [[ "$answer" == "$not_found" || "$answer" =~ $error_code ]]; then
             echo "absent=true" >> "$GITHUB_OUTPUT"
           else
             cat "$RUNNER_TEMP/absent.txt"
@@ -287,7 +296,8 @@ jobs:
       # written, and the read back after it proves the tag names the checked digest.
       #
       # Just before the tag is written, the tag is looked up once more, and only a tag the registry
-      # says it does not have is written. "denied" does not count here: the earlier checks take it
+      # says it does not have, in one of its own answers named at `image-version`, is written.
+      # "denied" does not count here: the earlier checks take it
       # as "not published" because GHCR gives it while the package does not exist, but by this step
       # the push by digest above has created the package and the pull has read from it, so a
       # "denied" now cannot mean "no package" and could hide a version that is there. A version tag
@@ -303,10 +313,13 @@ jobs:
           planned="sha256:$(printf '%s' "$(cat "$RUNNER_TEMP/planned.json")" | sha256sum | cut -d ' ' -f 1)"
           echo "tagging $ref as $IMAGE:$VERSION, which would name $planned"
           test "$planned" = "$DIGEST"
+          not_found="ERROR: $IMAGE:$VERSION: not found"
+          error_code='^ERROR: (manifest unknown|name unknown)(: [[:print:]]*)?$'
           if docker buildx imagetools inspect "$IMAGE:$VERSION" > "$RUNNER_TEMP/before-tag.txt" 2>&1; then
             echo "::error::$IMAGE:$VERSION already exists; a version tag is never replaced"
             exit 1
-          elif ! grep -qiE 'not found|manifest unknown|name unknown' "$RUNNER_TEMP/before-tag.txt"; then
+          elif ! answer="$(cat "$RUNNER_TEMP/before-tag.txt")" ||
+            ! [[ "$answer" == "$not_found" || "$answer" =~ $error_code ]]; then
             cat "$RUNNER_TEMP/before-tag.txt"
             echo "::error::could not tell whether $IMAGE:$VERSION exists; not tagging"
             exit 1
