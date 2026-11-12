@@ -258,8 +258,13 @@ describe("readStatement", () => {
     const outside = await makeProject({ "insert.sql": "select 1" });
     const root = await makeProject({});
     await mkdir(join(root, "channels"), { recursive: true });
-    await symlink(join(outside, "insert.sql"), join(root, "channels", "linked.sql"));
-    for (const file of [join(outside, "insert.sql"), join(root, "channels", "linked.sql")]) {
+    const files = [join(outside, "insert.sql")];
+    // Symbolic links need a privilege on Windows that CI's runner does not grant to every process.
+    if (process.platform !== "win32") {
+      await symlink(join(outside, "insert.sql"), join(root, "channels", "linked.sql"));
+      files.push(join(root, "channels", "linked.sql"));
+    }
+    for (const file of files) {
       await expect(readStatement(file, "sqlite", root)).rejects.toThrow(
         new StatementError("the file is outside the project; keep statement files inside it"),
       );
