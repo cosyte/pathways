@@ -76,8 +76,9 @@ Beside the status and the channels, the body says which engine answered: `versio
 `@cosyte/pathways` it runs; `schemaGeneration`, the
 [schema generation](./store-messages-in-a-database.md#schema-changes-expand-and-contract) that
 version brings the database to, its number of schema steps (`null` with a custom store; the database
-itself can be at a later generation a newer Pathways moved it to); `node`, the node id it holds the
-engine lease under; `role`, `active` or `standby`, or `single` on a custom store without leases; `leaseEpoch`, the
+itself can be at a later generation a newer Pathways moved it to); `node`, its node id, the one it
+holds the engine lease under and `pathways nodes` lists (see
+[nodes and heartbeats](#nodes-and-heartbeats)); `role`, `active` or `standby`, or `single` on a custom store without leases; `leaseEpoch`, the
 engine lease's epoch while it holds it, else `null`; and `draining`, `true` once it was told to stop
 and is closing its sources.
 
@@ -148,8 +149,9 @@ done. Run `pathways retention` by hand first in that case. Point a restart polic
 
 **Readiness** is 503 until the engine is running, and while it runs when storage cannot be read
 (read at most once a second, and counted unreachable after 5 seconds without an answer) or a source
-is down. On SIGTERM or SIGINT it turns 503 `draining` at once, while the sources are still
-closing, and the listener closes last. Point a load balancer or a readiness probe at `/readyz`.
+is down. On SIGTERM or SIGINT it turns 503 `draining` at once, and the sources keep taking
+messages in for `drain.notReadyDelay` before they close; the listener closes last. See
+[Stop and upgrade a node](./stop-and-upgrade-a-node.md). Point a load balancer or a readiness probe at `/readyz`.
 
 ```bash
 curl http://127.0.0.1:9091/readyz
@@ -158,6 +160,43 @@ curl http://127.0.0.1:9091/readyz
 `pathways probe` asks the same listener from the command line, and exits 0 or 1: `pathways probe`
 for liveness, `pathways probe --ready` for readiness. The Docker image's health check runs it; see
 [Run Pathways in Docker](./run-in-docker.md#health-check).
+
+## Nodes and heartbeats
+
+Each engine is a node, with a node id: the one `node.id` in `pathways.yaml` sets, or one generated at
+its first start and kept in the project's `.pathways/node-id`, so a restart is the same node. On a
+database store, the engine writes a row for its node when it starts, before it asks for the engine
+lease, so a standby has one too: its node id, host name, process id, start time, Pathways version,
+schema generation, role, a draining flag and its last heartbeat. Then, once per heartbeat interval
+(`node.heartbeat`, 5 seconds by default), it writes its heartbeat in one `UPDATE` that takes the time
+from the database's own clock in the same statement, never from the engine's, and it times the
+interval by its own monotonic clock, which a change to the wall clock does not move. At a clean stop it
+removes its row. The row holds ids, a host name, numbers and states: no message content and no URL.
+
+```bash
+npx pathways nodes
+```
+
+```text
+NODE              HOST      PID   ROLE     VERSION  HEARTBEAT  STATE
+3f9a1c2b7d4e5f60  engine-a  4242  active   0.0.2    1.2s ago   live
+engine-b          engine-b  311   standby  0.0.2    3.9s ago   live
+```
+
+The bound: a node shows `stale` once its last heartbeat is older than three of its heartbeat
+intervals, 15 seconds by default, judged by the database's clock. An engine killed hard wrote its last
+heartbeat at most one interval before it died, so it shows stale between two and three intervals
+after. `pathways nodes forget <id>` removes a stale row, audited; see the
+[command reference](./command-reference.md#pathways-nodes).
+
+A second engine that starts under the node id of a live one is refused, exit 1, naming the one that
+runs: its node id, host, process id, version, role and heartbeat age. Give each engine an id of its
+own: with `node: { id: { env: HOSTNAME } }`, each container's host name. A row of the same id that
+names this host, under this engine's own process id or one that does not run here, may be an
+earlier run of this engine (killed, or a container restarted). The start waits until that row has
+gone half its stale bound without a heartbeat, 7.5 seconds by default, by the database's clock, and
+takes it over only if no heartbeat came in that time. A row that beat is another engine that runs,
+such as a second container with the same host name and process id, and the start is refused.
 
 ## Logs
 

@@ -1,11 +1,18 @@
 import { existsSync } from "node:fs";
+import { hostname } from "node:os";
 import { stderr } from "node:process";
 import { parseArgs } from "node:util";
 
 import { pino, type Logger } from "pino";
 
 import { ConfigError, loadProject } from "./config/load.js";
-import { parseDuration, type ChannelConfig, type ProjectConfig } from "./config/schema.js";
+import {
+  NODE_ID,
+  NODE_STALE_HEARTBEATS,
+  parseDuration,
+  type ChannelConfig,
+  type ProjectConfig,
+} from "./config/schema.js";
 import type { Env } from "./connectors/endpoint.js";
 import { EncryptionError } from "./encryption/envelope.js";
 import { checkIndexKeys, projectIndexes } from "./encryption/blind-index.js";
@@ -38,9 +45,9 @@ import {
   describeHolder,
   EngineLease,
   LeaseCheckFailed,
-  nodeId,
   type LeaseLossReason,
 } from "./engine/lease.js";
+import { describeNode, NodeHeartbeat, nodeStateOf, resolveNodeId } from "./engine/nodes.js";
 import {
   askProbe,
   engineProbes,
@@ -49,6 +56,7 @@ import {
   type ProbeEndpoint,
 } from "./engine/probes.js";
 import { EXIT } from "./exit.js";
+import { faultPoint } from "./fault-points.js";
 import { HookSet } from "./extensions/hooks.js";
 import { ExtensionLoadError } from "./extensions/load.js";
 import { AuditLog, auditEvent, operatingSystemUser, type AuditListener } from "./operator/audit.js";
@@ -61,6 +69,10 @@ import {
   leaseStatusCommand,
   listCommand,
   migrateCommand,
+  nodeForgetCommand,
+  nodeForgetInvalidCommand,
+  NODE_ID_RULE,
+  nodesCommand,
   parseAction,
   parseId,
   parseLimit,
@@ -92,8 +104,10 @@ import {
   leaseStore,
   LeaseLostError,
   migrations,
+  nodeStore,
   StorageError,
   type MessageStore,
+  type NodeState,
   type Store,
 } from "./storage/store.js";
 import { describeFailure, runChannelTests } from "./testing/run-tests.js";
@@ -204,6 +218,12 @@ Commands:
   lease release --force
                       Free the engine lease of an engine whose host is gone,
                       so the next start takes it at once. Audited
+  nodes               Every engine on this database: node id, host, process,
+                      role, version, and its last heartbeat's age by the
+                      database's clock, stale once older than three heartbeat
+                      intervals
+  nodes forget <id>   Remove a stale node's row, as of an engine killed or
+                      whose host is gone. A live node's is refused. Audited
   migrate             Apply the schema steps this version has and the
                       database lacks, each tagged expand or contract: expand
                       steps always, contract steps with --contract. Audited
@@ -247,8 +267,8 @@ Options:
                         as JSON, with each setting read from the environment
                         and the variable it named; secrets stay references
       --json            status, messages, replay, clear, retention, audit,
-                        lease, migrate, verify, secrets check, channel: print
-                        one JSON document instead of text
+                        lease, nodes, migrate, verify, secrets check, channel:
+                        print one JSON document instead of text
       --channel <name>  messages, audit, verify, replay: only this channel
       --status <state>  messages: only this state: received, queued, retrying,
                         delivered, dry-run, filtered, failed or cleared.
@@ -288,7 +308,8 @@ Options:
                         replay, resend, clear, retention, config,
                         lease-release, migrate, channel-pause,
                         channel-resume, channel-stop, channel-halt,
-                        channel-reload, verify, bulk-replay or archive
+                        channel-reload, verify, bulk-replay, archive or
+                        node-forget
       --message <id>    audit: only entries about this message
       --encrypt-plaintext
                         rekey: also encrypt what was stored while encryption
@@ -308,13 +329,14 @@ module could not start or stopped on an error, init could not write the
 project, rekey left a value not under the current key, a replay, resend or
 clear was refused or the message failed again, a bulk replay's count was not
 typed or it was stopped, another engine holds the lease, the engine lost its
-lease, there was no lease to release, the database schema is one this version
-will not run on or migrate, verify found a difference or a failure, a secret or
-the key provider failed secrets check, probe found the engine not alive or not
-ready (probe exits only 0 or 1), no engine runs the project, or a channel
-command was refused; 2 the command line was not understood, or a bulk replay's
-count could not be asked for (add --yes); 3 the configuration is invalid; 4 a
-message named, or the run given to replay --resume, does not exist.
+lease, there was no lease to release, another live engine runs under the same
+node id, a node to forget was unknown or live, the database schema is one this
+version will not run on or migrate, verify found a difference or a failure, a
+secret or the key provider failed secrets check, probe found the engine not
+alive or not ready (probe exits only 0 or 1), no engine runs the project, or a
+channel command was refused; 2 the command line was not understood, or a bulk
+replay's count could not be asked for (add --yes); 3 the configuration is
+invalid; 4 a message named, or the run given to replay --resume, does not exist.
 `;
 
 /** Redaction paths for the engine's logger, in case a field that can hold content is ever logged. */
@@ -352,6 +374,7 @@ const OPTIONS: Readonly<Record<string, readonly OptionName[]>> = {
   audit: ["json", "action", "message", "channel", "since", "until", "limit", "before"],
   rekey: ["encrypt-plaintext"],
   lease: ["json", "force"],
+  nodes: ["json"],
   verify: ["json", "channel", "since", "ids", "samples"],
   probe: ["ready", "if-configured"],
   migrate: ["json", "contract", "dry-run"],
@@ -706,9 +729,18 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
   if (leases === undefined) logger.warn({ event: "lease-unsupported" });
   // Said once at start, so a log reader knows why nothing goes out.
   if (mode.dryRun) logger.warn({ event: "dry-run", destinations: "all" });
-  // Aborted by the caller's signal, or at once when the lease is lost.
+  // This engine's node id: from pathways.yaml, or kept in the project's state folder. The lease is
+  // taken under it, and the node row and the health body name it.
+  const resolved = await resolveNodeId(project.root, project.node.id);
+  if (resolved.from === "unsaved") {
+    logger.warn({ event: "node-id-unsaved", node: resolved.id, code: resolved.code });
+  }
+  const node = resolved.id;
+  const host = hostname();
+  // Aborted once the engine is to stop taking in: `drain.notReadyDelay` after the caller's signal,
+  // or at once when the lease is lost.
   const stopping = new AbortController();
-  const signal = AbortSignal.any([io.signal ?? new AbortController().signal, stopping.signal]);
+  const { signal } = stopping;
   // Where this engine stands, for readiness and the health body. Told to stop, it drains: its
   // sources close while the probes still answer, 503 draining.
   let state: EngineState = standby ? "standby" : "starting";
@@ -718,6 +750,7 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
       : new EngineLease({
           store: leases,
           ttlMs: project.lease.ttlMs,
+          claimant: { node, host },
           onLost: (reason) => {
             logger.error({ event: "lease-lost", reason, epoch: lease?.epoch });
             state = "fenced";
@@ -727,7 +760,23 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
   signal.addEventListener("abort", () => {
     if (state !== "fenced") state = "draining";
   });
-  const node = lease?.claimant.node ?? nodeId();
+  // Told to stop, a running engine reports draining at once and keeps taking in for
+  // `drain.notReadyDelay`, so a load balancer that reads its readiness stops sending it new
+  // connections before its listeners close. One not yet running, or a standby, stops at once.
+  const { drain } = project;
+  let notReady: NodeJS.Timeout | undefined;
+  const told = (): void => {
+    /* v8 ignore next: the lease was lost first, and the run is ending already */
+    if (signal.aborted) return;
+    const running = state === "running";
+    state = "draining";
+    logger.info({ event: "draining", ...drain });
+    faultPoint("drain-not-ready");
+    if (!running || drain.notReadyDelayMs === 0) stopping.abort();
+    else notReady = setTimeout(() => stopping.abort(), drain.notReadyDelayMs);
+  };
+  if (io.signal?.aborted === true) told();
+  else io.signal?.addEventListener("abort", told, { once: true });
   const identity = (): EngineIdentity => ({
     version: VERSION,
     schemaGeneration: project.storage.kind === "module" ? null : SCHEMA_GENERATION,
@@ -736,6 +785,30 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
     leaseEpoch: lease?.epoch ?? null,
     draining: state === "draining",
   });
+  // The node row: written before the lease is asked for, so a standby is listed too, and beaten
+  // until the engine stops. A store without the node methods keeps none.
+  const nodes = nodeStore(store);
+  const nodeState = (): NodeState => nodeStateOf(state, identity().role);
+  const heartbeat =
+    nodes === undefined
+      ? undefined
+      : new NodeHeartbeat({
+          store: nodes,
+          info: {
+            node,
+            host,
+            pid: process.pid,
+            version: VERSION,
+            schemaGeneration: identity().schemaGeneration,
+            staleAfterMs: project.node.heartbeatMs * NODE_STALE_HEARTBEATS,
+            ...nodeState(),
+          },
+          intervalMs: project.node.heartbeatMs,
+          state: nodeState,
+          onEvent: (event) => {
+            logger.warn({ ...event, node });
+          },
+        });
 
   const audit = auditFor(store, io, (error) => {
     logger.warn({ event: "audit-listener-failed", code: errorCode(error) });
@@ -785,6 +858,10 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
   try {
     // The probes answer from the first moment: starting, or standby, before the lease is taken.
     if (!(await listen(probeListener, "the probe listener", io))) return EXIT.failed;
+    if (heartbeat !== undefined) {
+      const joined = await joinNode(heartbeat, io);
+      if (joined !== true) return joined;
+    }
     if (lease !== undefined) {
       const taken = await takeLease(lease, { standby, health, signal, logger, io });
       if (taken !== true) return taken;
@@ -812,14 +889,48 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
       },
     });
   } finally {
+    clearTimeout(notReady);
+    io.signal?.removeEventListener("abort", told);
     // The engine has stopped, its sources closed, before the probes stop answering.
     await probeListener?.stop();
     await health?.stop();
+    faultPoint("drain-before-release");
     await lease?.release().catch((error: unknown) => {
       logger.warn({ event: "lease-release-failed", code: errorCode(error) });
     });
+    // Its row goes at a clean stop; one left behind shows stale once its heartbeats stop.
+    await heartbeat?.stop().catch((error: unknown) => {
+      logger.warn({ event: "node-leave-failed", code: errorCode(error) });
+    });
     await store.close();
   }
+}
+
+/**
+ * Writes this engine's node row and starts its heartbeat. Returns true when it did, or the exit
+ * code, having said why not: another live engine runs under the same node id (naming it: node,
+ * host, process, version, role and heartbeat age, never a URL), or the database refused.
+ */
+async function joinNode(heartbeat: NodeHeartbeat, io: CliIo): Promise<true | number> {
+  try {
+    const join = await heartbeat.join();
+    if (!join.joined) {
+      io.err(
+        `pathways: another engine runs under this node id on this database: ${describeNode(join.holder)}. ` +
+          "Give each engine a node id of its own (node.id in pathways.yaml), or stop that one first.\n",
+      );
+      return EXIT.failed;
+    }
+  } catch (error) {
+    // The database refused the row or went away; its own text can name the server.
+    const code = errorCode(error);
+    io.err(
+      `pathways: the node row could not be written${code === undefined ? "" : ` (${code})`}.\n`,
+    );
+    return EXIT.failed;
+  }
+  heartbeat.start();
+  return true;
 }
 
 /** Starts the health endpoint, if there is one; says why and returns false when it cannot listen. */
@@ -1396,9 +1507,11 @@ async function test(
 type OperatorRun = (context: OperatorContext) => Promise<number>;
 
 /**
- * The operator commands: status, messages, replay, clear, retention, audit, lease and migrate.
- * Parses and checks the arguments first, so a mistake changes nothing and opens nothing; then loads
- * the project, opens its store and runs.
+ * The operator commands: status, messages, replay, clear, retention, audit, lease, nodes and
+ * migrate. Parses and checks the arguments first, so a mistake changes nothing and opens nothing;
+ * then loads the project, opens its store and runs. One mistake opens the store all the same: a
+ * malformed id to `nodes forget`, audited without it. That open applies no schema step and makes no
+ * SQLite file, and where it cannot open, the mistake exits 2 unaudited.
  */
 async function operator(
   command: string,
@@ -1412,6 +1525,15 @@ async function operator(
 
   const project = await load(projectDir, io);
   if (project === undefined) return EXIT.config;
+  const invalidForget = parsed === nodeForgetInvalidCommand;
+  const unaudited = (): number => {
+    io.err(`pathways: ${NODE_ID_RULE} Run "pathways --help" for usage.\n`);
+    return EXIT.usage;
+  };
+  // Where SQLite has no file there is no audit log to write to, and opening it would make one.
+  if (invalidForget && project.storage.kind === "sqlite" && !existsSync(project.storage.file)) {
+    return unaudited();
+  }
   // verify reads what a running engine stored, so where SQLite has no file there is nothing to read,
   // and opening it would leave an empty database behind.
   if (
@@ -1429,20 +1551,27 @@ async function operator(
   // The engine-wide hooks receive each audit entry this command writes, as `pathways start`'s do.
   // status and audit write none, so they load no hooks.
   const withHooks =
-    command !== "status" && command !== "audit" && !(command === "lease" && rest[0] === "status");
+    command !== "status" &&
+    command !== "audit" &&
+    !(command === "lease" && rest[0] === "status") &&
+    !(command === "nodes" && rest.length === 0);
   // Every secret the command reads, resolved once: the store and the hooks share the one result.
   const secrets = await secretsOrExit(project, bare, withHooks ? "operator" : "store", io);
   if (typeof secrets === "number") return secrets;
   const context = { ...bare, secrets };
   // verify runs a candidate project, which may be on a newer Pathways than the engine running on
   // this database: it applies no schema step, so it never changes the schema under that engine.
+  // A malformed id is only audited on a schema this version runs on: it applies no step either, and
+  // a store that will not open says nothing beyond the usage error.
   const wrapped =
     command === "migrate"
       ? await openForMigrate(project, context, io)
       : command === "verify"
         ? await openWrapped(project, { ...context, migrate: "none" }, io, command)
-        : await openWrapped(project, context, io);
-  if (typeof wrapped === "number") return wrapped;
+        : invalidForget
+          ? await openWrapped(project, { ...context, migrate: "none" }, { ...io, err: () => {} })
+          : await openWrapped(project, context, io);
+  if (typeof wrapped === "number") return invalidForget ? unaudited() : wrapped;
   const { store } = wrapped;
   const audit = auditFor(store, io, (error) => {
     io.err(`pathways: an audit listener failed (${errorCode(error) ?? "no code"}).\n`);
@@ -1630,6 +1759,14 @@ function parseOperator(
         );
       }
       return leaseReleaseCommand;
+    case "nodes": {
+      if (rest.length === 0) return nodesCommand;
+      const [verb, id] = rest;
+      if (verb !== "forget" || rest.length !== 2 || id === undefined) return usage(io);
+      // Checked, never repeated: an argument can hold anything. Audited all the same, without it.
+      if (!NODE_ID.test(id)) return nodeForgetInvalidCommand;
+      return (context) => nodeForgetCommand(context, id);
+    }
     default: {
       // audit: OPTIONS lists exactly these commands.
       if (rest.length > 0) return usage(io);

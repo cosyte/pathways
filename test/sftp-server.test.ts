@@ -4,7 +4,6 @@ import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { userInfo } from "node:os";
 import { join } from "node:path";
 
-import { utils } from "ssh2";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import { CLAIMED_DIR, FileDestination, FileSource } from "../src/connectors/file.js";
@@ -12,6 +11,7 @@ import { fingerprint, KnownHosts } from "../src/connectors/known-hosts.js";
 import { SftpLocation, type SftpOptions } from "../src/connectors/sftp.js";
 import type { MessageSink, ReceiveOptions } from "../src/connectors/types.js";
 import { cleanUp } from "./helpers.js";
+import { ed25519KeyPair } from "./ssh-keys.js";
 import {
   listening,
   runSshd,
@@ -152,7 +152,7 @@ describe.skipIf(SSHD === undefined)("SftpLocation on OpenSSH", { timeout: 60_000
       }).stdout;
       expect(listed.split(" ")[1]).toBe(fingerprint(blobOf(sshd.hostPublic)));
     }
-    const other = utils.generateKeyPairSync("ed25519").public;
+    const other = ed25519KeyPair().public;
     const known = KnownHosts.parse(`[127.0.0.1]:${String(sshd.port)} ${other}`);
     const location = sftp(sshd, {
       verifyHost: (host, port, key) => {

@@ -145,6 +145,7 @@ export type {
   MessageStore,
   MessageSummary,
   NextDeliveryOptions,
+  NodeStore,
   Page,
   PendingDelivery,
   PendingMessage,
@@ -173,6 +174,16 @@ export {
   type LeaseClaimant,
   type LeaseHolder,
 } from "./storage/lease.js";
+export {
+  NODE_ROLES,
+  type NodeInfo,
+  type NodeJoin,
+  type NodeReplace,
+  type NodeRole,
+  type NodeRow,
+  type NodeSelf,
+  type NodeState,
+} from "./storage/nodes.js";
 export type { AuditListener } from "./operator/audit.js";
 export type {
   ArchivedDelivery,

@@ -523,7 +523,7 @@ const line = (entry: AuditEntry): string => `${entry.at} ${entry.actor} ${entry.
 
 ##### action
 
-> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"bulk-replay"` \| `"archive"` \| `"batch"`
+> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"bulk-replay"` \| `"archive"` \| `"batch"` \| `"node-forget"`
 
 ##### actor
 
@@ -643,7 +643,7 @@ await store.appendAudit("noah", [{ action: "content-view", channel: "adt", messa
 
 ##### action
 
-> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"bulk-replay"` \| `"archive"` \| `"batch"`
+> `readonly` **action**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"bulk-replay"` \| `"archive"` \| `"batch"` \| `"node-forget"`
 
 ##### channel?
 
@@ -679,7 +679,7 @@ const views = await store.auditEntries({ action: "content-view", since: "2026-11
 
 ##### action?
 
-> `readonly` `optional` **action?**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"bulk-replay"` \| `"archive"` \| `"batch"`
+> `readonly` `optional` **action?**: `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"bulk-replay"` \| `"archive"` \| `"batch"` \| `"node-forget"`
 
 ##### before?
 
@@ -2999,6 +2999,46 @@ Fenced by `epoch` when it is given.
 
 `Promise`\<`void`\>
 
+##### forgetNode()?
+
+> `optional` **forgetNode**(`node`): `Promise`\<`boolean`\>
+
+Removes the row of `node` only while it is stale. Returns whether it did. Optional.
+
+###### Parameters
+
+###### node
+
+`string`
+
+###### Returns
+
+`Promise`\<`boolean`\>
+
+##### joinNode()?
+
+> `optional` **joinNode**(`info`, `replace?`): `Promise`\<[`NodeJoin`](#nodejoin)\>
+
+Writes this node's row, its join time and first heartbeat from the database's clock: a new row,
+or over a row of the same id that is stale, or that still names `replace`'s host and process
+and has not beaten for `replace.silentMs` (an earlier run of this node whose heartbeat stopped).
+Answers with the live row that holds the id instead. Optional, with [nodeHeartbeat](#nodeheartbeat),
+[leaveNode](#leavenode), [nodes](#nodes) and [forgetNode](#forgetnode).
+
+###### Parameters
+
+###### info
+
+[`NodeInfo`](#nodeinfo)
+
+###### replace?
+
+[`NodeReplace`](#nodereplace)
+
+###### Returns
+
+`Promise`\<[`NodeJoin`](#nodejoin)\>
+
 ##### leaseHolder()?
 
 > `optional` **leaseHolder**(`name`): `Promise`\<[`LeaseHolder`](#leaseholder) \| `undefined`\>
@@ -3014,6 +3054,22 @@ The lease's last holder, or `undefined` when it was never taken. Optional, with 
 ###### Returns
 
 `Promise`\<[`LeaseHolder`](#leaseholder) \| `undefined`\>
+
+##### leaveNode()?
+
+> `optional` **leaveNode**(`self`): `Promise`\<`boolean`\>
+
+Removes the node's row while it still names `self`, at a clean stop. Optional.
+
+###### Parameters
+
+###### self
+
+[`NodeSelf`](#nodeself)
+
+###### Returns
+
+`Promise`\<`boolean`\>
 
 ##### listMessages()
 
@@ -3248,6 +3304,37 @@ searched by metadata.
 ###### Returns
 
 `Promise`\<[`PendingMessage`](#pendingmessage) \| `undefined`\>
+
+##### nodeHeartbeat()?
+
+> `optional` **nodeHeartbeat**(`self`, `state`): `Promise`\<`boolean`\>
+
+One UPDATE: sets the node's heartbeat from the database's clock in the same statement, with its
+role and draining flag, while the row still names `self`. Returns whether it did. Optional.
+
+###### Parameters
+
+###### self
+
+[`NodeSelf`](#nodeself)
+
+###### state
+
+[`NodeState`](#nodestate)
+
+###### Returns
+
+`Promise`\<`boolean`\>
+
+##### nodes()?
+
+> `optional` **nodes**(): `Promise`\<[`NodeRow`](#noderow)[]\>
+
+Every node row, by node id, with its heartbeat age by the database's clock. Optional.
+
+###### Returns
+
+`Promise`\<[`NodeRow`](#noderow)[]\>
 
 ##### outputs()
 
@@ -3795,6 +3882,308 @@ const due = await store.nextDelivery("adt", 0, { dueBy: Date.now() });
 Only a delivery due by this time, in epoch milliseconds: the oldest whose `nextAttemptAt` is at
 or before it, passing over any still waiting for a retry. The engine asks this for a destination
 with `retry.rotate: true`. A store that ignores it keeps that destination in order.
+
+***
+
+### NodeInfo
+
+Everything a node writes when it joins: who it is, which Pathways and schema generation it runs,
+where it stands, and how long after its last heartbeat it counts as stale. Ids, a host name,
+numbers and states only: never content, a path or a URL.
+
+#### Example
+
+```ts
+const info: NodeInfo = {
+  node: "engine-a", host: "host-a", pid: 4242, version: "0.0.2", schemaGeneration: 11,
+  role: "active", draining: false, staleAfterMs: 15_000,
+};
+```
+
+#### Extends
+
+- [`NodeSelf`](#nodeself)
+- [`NodeState`](#nodestate)
+
+#### Extended by
+
+- [`NodeRow`](#noderow)
+
+#### Properties
+
+##### draining
+
+> `readonly` **draining**: `boolean`
+
+###### Inherited from
+
+[`NodeState`](#nodestate).[`draining`](#draining-2)
+
+##### host
+
+> `readonly` **host**: `string`
+
+###### Inherited from
+
+[`NodeSelf`](#nodeself).[`host`](#host-5)
+
+##### node
+
+> `readonly` **node**: `string`
+
+###### Inherited from
+
+[`NodeSelf`](#nodeself).[`node`](#node-5)
+
+##### pid
+
+> `readonly` **pid**: `number`
+
+###### Inherited from
+
+[`NodeSelf`](#nodeself).[`pid`](#pid-3)
+
+##### role
+
+> `readonly` **role**: `"single"` \| `"standby"` \| `"active"` \| `"proving"` \| `"draining"` \| `"fenced"`
+
+###### Inherited from
+
+[`NodeState`](#nodestate).[`role`](#role-2)
+
+##### schemaGeneration
+
+> `readonly` **schemaGeneration**: `number` \| `null`
+
+The schema generation that version brings a built-in store to; null for a custom store.
+
+##### staleAfterMs
+
+> `readonly` **staleAfterMs**: `number`
+
+How long after its last heartbeat the node counts as stale, in milliseconds.
+
+##### version
+
+> `readonly` **version**: `string`
+
+The version of `@cosyte/pathways` the node runs.
+
+***
+
+### NodeReplace
+
+The row a join may replace: an earlier run of this node, named by its host and process, and how
+long its heartbeat must have been silent, by the database's clock, for the row to be taken. A
+row that names another process, or that beat within `silentMs`, is not.
+
+#### Example
+
+```ts
+const replace: NodeReplace = { node: "engine-a", host: "host-a", pid: 1, silentMs: 7_500 };
+```
+
+#### Extends
+
+- [`NodeSelf`](#nodeself)
+
+#### Properties
+
+##### host
+
+> `readonly` **host**: `string`
+
+###### Inherited from
+
+[`NodeSelf`](#nodeself).[`host`](#host-5)
+
+##### node
+
+> `readonly` **node**: `string`
+
+###### Inherited from
+
+[`NodeSelf`](#nodeself).[`node`](#node-5)
+
+##### pid
+
+> `readonly` **pid**: `number`
+
+###### Inherited from
+
+[`NodeSelf`](#nodeself).[`pid`](#pid-3)
+
+##### silentMs
+
+> `readonly` **silentMs**: `number`
+
+How long the row's heartbeat must have been silent, in milliseconds.
+
+***
+
+### NodeRow
+
+A node row as read, by the database's clock: its info, when it joined, how long ago its last
+heartbeat was, and whether that is longer ago than its own stale bound.
+
+#### Example
+
+```ts
+const alive = (row: NodeRow): boolean => !row.stale;
+```
+
+#### Extends
+
+- [`NodeInfo`](#nodeinfo)
+
+#### Properties
+
+##### draining
+
+> `readonly` **draining**: `boolean`
+
+###### Inherited from
+
+[`NodeInfo`](#nodeinfo).[`draining`](#draining)
+
+##### heartbeatAgeMs
+
+> `readonly` **heartbeatAgeMs**: `number`
+
+How long ago the last heartbeat was, in milliseconds, by the database's clock.
+
+##### host
+
+> `readonly` **host**: `string`
+
+###### Inherited from
+
+[`NodeInfo`](#nodeinfo).[`host`](#host-2)
+
+##### node
+
+> `readonly` **node**: `string`
+
+###### Inherited from
+
+[`NodeInfo`](#nodeinfo).[`node`](#node-2)
+
+##### pid
+
+> `readonly` **pid**: `number`
+
+###### Inherited from
+
+[`NodeInfo`](#nodeinfo).[`pid`](#pid)
+
+##### role
+
+> `readonly` **role**: `"single"` \| `"standby"` \| `"active"` \| `"proving"` \| `"draining"` \| `"fenced"`
+
+###### Inherited from
+
+[`NodeInfo`](#nodeinfo).[`role`](#role)
+
+##### schemaGeneration
+
+> `readonly` **schemaGeneration**: `number` \| `null`
+
+The schema generation that version brings a built-in store to; null for a custom store.
+
+###### Inherited from
+
+[`NodeInfo`](#nodeinfo).[`schemaGeneration`](#schemageneration)
+
+##### stale
+
+> `readonly` **stale**: `boolean`
+
+True once the last heartbeat is older than `staleAfterMs`.
+
+##### staleAfterMs
+
+> `readonly` **staleAfterMs**: `number`
+
+How long after its last heartbeat the node counts as stale, in milliseconds.
+
+###### Inherited from
+
+[`NodeInfo`](#nodeinfo).[`staleAfterMs`](#staleafterms)
+
+##### startedAt
+
+> `readonly` **startedAt**: `string`
+
+When the node joined, as an ISO 8601 time in UTC.
+
+##### version
+
+> `readonly` **version**: `string`
+
+The version of `@cosyte/pathways` the node runs.
+
+###### Inherited from
+
+[`NodeInfo`](#nodeinfo).[`version`](#version-2)
+
+***
+
+### NodeSelf
+
+Which process a node row belongs to: its node id, host name and process id. A heartbeat or a
+leave changes the row only while it still names all three, so an earlier process that ran under
+the same id cannot touch the row of the one that replaced it.
+
+#### Example
+
+```ts
+const self: NodeSelf = { node: "engine-a", host: "host-a", pid: 4242 };
+```
+
+#### Extended by
+
+- [`NodeInfo`](#nodeinfo)
+- [`NodeReplace`](#nodereplace)
+
+#### Properties
+
+##### host
+
+> `readonly` **host**: `string`
+
+##### node
+
+> `readonly` **node**: `string`
+
+##### pid
+
+> `readonly` **pid**: `number`
+
+***
+
+### NodeState
+
+What a heartbeat writes beside the database's time: the node's role and its draining flag.
+
+#### Example
+
+```ts
+const state: NodeState = { role: "active", draining: false };
+```
+
+#### Extended by
+
+- [`NodeInfo`](#nodeinfo)
+
+#### Properties
+
+##### draining
+
+> `readonly` **draining**: `boolean`
+
+##### role
+
+> `readonly` **role**: `"single"` \| `"standby"` \| `"active"` \| `"proving"` \| `"draining"` \| `"fenced"`
 
 ***
 
@@ -5792,7 +6181,7 @@ const detail: AuditDetail = { status: "transformed", queued: 2 };
 
 ### AuditEventAction
 
-> **AuditEventAction** = `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"bulk-replay"` \| `"archive"` \| `"batch"`
+> **AuditEventAction** = `"search"` \| `"view"` \| `"content-view"` \| `"replay"` \| `"resend"` \| `"clear"` \| `"retention"` \| `"config"` \| `"lease-release"` \| `"migrate"` \| `"channel-pause"` \| `"channel-resume"` \| `"channel-stop"` \| `"channel-halt"` \| `"channel-reload"` \| `"verify"` \| `"bulk-replay"` \| `"archive"` \| `"batch"` \| `"node-forget"`
 
 Every action the audit log records, as an [AuditEvent](#auditevent)'s `action`: `search` (messages
 listed), `view` (one message's details, without content), `content-view`, `replay`, `resend`,
@@ -5801,8 +6190,9 @@ the engine started), `lease-release` (the engine lease freed by force), `migrate
 applied by `pathways migrate`), `channel-pause`, `channel-resume`, `channel-stop`,
 `channel-halt` and `channel-reload` (a `pathways channel` command), `verify` (a stored
 message read by `pathways verify`), `bulk-replay` (a run of `pathways replay --status failed`:
-its scope, each batch and a summary), and `archive` (a sealed archive retention wrote and checked
-before changing what it holds). Kept equal to the audit log's own list by a test.
+its scope, each batch and a summary), `archive` (a sealed archive retention wrote and checked
+before changing what it holds), and `node-forget` (a stale node's row removed by
+`pathways nodes forget`). Kept equal to the audit log's own list by a test.
 
 #### Example
 
@@ -6476,6 +6866,49 @@ type Claim = MessageTypes["x12"]; // X12Interchange
 
 ***
 
+### NodeJoin
+
+> **NodeJoin** = \{ `joined`: `true`; \} \| \{ `holder`: [`NodeRow`](#noderow); `joined`: `false`; \}
+
+What [MessageStore.joinNode](#joinnode) answers: joined, or the live row that holds the id.
+
+#### Example
+
+```ts
+const join = await store.joinNode(info);
+if (!join.joined) console.error(join.holder.host);
+```
+
+***
+
+### NodeRole
+
+> **NodeRole** = *typeof* [`NODE_ROLES`](#node_roles)\[`number`\]
+
+One of [NODE\_ROLES](#node_roles).
+
+#### Example
+
+```ts
+const role: NodeRole = "active";
+```
+
+***
+
+### NodeStore
+
+> **NodeStore** = `Required`\<`Pick`\<[`MessageStore`](#messagestore), `"joinNode"` \| `"nodeHeartbeat"` \| `"leaveNode"` \| `"nodes"` \| `"forgetNode"`\>\>
+
+The node methods of [MessageStore](#messagestore), all five present.
+
+#### Example
+
+```ts
+const nodes: NodeStore | undefined = nodeStore(store);
+```
+
+***
+
 ### RefusalReason
 
 > **RefusalReason** = `"not-found"` \| `"changed"` \| `"pending"` \| `"not-failed"` \| `"content-dropped"`
@@ -7000,6 +7433,27 @@ the YAML names some of these to receive only those.
 
 ```ts
 LIFECYCLE_EVENTS.includes("delivered"); // true
+```
+
+***
+
+### NODE\_ROLES
+
+> `const` **NODE\_ROLES**: readonly \[`"single"`, `"standby"`, `"active"`, `"proving"`, `"draining"`, `"fenced"`\]
+
+Every role a node row can hold:
+
+- `single`: an engine on a store without leases, the only one.
+- `standby`: waiting for the engine lease another node holds.
+- `active`: holding the engine lease, or about to take it.
+- `proving`: reserved for a node that checks it can take over before it does; nothing sets it yet.
+- `draining`: told to stop, and closing its sources.
+- `fenced`: it lost the engine lease and is stopping.
+
+#### Example
+
+```ts
+NODE_ROLES.includes("standby"); // true
 ```
 
 ***

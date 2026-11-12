@@ -317,8 +317,9 @@ export interface SourceUpEvent extends LifecycleEventBase {
  * applied by `pathways migrate`), `channel-pause`, `channel-resume`, `channel-stop`,
  * `channel-halt` and `channel-reload` (a `pathways channel` command), `verify` (a stored
  * message read by `pathways verify`), `bulk-replay` (a run of `pathways replay --status failed`:
- * its scope, each batch and a summary), and `archive` (a sealed archive retention wrote and checked
- * before changing what it holds). Kept equal to the audit log's own list by a test.
+ * its scope, each batch and a summary), `archive` (a sealed archive retention wrote and checked
+ * before changing what it holds), and `node-forget` (a stale node's row removed by
+ * `pathways nodes forget`). Kept equal to the audit log's own list by a test.
  *
  * @example
  * ```ts
@@ -344,7 +345,8 @@ export type AuditEventAction =
   | "verify"
   | "bulk-replay"
   | "archive"
-  | "batch";
+  | "batch"
+  | "node-forget";
 
 /**
  * An entry of the audit log, once it is stored: who did what, to which message, and how it ended.
