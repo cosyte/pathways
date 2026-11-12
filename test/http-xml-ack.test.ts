@@ -188,12 +188,18 @@ describe("HttpDestination with ack: xml", () => {
           `<G><MSH><MSH.10>SYN-CTL-9999</MSH.10></MSH></G></ORU_R01>`,
       ),
     ],
-  ])("retries a message sent as XML with %s as a mismatch", async (_n, body) => {
-    const r = await serve(answer(ack("AA")));
-    const outcome = await deliver(destination({ url: r.url }), body);
-    expect(outcome).toBeInstanceOf(RetryableError);
-    expect(outcome).toMatchObject({ code: "ACK_CONTROL_ID_MISMATCH" });
-  });
+    ["an MSH with no MSH.10", Buffer.from("<ORU_R01><MSH><MSH.9/></MSH></ORU_R01>")],
+  ])(
+    "fails the delivery at once, sending nothing, when the message sent is XML with %s",
+    async (_n, body) => {
+      // The same body goes on every attempt, so a retry could only post it again: fail it at once.
+      const r = await serve(answer(ack("AA")));
+      const outcome = await deliver(destination({ url: r.url }), body);
+      expect(outcome).toBeInstanceOf(DeliveryRejected);
+      expect(outcome).toMatchObject({ reason: "SENT_XML_NO_CONTROL_ID" });
+      expect(r.received).toEqual([]);
+    },
+  );
 
   it("checks the control ID of a message sent whose MSH sits below the root", async () => {
     const nested = Buffer.from(`<R><G><MSH><MSH.10>${CONTROL_ID}</MSH.10></MSH></G></R>`);

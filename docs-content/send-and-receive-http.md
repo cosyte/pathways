@@ -252,13 +252,13 @@ destinations:
       ack: xml
 ```
 
-| A 2xx answer whose body is                                                                 | The delivery                              |
-| ------------------------------------------------------------------------------------------ | ----------------------------------------- |
-| an acknowledgement with `AA` or `CA`                                                       | delivered                                 |
-| an acknowledgement with `AE` or `CE`                                                       | retried, coded `ACK_AE` or `ACK_CE`       |
-| an acknowledgement with `AR` or `CR`                                                       | failed for good; the destination moves on |
-| an acknowledgement whose `MSA.2` is not the `MSH.10` sent, or sent as XML of another shape | retried, coded `ACK_CONTROL_ID_MISMATCH`  |
-| not XML, not exactly one acknowledgement, a code not listed, over 1 MiB, or cut short      | retried, coded `ACK_UNREADABLE`           |
+| A 2xx answer whose body is                                                            | The delivery                              |
+| ------------------------------------------------------------------------------------- | ----------------------------------------- |
+| an acknowledgement with `AA` or `CA`                                                  | delivered                                 |
+| an acknowledgement with `AE` or `CE`                                                  | retried, coded `ACK_AE` or `ACK_CE`       |
+| an acknowledgement with `AR` or `CR`                                                  | failed for good; the destination moves on |
+| an acknowledgement whose `MSA.2` is not the `MSH.10` sent                             | retried, coded `ACK_CONTROL_ID_MISMATCH`  |
+| not XML, not exactly one acknowledgement, a code not listed, over 1 MiB, or cut short | retried, coded `ACK_UNREADABLE`           |
 
 - **Any other status** is read by the status table above, whatever its body says.
 - **The answer is read within `timeout`**, from connecting to its last byte.
@@ -269,8 +269,9 @@ destinations:
 - **One acknowledgement, in one shape.** An answer is read only when the whole document holds
   exactly one `MSA`, a child of its root element; exactly one `MSA.1`, a child of that `MSA`; at most
   one `MSA.2`, a child of that `MSA`; and at most one `MSH`. `MSA.1` and `MSA.2` hold text alone, no
-  element and no comment, and the code is one of the six above exactly as written: `AA` or `aa`
-  is not a code. Anything else is unreadable and retried, never settled by the first thing found: an
+  element and no comment, and the code is one of the six above in upper case with nothing around
+  it: a code with spaces or a line break before or after it, or in lower case such as aa, is not
+  read. Anything else is unreadable and retried, never settled by the first thing found: an
   answer that also holds a second `MSA` or `MSA.1` at any depth or under any prefix could also be
   rejecting the message. An answer wrapped in a SOAP envelope, where the `MSA` sits deeper, is
   unreadable and retried too.
@@ -279,11 +280,18 @@ destinations:
 - **The message sent is read once per delivery**, before its first POST, whatever its size, so a
   result with a large embedded report is checked like a small one, and an attempt after the first
   does not read it again. It must hold exactly one `MSH`, at any depth, with exactly one `MSH.10`
-  child holding text alone; a message sent as XML in any other shape is retried as
-  `ACK_CONTROL_ID_MISMATCH` on every answer, since no answer can be matched to it. XML the reader
-  refuses (not well-formed, not UTF-8, or with a document type declaration or an entity anywhere,
-  even in a CDATA section) is not sent at all: the delivery fails at once with the reason
-  `SENT_XML_UNREADABLE`, since sending it again cannot change that.
+  child holding text alone. Two kinds of message sent as XML are not sent at all, and the delivery
+  fails at once, since the same body goes on every attempt and sending it again could only post it
+  to the receiver once more:
+  - XML in any other shape (no `MSH`, a batch with several, or an `MSH` without one `MSH.10`), whose
+    answer could never be matched to it, fails with the reason `SENT_XML_NO_CONTROL_ID`;
+  - XML the reader refuses (not well-formed, not UTF-8, or with a document type declaration or an
+    entity anywhere, even in a CDATA section) fails with the reason `SENT_XML_UNREADABLE`.
+
+  Either is stored as the reason, fires a `delivery-rejected` event, and can be
+  [replayed](./inspect-replay-and-clear-messages.md#replay-a-failed-message) once the transform is
+  fixed.
+
 - **The control ID check is skipped only for a body that is not XML at all**: one that does not open
   with `<`, after any spaces, tabs, line breaks or byte order mark. So a pipe-delimited HL7 v2 body
   sent with `ack: xml` is not checked: its answer is settled by its code alone. A destination whose

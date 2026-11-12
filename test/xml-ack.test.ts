@@ -101,9 +101,6 @@ describe("the XML acknowledgement reader", () => {
     expect(() => settleXmlAck({ code: "CE", controlId: "x" }, "x")).toThrow(RetryableError);
     expect(() => settleXmlAck({ code: "AR", controlId: "x" }, "x")).toThrow(DeliveryRejected);
     expect(() => settleXmlAck({ code: "CR", controlId: "x" }, "x")).toThrow(DeliveryRejected);
-    expect(() => settleXmlAck({ code: "AA", controlId: "x" }, MISFIT)).toThrow(
-      /ACK_CONTROL_ID_MISMATCH/,
-    );
     expect(() => settleXmlAck(undefined, "x")).toThrow(RetryableError);
     expect(() => settleXmlAck({ code: "AA", controlId: "y" }, "x")).toThrow(
       /ACK_CONTROL_ID_MISMATCH/,
@@ -192,11 +189,7 @@ describe("the one shape a message sent is checked in", () => {
     ["an MSH.10 outside the MSH", "<R><MSH/><G><MSH.10>S</MSH.10></G></R>"],
     ["an MSH.10 with a child element", "<R><MSH><MSH.10>S<b/></MSH.10></MSH></R>"],
     ["an empty MSH.10", "<R><MSH><MSH.10/></MSH></R>"],
-  ])("is a misfit with %s, retried as a mismatch", async (_name, body) => {
-    const sent = await xmlControlId(Buffer.from(body));
-    expect(sent).toBe(MISFIT);
-    expect(() => settleXmlAck({ code: "AA", controlId: "S" }, sent as typeof MISFIT)).toThrow(
-      /ACK_CONTROL_ID_MISMATCH/,
-    );
+  ])("is a misfit with %s, failed at once and never sent", async (_name, body) => {
+    expect(await xmlControlId(Buffer.from(body))).toBe(MISFIT);
   });
 });

@@ -144,30 +144,30 @@ failed with the error `delivery: destination-unknown` and its message can be rep
 A retried delivery stores and logs a code. These come from Pathways' own connectors; a network error
 keeps the operating system's code, such as `ECONNREFUSED` or `ENOTFOUND`.
 
-| Code                      | Connector | Meaning                                                                                                         |
-| ------------------------- | --------- | --------------------------------------------------------------------------------------------------------------- |
-| `CONNECT_TIMEOUT`         | MLLP      | no connection within `ackTimeout`                                                                               |
-| `ACK_TIMEOUT`             | MLLP      | no ACK within `ackTimeout`                                                                                      |
-| `ACK_AR`, `ACK_CR`        | MLLP      | the receiver answered with a reject code                                                                        |
-| `ACK_UNREADABLE`          | MLLP      | the answer was not an ACK Pathways could read                                                                   |
-| `ACK_CONTROL_ID_MISMATCH` | MLLP      | the ACK answered another message's MSH-10                                                                       |
-| `MLLP_CONNECTION`         | MLLP      | the connection ended with no other code                                                                         |
-| `CONNECT_TIMEOUT`         | tcp       | no connection within `timeout`                                                                                  |
-| `REPLY_TIMEOUT`           | tcp       | no whole reply within `timeout`                                                                                 |
-| `WRITE_TIMEOUT`           | tcp       | the output was not taken in within `timeout`, with no `expectReply`                                             |
-| `REPLY_OVERSIZE`          | tcp       | the reply was longer than `maxMessageSize`                                                                      |
-| `REPLY_BAD_LENGTH`        | tcp       | the reply's inclusive length prefix was smaller than the prefix                                                 |
-| `CONNECTION_CLOSED`       | tcp       | the receiver closed before a whole reply                                                                        |
-| `REPLY_RETRY`             | tcp       | the reply check said `retry`                                                                                    |
-| `REPLY_CHECK_FAILED`      | tcp       | the reply check threw, ran out of time or said something else                                                   |
-| `ABORTED`                 | tcp       | the channel was halted while the delivery ran                                                                   |
-| `TCP_CONNECTION`          | tcp       | the connection failed with no other code                                                                        |
-| `HTTP_<status>`           | HTTP      | a 408, 425, 429 or 5xx answer, or a held 3xx                                                                    |
-| `ETIMEDOUT`               | HTTP      | no answer within `timeout`                                                                                      |
-| `ACK_AE`, `ACK_CE`        | HTTP      | with `ack: xml`, the acknowledgement answered with an error code                                                |
-| `ACK_UNREADABLE`          | HTTP      | with `ack: xml`, the answer was not exactly one acknowledgement in the one shape read                           |
-| `ACK_CONTROL_ID_MISMATCH` | HTTP      | with `ack: xml`, the acknowledgement answered another `MSH.10`, or the message sent is XML without one `MSH.10` |
-| `DELIVERY_TIMEOUT`        | any       | the attempt ran past its deadline, cut off                                                                      |
+| Code                      | Connector | Meaning                                                                               |
+| ------------------------- | --------- | ------------------------------------------------------------------------------------- |
+| `CONNECT_TIMEOUT`         | MLLP      | no connection within `ackTimeout`                                                     |
+| `ACK_TIMEOUT`             | MLLP      | no ACK within `ackTimeout`                                                            |
+| `ACK_AR`, `ACK_CR`        | MLLP      | the receiver answered with a reject code                                              |
+| `ACK_UNREADABLE`          | MLLP      | the answer was not an ACK Pathways could read                                         |
+| `ACK_CONTROL_ID_MISMATCH` | MLLP      | the ACK answered another message's MSH-10                                             |
+| `MLLP_CONNECTION`         | MLLP      | the connection ended with no other code                                               |
+| `CONNECT_TIMEOUT`         | tcp       | no connection within `timeout`                                                        |
+| `REPLY_TIMEOUT`           | tcp       | no whole reply within `timeout`                                                       |
+| `WRITE_TIMEOUT`           | tcp       | the output was not taken in within `timeout`, with no `expectReply`                   |
+| `REPLY_OVERSIZE`          | tcp       | the reply was longer than `maxMessageSize`                                            |
+| `REPLY_BAD_LENGTH`        | tcp       | the reply's inclusive length prefix was smaller than the prefix                       |
+| `CONNECTION_CLOSED`       | tcp       | the receiver closed before a whole reply                                              |
+| `REPLY_RETRY`             | tcp       | the reply check said `retry`                                                          |
+| `REPLY_CHECK_FAILED`      | tcp       | the reply check threw, ran out of time or said something else                         |
+| `ABORTED`                 | tcp       | the channel was halted while the delivery ran                                         |
+| `TCP_CONNECTION`          | tcp       | the connection failed with no other code                                              |
+| `HTTP_<status>`           | HTTP      | a 408, 425, 429 or 5xx answer, or a held 3xx                                          |
+| `ETIMEDOUT`               | HTTP      | no answer within `timeout`                                                            |
+| `ACK_AE`, `ACK_CE`        | HTTP      | with `ack: xml`, the acknowledgement answered with an error code                      |
+| `ACK_UNREADABLE`          | HTTP      | with `ack: xml`, the answer was not exactly one acknowledgement in the one shape read |
+| `ACK_CONTROL_ID_MISMATCH` | HTTP      | with `ack: xml`, the acknowledgement answered another `MSH.10`                        |
+| `DELIVERY_TIMEOUT`        | any       | the attempt ran past its deadline, cut off                                            |
 
 A `delivery-retry` line's `retryInMs` is the backoff, or the wait a 429's or a 503's `Retry-After`
 asked for when that is longer, up to the destination's `retry.max`, 5 minutes by default. A
@@ -179,7 +179,8 @@ absent when there is no `Location` or it names no host.
 
 A delivery rejected for good stores its reason: the ACK code (`AE`, `CE` over MLLP; `AR`, `CR` from
 an HTTP destination with `ack: xml`), `SENT_XML_UNREADABLE` for an output in XML that an HTTP destination
-with `ack: xml` refuses to read, unsent, `HTTP <status>` for a
+with `ack: xml` refuses to read, unsent, `SENT_XML_NO_CONTROL_ID` for an output in XML without
+exactly one `MSH` holding one `MSH.10`, such as a batch, unsent, `HTTP <status>` for a
 101 or a 4xx other than 408, 425 and 429, `MLLP_PAYLOAD_CONTAINS_...` for an output that
 holds a framing byte, `REPLY_REJECTED` when a tcp reply check said `rejected`, or
 `TCP_PAYLOAD_CONTAINS_DELIMITER`, `TCP_PAYLOAD_CONTAINS_END` or `TCP_PAYLOAD_TOO_LONG` for an output

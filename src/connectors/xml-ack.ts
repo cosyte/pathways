@@ -46,13 +46,19 @@ export const REFUSED = Symbol("refused");
 /**
  * What {@link xmlControlId} gives for a message sent that is readable XML but not one HL7 v2 message
  * with one control ID: no `MSH` or more than one anywhere, or an `MSH` without exactly one `MSH.10`
- * holding text alone. Its acknowledgement cannot be matched to it, so the delivery is retried as a
- * mismatch, never settled unchecked.
+ * holding text alone. No acknowledgement can be matched to it, and the same body goes on every
+ * attempt, so a retry could only post it again: the delivery fails at once, never settled unchecked.
  */
 export const MISFIT = Symbol("misfit");
 
 /** The reason a delivery fails with when the message sent is XML the reader refuses. */
 export const SENT_XML_UNREADABLE = "SENT_XML_UNREADABLE";
+
+/**
+ * The reason a delivery fails with when the message sent is readable XML but not one `MSH` with one
+ * `MSH.10` ({@link MISFIT}): no `MSH`, a batch with several, or no control ID in its `MSH`.
+ */
+export const SENT_XML_NO_CONTROL_ID = "SENT_XML_NO_CONTROL_ID";
 
 let library: Promise<typeof Ccda> | undefined;
 
@@ -242,21 +248,19 @@ export async function xmlControlId(
  * - `AR` or `CR`: a {@link DeliveryRejected} naming the code, so the delivery is marked failed;
  * - an answer {@link readXmlAck} could not read (undefined): a retryable error coded
  *   `ACK_UNREADABLE`;
- * - an acknowledgement that answers another control ID than `sent`, or a `sent` of {@link MISFIT}:
- *   a retryable error coded `ACK_CONTROL_ID_MISMATCH`.
+ * - an acknowledgement that answers another control ID than `sent`: a retryable error coded
+ *   `ACK_CONTROL_ID_MISMATCH`.
  *
  * `sent` is what {@link xmlControlId} read of the message sent: undefined when it is not XML at all,
- * the only case the check is skipped.
+ * the only case the check is skipped. A message sent that is {@link REFUSED} or {@link MISFIT} is
+ * never posted, so it never comes here.
  *
  * @example
  * ```ts
  * settleXmlAck({ code: "AR", controlId: "SYN-1" }, "SYN-1"); // throws DeliveryRejected("AR")
  * ```
  */
-export function settleXmlAck(
-  ack: XmlAck | undefined,
-  sent: string | typeof MISFIT | undefined,
-): void {
+export function settleXmlAck(ack: XmlAck | undefined, sent: string | undefined): void {
   if (ack === undefined) throw transientError("ACK_UNREADABLE");
   if (sent !== undefined && ack.controlId !== sent) {
     throw transientError("ACK_CONTROL_ID_MISMATCH");
