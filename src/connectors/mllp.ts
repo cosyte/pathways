@@ -23,6 +23,7 @@ import {
 } from "./mllp-tls.js";
 import {
   DeliveryRejected,
+  PassFailed,
   type DestinationConnector,
   type MessageSink,
   type OutgoingMessage,
@@ -172,6 +173,8 @@ const MAX_WAITING_PEERS = 1_024;
  * - stored: `AA`;
  * - not stored: by default no ACK, and the connection closes so the sender sends again; or `AE` or
  *   `AR`, as `onStoreFailure` says;
+ * - on a channel that stores nothing, refused for good (a {@link PassFailed} that is permanent):
+ *   `AE`;
  * - no usable MSH header (none, no MSH-10, or more than one message in the frame): stored, marked
  *   failed, and answered `AR`;
  * - damaged in transit (the framing discarded bytes of it): stored, marked failed, and answered
@@ -339,6 +342,18 @@ export class MllpSource implements SourceConnector {
             : { failure: `inbound: ${problem}` },
         );
       } catch (error) {
+        if (error instanceof PassFailed && error.permanent) {
+          // A channel that stores nothing could not pass it on, and sending it again will not help.
+          this.report("warn", "mllp-pass-rejected", { code: error.code });
+          await this.answer(conn, state, {
+            code: "AE",
+            reason: "rejected",
+            problem,
+            header,
+            messageId: undefined,
+          });
+          return;
+        }
         const onStoreFailure = this.options.onStoreFailure ?? "close";
         this.report("warn", "mllp-store-failed", { ...describeError(error), onStoreFailure });
         if (onStoreFailure === "close") {

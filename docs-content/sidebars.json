@@ -34,6 +34,7 @@
         "inspect-replay-and-clear-messages",
         "search-messages-by-metadata",
         "set-message-retention",
+        "pass-messages-through-without-storing",
         "upgrade-pathways",
         "run-in-docker",
         "deploy-the-image"
