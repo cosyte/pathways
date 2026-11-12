@@ -132,10 +132,27 @@ export interface FileSourceFacts {
   readonly kind: "file";
   /** The file's name as it was dropped in the folder. It can carry a patient's name: never log it. */
   readonly name: string;
-  /** The body's size in bytes. */
+  /** The body's size in bytes: with `batch:`, the piece's. */
   readonly size: number;
+  /** With `batch:`, where the message sat in the file it was cut from. */
+  readonly batch?: BatchFacts;
   /** When the message was stored, as an ISO 8601 time. */
   readonly receivedAt: string;
+}
+
+/**
+ * Where a message sat in the batch a source's `batch:` cut it from: its place, from 0, and the first
+ * 16 hexadecimal digits of the SHA-256 of the whole file or request body, which every piece of it
+ * shares.
+ *
+ * @example
+ * ```ts
+ * const first = (source: FileSourceFacts): boolean => source.batch?.piece === 0;
+ * ```
+ */
+export interface BatchFacts {
+  readonly piece: number;
+  readonly hash: string;
 }
 
 /**
@@ -158,6 +175,8 @@ export interface HttpSourceFacts {
   readonly remoteAddress: string | undefined;
   /** The listed headers the request carried, by lower-case name; several values joined by `, `. */
   readonly headers: Readonly<Record<string, string>>;
+  /** With `batch:`, where the message sat in the request body it was cut from. */
+  readonly batch?: BatchFacts;
   /** When the message was stored, as an ISO 8601 time. */
   readonly receivedAt: string;
 }

@@ -107,6 +107,22 @@ export const CHANNELS = [
     ],
   },
   {
+    // One file holding every message, which the file source's `batch: { split: hl7 }` cuts into a
+    // message each, streaming, each stored in a transaction of its own. Beside the same messages one
+    // to a file, above, it gives the cost of a piece against a file; its 1,000 against its 10,000,
+    // whether a pass's memory stays flat as the file grows.
+    group: "hl7",
+    name: "HL7 v2 ADT^A01 batch file",
+    format: "hl7v2",
+    transform: TRANSFORMS.hl7Address,
+    extension: "hl7",
+    batch: "hl7",
+    sizes: [
+      { label: "1,000 messages", count: 1_000, build: S.adtMessage },
+      { label: "10,000 messages", count: 10_000, build: S.adtMessage },
+    ],
+  },
+  {
     group: "fhir",
     name: "FHIR R4 Patient",
     format: "fhir",
@@ -200,6 +216,7 @@ function engineBenchmark(channel) {
           bodies: bodiesOf(size),
           extension: channel.extension,
           content: channel.content,
+          batch: channel.batch,
         });
         return {
           inputs: [project],

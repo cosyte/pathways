@@ -96,9 +96,10 @@ export function workerOf(bin) {
  * Writes a project with one channel of `format`, whose inputs are `bodies`, and returns it.
  * `transform` is the TypeScript of the channel's transform, or undefined to pass each message
  * through as it was parsed. `content` is the project's `storage.content`, or undefined to keep the
- * default.
+ * default. `batch` is the file source's `batch: { split }`, such as `hl7`: then the bodies are
+ * written one after another into one file, which the source cuts into a message each.
  */
-export function makeProject({ format, transform, bodies, extension = "msg", content }) {
+export function makeProject({ format, transform, bodies, extension = "msg", content, batch }) {
   const root = mkdtempSync(join(tmpdir(), "pathways-bench-"));
   const channel = join(root, "channels", "bench");
   mkdirSync(channel, { recursive: true });
@@ -128,6 +129,7 @@ export function makeProject({ format, transform, bodies, extension = "msg", cont
       "  file:",
       "    dir: ../../data/in",
       "    minAge: 0",
+      ...(batch === undefined ? [] : [`    batch: { split: ${batch} }`]),
       ...(transform === undefined ? [] : ["transform: ./transform.ts"]),
       "destinations:",
       "  - file:",
@@ -140,6 +142,13 @@ export function makeProject({ format, transform, bodies, extension = "msg", cont
   mkdirSync(stash);
   mkdirSync(join(root, "data", "in"), { recursive: true });
   let bytes = 0;
+  if (batch !== undefined) {
+    // One file of every body, or none for a pass with no input.
+    const names = bodies.length === 0 ? [] : [`00000000.${extension}`];
+    for (const body of bodies) bytes += Buffer.byteLength(body);
+    if (names.length > 0) writeFileSync(join(stash, names[0]), bodies.join(""));
+    return { root, names, bytes, count: bodies.length };
+  }
   const names = bodies.map((body, n) => {
     const name = `${String(n).padStart(8, "0")}.${extension}`;
     writeFileSync(join(stash, name), body);

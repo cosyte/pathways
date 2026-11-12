@@ -26,6 +26,7 @@ entry.
 | `config`                                                                            | `pathways start` finds `pathways.yaml`, a `channel.yaml` or a transform added, changed or removed since the last start         |
 | `migrate`                                                                           | `pathways migrate` applied schema steps, said which it would apply (a dry run), or refused; once the database has an audit log |
 | `verify`                                                                            | `pathways verify` reads a stored message to run it through the project's transform; written before its content is read         |
+| `batch`                                                                             | a source read a [batch](./read-batch-files.md) to its end: its counts, or `refused` with the `reason` it was failed whole      |
 | `channel-pause`, `channel-resume`, `channel-stop`, `channel-halt`, `channel-reload` | a `pathways channel` command, whether it was done or refused, with the user the command reports                                |
 
 Each entry holds the time, the operating system user who acted, the action, its outcome (`ok`,

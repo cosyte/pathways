@@ -588,6 +588,106 @@ const httpSourceResponse = z
       "How a stored message is answered: ack for an HL7 ACK as HL7 over HTTP sets it (needs format: hl7v2), or { status, contentType, headers, body }. Default: 202 with the message id as JSON.",
   });
 
+/** How a source's `batch:` cuts a file or body: there is no regular-expression cut. */
+const BATCH_SPLITS = ["hl7", "lines", "delimiter"] as const;
+
+/** The longest `delimiter` a batch takes, in characters. */
+const MAX_DELIMITER = 64;
+
+/** What `split` and `delimiter` share between the file and HTTP sources' `batch:` blocks. */
+const batchShape = {
+  split: envable(
+    z.enum(BATCH_SPLITS).meta({
+      description:
+        "How the file or body is cut into messages: hl7 (HL7 v2 messages, batch envelopes and MLLP frames read), lines (one message per line) or delimiter (at each delimiter).",
+    }),
+  ),
+  delimiter: envable(
+    z
+      .string()
+      .min(1)
+      .max(MAX_DELIMITER)
+      .meta({
+        description: `With split: delimiter, the text each message ends at, as UTF-8 bytes, 1 to ${MAX_DELIMITER} characters. YAML's escapes, such as "\\n---\\n", write a control character.`,
+      }),
+  ).optional(),
+};
+
+/** `delimiter` with `split: delimiter` alone, and `onIncomplete` and `holdFor` with `split: hl7`. */
+function batchChecks(
+  value: {
+    readonly split: (typeof BATCH_SPLITS)[number];
+    readonly delimiter?: string | undefined;
+    readonly onIncomplete?: string | undefined;
+    readonly holdFor?: number | undefined;
+  },
+  ctx: z.RefinementCtx,
+): void {
+  if (value.split === "delimiter" && value.delimiter === undefined) {
+    ctx.addIssue({ code: "custom", path: ["delimiter"], message: "split: delimiter needs one" });
+  }
+  if (value.split !== "delimiter" && value.delimiter !== undefined) {
+    ctx.addIssue({ code: "custom", path: ["delimiter"], message: "goes with split: delimiter" });
+  }
+  if (value.split !== "hl7" && value.onIncomplete !== undefined) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["onIncomplete"],
+      message: "goes with split: hl7, whose batch envelope can be incomplete",
+    });
+  }
+  if (
+    value.holdFor !== undefined &&
+    (value.split !== "hl7" || (value.onIncomplete ?? "hold") !== "hold")
+  ) {
+    ctx.addIssue({ code: "custom", path: ["holdFor"], message: "goes with onIncomplete: hold" });
+  }
+}
+
+/** A file source's `batch:`. */
+const fileBatch = z
+  .strictObject({
+    ...batchShape,
+    maxFileSize: bytes
+      .meta({
+        description:
+          "The largest file read as a batch: a size such as 100MB. A larger one is failed whole, with the code BATCH_FILE_TOO_LARGE, and moved aside. Default: no limit.",
+      })
+      .optional(),
+    onIncomplete: envable(
+      z.enum(["hold", "accept", "fail"]).meta({
+        description:
+          "With split: hl7, what a file lacking its BTS or FTS trailer, or whose trailer's count does not match, gets: hold (left claimed for holdFor, as a file still being written, then failed), accept (stored as it is) or fail (failed at once, with the code BATCH_INCOMPLETE, and moved aside). Default hold.",
+      }),
+    ).optional(),
+    holdFor: duration(
+      "How long onIncomplete: hold leaves an incomplete file, from its claim, before it is failed: a duration such as 5m. Default 5m.",
+      { ms: 1, message: 'a duration of at least 1ms, such as "5m"' },
+    ).optional(),
+  })
+  .meta({
+    description:
+      "Read each file as a batch of messages, each stored as a message of its own, rather than as one message.",
+  })
+  .superRefine(batchChecks);
+
+/** An HTTP source's `batch:`. */
+const httpBatch = z
+  .strictObject({
+    ...batchShape,
+    onIncomplete: envable(
+      z.enum(["accept", "fail"]).meta({
+        description:
+          "With split: hl7, what a body lacking its BTS or FTS trailer, or whose trailer's count does not match, gets: accept (stored as it is) or fail (422 with the code BATCH_INCOMPLETE, nothing stored). Default fail.",
+      }),
+    ).optional(),
+  })
+  .meta({
+    description:
+      "Read each body as a batch of messages, each stored as a message of its own, and answer with their ids. An Idempotency-Key header names the request, so a retry stores nothing twice.",
+  })
+  .superRefine(batchChecks);
+
 const httpSource = restate(
   z
     .strictObject({
@@ -622,6 +722,7 @@ const httpSource = restate(
             "Request headers the transform reads in ctx.source.headers, by name. Authorization, Proxy-Authorization and Cookie are never passed. Default: none.",
         })
         .optional(),
+      batch: httpBatch.optional(),
     })
     .meta({
       description:
@@ -645,10 +746,18 @@ function httpSourceChecks(
     readonly methods?: readonly string[] | undefined;
     readonly response?: z.output<typeof httpSourceResponse> | undefined;
     readonly contextHeaders?: readonly string[] | undefined;
+    readonly batch?: unknown;
   },
   ctx: z.RefinementCtx,
 ): void {
   contextHeaderChecks(value.contextHeaders ?? [], ctx);
+  if (value.batch !== undefined && value.response === "ack") {
+    ctx.addIssue({
+      code: "custom",
+      path: ["batch"],
+      message: "cannot be set alongside response: ack, which answers one message with one ACK",
+    });
+  }
   if (value.path !== undefined && value.paths !== undefined) {
     ctx.addIssue({
       code: "custom",
@@ -1851,8 +1960,11 @@ const source = restate(
             }),
           ).optional(),
           sftp: sftpBlock.optional(),
+          batch: fileBatch.optional(),
         })
-        .meta({ description: "Read each file dropped into dir as one message." })
+        .meta({
+          description: "Read each file dropped into dir as one message, or with batch, as several.",
+        })
         .superRefine(sftpPaths(["dir", "errorDir"]))
         .optional(),
       http: httpSource.optional(),
@@ -2212,6 +2324,16 @@ export const DEFAULT_LEASE_TTL_MS = 15_000;
 /** How long a file must sit unchanged in a file source before it is read, by default. */
 export const DEFAULT_MIN_AGE_MS = 1_000;
 
+/**
+ * How long a file source holds an incomplete HL7 batch, from its claim, by default: 5 minutes.
+ *
+ * @example
+ * ```ts
+ * DEFAULT_BATCH_HOLD_MS; // 300000
+ * ```
+ */
+export const DEFAULT_BATCH_HOLD_MS = 300_000;
+
 /** How many passes in a row a file source fails to open a file before it sets it aside, by default. */
 export const DEFAULT_READ_TRIES = 3;
 
@@ -2344,6 +2466,29 @@ export interface FileSource {
   readonly readTries: number;
   /** The SFTP server `dir` and `errorDir` are on, or `undefined` for a folder on this machine. */
   readonly sftp?: SftpConfig | undefined;
+  /** How each file is read as a batch of messages, or `undefined` to read each as one message. */
+  readonly batch?: BatchConfig | undefined;
+}
+
+/**
+ * A source's `batch:` setting, resolved: how a file or body is cut into messages, the bytes a
+ * `delimiter` cut is made at, and, for an HL7 batch, what an incomplete one gets.
+ *
+ * @example
+ * ```ts
+ * const batch: BatchConfig = { split: "hl7", delimiter: undefined, maxFileSize: undefined, onIncomplete: "hold", holdForMs: 300_000 };
+ * ```
+ */
+export interface BatchConfig {
+  readonly split: "hl7" | "lines" | "delimiter";
+  /** The delimiter's UTF-8 bytes, with `split: delimiter`. */
+  readonly delimiter: Uint8Array | undefined;
+  /** The largest file read as a batch, in bytes; `undefined` for no limit, and for HTTP. */
+  readonly maxFileSize: number | undefined;
+  /** What an incomplete HL7 batch gets: `hold` (a file source only), `accept` or `fail`. */
+  readonly onIncomplete: "hold" | "accept" | "fail";
+  /** How long a file source holds an incomplete HL7 batch, from its claim, in milliseconds. */
+  readonly holdForMs: number;
 }
 
 /**
@@ -2439,6 +2584,8 @@ export interface HttpSource extends ListenerConfig {
   readonly maxBytes: number;
   /** The request headers passed to the transform in `ctx.source.headers`, in lower case. */
   readonly contextHeaders: readonly string[];
+  /** How each body is read as a batch of messages, or `undefined` to read each as one message. */
+  readonly batch?: BatchConfig | undefined;
 }
 
 /**

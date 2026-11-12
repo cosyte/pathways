@@ -35,8 +35,11 @@ import {
   DeliveryRejected,
   type DestinationConnector,
   type MessageSink,
+  type ReceivedPiece,
+  type ReceiveOptions,
   type SourceConnector,
 } from "../connectors/types.js";
+import type { BatchResult } from "../connectors/batch.js";
 import { customDestination, customSource, loadAckBuilder } from "../extensions/build.js";
 import { faultPoint } from "../fault-points.js";
 import type { LifecycleEvent } from "../extensions/events.js";
@@ -413,6 +416,7 @@ export async function connectorsFor(
             : response,
         maxBytes: source.maxBytes,
         contextHeaders: source.contextHeaders,
+        ...(source.batch === undefined ? {} : { batch: source.batch }),
         tls,
         token,
         onRefused: (status) => {
@@ -1720,106 +1724,141 @@ export class Engine {
   private sinkFor(channel: RunningChannel, cut?: AbortSignal): MessageSink {
     const { config } = channel;
     const { store, logger } = this.options;
+    const receivePiece = async (
+      body: Uint8Array,
+      options: ReceiveOptions = {},
+    ): Promise<ReceivedPiece> => {
+      // Before anything is stored: the source keeps the message for a later pass.
+      if (cut?.aborted === true) throw new PassCut();
+      const { duplicateKey, idempotencyKey, resumed, failure, source } = options;
+      let received: ReceivedMessage;
+      const receivedAt = this.at();
+      // Settled once this message's facts are set or the receive failed, so a pass that takes
+      // the message from the store before this call has returned waits for its facts.
+      let settle!: () => void;
+      const receiving = new Promise<void>((resolve) => (settle = resolve));
+      channel.receiving.add(receiving);
+      const settled = (): void => {
+        channel.receiving.delete(receiving);
+        settle();
+      };
+      try {
+        // Checked and copied before anything is stored, so a source that passes what a
+        // transform cannot be handed learns it at once and the sender keeps the message, and a
+        // source that changes its object afterwards changes nothing the transform reads.
+        const passed = source === undefined ? undefined : copyFacts(source);
+        // An engine that lost its lease takes nothing more in: the source answers as it does
+        // when a message cannot be stored, so the sender keeps it.
+        this.options.fence?.check();
+        received = await store.receive(config.name, body, {
+          // Storage keeps a hash of each key, so a sender's identifiers and a file's name are not
+          // stored.
+          duplicateKey: hashed(duplicateKey),
+          idempotencyKey: hashed(idempotencyKey),
+          resumed,
+          failure,
+          size: body.byteLength,
+          // Kept with the metadata once the body is dropped, to match a copy held elsewhere.
+          ...(config.settings.content === "dropAfterDelivery"
+            ? { contentHash: createHash("sha256").update(body).digest("hex") }
+            : {}),
+        });
+        // Set at once, with no wait between the store call and here.
+        if (failure === undefined && received.alreadyStored !== true) {
+          keepFacts(
+            channel.facts,
+            received.id,
+            sourceFacts(config.source.kind, passed, body.byteLength, receivedAt),
+          );
+        }
+        settled();
+      } catch (error) {
+        settled();
+        const code = errorCode(error);
+        logger.error({ event: "receive-failed", channel: config.name, code });
+        this.emit(channel, () => ({
+          type: "receive-failed",
+          at: this.at(),
+          channel: config.name,
+          name: errorName(error),
+          code,
+        }));
+        throw error;
+      }
+      faultPoint("after-store-before-ack");
+      this.step();
+      if (received.alreadyStored === true) {
+        // Handed in again after a stop between storing and acknowledging: stored once already.
+        logger.info({ event: "already-stored", channel: config.name, message: received.id });
+        return { id: received.id, alreadyStored: true };
+      }
+      logger.info({
+        event: "received",
+        channel: config.name,
+        message: received.id,
+        bytes: body.byteLength,
+        ...(failure === undefined ? {} : { failed: true }),
+      });
+      this.emit(channel, () => ({
+        type: "received",
+        at: this.at(),
+        channel: config.name,
+        messageId: received.id,
+        bytes: body.byteLength,
+        failed: failure !== undefined,
+        duplicateOf: received.duplicateOf,
+      }));
+      if (received.duplicateOf !== undefined) {
+        logger.warn({
+          event: "possible-duplicate",
+          channel: config.name,
+          message: received.id,
+          duplicateOf: received.duplicateOf,
+        });
+      }
+      return { id: received.id, alreadyStored: false };
+    };
     const sink: MessageSink = {
       sourceDown: (code) => this.sourceDown(channel, code),
       sourceUp: () => {
         this.sourceUp(channel);
       },
-      receive: async (body, options = {}) => {
-        // Before anything is stored: the source keeps the message for a later pass.
-        if (cut?.aborted === true) throw new PassCut();
-        const { duplicateKey, idempotencyKey, resumed, failure, source } = options;
-        let received: ReceivedMessage;
-        const receivedAt = this.at();
-        // Settled once this message's facts are set or the receive failed, so a pass that takes
-        // the message from the store before this call has returned waits for its facts.
-        let settle!: () => void;
-        const receiving = new Promise<void>((resolve) => (settle = resolve));
-        channel.receiving.add(receiving);
-        const settled = (): void => {
-          channel.receiving.delete(receiving);
-          settle();
-        };
-        try {
-          // Checked and copied before anything is stored, so a source that passes what a
-          // transform cannot be handed learns it at once and the sender keeps the message, and a
-          // source that changes its object afterwards changes nothing the transform reads.
-          const passed = source === undefined ? undefined : copyFacts(source);
-          // An engine that lost its lease takes nothing more in: the source answers as it does
-          // when a message cannot be stored, so the sender keeps it.
-          this.options.fence?.check();
-          received = await store.receive(config.name, body, {
-            // Storage keeps a hash of each key, so a sender's identifiers and a file's name are not
-            // stored.
-            duplicateKey: hashed(duplicateKey),
-            idempotencyKey: hashed(idempotencyKey),
-            resumed,
-            failure,
-            size: body.byteLength,
-            // Kept with the metadata once the body is dropped, to match a copy held elsewhere.
-            ...(config.settings.content === "dropAfterDelivery"
-              ? { contentHash: createHash("sha256").update(body).digest("hex") }
-              : {}),
-          });
-          // Set at once, with no wait between the store call and here.
-          if (failure === undefined && received.alreadyStored !== true) {
-            keepFacts(
-              channel.facts,
-              received.id,
-              sourceFacts(config.source.kind, passed, body.byteLength, receivedAt),
-            );
-          }
-          settled();
-        } catch (error) {
-          settled();
-          const code = errorCode(error);
-          logger.error({ event: "receive-failed", channel: config.name, code });
-          this.emit(channel, () => ({
-            type: "receive-failed",
-            at: this.at(),
-            channel: config.name,
-            name: errorName(error),
-            code,
-          }));
-          throw error;
-        }
-        faultPoint("after-store-before-ack");
-        this.step();
-        if (received.alreadyStored === true) {
-          // Handed in again after a stop between storing and acknowledging: stored once already.
-          logger.info({ event: "already-stored", channel: config.name, message: received.id });
-          return received.id;
-        }
-        logger.info({
-          event: "received",
-          channel: config.name,
-          message: received.id,
-          bytes: body.byteLength,
-          ...(failure === undefined ? {} : { failed: true }),
-        });
-        this.emit(channel, () => ({
-          type: "received",
-          at: this.at(),
-          channel: config.name,
-          messageId: received.id,
-          bytes: body.byteLength,
-          failed: failure !== undefined,
-          duplicateOf: received.duplicateOf,
-        }));
-        if (received.duplicateOf !== undefined) {
-          logger.warn({
-            event: "possible-duplicate",
-            channel: config.name,
-            message: received.id,
-            duplicateOf: received.duplicateOf,
-          });
-        }
-        return received.id;
-      },
+      receive: async (body, options) => (await receivePiece(body, options)).id,
+      receivePiece,
+      batchDone: (result) => this.batchDone(config.name, result),
     };
     // A store that copies each body it stores makes a sink that keeps none, so a source may free a
     // body it is done with once it is stored.
     return copiesBodies(store) ? markCopiesBodies(sink) : sink;
+  }
+
+  /**
+   * Logs what a batch came to and records it in the audit log as a `batch` entry: counts and codes,
+   * never a name or content. A batch failed whole is recorded `refused`, with its code. An audit
+   * log that cannot be written is logged and the batch goes on: its pieces are stored already.
+   */
+  private async batchDone(channel: string, result: BatchResult): Promise<void> {
+    const { logger } = this.options;
+    const { source, outcome, code, pieces, stored, failed, duplicates, warnings } = result;
+    const counts = { pieces, stored, failed, duplicates };
+    const warned = warnings.length === 0 ? {} : { warnings: warnings.join(",") };
+    const why = code === undefined ? {} : { code };
+    logger.info({ event: "batch", channel, source, outcome, ...counts, ...why, ...warned });
+    try {
+      await this.audit.record({
+        action: "batch",
+        outcome: outcome === "stored" ? "ok" : "refused",
+        channel,
+        detail: {
+          source,
+          ...counts,
+          ...(code === undefined ? {} : { reason: code }),
+          ...warned,
+        },
+      });
+    } catch (error) {
+      logger.warn({ event: "batch-audit-failed", channel, code: errorCode(error) });
+    }
   }
 
   /**

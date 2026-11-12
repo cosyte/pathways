@@ -15,6 +15,7 @@
         "test-a-channel",
         "make-sample-messages",
         "read-and-write-files",
+        "read-batch-files",
         "send-and-receive-mllp",
         "send-and-receive-http",
         "work-with-formats",

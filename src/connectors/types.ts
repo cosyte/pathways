@@ -1,4 +1,19 @@
 import type { JsonValue } from "../transform.js";
+import type { BatchResult } from "./batch.js";
+
+/**
+ * What {@link MessageSink.receivePiece} resolves with: the stored message's id, and whether the
+ * store held it already, so nothing new was stored.
+ *
+ * @example
+ * ```ts
+ * const { id, alreadyStored } = await sink.receivePiece(body, { idempotencyKey, resumed: true });
+ * ```
+ */
+export interface ReceivedPiece {
+  readonly id: number;
+  readonly alreadyStored: boolean;
+}
 
 /**
  * The connector interfaces. Pathways' own connectors implement these, and so can yours: a source
@@ -83,6 +98,19 @@ export interface MessageSink {
    * `options` is optional, so a source that passes only `body` keeps working unchanged.
    */
   receive(body: Uint8Array, options?: ReceiveOptions): Promise<number>;
+  /**
+   * As {@link receive}, and also says whether the store held the message already, under its
+   * `idempotencyKey`, so nothing new was stored. The built-in sources call it for each piece of a
+   * batch, to count what the batch came to; the engine's own sink always has it, and a sink a test
+   * builds by hand may leave it out.
+   */
+  receivePiece?(body: Uint8Array, options?: ReceiveOptions): Promise<ReceivedPiece>;
+  /**
+   * Told what a whole batch came to once every piece is stored, or once it was failed whole: counts
+   * and codes, never content. The engine records it in the audit log as a `batch` entry. Optional,
+   * as {@link receivePiece} is.
+   */
+  batchDone?(result: BatchResult): Promise<void>;
   /**
    * Says the source lost what it reads from (a broker, a remote server, a socket it dialled) and
    * cannot take messages in until it is back. Until {@link sourceUp}, the health endpoint shows

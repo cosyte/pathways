@@ -776,6 +776,8 @@ export interface ExpireResult {
  *   the `pathways channel` commands of the same names asked, with the user the client named.
  * - `verify`: `pathways verify` read a stored message's content, to run it through a candidate
  *   project's transform; written before the content is read.
+ * - `batch`: a source read a file or request body as a batch: how many pieces it stored, failed
+ *   and found stored already, and, for a batch failed whole, why. Counts and codes, never a name.
  *
  * @example
  * ```ts
@@ -799,6 +801,7 @@ export const AUDIT_ACTIONS = [
   "channel-halt",
   "channel-reload",
   "verify",
+  "batch",
 ] as const;
 
 /**

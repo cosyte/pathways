@@ -11,6 +11,7 @@ import { DEFAULT_INDEX_BITS, isLowEntropyKey } from "./meta-index.js";
 import {
   BUILT_IN_SECRET_PROVIDERS,
   channelSchema,
+  DEFAULT_BATCH_HOLD_MS,
   DEFAULT_DATABASE_CONNECT_TIMEOUT_MS,
   DEFAULT_DATABASE_FILE,
   DEFAULT_DATABASE_URL_ENV,
@@ -29,6 +30,7 @@ import {
   DEFAULT_SECRET_TIMEOUT_MS,
   DEFAULT_SETTINGS,
   projectSchema,
+  type BatchConfig,
   type ChannelConfig,
   type ClientTlsFiles,
   type ContentPolicy,
@@ -522,6 +524,7 @@ function resolveSource(
       response: resolveSourceResponse(http.response, dir),
       maxBytes: http.maxBytes ?? DEFAULT_MAX_BYTES,
       contextHeaders: (http.contextHeaders ?? []).map((name) => name.toLowerCase()),
+      ...(http.batch === undefined ? {} : { batch: resolveBatch(http.batch, "fail") }),
     };
   }
   // The schema lets exactly one kind through, so a source that is not HTTP is a file source.
@@ -547,6 +550,28 @@ function resolveSource(
     errorDir: file.errorDir === undefined ? undefined : place(file.errorDir),
     readTries: file.readTries ?? DEFAULT_READ_TRIES,
     sftp,
+    ...(file.batch === undefined ? {} : { batch: resolveBatch(file.batch, "hold") }),
+  };
+}
+
+/** A source's `batch:`, resolved: the delimiter as UTF-8 bytes, and the defaults filled in. */
+function resolveBatch(
+  batch: {
+    readonly split: BatchConfig["split"];
+    readonly delimiter?: string | undefined;
+    readonly maxFileSize?: number | undefined;
+    readonly onIncomplete?: BatchConfig["onIncomplete"] | undefined;
+    readonly holdFor?: number | undefined;
+  },
+  incomplete: BatchConfig["onIncomplete"],
+): BatchConfig {
+  return {
+    split: batch.split,
+    delimiter:
+      batch.delimiter === undefined ? undefined : new TextEncoder().encode(batch.delimiter),
+    maxFileSize: batch.maxFileSize,
+    onIncomplete: batch.onIncomplete ?? incomplete,
+    holdForMs: batch.holdFor ?? DEFAULT_BATCH_HOLD_MS,
   };
 }
 

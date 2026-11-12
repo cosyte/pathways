@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import type { ChannelConfig, ProjectConfig } from "../config/schema.js";
 import { transformConfigFor } from "../config/transform-config.js";
+import { once, splitPieces } from "../connectors/batch.js";
 import type { Env } from "../connectors/endpoint.js";
 import { ChannelWorker, TransformLoadError } from "../engine/channel-worker.js";
 import type { FailureSummary } from "../engine/worker-entry.js";
@@ -46,7 +47,8 @@ export function expectedName(input: string): string {
 
 /**
  * Runs every input in each channel's `tests/` folder through the channel's transform, in the same
- * worker the engine uses, and compares the output with the saved `<name>.expected.<ext>`, byte for
+ * worker the engine uses (for a channel whose source reads batches, each piece of the input, cut as
+ * the source cuts it, and every piece's outputs together), and compares the output with the saved `<name>.expected.<ext>`, byte for
  * byte, whatever the channel's format. A message the transform filters out expects an empty file;
  * several outputs are joined by a newline.
  *
@@ -108,13 +110,17 @@ export async function runChannelTests(
     try {
       for (const input of inputs) {
         const label = `${channel.name}/tests/${input}`;
-        const outcome = await worker.run(new Uint8Array(await readFile(join(testsDir, input))));
-        if (!outcome.ok) {
-          options.out(`FAIL ${label}: ${describeFailure(outcome.failure, channel)}`);
+        const outcome = await runInput(
+          worker,
+          channel,
+          new Uint8Array(await readFile(join(testsDir, input))),
+        );
+        if (typeof outcome === "string") {
+          options.out(`FAIL ${label}: ${outcome}`);
           failed += 1;
           continue;
         }
-        const actual = joinOutputs(outcome.outputs);
+        const actual = joinOutputs(outcome);
         const expectedFile = expectedName(input);
         if (options.update) {
           await writeFile(join(testsDir, expectedFile), actual);
@@ -146,6 +152,32 @@ export async function runChannelTests(
   }
 
   return { passed, failed, updated };
+}
+
+/**
+ * Runs one input through the worker: whole, or, for a channel whose source reads batches, each
+ * piece the source would cut it into, in order. The outputs, or what failed in words.
+ */
+async function runInput(
+  worker: ChannelWorker,
+  channel: ChannelConfig,
+  body: Uint8Array,
+): Promise<readonly Uint8Array[] | string> {
+  const { source } = channel;
+  const batch = source.kind === "file" || source.kind === "http" ? source.batch : undefined;
+  if (batch === undefined) {
+    const outcome = await worker.run(body);
+    return outcome.ok ? outcome.outputs : describeFailure(outcome.failure, channel);
+  }
+  const outputs: Uint8Array[] = [];
+  for await (const piece of splitPieces(once(body), batch)) {
+    const at = `piece ${String(piece.index + 1)}`;
+    if (piece.failure !== undefined) return `${at} could not be read (${piece.failure})`;
+    const outcome = await worker.run(piece.body);
+    if (!outcome.ok) return `${at}: ${describeFailure(outcome.failure, channel)}`;
+    outputs.push(...outcome.outputs);
+  }
+  return outputs;
 }
 
 async function testInputs(dir: string): Promise<string[] | undefined> {

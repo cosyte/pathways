@@ -14,6 +14,7 @@
 export { VERSION } from "./version.js";
 export type { Format } from "./config/schema.js";
 export type {
+  BatchFacts,
   CcdaDocument,
   FhirResource,
   FileSourceFacts,
@@ -37,10 +38,12 @@ export {
   type DestinationConnector,
   type MessageSink,
   type OutgoingMessage,
+  type ReceivedPiece,
   type ReceiveOptions,
   type Resend,
   type SourceConnector,
 } from "./connectors/types.js";
+export type { BatchResult } from "./connectors/batch.js";
 export {
   defaultAckBuilder,
   type AckBuilder,

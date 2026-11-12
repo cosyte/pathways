@@ -51,6 +51,8 @@ A `transform-failed` line's `kind` is `load`, `parse`, `transform`, `output`, `t
 | `poll-overlap`                                                     | a polled source's pass came due while its last `poll` call had not returned, and was skipped                                                          |
 | `source-read-failed`                                               | a file source could not claim or read a file; it stays for the next pass                                                                              |
 | `source-file-set-aside`                                            | a file source will not take a file, by `reason` (`too-large` or `unreadable`); `moved` says whether it went into `errorDir`, and `code` why not       |
+| `batch`                                                            | a source read a batch to its end: `source`, `outcome`, `pieces`, `stored`, `failed`, `duplicates`, and `code` and `warnings` when it has them         |
+| `batch-audit-failed`                                               | a batch's audit entry could not be written (`code`); its pieces are stored                                                                            |
 | `http-refused`                                                     | an HTTP source or the health endpoint refused a request, with its `status`                                                                            |
 | `http-unreadable`                                                  | an HTTP source answering with ACKs stored a message as failed, with its `problem`                                                                     |
 | `mllp-listening`                                                   | an MLLP source is listening, on `port`, with `tls` true or false                                                                                      |
@@ -141,6 +143,11 @@ Besides the operating system's codes (`EACCES`, `EEXIST` and the like), a `sourc
 | `ESTALE`                        | a file left the source folder, or was replaced, between the pass finding it and moving it; it stays         |
 | `ERR_PATHWAYS_FILE_HELD`        | a file moved in from outside the folder could not go back, and waits in `.claimed/` as `refused-...`        |
 | `ERR_PATHWAYS_FILE_ID_UNSTEADY` | the folder's file system changes a file's id when it moves (FAT, exFAT), so the source claims nothing there |
+
+A file source with `batch:` sets a file aside with the `reason` `batch-too-large`, `batch-empty` or
+`batch-incomplete`, and stores it as a failed message with the error `batch: BATCH_FILE_TOO_LARGE`,
+`batch: BATCH_EMPTY` or `batch: BATCH_INCOMPLETE`. A piece of an HL7 batch that cannot be read is
+stored as failed with `batch: ` and the parser's code, such as `batch: NO_MSH_SEGMENT`.
 
 ## SFTP codes
 
