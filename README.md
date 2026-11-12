@@ -216,6 +216,11 @@ These are on `main` and land in the next release, not in 0.0.4:
   now stored on SQL Server, as on every other database. SQL Server refused them before, and the
   write failed.
   <!-- changesets: sqlserver-empty-body -->
+- **A scrape does not hang on a hung database.** The store reads behind `/metrics` wait at most 5
+  seconds, as the readiness check does, so a database that hangs reads as `pathways_store_up 0` and
+  the store-down alert can fire, instead of the scrape hanging with it. From when reads start
+  until they answer or fail, neither a scrape nor the readiness check starts new ones.
+  <!-- changesets: metrics-store-timeout -->
 
 ---
 

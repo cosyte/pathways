@@ -33,6 +33,18 @@ export const OPENMETRICS_CONTENT_TYPE =
 export const METRICS_STORE_CACHE_MS = 5_000;
 
 /**
+ * How long a scrape waits for the store reads behind the gauges: 5 seconds, as long as the
+ * readiness check waits. A database that neither answers nor fails in that time reads as down
+ * (`pathways_store_up` 0), so a scrape never hangs on it and the store-down alert can fire.
+ *
+ * @example
+ * ```ts
+ * setTimeout(() => resolve(undefined), METRICS_STORE_TIMEOUT_MS);
+ * ```
+ */
+export const METRICS_STORE_TIMEOUT_MS = 5_000;
+
+/**
  * The type of one metric family, as OpenMetrics names it.
  *
  * @example
@@ -290,14 +302,14 @@ export const METRIC_FAMILIES: readonly MetricFamily[] = [
     name: "pathways_store_up",
     type: "gauge",
     unit: undefined,
-    help: "1 when the store answered its latest reads, 0 when it did not.",
+    help: "1 when the store answered its latest reads within 5 seconds, 0 when one failed or it did not answer in time.",
     labels: [],
   },
   {
     name: "pathways_store_latency_seconds",
     type: "gauge",
     unit: "seconds",
-    help: "How long the store took to answer its latest reads.",
+    help: "How long the store took to answer its latest reads; at least 5 when it did not answer within 5 seconds.",
     labels: [],
   },
 ];
