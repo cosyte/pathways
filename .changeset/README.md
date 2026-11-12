@@ -9,5 +9,6 @@ pnpm changeset
 ```
 
 Once a changeset is on `main`, the release workflow opens a "Version Packages" pull request. Nothing
-is published until that pull request merges and a reviewer approves the `release` environment, and
-the first release is a maintainer's call.
+is published until that pull request merges and a reviewer approves the `release` environment.
+That pull request fails `test/release-status.test.ts` until every item it releases has moved from
+the README's "In the next release" up to "What the latest release ships".

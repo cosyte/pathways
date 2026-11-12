@@ -139,11 +139,14 @@ What follows is in 0.0.2, the version on npm:
 These are on `main` and land in the next release, not in 0.0.2:
 
 - A TCP source and destination for feeds that are not MLLP, with your own framing.
-- A CSV format, for delimited and fixed-width text.
+  <!-- changesets: tcp-connector -->
+- A CSV format, for delimited and fixed-width text. <!-- changesets: csv-format -->
 - An SMTP destination, and file sources and destinations on Amazon S3 and Azure Blob Storage.
+  <!-- changesets: smtp-destination, object-store-locations -->
 - A counted, resumable replay of every failed message in a scope, a bounded drain when the engine is
   told to stop, limits on MLLP connections and message sizes, and separate retention clocks with
   sealed archives.
+  <!-- changesets: bulk-replay, graceful-drain, mllp-options, retention-clocks-and-archive -->
 
 The changelog lists each once it is released.
 

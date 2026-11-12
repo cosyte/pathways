@@ -57,4 +57,4 @@ Each with its PRs; the comments at the code it guards give the reasons.
   thread with a plain `import()` (#11, #15).
 - We never call Pathways HIPAA or HITRUST compliant or certified: it is built to the controls (#1).
 - The starter ships in the tarball with no README (public copy, which waits for the operator), the
-  `Dockerfile` pins every image by digest, and the first release waits for the operator (#1, #9).
+  `Dockerfile` pins every image by digest (#1, #9).
