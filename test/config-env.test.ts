@@ -675,6 +675,7 @@ destinations:
       "channel.yaml.destinations.[].mllp.plaintext",
       "channel.yaml.source.tcp.plaintext",
       "channel.yaml.destinations.[].tcp.plaintext",
+      "channel.yaml.destinations.[].smtp.plaintext",
       "channel.yaml.hooks.[].webhook.plaintext",
       "channel.yaml.index.[].key",
       "channel.yaml.index.[].bits",
