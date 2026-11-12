@@ -2387,6 +2387,29 @@ const held: HeldDeliveries = { unknown: 0, gone: 2 };
 
 ***
 
+### Hl7v2Settings
+
+How an `hl7v2` channel reads and writes its bodies, from the channel's `hl7v2:` block.
+
+#### Example
+
+```ts
+const settings: Hl7v2Settings = { assumeCharset: "8859/1" };
+```
+
+#### Properties
+
+##### assumeCharset?
+
+> `readonly` `optional` **assumeCharset?**: `string`
+
+The character set to read and write a message in when its MSH-18 is blank or absent: `8859/1`
+to `8859/8`, `8859/10`, `8859/13` to `8859/16`, or `WINDOWS-1252`. A message that declares
+MSH-18 is read and written in the set it declares. Unset, a blank MSH-18 means ASCII, read as its UTF-8 superset: bytes that are not
+UTF-8 are kept as they arrived, and a segment a transform edits must then be ASCII.
+
+***
+
 ### HookContext
 
 What a hook factory is given beside its options: the context, and the channel for a hook a

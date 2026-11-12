@@ -65,6 +65,7 @@ export type {
   CsvRecord,
   CsvSettings,
   CsvTable,
+  Hl7v2Settings,
   JsonValue,
 } from "./engine/worker-entry.js";
 

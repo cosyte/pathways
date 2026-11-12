@@ -2,6 +2,7 @@ import type { Logger } from "pino";
 
 import type { ProjectConfig } from "../config/schema.js";
 import type { Env } from "../connectors/endpoint.js";
+import { extensionEnv } from "../env.js";
 import { projectIndexes } from "../encryption/blind-index.js";
 import { EncryptedStore, UnencryptedStore } from "../encryption/encrypted-store.js";
 import { keysToStart, type KeyProvider } from "../encryption/keys.js";
@@ -77,7 +78,7 @@ export async function startingKeys(
     encryption,
     {
       dir: project.root,
-      env: context.env,
+      env: extensionEnv(context.env),
       logger: context.logger.child({ extension: "encryption" }),
     },
     "pathways.yaml: encryption.provider.module",
@@ -111,7 +112,7 @@ export async function openRawStore(
     storage,
     {
       dir: project.root,
-      env: context.env,
+      env: extensionEnv(context.env),
       logger: context.logger.child({ extension: "storage" }),
     },
     "pathways.yaml: storage.module",

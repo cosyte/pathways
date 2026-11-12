@@ -51,13 +51,23 @@
         "upgrade-pathways",
         "stop-and-upgrade-a-node",
         "run-in-docker",
+        "run-with-docker-compose",
         "deploy-the-image"
       ]
     },
     {
       "type": "category",
       "label": "Explanation",
-      "items": ["delivery-and-errors", "the-transform-worker", "security-model"]
+      "items": [
+        "the-message-model",
+        "delivery-and-errors",
+        "the-transform-worker",
+        "file-and-object-claims",
+        "storage-and-encryption",
+        "retention-and-archives",
+        "running-more-than-one-engine",
+        "security-model"
+      ]
     },
     {
       "type": "category",

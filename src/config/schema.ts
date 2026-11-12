@@ -4,7 +4,13 @@ import { parseNetwork } from "../connectors/address-guard.js";
 import { normalisePath } from "../connectors/http-path.js";
 import { queryValueProblem, templateProblem } from "../connectors/http-template.js";
 import { unknownPlaceholders } from "../connectors/smtp-template.js";
-import { FORMATS, type CsvSettings } from "../engine/worker-entry.js";
+import type { EngineVariable, VariableName } from "../env.js";
+import {
+  ASSUMABLE_CHARSETS,
+  FORMATS,
+  type CsvSettings,
+  type Hl7v2Settings,
+} from "../engine/worker-entry.js";
 import { LIFECYCLE_EVENTS, type LifecycleEventType } from "../extensions/events.js";
 import type { JsonValue } from "../transform.js";
 import { cronClass } from "./cron.js";
@@ -3406,6 +3412,19 @@ const csvBlock = z
       "How a csv channel reads and writes its bodies: delimiter, quote, escape, header, encoding, newline, pad, escapeFormulas and maxRowLength, or columns for fixed-width lines.",
   });
 
+/** An `hl7v2` channel's `hl7v2:` block. */
+const hl7v2Block = z
+  .strictObject({
+    assumeCharset: z
+      .enum(ASSUMABLE_CHARSETS)
+      .meta({
+        description:
+          "The character set to read and write a message in when its MSH-18 is blank, such as 8859/1. A message that declares MSH-18 keeps its own. Default: none, so a blank MSH-18 means ASCII, and a segment a transform edits in a message with other bytes fails its output.",
+      })
+      .optional(),
+  })
+  .meta({ description: "How an hl7v2 channel reads and writes its bodies: assumeCharset." });
+
 /** `channels/<name>/channel.yaml`. */
 export const channelSchema = restate(
   z
@@ -3429,6 +3448,7 @@ export const channelSchema = restate(
         })
         .optional(),
       csv: csvBlock.optional(),
+      hl7v2: hl7v2Block.optional(),
       source,
       transform: path
         .meta({
@@ -3519,6 +3539,13 @@ export const channelSchema = restate(
           code: "custom",
           path: ["csv"],
           message: "a csv: block needs format: csv",
+        });
+      }
+      if (channel.hl7v2 !== undefined && (channel.format ?? "hl7v2") !== "hl7v2") {
+        ctx.addIssue({
+          code: "custom",
+          path: ["hl7v2"],
+          message: "an hl7v2: block needs format: hl7v2",
         });
       }
       // MLLP frames HL7 v2 and its ACKs are HL7 v2 messages, so an MLLP endpoint needs that format.
@@ -3805,7 +3832,7 @@ export const DEFAULT_DATABASE_FILE = ".pathways/pathways.db";
  * process.env[DEFAULT_DATABASE_URL_ENV]; // "postgres://pathways:...@db.internal/pathways"
  * ```
  */
-export const DEFAULT_DATABASE_URL_ENV = "PATHWAYS_DATABASE_URL";
+export const DEFAULT_DATABASE_URL_ENV = "PATHWAYS_DATABASE_URL" satisfies EngineVariable;
 
 /**
  * The most connections a database server's pool opens, by default.
@@ -3847,10 +3874,10 @@ export const DEFAULT_MAX_BYTES = 10 * 1_048_576;
 export const DEFAULT_HTTP_TIMEOUT_MS = 30_000;
 
 /** The environment variable an HTTP source reads its bearer token from when `auth` is not set. */
-export const DEFAULT_HTTP_TOKEN_ENV = "PATHWAYS_HTTP_TOKEN";
+export const DEFAULT_HTTP_TOKEN_ENV = "PATHWAYS_HTTP_TOKEN" satisfies EngineVariable;
 
 /** The environment variable the health endpoint reads its bearer token from when `auth` is not set. */
-export const DEFAULT_HEALTH_TOKEN_ENV = "PATHWAYS_HEALTH_TOKEN";
+export const DEFAULT_HEALTH_TOKEN_ENV = "PATHWAYS_HEALTH_TOKEN" satisfies EngineVariable;
 
 /**
  * How long one call to a hook may run by default, in milliseconds.
@@ -4136,15 +4163,16 @@ export interface SecretReference {
 
 /**
  * Where a secret is read at start, as the YAML wrote it: an environment variable, a file (an absolute
- * path), or a provider's secret.
+ * path), or a provider's secret. The variable is one of ENGINE_VARIABLES or a name configuration
+ * gave (configuredName), so a fixed name not on the list is a type error.
  *
  * @example
  * ```ts
- * const token: SecretSource = { env: "LAB_TOKEN" };
+ * const token: SecretSource = { env: "PATHWAYS_HTTP_TOKEN" };
  * ```
  */
 export type SecretSource =
-  { readonly env: string } | { readonly file: string } | { readonly secret: SecretReference };
+  { readonly env: VariableName } | { readonly file: string } | { readonly secret: SecretReference };
 
 /** A header an HTTP client or source sends: written in the YAML, or a secret read at start. */
 export type HeaderValue = { readonly value: string } | SecretSource;
@@ -4560,6 +4588,8 @@ export interface ChannelConfig {
   readonly format: Format;
   /** A `csv` channel's `csv:` block, as written; unset for another format or no block. */
   readonly csv?: CsvSettings | undefined;
+  /** An `hl7v2` channel's `hl7v2:` block, as written; unset for another format or no block. */
+  readonly hl7v2?: Hl7v2Settings | undefined;
   readonly source:
     FileSource | HttpSource | MllpSource | TcpSource | ChannelSourceConfig | ModuleConnector;
   /** The transform module, or `undefined` to pass each message through unchanged. */

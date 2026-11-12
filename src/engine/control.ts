@@ -10,6 +10,7 @@ import {
   type ChannelCommand,
   type ChannelCommandReport,
 } from "./engine.js";
+import { engineVariable } from "../env.js";
 
 /**
  * The control socket: `pathways start` listens on it, and `pathways channel` asks the running
@@ -137,7 +138,7 @@ export function controlAddress(root: string, system: ControlSystem = {}): Contro
   /* v8 ignore next: every Unix system has a uid */
   const uid = system.uid ?? process.getuid?.() ?? 0;
   const limit = SOCKET_PATH_LIMIT[platform] ?? DEFAULT_SOCKET_PATH_LIMIT;
-  const runtime = system.runtimeDir ?? process.env["XDG_RUNTIME_DIR"];
+  const runtime = system.runtimeDir ?? engineVariable("XDG_RUNTIME_DIR");
   const bases = [
     ...(runtime !== undefined && runtime.startsWith("/") ? [runtime] : []),
     system.tmpdir ?? tmpdir(),

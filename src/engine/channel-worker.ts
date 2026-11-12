@@ -9,6 +9,7 @@ import type {
   DestinationReply,
   DestinationSetup,
   FailureSummary,
+  Hl7v2Settings,
   MessageContext,
   RoutedMessage,
   ScriptLogMessage,
@@ -163,6 +164,8 @@ export interface ChannelWorkerOptions {
   readonly destinations?: readonly DestinationSetup[] | undefined;
   /** A `csv` channel's `csv:` block, as validated: how its bodies are read and written. */
   readonly csv?: CsvSettings | undefined;
+  /** An `hl7v2` channel's `hl7v2:` block, as validated: how its bodies are read and written. */
+  readonly hl7v2?: Hl7v2Settings | undefined;
   /**
    * How long the module's `onStart` may run on each spawn, and its `onStop` when the worker stops,
    * in milliseconds. Defaults to `timeoutMs`.
@@ -315,7 +318,14 @@ export class ChannelWorker {
         ? {}
         : { destinations: this.options.destinations }),
       channel,
-      ...(this.options.csv === undefined ? {} : { formatSettings: { csv: this.options.csv } }),
+      ...(this.options.csv === undefined && this.options.hl7v2 === undefined
+        ? {}
+        : {
+            formatSettings: {
+              ...(this.options.csv === undefined ? {} : { csv: this.options.csv }),
+              ...(this.options.hl7v2 === undefined ? {} : { hl7v2: this.options.hl7v2 }),
+            },
+          }),
     };
     const worker = new Worker(this.options.workerUrl ?? defaultWorkerUrl(), {
       workerData: setup,

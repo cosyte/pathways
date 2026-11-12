@@ -10,6 +10,7 @@ import type {
   SecretSource,
   SftpConfig,
 } from "../config/schema.js";
+import { configuredName } from "../env.js";
 
 // Where a project reads its secrets: each reference, by the file and key that wrote it. The loader
 // checks every reference names a provider the project has, and start resolves the ones a provider
@@ -39,7 +40,7 @@ export interface SecretSourceYaml {
  * ```
  */
 export function secretSourceOf(source: SecretSourceYaml, dir: string): SecretSource {
-  if (source.env !== undefined) return { env: source.env };
+  if (source.env !== undefined) return { env: configuredName(source.env) };
   if (source.file !== undefined) return { file: resolve(dir, source.file) };
   // The schema lets exactly one of the three through.
   const secret = source.secret as NonNullable<SecretSourceYaml["secret"]>;

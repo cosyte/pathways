@@ -28,8 +28,9 @@ pathways init [dir]
 Writes the starter project into `dir` (default: the project folder), which must be empty or not exist
 yet: `pathways.yaml`, the `adt-to-lab` channel with its transform and tests, a `.gitignore`, a
 `package.json`, a `Dockerfile` and `.dockerignore` that build the project's own image (see
-[Deploy the image](./deploy-the-image.md)), and a development master key generated for this project
-in `.pathways/dev.key`.
+[Deploy the image](./deploy-the-image.md)), a `compose.yaml` and `.env.example` that run it under
+Docker Compose beside PostgreSQL (see [Run Pathways with Docker Compose](./run-with-docker-compose.md)),
+and a development master key generated for this project in `.pathways/dev.key`.
 On Linux and macOS the key is readable by its owner only (mode 0600, in a folder with mode 0700). On
 Windows a file's mode does not limit who can read it, so there the project folder's access control
 list is what keeps the key private, and `init` says so: keep the folder to the accounts that run

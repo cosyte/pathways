@@ -7,7 +7,13 @@ import { join } from "node:path";
 import { parseResource, validateResource } from "@cosyte/fhir";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 
-import { expectedOutput, listExamples, run as examplePages } from "../scripts/example-pages.js";
+import {
+  expectedOutput,
+  listExamples,
+  readIfPresent,
+  run as examplePages,
+  sidebarIds,
+} from "../scripts/example-pages.js";
 import { run } from "../src/cli.js";
 import { outputs, ROOT } from "./docs-helpers.js";
 import { captureLogger, type LogEvent } from "./helpers.js";
@@ -25,6 +31,9 @@ import { SSHD, startSshd, stopAllSshd } from "./sshd.js";
  *   pass runs against OpenSSH's own server where PATHWAYS_TEST_SSHD names it, as the `sftp` workflow
  *   sets it.
  *
+ * A folder under `examples/` that is not a channel project is named in `OTHER_FOLDERS` with its
+ * reason, so a new folder is either an example or an exception someone wrote down.
+ *
  * Each runs on a copy of the example in the system temp folder. `pathways` runs in this process,
  * through the command's own entry point (`run` in src/cli.ts), with its log lines kept for the
  * checks; the example's scripts run under Node as `npm run` starts them. The messages are the
@@ -41,6 +50,22 @@ const EXAMPLES = [
   "mllp-to-http",
   "replay-after-failure",
 ] as const;
+
+/**
+ * The folders under `examples/` that are deliberately not channel projects, each with the reason.
+ * They have no `pathways.yaml` at the top, so `scripts/example-pages.ts` gives them no generated
+ * page; each is held instead by its own test and workflow, and has a how-to page written by hand,
+ * which the sidebar lists and the README and the quickstart link.
+ */
+const OTHER_FOLDERS = {
+  "docker-compose": {
+    reason:
+      "a deployment of the engine, not a project to copy: its pathways.yaml is a Compose config " +
+      "inside compose.yaml, test/env-example.test.ts holds its files and the compose workflow " +
+      "brings it up and sends a message through",
+    page: "run-with-docker-compose",
+  },
+} as const;
 
 /** What one run of a command did. */
 interface Ran {
@@ -231,6 +256,34 @@ describe("the examples", () => {
   it("are the five folders under examples/ with a pathways.yaml", () => {
     expect(listExamples(ROOT)).toEqual([...EXAMPLES]);
   });
+
+  it("leave no other folder under examples/ but the named ones, each with its reason", async () => {
+    const folders = (await readdir(join(ROOT, "examples"), { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .filter((name) => !(EXAMPLES as readonly string[]).includes(name))
+      .sort();
+    expect(folders).toEqual(Object.keys(OTHER_FOLDERS).sort());
+  });
+
+  it.each(Object.entries(OTHER_FOLDERS))(
+    "%s is not a channel project, and its how-to page is listed and linked",
+    (name, { reason, page }) => {
+      expect(reason).not.toBe("");
+      expect(readIfPresent(join(ROOT, "examples", name, "pathways.yaml"))).toBeNull();
+      expect(readIfPresent(join(ROOT, "docs-content", `${page}.md`))).not.toBeNull();
+      const sidebar = JSON.parse(
+        readFileSync(join(ROOT, "docs-content/sidebars.json"), "utf8"),
+      ) as {
+        docs?: unknown;
+      };
+      expect(sidebarIds(sidebar.docs ?? [])).toContain(page);
+      expect(readFileSync(join(ROOT, "README.md"), "utf8")).toContain(`docs-content/${page}.md)`);
+      expect(readFileSync(join(ROOT, "docs-content/quickstart.md"), "utf8")).toContain(
+        `](./${page}.md`,
+      );
+    },
+  );
 
   it("match their pages, pin this version, and are linked from the README, overview and quickstart", () => {
     const outcome = examplePages({ root: ROOT, check: true });
