@@ -649,6 +649,7 @@ A file source's or destination's `azblob:`. The identity is Azure's default chai
 | `plaintext`    | boolean, only with an `http://` URL                  | `false`                  |
 | `timeout`      | duration                                             | `30s`                    |
 | `resendHeader` | a header name                                        | none                     |
+| `ack`          | `xml`                                                | none: the status decides |
 
 The URL may not hold a user name or password. A header whose name holds `auth`, `cookie`, `token`,
 `secret`, `password`, `key`, `signature` or `credential` must be a secret reference. `Content-Length`,
@@ -665,6 +666,15 @@ waiting longer when a 429 or a 503 asks with `Retry-After`, never more than `ret
 by default); a 3xx is held, never followed, and retried every `retry.max`; a 101 or any other 4xx
 fails the delivery for good. The destination's [`retry`](#retry) block sets the waits and any limit. Any other 1xx is an interim answer: the attempt waits for the final
 answer after it, and is retried when none comes within `timeout` or the connection closes. See [Send and receive over HTTP](./send-and-receive-http.md).
+
+With `ack: xml`, a 2xx answer is read as an HL7 v2 XML acknowledgement and settles the delivery:
+`AA` or `CA` delivered, `AR` or `CR` failed, and `AE` or `CE`, an answer that is not exactly one
+acknowledgement or one that answers another `MSH.10`, retried. `AE` and `AR` settle the other way
+round from an MLLP destination. A message sent as XML the reader refuses fails at once, unsent,
+with the reason `SENT_XML_UNREADABLE`, and one sent as XML without exactly one `MSH` holding one
+`MSH.10` with the reason `SENT_XML_NO_CONTROL_ID`; the control ID check is skipped only for a body that is not
+XML at all. The destination's format must be `hl7v2` or `text`. See
+[Settle by an HL7 v2 XML acknowledgement](./send-and-receive-http.md#settle-by-an-hl7-v2-xml-acknowledgement).
 
 #### MLLP destination
 

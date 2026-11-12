@@ -649,6 +649,7 @@ export async function connectorsFor(
             ),
             timeoutMs: destination.timeoutMs,
             resendHeader: destination.resendHeader,
+            ack: destination.ack,
             now,
             ...(destination.tls === undefined
               ? {}
