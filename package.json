@@ -1,6 +1,6 @@
 {
   "name": "@cosyte/pathways",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "A code-first healthcare integration engine for Node.js: channels in YAML, transforms in TypeScript. Early and not yet released.",
   "keywords": [
     "healthcare",
@@ -116,6 +116,7 @@
     "@types/pg": "8.23.1",
     "@types/ssh2": "1.15.6",
     "ajv": "8.17.1",
+    "csv-parse": "6.1.0",
     "fast-check": "4.10.2",
     "hdr-histogram-js": "3.0.0",
     "mysql2": "3.24.6",
@@ -132,7 +133,7 @@
     "@cosyte/ccda": "^0.1.6",
     "@cosyte/fhir": "^0.1.9",
     "@cosyte/hl7": "^0.1.9",
-    "@cosyte/mllp": "^0.1.7",
+    "@cosyte/mllp": "^0.1.12",
     "@cosyte/x12": "^0.1.11",
     "better-sqlite3": "^13.0.3",
     "croner": "^11.0.0",

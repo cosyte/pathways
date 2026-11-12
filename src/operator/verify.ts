@@ -167,6 +167,7 @@ class Runner {
       channel: config.name,
       transformFile: config.transform,
       format: config.format,
+      csv: config.csv,
       timeoutMs: config.settings.timeoutMs,
       memoryMb: config.settings.memoryMb,
       config: resolved.resolved,

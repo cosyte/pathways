@@ -19,6 +19,7 @@ import {
   projectSchema,
 } from "../src/config/schema.js";
 import { ChannelWorker } from "../src/engine/channel-worker.js";
+import type { CsvSettings } from "../src/engine/worker-entry.js";
 import { generateKey } from "../src/encryption/keys.js";
 import {
   age,
@@ -434,13 +435,15 @@ describe("make sample messages with @cosyte/synth", () => {
 async function transformWith(
   dir: string,
   transformFile: string,
-  format: "hl7v2" | "fhir" | "x12" | "json",
+  format: "hl7v2" | "fhir" | "x12" | "json" | "csv",
   inputs: readonly string[],
+  csv?: CsvSettings,
 ): Promise<(readonly string[] | string)[]> {
   const worker = new ChannelWorker({
     channel: "docs",
     transformFile: join(dir, transformFile),
     format,
+    csv,
     timeoutMs: 10_000,
     memoryMb: 256,
   });
@@ -528,7 +531,7 @@ describe("transform and filter messages", () => {
   );
 });
 
-describe("handle FHIR, X12, C-CDA, JSON and text", () => {
+describe("handle FHIR, X12, C-CDA, JSON, CSV and text", () => {
   const name = "work-with-formats.md";
 
   it(
@@ -576,6 +579,27 @@ describe("handle FHIR, X12, C-CDA, JSON and text", () => {
         name: [{ family: "TESTPATIENT", given: ["ALPHA"] }],
       });
       expect(update).toEqual([]);
+    },
+    SLOW,
+  );
+
+  it(
+    "drops inactive rows and upper-cases codes with the page's csv settings",
+    async () => {
+      const dir = await starterProject();
+      await putTitled(dir, name, "channels/codes-in/transform.ts");
+      const settings = (
+        parseYaml(titled(name, "channels/codes-in/channel.yaml")) as { csv: CsvSettings }
+      ).csv;
+      expect(
+        await transformWith(
+          dir,
+          "channels/codes-in/transform.ts",
+          "csv",
+          ["code;status;note\ntest-001;active;=1+2\ntest-002;inactive;x\ntest-003;active;y\n"],
+          settings,
+        ),
+      ).toEqual([['code;status;note\nTEST-001;active;"\'=1+2"\nTEST-003;active;y\n']]);
     },
     SLOW,
   );

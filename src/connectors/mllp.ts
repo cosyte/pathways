@@ -1,5 +1,3 @@
-import { isIP } from "node:net";
-
 import { Hl7ParseError, interpretAck, parseHL7, type Hl7Message } from "@cosyte/hl7";
 import {
   createClient,
@@ -9,15 +7,20 @@ import {
   MllpFramingError,
   MllpTimeoutError,
   type Connection,
+  type ConnectionRejectedEvent,
   type MessageMeta,
   type MllpClient,
   type MllpServer,
-  type TlsOptions,
 } from "@cosyte/mllp";
 
 import type { OnStoreFailure } from "../config/schema.js";
 import { defaultAckBuilder, type AckBuilder, type AckRequest } from "./ack.js";
-import type { ClientTlsMaterial, ServerTlsMaterial } from "./tls.js";
+import {
+  mllpClientTlsOptions,
+  mllpServerTlsOptions,
+  type MllpClientTlsMaterial,
+  type MllpServerTlsMaterial,
+} from "./mllp-tls.js";
 import {
   DeliveryRejected,
   type DestinationConnector,
@@ -103,6 +106,12 @@ function isBreak(byte: number | undefined): boolean {
   return byte === CR || byte === LF;
 }
 
+/** The most connections an MLLP source holds at once when its block sets no `maxConnections`. */
+export const DEFAULT_MLLP_MAX_CONNECTIONS = 100;
+
+/** The largest message an MLLP source takes when its block sets no `maxMessageSize`: 4 MiB. */
+export const DEFAULT_MLLP_MAX_MESSAGE_SIZE = 4 * 1_024 * 1_024;
+
 /** Options for an {@link MllpSource}. */
 export interface MllpSourceOptions {
   readonly host: string;
@@ -112,7 +121,28 @@ export interface MllpSourceOptions {
    * TLS, or undefined for plaintext MLLP. With a `ca`, every client must present a certificate it
    * signed, and a client without one fails the handshake (mutual TLS).
    */
-  readonly tls: ServerTlsMaterial | undefined;
+  readonly tls: MllpServerTlsMaterial | undefined;
+  /**
+   * The most connections held at once; one that arrives over it is closed at accept, before any byte
+   * is read, and counted in {@link MllpSource.refusedConnections}. Defaults to
+   * {@link DEFAULT_MLLP_MAX_CONNECTIONS}.
+   */
+  readonly maxConnections?: number | undefined;
+  /**
+   * How long a connection may go without a whole message, in milliseconds, before it is closed: an
+   * idle connection, and one that stalls partway through a frame. Undefined for no limit.
+   */
+  readonly receiveTimeoutMs?: number | undefined;
+  /**
+   * The largest message taken, in bytes. A frame that grows past it closes the connection, and
+   * nothing of it is stored. Defaults to {@link DEFAULT_MLLP_MAX_MESSAGE_SIZE}.
+   */
+  readonly maxMessageSize?: number | undefined;
+  /**
+   * `false` closes each connection once the ACKs of the messages it brought have been written out,
+   * for a sender that opens one connection per message. Defaults to `true`.
+   */
+  readonly keepOpen?: boolean | undefined;
   /** What to do when a message cannot be stored. Defaults to `close`. */
   readonly onStoreFailure?: OnStoreFailure;
   /** Builds each ACK. Defaults to {@link defaultAckBuilder}. */
@@ -126,6 +156,8 @@ interface ConnectionState {
   tail: Promise<void>;
   /** Set once this source closes the connection: nothing queued behind is stored or answered. */
   closed: boolean;
+  /** How many messages on this connection are queued or being handled. */
+  queued: number;
   /** What the transform reads in `ctx.source` about each message on this connection. */
   readonly facts: Readonly<Record<string, string>>;
 }
@@ -166,10 +198,19 @@ export class MllpSource implements SourceConnector {
    */
   private readonly peers = new Map<string, string>();
   private stopping = false;
+  private refused = 0;
 
   /** @param options Where to listen, TLS, and how to answer. */
   constructor(options: MllpSourceOptions) {
     this.options = options;
+  }
+
+  /**
+   * How many connections this source has closed at accept because it already held
+   * `maxConnections`, since it was made. A count only: never who connected.
+   */
+  get refusedConnections(): number {
+    return this.refused;
   }
 
   /** The port the source listens on, or undefined when it is not listening. */
@@ -179,24 +220,19 @@ export class MllpSource implements SourceConnector {
 
   /** Starts listening, storing each message through `sink`. Rejects when the port cannot be had. */
   async start(sink: MessageSink): Promise<void> {
-    const { tls: material, port, host } = this.options;
+    const { tls: material, port, host, receiveTimeoutMs } = this.options;
     const server = createServer({
       onMessage: (payload, meta, conn) => {
         this.accept(sink, payload, meta, conn);
       },
       // The host is the operator's own setting, so binding every interface is theirs to choose.
       allowWildcardBind: true,
-      ...(material === undefined
-        ? {}
-        : {
-            tls: {
-              cert: material.cert,
-              key: material.key,
-              ...(material.ca === undefined
-                ? {}
-                : { ca: material.ca, clientAuth: "MUST" as const }),
-            },
-          }),
+      maxConnections: this.options.maxConnections ?? DEFAULT_MLLP_MAX_CONNECTIONS,
+      framing: { maxFrameSizeBytes: this.options.maxMessageSize ?? DEFAULT_MLLP_MAX_MESSAGE_SIZE },
+      // The library's idle timer restarts only when a whole message arrives, so it also ends a
+      // connection that sent part of a frame and stalled.
+      ...(receiveTimeoutMs === undefined ? {} : { deadPeerTimeoutMs: receiveTimeoutMs }),
+      ...(material === undefined ? {} : { tls: mllpServerTlsOptions(material) }),
     });
     server.on("error", (error: unknown) => {
       this.report("warn", "mllp-source-error", describeError(error));
@@ -216,6 +252,14 @@ export class MllpSource implements SourceConnector {
         rememberPeer(this.peers, event.connectionId, subject, MAX_WAITING_PEERS);
       },
     );
+    server.on("connectionRejected", (event: ConnectionRejectedEvent) => {
+      this.refused += 1;
+      // The cap and the code only: who connected stays out of the log.
+      this.report("warn", "mllp-connection-refused", {
+        code: event.code,
+        maxConnections: event.maxConnections,
+      });
+    });
     server.on("securityWarning", (warning: { readonly code: string }) => {
       this.report("warn", "mllp-security-warning", { code: warning.code });
     });
@@ -249,6 +293,7 @@ export class MllpSource implements SourceConnector {
       state = {
         tail: Promise.resolve(),
         closed: false,
+        queued: 0,
         facts: {
           /* v8 ignore next: a connection that delivered a message has the address it came from */
           ...(remoteAddress === null ? {} : { remoteAddress }),
@@ -258,7 +303,13 @@ export class MllpSource implements SourceConnector {
       this.states.set(conn, state);
     }
     const current = state;
-    const task = current.tail.then(() => this.handle(sink, payload, meta, conn, current));
+    current.queued += 1;
+    const task = current.tail
+      .then(() => this.handle(sink, payload, meta, conn, current))
+      .then(() => {
+        current.queued -= 1;
+        if (this.options.keepOpen === false && current.queued === 0) finish(conn, current);
+      });
     current.tail = task;
     this.pending.add(task);
     void task.then(() => this.pending.delete(task));
@@ -400,6 +451,17 @@ function close(conn: Connection, state: ConnectionState): void {
   conn.destroy();
 }
 
+/**
+ * Closes a connection once every message it brought has been answered: what was sent is written
+ * out before the connection ends, so no ACK is cut off. A message that arrives after this is neither
+ * stored nor answered, so its sender sends it again.
+ */
+function finish(conn: Connection, state: ConnectionState): void {
+  if (state.closed) return;
+  state.closed = true;
+  void conn.close({ drainTimeoutMs: 1_000 });
+}
+
 /** How much longer than its ACK timeout a send may take in all, to cover a write that never flushes. */
 const SEND_GRACE_MS = 1_000;
 
@@ -411,7 +473,7 @@ export interface MllpDestinationOptions {
    * TLS, or undefined for plaintext MLLP. The server's certificate is always verified, against `ca`
    * when set and Node's built-in roots otherwise; `cert` and `key` present a client certificate.
    */
-  readonly tls: ClientTlsMaterial | undefined;
+  readonly tls: MllpClientTlsMaterial | undefined;
   /** How long to wait to connect, and then for each ACK, in milliseconds. */
   readonly ackTimeoutMs: number;
 }
@@ -506,7 +568,7 @@ export class MllpDestination implements DestinationConnector {
       port,
       ackTimeoutMs,
       pipeline: false,
-      ...(tls === undefined ? {} : { tls: clientTls(tls, host) }),
+      ...(tls === undefined ? {} : { tls: mllpClientTlsOptions(tls, host) }),
     });
     // A failure surfaces on the send it breaks; this keeps the client from reporting it twice.
     client.on("error", () => undefined);
@@ -555,22 +617,6 @@ export class MllpDestination implements DestinationConnector {
     this.client?.destroy();
     this.client = undefined;
   }
-}
-
-/**
- * `@cosyte/mllp`'s client TLS options for `material`. Verification is always on: the library offers
- * no way to turn it off but `allowUnverified`, which this never sets.
- */
-function clientTls(material: ClientTlsMaterial, host: string): TlsOptions {
-  const { ca, cert, key } = material;
-  return {
-    ...(ca === undefined ? {} : { ca }),
-    ...(cert === undefined ? {} : { cert }),
-    ...(key === undefined ? {} : { key }),
-    // @cosyte/mllp sends the host as the TLS server name, which Node refuses for an IP address. An
-    // empty name sends none, and Node still checks the certificate against the host itself.
-    ...(isIP(host) === 0 ? {} : { servername: "" }),
-  };
 }
 
 /**
