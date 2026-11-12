@@ -28,6 +28,13 @@ rather than being rounded; use `text` to pass it through untouched.
 A message that does not parse is marked failed with the parser's stable code, such as
 `NO_MSH_SEGMENT` or `X12_NO_ISA_HEADER`, and the transform never sees it.
 
+An HL7 v2 body is read in the character set its MSH-18 declares, and written back in that same set.
+A message that holds a character the set has no byte for (a euro sign in a message that declares
+`8859/1`, say) is never sent with a substitute: its output fails with `UNENCODABLE_CHARACTER`, and
+the error names the segment, the field and the set, never the field's text. Pathways 0.0.3 and
+earlier wrote every `Hl7Message` as UTF-8, whatever MSH-18 said. A transform that wants UTF-8 out
+sets MSH-18 to `UNICODE UTF-8`, or returns `message.toString()`, a string, which is sent as UTF-8.
+
 MLLP carries HL7 v2 only, so a channel with an MLLP source or destination keeps `format: hl7v2`.
 
 ## Read a FHIR resource
@@ -155,7 +162,9 @@ What a transform returns is written back like this, whatever the channel's forma
 - bytes (a `Uint8Array`, which a `Buffer` is) are sent exactly as they are, so a body in another
   character set, such as Latin-1, or a binary one keeps its bytes;
 - a model from `@cosyte/hl7`, `@cosyte/fhir`, `@cosyte/x12` or `@cosyte/ccda` is written by its own
-  library;
+  library. An `Hl7Message` is written with `toBytes()`, in the character set its MSH-18 declares
+  (UTF-8 when MSH-18 is blank), so a Latin-1 message that nothing changed goes out byte for byte as
+  it arrived;
 - on a `json` channel, a plain object, an array, a number or a boolean is written with
   `JSON.stringify`;
 - on a `csv` channel, a `CsvTable` is written with the channel's `csv:` settings.

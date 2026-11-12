@@ -119,9 +119,9 @@
     "hl7v2 hand control id with components": "ffd604d7ca80a42976171d969003240a",
     "hl7v2 hand hex escape in control id": "4bfd87b69bc00a2207b699a848b813f9",
     "hl7v2 hand UTF-8 name": "4a44ba1c15690e17005b20640557a5db",
-    "hl7v2 hand Latin-1 name, MSH-18 8859/1": "81a45f6decfe77ebb1b3265e2ee80489",
-    "hl7v2 hand Latin-1 bytes, no MSH-18": "4a44ba1c15690e17005b20640557a5db",
-    "hl7v2 hand invalid UTF-8": "c42cfbc2e4b9b46fd155f90153688a8f",
+    "hl7v2 hand Latin-1 name, MSH-18 8859/1": "04a10b0e4f25f74970ed248df9d64bb0",
+    "hl7v2 hand Latin-1 bytes, no MSH-18": "ca8a671a06c64c666fc468c1be379e3b",
+    "hl7v2 hand invalid UTF-8": "723f659a46428ab9cfd690c2d0e7efb9",
     "hl7v2 hand segment of one field": "3e484e29bc18aab86bd33847385f246e",
     "hl7v2 hand Z segment": "d3c362c26759f81a2e66b016e7c32039",
     "hl7v2 hand subcomponents": "0da9aa7429f56999c0faeea99a721cdc",
@@ -845,7 +845,7 @@
   "engine": {
     "ccda": "a77b6356d9496368e9b9af213b0835fb",
     "fhir": "7636790250e0453ae48a5f0a4df05a03",
-    "hl7v2": "c450f22cac4f6058ed622eac006be1eb",
+    "hl7v2": "cdd2b3b017c4c7e6964e95edf707b374",
     "json": "4e380a8a9b8e4d06b462a783d2439081",
     "text": "bc5d69517be980bed66c50cb69f4faf9",
     "x12": "8d789782ba2097daa4e354ba423c1b81"

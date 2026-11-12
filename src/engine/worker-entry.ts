@@ -356,8 +356,11 @@ export const FORMAT_REGISTRY = Object.freeze({
       (await libraries.hl7()).parseHL7(Buffer.from(body.buffer, body.byteOffset, body.byteLength)),
     model: {
       byShape: false,
+      // Written in the charset MSH-18 declares, so a message nothing changed leaves as the bytes it
+      // arrived as. A character that set cannot hold is refused (`UNENCODABLE_CHARACTER`, naming
+      // the segment and field, never their text), never replaced.
       write: async (value) =>
-        value instanceof (await libraries.hl7()).Hl7Message ? value.toString() : undefined,
+        value instanceof (await libraries.hl7()).Hl7Message ? value.toBytes() : undefined,
     },
   }),
   fhir: defineFormat<Fhir.FhirComplex>({
@@ -1263,7 +1266,7 @@ export function bytesOf(written: Written): Uint8Array {
  *
  * @example
  * ```ts
- * const bytes = await encode("hl7v2", message); // message.toString(), as UTF-8
+ * const bytes = await encode("hl7v2", message); // message.toBytes(), in its MSH-18 charset
  * const json = await encode("json", { status: "ok" }); // {"status":"ok"}
  * ```
  */

@@ -57,6 +57,17 @@ async function failureOf(promise: Promise<unknown>, transformFile?: string) {
 
 const identity: TransformFunction = (message) => message;
 
+/**
+ * A synthetic ADT from @cosyte/synth that declares ISO 8859-1 in MSH-18 and holds a non-ASCII
+ * letter, as the Latin-1 bytes a sender would send.
+ */
+function latin1Adt(): Uint8Array {
+  const message = generateAdt({ seed: 21, trigger: "A01" });
+  message.setField("MSH.18", "8859/1");
+  message.setField("PID.5.1", "TESTPATIENTÉ");
+  return new Uint8Array(Buffer.from(message.toString(), "latin1"));
+}
+
 async function roundTrip(format: WorkerFormat, body: string): Promise<string> {
   return text(await encode(format, await decode(format, bytes(body))));
 }
@@ -254,6 +265,37 @@ describe("decode and encode", () => {
     expect([...written]).toEqual([0x4d, 0xe9, 0x1c]);
     expect(written.buffer).not.toBe(latin1.buffer);
     expect([...bytesOf("Mé")]).toEqual([0x4d, 0xc3, 0xa9]);
+  });
+
+  it("writes an hl7v2 message in the character set MSH-18 declares, byte for byte", async () => {
+    const body = latin1Adt();
+    // 0xc9 is E-acute in ISO 8859-1, and not valid UTF-8 on its own.
+    expect(body.includes(0xc9)).toBe(true);
+    const [out] = await runTransform(identity, "hl7v2", body);
+    expect(Buffer.from(out ?? []).equals(Buffer.from(body))).toBe(true);
+    // A message the transform changed is written in the declared set too.
+    const edit: TransformFunction = (message) => {
+      (message as Hl7Message).setField("MSH.5", "LAB2");
+      return message;
+    };
+    const [edited] = await runTransform(edit, "hl7v2", body);
+    expect(Buffer.from(edited ?? []).toString("latin1")).toContain("|LAB2|");
+    expect(edited?.includes(0xc9)).toBe(true);
+    expect(edited?.includes(0xc3)).toBe(false);
+  });
+
+  it("fails the output on a character the declared set cannot hold, naming no field text", async () => {
+    const edit: TransformFunction = (message) => {
+      (message as Hl7Message).setField("PID.5.2", "EURO€NAME");
+      return message;
+    };
+    const failure = await failureOf(runTransform(edit, "hl7v2", latin1Adt()));
+    expect(failure).toMatchObject({
+      kind: "output",
+      name: "Hl7EncodeError",
+      code: "UNENCODABLE_CHARACTER",
+    });
+    expect(failure.detail).not.toMatch(/EURO|NAME|€|TESTPAT/);
   });
 
   it("keeps a serializer's own refusal code", async () => {
