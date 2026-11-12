@@ -67,8 +67,9 @@ can wait as a standby and take over through the engine lease, and
   [HL7 v2 over MLLP in, HTTP out](./example-mllp-to-http.md),
   [a file drop to SFTP](./example-file-to-sftp.md), [HL7 v2 to FHIR](./example-hl7-to-fhir.md),
   [filter, then send to two destinations](./example-filter-and-route.md),
-  [replay after a failure](./example-replay-after-failure.md), and
-  [a veterinary lab result to FHIR](./example-vet-lab-to-fhir.md).
+  [replay after a failure](./example-replay-after-failure.md),
+  [a veterinary lab result to FHIR](./example-vet-lab-to-fhir.md), and
+  [a veterinary lab result as v2 XML over HTTPS](./example-vet-lab-to-v2-xml.md).
 - [How delivery and errors work](./delivery-and-errors.md), before you run Pathways for real.
 
 The repository: https://github.com/cosyte/pathways

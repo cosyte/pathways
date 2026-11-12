@@ -101,6 +101,7 @@ synthetic messages, with its tests, which CI runs on every change. Each has a pa
 - [Filter, then send to two destinations](https://github.com/cosyte/pathways/blob/main/docs-content/example-filter-and-route.md)
 - [Replay after a failure](https://github.com/cosyte/pathways/blob/main/docs-content/example-replay-after-failure.md)
 - [A veterinary lab result to FHIR](https://github.com/cosyte/pathways/blob/main/docs-content/example-vet-lab-to-fhir.md)
+- [A veterinary lab result as v2 XML over HTTPS](https://github.com/cosyte/pathways/blob/main/docs-content/example-vet-lab-to-v2-xml.md)
 
 ---
 

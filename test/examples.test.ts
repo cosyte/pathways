@@ -12,12 +12,13 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
+import { request as httpsRequest } from "node:https";
 import { tmpdir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { parseResource, validateResource } from "@cosyte/fhir";
-import { type Hl7Message, parseHL7 } from "@cosyte/hl7";
+import { type Hl7Message, Hl7XmlError, parseHL7, parseHL7Xml } from "@cosyte/hl7";
 import { generateAdt, generateOru } from "@cosyte/synth/hl7";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 
@@ -52,8 +53,8 @@ import { SSHD, startSshd, stopAllSshd } from "./sshd.js";
  * through the command's own entry point (`run` in src/cli.ts), with its log lines kept for the
  * checks; the example's scripts run under Node as `npm run` starts them. The packages an example's
  * `dependencies` names are linked into the copy from this repository's own, as `npm install` gives
- * them to a reader. The messages are the examples' own, all synthetic; the veterinary example's are
- * held to the `@cosyte/synth` seeds its README names.
+ * them to a reader. The messages are the examples' own, all synthetic; the veterinary examples' are
+ * held to the `@cosyte/synth` seeds their READMEs name.
  */
 
 const SLOW = 120_000;
@@ -66,6 +67,7 @@ const EXAMPLES = [
   "mllp-to-http",
   "replay-after-failure",
   "vet-lab-to-fhir",
+  "vet-lab-to-v2-xml",
 ] as const;
 
 /**
@@ -225,8 +227,9 @@ async function until(
 
 /**
  * A copy of `examples/<name>` in the system temp folder, as a reader copies it, with a development
- * key made by its own `npm run key` script. Every file keeps its time, as a checkout's files are
- * old enough for a file source's `minAge`.
+ * key made by its own `npm run key` script, and development certificates by its `npm run certs`
+ * script where it has one. Every file keeps its time, as a checkout's files are old enough for a
+ * file source's `minAge`.
  */
 async function copy(name: string): Promise<string> {
   const parent = await mkdtemp(join(tmpdir(), "pathways-example-"));
@@ -242,6 +245,17 @@ async function copy(name: string): Promise<string> {
   const key = await script(["scripts/dev-key.ts"], dir);
   expect(key.out).toBe("wrote .pathways/dev.key\n");
   expect(key.code).toBe(0);
+  const manifest = JSON.parse(await readFile(join(dir, "package.json"), "utf8")) as {
+    readonly scripts?: Readonly<Record<string, string>>;
+  };
+  if (manifest.scripts?.["certs"] !== undefined) {
+    const certs = await script(["scripts/dev-certs.ts"], dir);
+    expect(certs.err).toBe("");
+    expect(certs.out).toBe(
+      "wrote .pathways/tls: ca.crt, lab.crt, lab.key, client.crt, client.key\n",
+    );
+    expect(certs.code).toBe(0);
+  }
   return dir;
 }
 
@@ -288,7 +302,7 @@ const steady = (text: string | undefined): string =>
     .replace(/^Run \d+:/m, "Run <id>:");
 
 describe("the examples", () => {
-  it("are the six folders under examples/ with a pathways.yaml", () => {
+  it("are the seven folders under examples/ with a pathways.yaml", () => {
     expect(listExamples(ROOT)).toEqual([...EXAMPLES]);
   });
 
@@ -634,7 +648,112 @@ describe("a real pass of each example, as its page shows it", () => {
     },
     SLOW,
   );
+
+  it(
+    "vet-lab-to-v2-xml: POSTs each result as v2 XML with a client certificate and settles it by the acknowledgement",
+    async () => {
+      const shown = outputs("example-vet-lab-to-v2-xml.md");
+      const dir = await copy("vet-lab-to-v2-xml");
+      const tests = "channels/vet-results-to-xml/tests";
+      const results = [1, 2, 3, 4].map((n) => `${tests}/oru-${String(n)}`);
+      await onPickedPorts(2, async ([mllp = 0, https = 0]) => {
+        const env = {
+          MLLP_PORT: String(mllp),
+          LAB_PORT: String(https),
+          LAB_URL: `https://127.0.0.1:${String(https)}/results`,
+        };
+        // The answers the page gives the stand-in: AA, AE then AA, AR, and an AA to another
+        // control id then the AA it gives once they run out.
+        const lab = launch(["scripts/lab.ts", "AA", "AE", "AA", "AR", "other-id"], dir, env);
+        const engine = startEngine(dir, env);
+        try {
+          await until("the stand-in", () => lab.out().includes("listening on"), lab.ended);
+          await until(
+            "the MLLP source",
+            () => logged(engine, "mllp-listening"),
+            () =>
+              engine.events.some(
+                (line) => line.event === "source-start-failed" && line["code"] === "EADDRINUSE",
+              ),
+          );
+        } catch (error) {
+          // Another attempt opens the same database, so this engine lets go of it first.
+          await Promise.all([engine.stop(), lab.stop()]);
+          throw error;
+        }
+
+        // The stand-in takes no connection without a client certificate its CA signed.
+        expect(await postWithoutClientCertificate(dir, https)).toBe("refused");
+
+        const sent = await script(
+          ["scripts/send.ts", ...results.map((result) => `${result}.hl7`)],
+          dir,
+          env,
+        );
+        expect(sent.code).toBe(0);
+        expect(sent.out.trimEnd()).toBe(shown[0]);
+        const count = (event: string): number =>
+          engine.events.filter((line) => line.event === event).length;
+        await until(
+          "three deliveries and a rejection",
+          () => count("delivered") === 3 && count("delivery-rejected") === 1,
+        );
+        expect((await engine.stop()).code).toBe(0);
+        await lab.stop();
+
+        expect(lab.out().trimEnd().split("\n").slice(1)).toEqual(shown[1]?.split("\n"));
+        // The error is retried, the reject fails, and the answer to another message is retried.
+        expect(
+          engine.events
+            .filter((line) => line.event === "delivery-retry")
+            .map((line) => line["code"]),
+        ).toEqual(["ACK_AE", "ACK_CONTROL_ID_MISMATCH"]);
+        expect(
+          engine.events
+            .filter((line) => line.event === "delivery-rejected")
+            .map((line) => line["reason"]),
+        ).toEqual(["AR"]);
+        const status = await pathways(["status"], dir);
+        expect(status.out).toContain("4 transformed, 0 filtered, 0 failed");
+        expect(status.out).toContain("3 delivered, 1 failed");
+      });
+
+      // Six POSTs: the first result, the second twice, the third, and the fourth twice. Each is the
+      // result's expected document, which reads back to the message the lab sent.
+      const posts = ["1", "2", "2", "3", "4", "4"].map((n) => `${tests}/oru-${n}`);
+      expect(await listed(join(dir, "data/lab"))).toEqual(
+        posts.map((_post, index) => `${String(index + 1)}.xml`),
+      );
+      for (const [index, result] of posts.entries()) {
+        const body = await bytes(dir, `data/lab/${String(index + 1)}.xml`);
+        expect(body).toEqual(await bytes(dir, `${result}.expected.hl7`));
+        expect(parseHL7Xml(body.toString("utf8")).toString()).toBe(
+          parseHL7(await readFile(join(dir, `${result}.hl7`), "latin1")).toString(),
+        );
+      }
+    },
+    SLOW,
+  );
 });
+
+/**
+ * POSTs to the stand-in on `port` trusting the copy's CA but presenting no client certificate:
+ * `refused` when the connection fails, else the status it answers.
+ */
+async function postWithoutClientCertificate(dir: string, port: number): Promise<string> {
+  const ca = await readFile(join(dir, ".pathways/tls/ca.crt"));
+  return new Promise((resolve) => {
+    const request = httpsRequest(
+      { host: "127.0.0.1", port, method: "POST", path: "/results", ca },
+      (response) => {
+        response.resume();
+        resolve(`answered ${String(response.statusCode)}`);
+      },
+    );
+    request.on("error", () => resolve("refused"));
+    request.end("<ORU_R01/>");
+  });
+}
 
 describe("the veterinary example's messages and transform", () => {
   const tests = join(ROOT, "examples/vet-lab-to-fhir/channels/vet-results-to-fhir/tests");
@@ -900,5 +1019,72 @@ describe("the veterinary example's messages and transform", () => {
     expect(() => transform(subcomponents)).toThrow(ONE_SPECIES);
     const escaped = await underHash("CAT\\S\\DOG^Cat^99COSYTE");
     expect(() => transform(escaped)).toThrow(ONE_SPECIES);
+  });
+});
+
+describe("the v2 XML example's messages and transform", () => {
+  const channel = join(ROOT, "examples/vet-lab-to-v2-xml/channels/vet-results-to-xml");
+  const SEEDS = [4831, 4832, 4833, 4834] as const;
+
+  async function xmlTransform(): Promise<(msg: Hl7Message) => unknown> {
+    return (
+      (await import(pathToFileURL(join(channel, "transform.ts")).href)) as {
+        readonly default: (msg: Hl7Message) => unknown;
+      }
+    ).default;
+  }
+
+  /** The example's first synthetic lab result, with `edit` applied to its segments. */
+  async function edited(edit: (segments: string[]) => string[]): Promise<Hl7Message> {
+    const raw = await readFile(join(channel, "tests/oru-1.hl7"), "latin1");
+    return parseHL7(edit(raw.split("\r")).join("\r"));
+  }
+
+  it("are the @cosyte/synth messages of the seeds its README names", async () => {
+    const readme = readFileSync(join(ROOT, "examples/vet-lab-to-v2-xml/README.md"), "utf8");
+    expect(readme).toContain('`generateOru({ seed, subject: "animal" })`');
+    expect(readme).toContain("with the seeds 4831, 4832, 4833 and 4834.");
+    for (const [index, seed] of SEEDS.entries()) {
+      expect(await readFile(join(channel, `tests/oru-${String(index + 1)}.hl7`), "latin1")).toBe(
+        generateOru({ seed, subject: "animal" }).toString(),
+      );
+    }
+  });
+
+  it("filters out a message that is not a lab result", async () => {
+    const transform = await xmlTransform();
+    expect(transform(generateAdt({ seed: 4835, trigger: "A01", subject: "animal" }))).toBeNull();
+  });
+
+  it("fails a result of an HL7 version it has no group table for, rather than guess its groups", async () => {
+    const transform = await xmlTransform();
+    const msg = await edited((segments) =>
+      segments.map((segment) =>
+        segment.startsWith("MSH|") ? segment.replace(/\|2\.5$/, "|2.6") : segment,
+      ),
+    );
+    expect(msg.version).toBe("2.6");
+    expect(() => transform(msg)).toThrow(
+      "no ORU_R01 group table for this result's HL7 version (MSH-12)",
+    );
+  });
+
+  it("fails a result that fills a field with components whose data type its table does not hold", async () => {
+    const transform = await xmlTransform();
+    // OBR-16, the ordering provider, a name with components.
+    const msg = await edited((segments) =>
+      segments.map((segment) =>
+        segment.startsWith("OBR|") ? `${segment}|||||||||SYN1234^Testvet^Sample` : segment,
+      ),
+    );
+    expect(msg.get("OBR.16.2")).toBe("Testvet");
+    let thrown: unknown;
+    try {
+      transform(msg);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(Hl7XmlError);
+    expect((thrown as Hl7XmlError).code).toBe("DATA_TYPE_UNKNOWN");
   });
 });

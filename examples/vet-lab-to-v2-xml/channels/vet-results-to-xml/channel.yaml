@@ -1,0 +1,38 @@
+# yaml-language-server: $schema=../../node_modules/@cosyte/pathways/schema/channel.json
+
+# Take veterinary lab results as HL7 v2 over MLLP, write each in the HL7 v2 XML encoding, and POST
+# it over HTTPS with a client certificate to a results web service that answers each POST with an
+# XML acknowledgement.
+name: vet-results-to-xml
+
+# What comes in: the transform receives each message parsed by @cosyte/hl7.
+format: hl7v2
+
+source:
+  mllp:
+    # This machine only, on port 2575 unless MLLP_PORT names another.
+    host: 127.0.0.1
+    port: { env: MLLP_PORT, default: 2575 }
+    # Plain TCP on the loopback, for this example only. A lab system on another machine connects
+    # over TLS: give the source tls: { cert, key, ca } in place of this line.
+    plaintext: true
+
+transform: ./transform.ts
+
+destinations:
+  - http:
+      # The stand-in in scripts/lab.ts listens here. A real service's URL comes from its operator.
+      url: { env: LAB_URL, default: "https://127.0.0.1:8443/results" }
+      headers:
+        # The channel's format names what comes in, so set the type of what goes out.
+        Content-Type: application/xml
+      # The CA the service's certificate is signed by, and the client certificate and key this
+      # channel presents. npm run certs makes all three for development, under .pathways/tls/. A
+      # real service issues or names its own.
+      tls:
+        ca: ../../.pathways/tls/ca.crt
+        cert: ../../.pathways/tls/client.crt
+        key: ../../.pathways/tls/client.key
+      # Read each 2xx answer as an HL7 v2 XML acknowledgement and settle the delivery by its MSA.1:
+      # AA delivered, AE retried, AR failed. An answer to another MSH.10 is retried.
+      ack: xml

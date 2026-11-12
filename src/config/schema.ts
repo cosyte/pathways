@@ -1146,7 +1146,7 @@ const httpDestination = restate(
       ack: envable(
         z.enum(["xml"]).meta({
           description:
-            "xml: read each 2xx answer as an HL7 v2 XML acknowledgement and settle by its MSA.1: AA or CA delivered, AR or CR failed, AE or CE (or an answer that is not exactly one acknowledgement or answers another MSH.10) retried. Needs the destination's format to be hl7v2 or text. Default: the status alone decides.",
+            "xml: read each 2xx answer as an HL7 v2 XML acknowledgement and settle by its MSA.1: AA or CA delivered, AR or CR failed, AE or CE (or an answer that is not exactly one acknowledgement or answers another MSH.10) retried. A message sent as XML is read first and, unsent, fails at once: SENT_XML_UNREADABLE when the XML cannot be read, SENT_XML_NO_CONTROL_ID when it holds no single MSH with one MSH.10. Needs the destination's format to be hl7v2 or text. Default: the status alone decides.",
         }),
       ).optional(),
     })
