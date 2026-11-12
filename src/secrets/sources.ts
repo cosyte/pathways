@@ -4,6 +4,7 @@ import type {
   ChannelConfig,
   HeaderValue,
   HookConfig,
+  MllpTlsChoices,
   ProjectConfig,
   SecretSource,
   SftpConfig,
@@ -123,11 +124,15 @@ function channelUses(channel: ChannelConfig, skipDry: DrySkip | undefined): Secr
     }
   }
   if (source.kind === "file") uses.push(...sftpUses(source.sftp, `${file}: source.file.sftp`));
+  if (source.kind === "mllp") uses.push(...pfxUses(source.tls, `${file}: source.mllp.tls`));
   for (const [index, destination] of channel.destinations.entries()) {
     // A destination that runs dry builds no connector, so its secrets are never needed.
     const dry = skipDry === "all" || (skipDry === "each" && destination.dryRun === true);
     if (destination.kind === "http" && !dry) {
       uses.push(...headerUses(destination.headers, `${file}: destinations.${index}.http`));
+    }
+    if (destination.kind === "mllp" && !dry) {
+      uses.push(...pfxUses(destination.tls, `${file}: destinations.${index}.mllp.tls`));
     }
     if (destination.kind === "file" && !dry) {
       uses.push(...sftpUses(destination.sftp, `${file}: destinations.${index}.file.sftp`));
@@ -135,6 +140,13 @@ function channelUses(channel: ChannelConfig, skipDry: DrySkip | undefined): Secr
   }
   uses.push(...hookUses(channel.hooks, file));
   return uses;
+}
+
+/** An MLLP block's pfx passphrase, when its TLS has one. */
+function pfxUses(tls: MllpTlsChoices | undefined, where: string): SecretUse[] {
+  return tls?.passphrase === undefined
+    ? []
+    : [{ source: tls.passphrase, where: `${where}.passphrase` }];
 }
 
 /** An `sftp:` block's private key and passphrase, when the block is there. */

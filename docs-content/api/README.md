@@ -6037,7 +6037,7 @@ LIFECYCLE_EVENTS.includes("delivered"); // true
 
 ### VERSION
 
-> `const` **VERSION**: `"0.0.1"` = `"0.0.1"`
+> `const` **VERSION**: `"0.0.2"` = `"0.0.2"`
 
 The version of `@cosyte/pathways`, kept equal to `package.json#version` (a test fails when they
 differ).
