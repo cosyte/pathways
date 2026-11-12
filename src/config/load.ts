@@ -21,6 +21,7 @@ import {
   DEFAULT_HTTP_TIMEOUT_MS,
   DEFAULT_HTTP_TOKEN_ENV,
   DEFAULT_DRAIN_TIMEOUT_MS,
+  DEFAULT_HEARTBEAT_MS,
   DEFAULT_LEASE_TTL_MS,
   DEFAULT_DELIVERY_TIMEOUT_MS,
   DEFAULT_MAX_BYTES,
@@ -425,6 +426,7 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
     health,
     probes,
     lease,
+    node: { id: project.node?.id, heartbeatMs: project.node?.heartbeat ?? DEFAULT_HEARTBEAT_MS },
     migrations: { rollbackWindowMs: project.migrations?.rollbackWindow ?? 0 },
     drain: {
       notReadyDelayMs: project.drain?.notReadyDelay ?? 0,

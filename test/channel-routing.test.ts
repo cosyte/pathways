@@ -30,6 +30,7 @@ import {
   TEST_DATABASES,
   testStorage,
   type TestDatabase,
+  type TestStorage,
 } from "./databases.js";
 import { captureLogger, cleanUp, dropFile, makeProject } from "./helpers.js";
 
@@ -80,6 +81,8 @@ interface Setup {
   readonly engine: Engine;
   readonly store: Store;
   readonly clock: { now: number };
+  /** Opens another connection to the same database, as another engine node would. */
+  readonly storage: TestStorage;
 }
 
 async function setUp(
@@ -94,7 +97,8 @@ async function setUp(
   const root = await makeProject(files);
   const loaded = await loadProject(root);
   const project = options.edit?.(loaded) ?? loaded;
-  const store = await (await testStorage(database, project.databaseFile)).open();
+  const storage = await testStorage(database, project.databaseFile);
+  const store = await storage.open();
   stores.push(store);
   await options.before?.(store);
   const clock = { now: Date.now() };
@@ -106,7 +110,7 @@ async function setUp(
   });
   engines.push(engine);
   await engine.start();
-  return { root, project, engine, store, clock };
+  return { root, project, engine, store, clock, storage };
 }
 
 /** Every message of `channel`, oldest first, with its body. */
@@ -435,6 +439,33 @@ for (const database of TEST_DATABASES) {
       expect(await statusCommand(status.context, [])).toBe(EXIT.ok);
       expect(status.out()).toMatch(/^a: .*\n {2}feeds: b\n/m);
       expect(status.out()).toMatch(/^b: .*\n {2}fed by: a\n/m);
+    });
+
+    it("hands over through the database, so another engine node on it takes the message", async () => {
+      const { root, project, engine, store, storage } = await setUp(
+        database,
+        {
+          "channels/a/channel.yaml": FEEDER,
+          "channels/b/channel.yaml": target(),
+        },
+        { before: (opened) => opened.setChannelState("b", "stopped") },
+      );
+      await dropFile(join(root, "data", "inbox", "in.txt"), "SYNTHETIC-1");
+      await engine.tick();
+      expect(await store.messageCounts("b")).toMatchObject({ received: 1 });
+      // The first node stops; a second, on its own connection, runs b.
+      engines.splice(engines.indexOf(engine), 1);
+      await engine.stop();
+      const other = await storage.open();
+      stores.push(other);
+      await other.setChannelState("b", "running");
+      const second = new Engine({ project, store: other, logger: captureLogger().logger });
+      engines.push(second);
+      await second.start();
+      await second.tick();
+      const [handed] = await messagesOf(store, "b");
+      expect(handed).toMatchObject({ body: "SYNTHETIC-1", state: "delivered", hops: 1 });
+      expect(await readdir(join(root, "data", "out"))).toHaveLength(1);
     });
 
     it("stores hand-offs for a stopped target, and waits once it holds maxPending", async () => {

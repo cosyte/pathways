@@ -2195,6 +2195,42 @@ const lease = z
       "The engine lease, which one engine per database holds, so a second is refused or waits as a standby.",
   });
 
+/**
+ * What a node id may hold: 1 to 64 letters, digits, dots, hyphens and underscores, starting with a
+ * letter or a digit, so a host name or a container's name fits.
+ *
+ * @example
+ * ```ts
+ * NODE_ID.test("engine-a"); // true
+ * ```
+ */
+export const NODE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+/** This engine's node: its id, and how often it writes its heartbeat. */
+const node = z
+  .strictObject({
+    id: envable(
+      z
+        .string()
+        .regex(
+          NODE_ID,
+          "1 to 64 letters, digits, dots, hyphens and underscores, starting with a letter or a digit",
+        )
+        .meta({
+          description:
+            "This engine's node id, unique among the engines on its database: 1 to 64 letters, digits, dots, hyphens and underscores. Default: one generated at the first start and kept in .pathways/node-id.",
+        }),
+    ).optional(),
+    heartbeat: duration(
+      "How often this engine writes its heartbeat to its node row: a duration of at least 1s, such as 5s, or a number of milliseconds. A node whose last heartbeat is three of these old shows stale. Default 5s.",
+      { ms: 1_000, message: 'a duration of at least 1s, such as "5s"' },
+    ).optional(),
+  })
+  .meta({
+    description:
+      "This engine's node: its id, and how often it writes its heartbeat, so pathways nodes and a second engine see who runs and whether it is alive.",
+  });
+
 /** A drain's wait: a duration from 0 up to the longest a timer holds. */
 const drainWait = (description: string) =>
   envable(
@@ -2312,6 +2348,7 @@ export const projectSchema = z
     health: health.optional(),
     probes: probes.optional(),
     lease: lease.optional(),
+    node: node.optional(),
     drain: drain.optional(),
     migrations: migrationsBlock.optional(),
     config: transformConfig.optional(),
@@ -3295,6 +3332,27 @@ export const DEFAULT_SETTINGS: Settings = {
 export const DEFAULT_LEASE_TTL_MS = 15_000;
 
 /**
+ * How often a node writes its heartbeat, by default: 5 seconds.
+ *
+ * @example
+ * ```ts
+ * DEFAULT_HEARTBEAT_MS * NODE_STALE_HEARTBEATS; // 15000, the default stale bound
+ * ```
+ */
+export const DEFAULT_HEARTBEAT_MS = 5_000;
+
+/**
+ * How many heartbeat intervals a node's last heartbeat may be old before it shows stale: 3, so one
+ * or two late or failed heartbeats do not make a running node look gone.
+ *
+ * @example
+ * ```ts
+ * const staleAfterMs = heartbeatMs * NODE_STALE_HEARTBEATS;
+ * ```
+ */
+export const NODE_STALE_HEARTBEATS = 3;
+
+/**
  * How long `pathways start` lets the work in flight finish once it is told to stop, by default: 30
  * seconds. Past it, what is left is cut off: an MLLP message not yet stored gets no ACK, and a send
  * under way stays pending, sent again (flagged) at the next start.
@@ -4157,6 +4215,21 @@ export interface LeaseConfig {
 }
 
 /**
+ * This engine's node settings, from `pathways.yaml`'s `node` block.
+ *
+ * @example
+ * ```ts
+ * const node: NodeConfig = { id: "engine-a", heartbeatMs: 5_000 };
+ * ```
+ */
+export interface NodeConfig {
+  /** The node id `pathways.yaml` sets, or undefined for the one kept in `.pathways/node-id`. */
+  readonly id: string | undefined;
+  /** How often the node writes its heartbeat, in milliseconds. */
+  readonly heartbeatMs: number;
+}
+
+/**
  * How `pathways start` drains when told to stop, from `pathways.yaml`'s `drain` block.
  *
  * @example
@@ -4223,6 +4296,8 @@ export interface ProjectConfig {
   readonly probes: ProbesConfig | undefined;
   /** The engine lease's time to live, and whether to start as a standby. */
   readonly lease: LeaseConfig;
+  /** This engine's node id, when set, and its heartbeat interval. */
+  readonly node: NodeConfig;
   /** How `pathways migrate` treats contract steps. */
   readonly migrations: MigrationsConfig;
   /** How `pathways start` drains when told to stop. */

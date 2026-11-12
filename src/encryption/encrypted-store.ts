@@ -18,6 +18,12 @@ import type {
   MessageStore,
   MessageSummary,
   NextDeliveryOptions,
+  NodeInfo,
+  NodeJoin,
+  NodeReplace,
+  NodeRow,
+  NodeSelf,
+  NodeState,
   Page,
   PendingDelivery,
   SendStart,
@@ -35,6 +41,7 @@ import type {
 import {
   channelStateStore,
   leaseStore,
+  nodeStore,
   retentionStore,
   type RetentionStore,
 } from "../storage/store.js";
@@ -208,6 +215,12 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
   readonly setChannelState?: (channel: string, state: ChannelRunState) => Promise<void>;
   /** Straight through, present only when the store underneath has it. */
   readonly markDryRun?: (deliveryId: number, epoch?: number) => Promise<void>;
+  /** The node methods, straight through, present only when the store underneath has all five. */
+  readonly joinNode?: (info: NodeInfo, replace?: NodeReplace) => Promise<NodeJoin>;
+  readonly nodeHeartbeat?: (self: NodeSelf, state: NodeState) => Promise<boolean>;
+  readonly leaveNode?: (self: NodeSelf) => Promise<boolean>;
+  readonly nodes?: () => Promise<NodeRow[]>;
+  readonly forgetNode?: (node: string) => Promise<boolean>;
   /**
    * The retention steps: ids and counts, and rows changed whole or emptied, so straight through,
    * present only when the store underneath has all four; the rows an archive holds come back
@@ -257,6 +270,14 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
       this.setChannelState = states.setChannelState;
     }
     if (inner.markDryRun !== undefined) this.markDryRun = inner.markDryRun.bind(inner);
+    const nodes = nodeStore(inner);
+    if (nodes !== undefined) {
+      this.joinNode = nodes.joinNode;
+      this.nodeHeartbeat = nodes.nodeHeartbeat;
+      this.leaveNode = nodes.leaveNode;
+      this.nodes = nodes.nodes;
+      this.forgetNode = nodes.forgetNode;
+    }
     const steps = retentionStore(inner);
     if (steps !== undefined) {
       this.countExpiring = (channel, query) => steps.countExpiring(channel, query);
