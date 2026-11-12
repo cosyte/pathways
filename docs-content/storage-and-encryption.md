@@ -90,6 +90,14 @@ Pathways never reads what it added, and none has a rollback step:
   channel's rows once per start. A custom store may implement `settle`, `unsettled` and
   `requeuedUnsettled`; one without the first two sends no settled events, and one without
   `requeuedUnsettled` settles such a replay at the next start.
+- Migration `0017-delivery-queued-at` adds a `queued_at` column to `deliveries`: when the delivery
+  was queued, set when its row is written and never moved after, which
+  `pathways_oldest_pending_age_seconds` counts from. It only adds a column that may be null, with no
+  default and no index, which changes the table's definition and none of its rows, so it is safe
+  while deliveries are in flight; an older Pathways running beside it leaves the column empty, and
+  such a delivery counts from its message's last update. Nothing fills it in for deliveries already
+  queued. To remove it, stop every engine, drop the column, and delete the step's rows from
+  `kysely_migration` and `schema_info`; the step's own `down` does the same.
 
 ## Schema steps and the migration lock
 

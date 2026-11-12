@@ -194,7 +194,9 @@ export interface DestinationQueue {
   readonly failed: number;
   /**
    * When the oldest of its pending deliveries was queued (its message transformed, replayed or
-   * resent, as the message's last update), ISO 8601 in UTC; undefined when none is pending.
+   * resent), ISO 8601 in UTC; undefined when none is pending. A retry, a failure or a clear never
+   * moves it. A delivery queued before schema step `0017-delivery-queued-at`, or by an older
+   * Pathways, has no queue time of its own and counts from its message's last update.
    */
   readonly oldestPendingSince: string | undefined;
 }
@@ -313,6 +315,11 @@ interface DeliveriesTable {
   destination_key: string | null;
   /** When the delivery failed for good (ISO 8601, UTC); null until then. Since 0011. */
   failed_at: string | null;
+  /**
+   * When the delivery was queued (ISO 8601, UTC): set when its row is inserted, and never moved by a
+   * retry, a failure or a clear. Null for one an older Pathways queued, or queued before 0017.
+   */
+  queued_at: string | null;
 }
 
 /** The audit log. Rows are only ever inserted: nothing here updates or deletes one. Since 0003. */
@@ -2045,6 +2052,17 @@ const COLUMN_TYPES: Readonly<Record<StorageKind, ColumnTypes>> = {
 export const AUDIT_LOG_STEP = "0003-operator-and-audit";
 
 /**
+ * The step that gives each delivery its own queue time, `queued_at`, which the oldest pending age
+ * per destination counts from. It is the first step with a `down`, which drops the column again.
+ *
+ * @example
+ * ```ts
+ * const timed = state.applied.some((step) => step.name === QUEUED_AT_STEP);
+ * ```
+ */
+export const QUEUED_AT_STEP = "0017-delivery-queued-at";
+
+/**
  * The schema's steps, in the column types of `kind`, each tagged `expand` or `contract`. One
  * portable set: each database runs the same steps under the same names, so the migration table
  * reads the same everywhere.
@@ -2397,6 +2415,22 @@ export function migrations(kind: StorageKind): Record<string, SchemaStep> {
           .set((eb) => ({ settled_generation: eb.ref("generation") }))
           .where((eb) => ended(eb))
           .execute();
+      },
+    },
+    [QUEUED_AT_STEP]: {
+      // Expand only: a column that may be null, with no default and no index, which an older
+      // Pathways never reads or writes. Adding one changes the table's definition alone, no row of
+      // it (SQLite, PostgreSQL, SQL Server, MySQL 8 and MariaDB 10.3 on), so it is safe on a live
+      // queue: deliveries in flight keep their rows, and one an older Pathways queues meanwhile has
+      // no queue time and counts from its message's last update, as every delivery did before.
+      // Nothing fills it in for the rows already there, which would write every one. Its `down`
+      // drops the column and the step's record: stop every engine of this version first.
+      tag: "expand",
+      async up(db: Kysely<unknown>): Promise<void> {
+        await db.schema.alterTable("deliveries").addColumn("queued_at", t.time).execute();
+      },
+      async down(db: Kysely<unknown>): Promise<void> {
+        await db.schema.alterTable("deliveries").dropColumn("queued_at").execute();
       },
     },
   };
@@ -4123,9 +4157,9 @@ export class Store implements MessageStore, ContentStore, MetaStore {
 
   /**
    * Each destination of `channel` with a delivery pending or failed, by its key (or, for deliveries
-   * made before keys, its place): its counts, and the oldest last update of a message with a
-   * delivery pending there. Three reads, each on the deliveries' index by channel, destination and
-   * status.
+   * made before keys, its place): its counts, and the oldest queue time of a delivery pending there,
+   * its own `queued_at`, or for one queued before that column its message's last update. Three
+   * reads, each on the deliveries' index by channel, destination and status.
    */
   async destinationQueues(channel: string): Promise<DestinationQueue[]> {
     const counts = await this.db
@@ -4159,8 +4193,12 @@ export class Store implements MessageStore, ContentStore, MetaStore {
       .select([
         "deliveries.destination as destination",
         "deliveries.destination_key as destination_key",
-        // Never null: each group has a pending delivery, and its message an update time.
-        (eb) => eb.fn.min<string>("messages.updated_at").as("since"),
+        // Never null: each group has a pending delivery, and its message an update time. Both are
+        // ISO 8601 in UTC, written by toISOString, so the least string is the earliest time.
+        (eb) =>
+          eb.fn
+            .min<string>(eb.fn.coalesce("deliveries.queued_at", "messages.updated_at"))
+            .as("since"),
       ])
       .where("deliveries.channel", "=", channel)
       .where("deliveries.status", "=", "pending")
@@ -4675,6 +4713,9 @@ export class Store implements MessageStore, ContentStore, MetaStore {
       throw new RangeError("each destination's outputs need each destination's key, in order");
     }
     let queued = 0;
+    // One queue time for every row of this transform, replay or resend: a later retry, failure or
+    // clear never moves it.
+    const queuedAt = this.now().toISOString();
     for (const [destination, outcome] of outcomes.entries()) {
       const destinationKey = keys?.[destination] ?? null;
       // Nothing stored for it to send again: no row at all, so it is neither filtered nor failed.
@@ -4698,6 +4739,7 @@ export class Store implements MessageStore, ContentStore, MetaStore {
             failed_at: "failure" in outcome ? this.now().toISOString() : null,
             generation: message.generation,
             destination_key: destinationKey,
+            queued_at: queuedAt,
           })
           .execute();
         continue;
@@ -4719,6 +4761,7 @@ export class Store implements MessageStore, ContentStore, MetaStore {
             delivered_at: null,
             generation: message.generation,
             destination_key: destinationKey,
+            queued_at: queuedAt,
           })
           .execute();
         queued += 1;

@@ -2008,7 +2008,9 @@ Its deliveries that failed for good and are not cleared.
 > `readonly` **oldestPendingSince**: `string` \| `undefined`
 
 When the oldest of its pending deliveries was queued (its message transformed, replayed or
-resent, as the message's last update), ISO 8601 in UTC; undefined when none is pending.
+resent), ISO 8601 in UTC; undefined when none is pending. A retry, a failure or a clear never
+moves it. A delivery queued before schema step `0017-delivery-queued-at`, or by an older
+Pathways, has no queue time of its own and counts from its message's last update.
 
 ##### pending
 
