@@ -100,6 +100,7 @@ synthetic messages, with its tests, which CI runs on every change. Each has a pa
 - [HL7 v2 to FHIR](https://github.com/cosyte/pathways/blob/main/docs-content/example-hl7-to-fhir.md)
 - [Filter, then send to two destinations](https://github.com/cosyte/pathways/blob/main/docs-content/example-filter-and-route.md)
 - [Replay after a failure](https://github.com/cosyte/pathways/blob/main/docs-content/example-replay-after-failure.md)
+- [A veterinary lab result to FHIR](https://github.com/cosyte/pathways/blob/main/docs-content/example-vet-lab-to-fhir.md)
 
 ---
 

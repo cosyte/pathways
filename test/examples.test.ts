@@ -1,10 +1,24 @@
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { chmod, cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  cp,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir, userInfo } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { parseResource, validateResource } from "@cosyte/fhir";
+import { type Hl7Message, parseHL7 } from "@cosyte/hl7";
+import { generateAdt, generateOru } from "@cosyte/synth/hl7";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 
 import {
@@ -36,8 +50,10 @@ import { SSHD, startSshd, stopAllSshd } from "./sshd.js";
  *
  * Each runs on a copy of the example in the system temp folder. `pathways` runs in this process,
  * through the command's own entry point (`run` in src/cli.ts), with its log lines kept for the
- * checks; the example's scripts run under Node as `npm run` starts them. The messages are the
- * examples' own, all synthetic.
+ * checks; the example's scripts run under Node as `npm run` starts them. The packages an example's
+ * `dependencies` names are linked into the copy from this repository's own, as `npm install` gives
+ * them to a reader. The messages are the examples' own, all synthetic; the veterinary example's are
+ * held to the `@cosyte/synth` seeds its README names.
  */
 
 const SLOW = 120_000;
@@ -49,6 +65,7 @@ const EXAMPLES = [
   "hl7-to-fhir",
   "mllp-to-http",
   "replay-after-failure",
+  "vet-lab-to-fhir",
 ] as const;
 
 /**
@@ -221,10 +238,28 @@ async function copy(name: string): Promise<string> {
     preserveTimestamps: true,
     filter: (source) => !ignored.test(source.slice(join(ROOT, "examples", name).length)),
   });
+  await linkDependencies(dir);
   const key = await script(["scripts/dev-key.ts"], dir);
   expect(key.out).toBe("wrote .pathways/dev.key\n");
   expect(key.code).toBe(0);
   return dir;
+}
+
+/**
+ * Links each package the copy's `package.json` names in `dependencies` into its `node_modules`, from
+ * this repository's own, as `npm install` puts them there: a transform that imports a library finds
+ * it. `@cosyte/pathways` is a devDependency the transforms import types from only, so it is not
+ * linked. A junction on Windows, which needs no privilege; elsewhere the type is ignored.
+ */
+async function linkDependencies(dir: string): Promise<void> {
+  const manifest = JSON.parse(await readFile(join(dir, "package.json"), "utf8")) as {
+    readonly dependencies?: Readonly<Record<string, string>>;
+  };
+  for (const name of Object.keys(manifest.dependencies ?? {})) {
+    const link = join(dir, "node_modules", name);
+    await mkdir(dirname(link), { recursive: true });
+    await symlink(await realpath(join(ROOT, "node_modules", name)), link, "junction");
+  }
 }
 
 /** Copies a test message of a channel into its inbox, keeping its time, as `cp -p` does. */
@@ -253,7 +288,7 @@ const steady = (text: string | undefined): string =>
     .replace(/^Run \d+:/m, "Run <id>:");
 
 describe("the examples", () => {
-  it("are the five folders under examples/ with a pathways.yaml", () => {
+  it("are the six folders under examples/ with a pathways.yaml", () => {
     expect(listExamples(ROOT)).toEqual([...EXAMPLES]);
   });
 
@@ -496,4 +531,121 @@ describe("a real pass of each example, as its page shows it", () => {
     },
     SLOW,
   );
+
+  it(
+    "vet-lab-to-fhir: acknowledges both over MLLP and POSTs one Bundle that keeps species and breed",
+    async () => {
+      const shown = outputs("example-vet-lab-to-fhir.md");
+      const dir = await copy("vet-lab-to-fhir");
+      const tests = "channels/vet-results-to-fhir/tests";
+      await onPickedPorts(2, async ([mllp = 0, http = 0]) => {
+        const env = {
+          MLLP_PORT: String(mllp),
+          RECEIVER_PORT: String(http),
+          FHIR_URL: `http://127.0.0.1:${String(http)}/fhir/$process-message`,
+        };
+        const receiver = launch(["scripts/receiver.ts"], dir, env);
+        const engine = startEngine(dir, env);
+        try {
+          await until(
+            "the receiver",
+            () => receiver.out().includes("listening on"),
+            receiver.ended,
+          );
+          await until(
+            "the MLLP source",
+            () => logged(engine, "mllp-listening"),
+            () =>
+              engine.events.some(
+                (line) => line.event === "source-start-failed" && line["code"] === "EADDRINUSE",
+              ),
+          );
+        } catch (error) {
+          // Another attempt opens the same database, so this engine lets go of it first.
+          await Promise.all([engine.stop(), receiver.stop()]);
+          throw error;
+        }
+
+        const sent = await script(
+          ["scripts/send.ts", `${tests}/oru.hl7`, `${tests}/adt.hl7`],
+          dir,
+          env,
+        );
+        expect(sent.code).toBe(0);
+        expect(sent.out.trimEnd()).toBe(shown[0]);
+        await until("the delivery", () => logged(engine, "delivered"));
+        await until("the filter", () => logged(engine, "filtered"));
+        expect((await engine.stop()).code).toBe(0);
+        await receiver.stop();
+
+        expect(receiver.out().trimEnd().split("\n").slice(1)).toEqual([shown[1]]);
+        const status = await pathways(["status"], dir);
+        expect(status.out).toContain("1 transformed, 1 filtered, 0 failed");
+        expect(status.out).toContain("1 delivered, 0 failed");
+      });
+
+      expect(await listed(join(dir, "data/receiver"))).toEqual(["1.json"]);
+      const body = await bytes(dir, "data/receiver/1.json");
+      expect(body).toEqual(await bytes(dir, `${tests}/oru.expected.hl7`));
+      expect(parseResource(body.toString("utf8")).resource).toBeDefined();
+
+      // The species and breed the lab sent in PID-35 and PID-36 are the ones the Patient carries.
+      const sentPatient = parseHL7(await readFile(join(dir, `${tests}/oru.hl7`), "latin1")).patient;
+      const bundle = JSON.parse(body.toString("utf8")) as {
+        readonly entry: readonly {
+          readonly resource: {
+            readonly resourceType: string;
+            readonly extension?: readonly {
+              readonly url: string;
+              readonly extension: readonly {
+                readonly url: string;
+                readonly valueCodeableConcept: { readonly coding: readonly { code: string }[] };
+              }[];
+            }[];
+          };
+        }[];
+      };
+      const patients = bundle.entry.filter((each) => each.resource.resourceType === "Patient");
+      expect(patients).toHaveLength(1);
+      const animal = patients[0]?.resource.extension?.find(
+        (each) => each.url === "http://hl7.org/fhir/StructureDefinition/patient-animal",
+      );
+      const part = (name: string): string | undefined =>
+        animal?.extension.find((each) => each.url === name)?.valueCodeableConcept.coding[0]?.code;
+      expect(sentPatient?.species?.identifier).toBeDefined();
+      expect(sentPatient?.breed?.identifier).toBeDefined();
+      expect(part("species")).toBe(sentPatient?.species?.identifier);
+      expect(part("breed")).toBe(sentPatient?.breed?.identifier);
+    },
+    SLOW,
+  );
+});
+
+describe("the veterinary example's messages and transform", () => {
+  const tests = join(ROOT, "examples/vet-lab-to-fhir/channels/vet-results-to-fhir/tests");
+
+  it("are the @cosyte/synth messages of the seeds its README names", async () => {
+    const readme = readFileSync(join(ROOT, "examples/vet-lab-to-fhir/README.md"), "utf8");
+    expect(readme).toContain('generateOru({ seed: 4821, subject: "animal" })');
+    expect(readme).toContain('generateAdt({ seed: 4822, trigger: "A01", subject: "animal" })');
+    expect(await readFile(join(tests, "oru.hl7"), "latin1")).toBe(
+      generateOru({ seed: 4821, subject: "animal" }).toString(),
+    );
+    expect(await readFile(join(tests, "adt.hl7"), "latin1")).toBe(
+      generateAdt({ seed: 4822, trigger: "A01", subject: "animal" }).toString(),
+    );
+  });
+
+  it("refuses a lab result with no species, so a person's result is never sent as an animal's", async () => {
+    const transform = (
+      (await import(
+        pathToFileURL(
+          join(ROOT, "examples/vet-lab-to-fhir/channels/vet-results-to-fhir/transform.ts"),
+        ).href
+      )) as { readonly default: (msg: Hl7Message) => unknown }
+    ).default;
+    const person = generateOru({ seed: 4821 });
+    expect(person.patient?.species).toBeUndefined();
+    expect(() => transform(person)).toThrow("no species in PID-35");
+  });
 });
