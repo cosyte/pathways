@@ -7,7 +7,7 @@ import type { DestinationConfig } from "../config/schema.js";
  * Where a destination sends, as its identity reads it when it has no `name:`: a local folder or a
  * module by its path from the project's root, so moving the project keeps it; an SFTP folder by its
  * server and path; an S3 or Azure Blob prefix by its bucket or container; an HTTP destination by its
- * URL; an MLLP or tcp one by its host and port.
+ * URL; an MLLP or tcp one by its host and port; an SMTP one by its server and its recipients.
  */
 function target(root: string, destination: DestinationConfig): string {
   // The configuration resolves a local folder and a module to absolute paths.
@@ -29,6 +29,8 @@ function target(root: string, destination: DestinationConfig): string {
     case "mllp":
     case "tcp":
       return `${destination.host}:${String(destination.port)}`;
+    case "smtp":
+      return `${destination.host}:${String(destination.port)}/${[...destination.to, ...destination.cc].join(",")}`;
     case "module":
       return fromRoot(destination.module);
   }

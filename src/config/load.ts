@@ -20,6 +20,7 @@ import {
   DEFAULT_HTTP_TIMEOUT_MS,
   DEFAULT_HTTP_TOKEN_ENV,
   DEFAULT_LEASE_TTL_MS,
+  DEFAULT_DELIVERY_TIMEOUT_MS,
   DEFAULT_MAX_BYTES,
   DEFAULT_MIN_AGE_MS,
   DEFAULT_POLL_DEADLINE_MS,
@@ -28,6 +29,11 @@ import {
   DEFAULT_POOL_MAX,
   DEFAULT_SECRET_TIMEOUT_MS,
   DEFAULT_SETTINGS,
+  DEFAULT_SMTP_BODY,
+  DEFAULT_SMTP_CONNECT_TIMEOUT_MS,
+  DEFAULT_SMTP_GREETING_TIMEOUT_MS,
+  DEFAULT_SMTP_SOCKET_TIMEOUT_MS,
+  DEFAULT_SMTP_SUBJECT,
   DEFAULT_TCP_IDLE_TIMEOUT_MS,
   DEFAULT_TCP_STALL_TIMEOUT_MS,
   DEFAULT_TCP_TIMEOUT_MS,
@@ -57,6 +63,7 @@ import {
   type ServerTlsFiles,
   type SftpConfig,
   type Settings,
+  type SmtpDestination,
   type StorageConfig,
   type TcpFraming,
   type TransformConfigBlock,
@@ -793,9 +800,12 @@ function resolveConnector(
   dir: string,
   settings: Settings,
 ): ChannelConfig["destinations"][number] {
-  const { http, mllp, tcp } = destination;
+  const { http, mllp, smtp, tcp } = destination;
   const module = resolveModule(destination, dir);
   if (module !== undefined) return module;
+  if (smtp !== undefined) {
+    return resolveSmtp(smtp, dir, destination.timeout ?? DEFAULT_DELIVERY_TIMEOUT_MS);
+  }
   if (tcp !== undefined) {
     return {
       kind: "tcp",
@@ -833,6 +843,43 @@ function resolveConnector(
     ...resolveHttpClient(http, dir),
     timeoutMs: http.timeout ?? DEFAULT_HTTP_TIMEOUT_MS,
     resendHeader: http.resendHeader,
+  };
+}
+
+/** An `smtp:` block as the YAML wrote it. */
+type SmtpYaml = NonNullable<DestinationYaml["smtp"]>;
+
+/** The port each way of running SMTP listens on by default: 465, 587, or 25 without TLS. */
+const SMTP_PORTS = { implicit: 465, starttls: 587, none: 25 } as const;
+
+/**
+ * An `smtp:` block, resolved: its CA and secret files against `dir`, and every default filled in,
+ * each time limit no longer than `totalMs`, the delivery's own.
+ */
+function resolveSmtp(smtp: SmtpYaml, dir: string, totalMs: number): SmtpDestination {
+  const tls = smtp.tls === undefined ? undefined : (smtp.tls.mode ?? "implicit");
+  const within = (written: number | undefined, fallback: number): number =>
+    written ?? Math.min(fallback, totalMs);
+  return {
+    kind: "smtp",
+    host: smtp.host,
+    port: smtp.port ?? SMTP_PORTS[tls ?? "none"],
+    tls,
+    ca: smtp.tls?.ca === undefined ? undefined : resolve(dir, smtp.tls.ca),
+    plaintext: smtp.plaintext === true,
+    user: smtp.user === undefined ? undefined : secretSourceOf(smtp.user, dir),
+    password: smtp.password === undefined ? undefined : secretSourceOf(smtp.password, dir),
+    from: smtp.from,
+    to: smtp.to,
+    cc: smtp.cc ?? [],
+    subject: smtp.subject ?? DEFAULT_SMTP_SUBJECT,
+    body: smtp.body ?? DEFAULT_SMTP_BODY,
+    attach: smtp.attach ?? false,
+    onPartialRefusal: smtp.onPartialRefusal ?? "rejected",
+    maxBytes: smtp.maxSize ?? DEFAULT_MAX_BYTES,
+    connectTimeoutMs: within(smtp.connectTimeout, DEFAULT_SMTP_CONNECT_TIMEOUT_MS),
+    greetingTimeoutMs: within(smtp.greetingTimeout, DEFAULT_SMTP_GREETING_TIMEOUT_MS),
+    socketTimeoutMs: within(smtp.socketTimeout, DEFAULT_SMTP_SOCKET_TIMEOUT_MS),
   };
 }
 

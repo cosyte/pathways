@@ -105,7 +105,7 @@ The destination's three keys:
 
 Each delivery records the destination it was made for: by its `name`, or, without one, by its kind
 and target (a `file` destination's folder, or its bucket or container and prefix, an `http` destination's URL, an `mllp` or `tcp`
-destination's host and port, a `module` destination's module). Adding a destination anywhere in the
+destination's host and port, an `smtp` destination's server and recipients, a `module` destination's module). Adding a destination anywhere in the
 list, removing one or reordering them is safe: after a restart, each queued delivery goes to the
 destination it was made for, and a resend or `pathways verify` reads each destination's own stored
 outputs. A delivery queued for a destination the channel no longer has waits, and is logged at

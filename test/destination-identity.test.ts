@@ -447,14 +447,21 @@ describe("destinationKeys", () => {
   const mllp = as({ kind: "mllp", host: "lab.example.com", port: 2575 });
   const tcp = as({ kind: "tcp", host: "lab.example.com", port: 2575 });
   const module = as({ kind: "module", module: `${root}/destination.ts` });
+  const smtp = as({
+    kind: "smtp",
+    host: "mail.example.com",
+    port: 587,
+    to: ["lab@example.com"],
+    cc: [],
+  });
   const named = as({ kind: "http", url: "https://lab.example.com/in", name: "lab" });
 
   it("keys a destination by its name, else by its kind and target, and two alike by their order", () => {
     const keys = destinationKeys(root, [file, sftp, http, mllp, tcp, module, named, http]);
     for (const key of keys) expect(key).toMatch(/^[0-9a-f]{32}$/);
     expect(new Set(keys).size).toBe(8);
-    const objectStores = destinationKeys(root, [s3, s3At, azblob, azblobAt]);
-    expect(new Set([...keys, ...objectStores]).size).toBe(12);
+    const others = destinationKeys(root, [s3, s3At, azblob, azblobAt, smtp]);
+    expect(new Set([...keys, ...others]).size).toBe(13);
     // A name keeps its key whatever the destination's kind or target.
     expect(destinationKeys(root, [as({ ...mllp, name: "lab" })])).toEqual([keys[6]]);
     // The first of two alike keeps the key it has alone.
