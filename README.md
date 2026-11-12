@@ -154,6 +154,9 @@ These are on `main` and land in the next release, not in 0.0.3:
 
 - The package description on npm no longer says Pathways is not yet out.
   <!-- changesets: release-status -->
+- An `xml` format: any XML body reaches the transform as a DOM document, read by `@cosyte/ccda`'s
+  hardened reader, with size and shape caps, and an untouched document leaves byte for byte.
+  <!-- changesets: xml-format -->
 
 The changelog lists each once it is released.
 

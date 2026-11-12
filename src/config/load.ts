@@ -401,6 +401,7 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
       format,
       ...(channel.csv === undefined ? {} : { csv: channel.csv }),
       ...(channel.hl7v2 === undefined ? {} : { hl7v2: channel.hl7v2 }),
+      ...(channel.xml === undefined ? {} : { xml: channel.xml }),
       source,
       transform,
       destinations,
