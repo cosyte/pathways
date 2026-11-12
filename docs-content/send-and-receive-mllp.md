@@ -46,6 +46,7 @@ source:
     tls: { cert: ../../certs/server.pem, key: ../../certs/server.key }
     maxConnections: 20
     receiveTimeout: 10m
+    maxConnectionAge: 1h
     maxMessageSize: 8MB
     keepOpen: false
 destinations:
@@ -62,6 +63,12 @@ destinations:
   each message. A part-sent message is never stored, so the sender sends it again on a new connection.
   Set it longer than the sender's own quiet periods, since many senders keep one connection open all
   day, and longer than storing a message takes.
+- **`maxConnectionAge`** (no limit by default) closes a connection once it is older than this, after
+  the message it brings has been stored and answered. The sender connects again, and through a load
+  balancer that can be another node, so long-lived connections spread out again after a node is added
+  or restarted. Off by default, since how a sender takes a closed connection is its own: most connect
+  again, and the message they were sending, if any, was answered first. The engine logs
+  `mllp-connection-aged` when it closes one.
 - **`maxMessageSize`** (4 MB by default, 1 MB being 1,024 KB) is the largest message taken. A frame
   that grows past it closes the connection, nothing of it is stored, and the engine logs
   `mllp-source-error` with the code `MLLP_FRAME_TOO_LARGE`.

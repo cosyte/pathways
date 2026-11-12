@@ -274,7 +274,7 @@ describe("pathways verify, on stored messages", () => {
     // Back to the schema before schema_info, as the version before left it.
     const db = new SqliteDatabase(join(root, ".pathways/pathways.db"));
     db.exec(
-      "drop table schema_info; drop table channel_states; drop table meta_index; delete from kysely_migration where name in ('0007-schema-info', '0008-content-drop', '0009-channel-states', '0010-message-meta'); alter table messages drop column content_hash; alter table messages drop column content_dropped_at; alter table messages drop column meta",
+      "drop table schema_info; drop table channel_states; drop table meta_index; delete from kysely_migration where name in ('0007-schema-info', '0008-content-drop', '0009-channel-states', '0010-message-meta', '0011-delivery-failed-at'); alter table messages drop column content_hash; alter table messages drop column content_dropped_at; alter table messages drop column meta; alter table deliveries drop column failed_at",
     );
     db.close();
     const result = await runCli(["verify", "-C", root]);

@@ -49,6 +49,7 @@ import {
   type ProbeEndpoint,
 } from "./engine/probes.js";
 import { EXIT } from "./exit.js";
+import { faultPoint } from "./fault-points.js";
 import { HookSet } from "./extensions/hooks.js";
 import { ExtensionLoadError } from "./extensions/load.js";
 import { AuditLog, auditEvent, operatingSystemUser, type AuditListener } from "./operator/audit.js";
@@ -73,6 +74,11 @@ import {
   statusCommand,
   type OperatorContext,
 } from "./operator/commands.js";
+import {
+  bulkReplayCommand,
+  DEFAULT_REPLAY_BATCH,
+  MAX_REPLAY_BATCH,
+} from "./operator/bulk-replay.js";
 import { recordConfigChanges } from "./operator/config-audit.js";
 import { verifyCommand, type VerifySelection } from "./operator/verify.js";
 import { InitError, initProject, STARTER_CHANNEL, STARTER_KEY_FILE } from "./starter/init.js";
@@ -115,6 +121,12 @@ export interface CliIo {
    * in `pathways.yaml` receive the same entries as `audit` events.
    */
   readonly onAudit?: AuditListener;
+  /**
+   * Asks the person at the terminal and resolves with the line typed: `pathways replay --status
+   * failed` asks for its count. The process entry sets it when stdin is a terminal; unset, such a
+   * replay needs `--yes`.
+   */
+  readonly ask?: (prompt: string) => Promise<string | undefined>;
 }
 
 const HELP = `Usage: pathways <command> [options]
@@ -161,6 +173,15 @@ Commands:
                       --content
   replay <id...>      Run each message through its channel's transform again
                       and queue fresh deliveries behind those waiting
+  replay --status failed
+                      Count the failed messages that match --channel,
+                      --destination, --since and --until, show the scope,
+                      and once the count is typed (or --yes is given) replay
+                      them oldest first in batches, each batch audited. One
+                      that changed since the count is skipped
+  replay --resume <run>
+                      Go on with a bulk replay that stopped, under the scope
+                      it counted: what it replayed is not replayed again
   clear <id...>       Mark failed messages cleared, so they leave the failed
                       count and retention can delete them
   retention           Delete delivered, filtered and cleared messages past
@@ -229,16 +250,25 @@ Options:
       --json            status, messages, replay, clear, retention, audit,
                         lease, migrate, verify, secrets check, channel: print
                         one JSON document instead of text
-      --channel <name>  messages, audit, verify: only this channel
+      --channel <name>  messages, audit, verify, replay: only this channel
       --status <state>  messages: only this state: received, queued, retrying,
-                        delivered, dry-run, filtered, failed or cleared
-      --since <time>    messages, audit, verify: from this time: 2026-11-07,
+                        delivered, dry-run, filtered, failed or cleared.
+                        replay: failed, the only state a bulk replay takes
+      --destination <n> replay: only messages whose delivery to this
+                        destination failed, by its place in the channel's
+                        list from 0 (as status shows it). Needs --channel.
+                        Each is still replayed to every destination
+      --yes             replay: go on without typing the count
+      --batch <n>       replay: messages a batch, each batch audited (default
+                        100, at most 1000)
+      --resume <run>    replay: go on with the bulk replay of this run id
+      --since <time>    messages, audit, verify, replay: from this time: 2026-11-07,
                         2026-11-07T12:00:00Z (UTC unless a zone is given), or
                         a duration ago, such as 24h or 7d. verify: default 24h
       --ids <id,...>    verify: these stored messages, by id
       --samples <dir>   verify: the inputs in dir/<channel>/ instead of stored
                         messages, each against its .expected file, as in tests/
-      --until <time>    messages, audit: before this time
+      --until <time>    messages, audit, replay: before this time
       --limit <n>       messages, audit: at most n rows (default ${DEFAULT_LIMIT}, at most 1000)
       --before <id>     messages, audit: the next page, as the last one says
       --where <key=value>
@@ -259,7 +289,7 @@ Options:
                         replay, resend, clear, retention, config,
                         lease-release, migrate, channel-pause,
                         channel-resume, channel-stop, channel-halt,
-                        channel-reload, verify or archive
+                        channel-reload, verify, bulk-replay or archive
       --message <id>    audit: only entries about this message
       --encrypt-plaintext
                         rekey: also encrypt what was stored while encryption
@@ -267,23 +297,25 @@ Options:
   -h, --help            Show this help
   -v, --version         Print the version
 
-Every replay, resend, clear, search, view and content view is written to the
-audit log with the operating system user, as are retention runs and the
-configuration changes pathways start sees. A channel command is written with
-the user the command reports; the control socket's folder, open to that user
-alone, is what limits who can send one. The hooks in pathways.yaml receive
+Every replay, resend, bulk replay, clear, search, view and content view is
+written to the audit log with the operating system user, as are retention runs
+and the configuration changes pathways start sees. A channel command is written
+with the user the command reports; the control socket's folder, open to that
+user alone, is what limits who can send one. The hooks in pathways.yaml receive
 each entry as an audit event.
 
 Exit codes: 0 done; 1 a test failed, the engine, a command or an extension
 module could not start or stopped on an error, init could not write the
 project, rekey left a value not under the current key, a replay, resend or
-clear was refused or the message failed again, another engine holds the lease,
-the engine lost its lease, there was no lease to release, the database schema
-is one this version will not run on or migrate, verify found a difference or a
-failure, a secret or the key provider failed secrets check, probe found the
-engine not alive or not ready (probe exits only 0 or 1), no engine runs the
-project, or a channel command was refused; 2 the command line was not
-understood; 3 the configuration is invalid; 4 a message named does not exist.
+clear was refused or the message failed again, a bulk replay's count was not
+typed or it was stopped, another engine holds the lease, the engine lost its
+lease, there was no lease to release, the database schema is one this version
+will not run on or migrate, verify found a difference or a failure, a secret or
+the key provider failed secrets check, probe found the engine not alive or not
+ready (probe exits only 0 or 1), no engine runs the project, or a channel
+command was refused; 2 the command line was not understood, or a bulk replay's
+count could not be asked for (add --yes); 3 the configuration is invalid; 4 a
+message named, or the run given to replay --resume, does not exist.
 `;
 
 /** Redaction paths for the engine's logger, in case a field that can hold content is ever logged. */
@@ -304,7 +336,18 @@ const OPTIONS: Readonly<Record<string, readonly OptionName[]>> = {
   secrets: ["json"],
   status: ["json"],
   messages: ["json", "channel", "status", "since", "until", "limit", "before", "content", "where"],
-  replay: ["json", "resend"],
+  replay: [
+    "json",
+    "resend",
+    "status",
+    "channel",
+    "destination",
+    "since",
+    "until",
+    "yes",
+    "batch",
+    "resume",
+  ],
   clear: ["json"],
   retention: ["json", "dry-run"],
   audit: ["json", "action", "message", "channel", "since", "until", "limit", "before"],
@@ -664,9 +707,10 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
   if (leases === undefined) logger.warn({ event: "lease-unsupported" });
   // Said once at start, so a log reader knows why nothing goes out.
   if (mode.dryRun) logger.warn({ event: "dry-run", destinations: "all" });
-  // Aborted by the caller's signal, or at once when the lease is lost.
+  // Aborted once the engine is to stop taking in: `drain.notReadyDelay` after the caller's signal,
+  // or at once when the lease is lost.
   const stopping = new AbortController();
-  const signal = AbortSignal.any([io.signal ?? new AbortController().signal, stopping.signal]);
+  const { signal } = stopping;
   // Where this engine stands, for readiness and the health body. Told to stop, it drains: its
   // sources close while the probes still answer, 503 draining.
   let state: EngineState = standby ? "standby" : "starting";
@@ -685,6 +729,23 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
   signal.addEventListener("abort", () => {
     if (state !== "fenced") state = "draining";
   });
+  // Told to stop, a running engine reports draining at once and keeps taking in for
+  // `drain.notReadyDelay`, so a load balancer that reads its readiness stops sending it new
+  // connections before its listeners close. One not yet running, or a standby, stops at once.
+  const { drain } = project;
+  let notReady: NodeJS.Timeout | undefined;
+  const told = (): void => {
+    /* v8 ignore next: the lease was lost first, and the run is ending already */
+    if (signal.aborted) return;
+    const running = state === "running";
+    state = "draining";
+    logger.info({ event: "draining", ...drain });
+    faultPoint("drain-not-ready");
+    if (!running || drain.notReadyDelayMs === 0) stopping.abort();
+    else notReady = setTimeout(() => stopping.abort(), drain.notReadyDelayMs);
+  };
+  if (io.signal?.aborted === true) told();
+  else io.signal?.addEventListener("abort", told, { once: true });
   const node = lease?.claimant.node ?? nodeId();
   const identity = (): EngineIdentity => ({
     version: VERSION,
@@ -770,9 +831,12 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
       },
     });
   } finally {
+    clearTimeout(notReady);
+    io.signal?.removeEventListener("abort", told);
     // The engine has stopped, its sources closed, before the probes stop answering.
     await probeListener?.stop();
     await health?.stop();
+    faultPoint("drain-before-release");
     await lease?.release().catch((error: unknown) => {
       logger.warn({ event: "lease-release-failed", code: errorCode(error) });
     });
@@ -1427,6 +1491,8 @@ async function operator(
       err: io.err,
       now: Date.now,
       env: context.env,
+      ask: io.ask,
+      signal: io.signal,
       keys: (wrapped as { readonly keys?: KeyProvider | undefined }).keys,
     });
   } catch (error) {
@@ -1543,6 +1609,9 @@ function parseOperator(
     }
     case "replay":
     case "clear": {
+      if (command === "replay" && BULK_REPLAY_OPTIONS.some((name) => values[name] !== undefined)) {
+        return parseBulkReplay(rest, values, io);
+      }
       if (rest.length === 0) return invalid(io, `${command} needs at least one message id.`);
       const ids = rest.map(parseId);
       if (ids.some((id) => id === undefined)) {
@@ -1599,6 +1668,58 @@ function parseOperator(
       return (context) => auditCommand(context, { ...filters, action, messageId });
     }
   }
+}
+
+/** The options that make `pathways replay` a bulk replay. */
+const BULK_REPLAY_OPTIONS = [
+  "status",
+  "channel",
+  "destination",
+  "since",
+  "until",
+  "yes",
+  "batch",
+  "resume",
+] as const;
+
+/**
+ * `pathways replay --status failed` and `pathways replay --resume <run>`, parsed, or the exit code
+ * of a usage error. A bulk replay names no ids, and `--resume` takes no filters: the run has them.
+ */
+function parseBulkReplay(rest: readonly string[], values: Values, io: CliIo): OperatorRun | number {
+  if (rest.length > 0) return invalid(io, "replay takes message ids or --status failed, not both.");
+  const batch = values.batch === undefined ? DEFAULT_REPLAY_BATCH : parseId(values.batch);
+  if (batch === undefined || batch > MAX_REPLAY_BATCH) {
+    return invalid(io, `--batch takes a whole number from 1 to ${String(MAX_REPLAY_BATCH)}.`);
+  }
+  const yes = values.yes === true;
+  if (values.resume !== undefined) {
+    const filters = ["status", "channel", "destination", "since", "until", "resend"] as const;
+    if (filters.some((name) => values[name] !== undefined)) {
+      return invalid(io, "--resume goes on under the run's own scope, and takes no filters.");
+    }
+    const resume = parseId(values.resume);
+    if (resume === undefined)
+      return invalid(io, "--resume takes the run id a bulk replay printed.");
+    return (context) => bulkReplayCommand(context, { resume, yes, batch });
+  }
+  if (values.status !== "failed") return invalid(io, "a bulk replay takes --status failed.");
+  const filters = parseListing(values, io);
+  if (typeof filters === "number") return filters;
+  let destination: number | undefined;
+  if (values.destination !== undefined) {
+    if (!/^\d{1,4}$/.test(values.destination)) {
+      return invalid(
+        io,
+        "--destination takes the destination's place in its channel's list, from 0.",
+      );
+    }
+    if (filters.channel === undefined) return invalid(io, "--destination needs --channel.");
+    destination = Number(values.destination);
+  }
+  const { channel, since, until } = filters;
+  const scope = { channel, destination, since, until, resend: values.resend === true };
+  return (context) => bulkReplayCommand(context, { scope, yes, batch });
 }
 
 /** `pathways verify`'s arguments, parsed. */
@@ -1759,6 +1880,10 @@ function parseCli(argv: readonly string[]) {
       ids: { type: "string" },
       samples: { type: "string" },
       where: { type: "string", multiple: true },
+      destination: { type: "string" },
+      yes: { type: "boolean" },
+      batch: { type: "string" },
+      resume: { type: "string" },
     },
     allowPositionals: true,
     strict: true,

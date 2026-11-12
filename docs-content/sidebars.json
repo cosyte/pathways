@@ -35,6 +35,7 @@
         "search-messages-by-metadata",
         "set-message-retention",
         "upgrade-pathways",
+        "stop-and-upgrade-a-node",
         "run-in-docker",
         "deploy-the-image"
       ]
