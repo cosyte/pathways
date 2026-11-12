@@ -1,0 +1,16 @@
+# yaml-language-server: $schema=../../node_modules/@cosyte/pathways/schema/channel.json
+
+# Read HL7 v2 ADT files from a folder, give each the registry's code for its event, and write it to
+# the registry's inbound folder. An event with no code fails, and waits, stored, for a replay.
+name: adt-to-registry
+format: hl7v2
+
+source:
+  file:
+    dir: ../../data/adt-to-registry/in
+
+transform: ./transform.ts
+
+destinations:
+  - file:
+      dir: ../../data/adt-to-registry/out

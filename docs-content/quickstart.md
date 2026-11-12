@@ -135,6 +135,11 @@ to the audit log first.
 ## Next
 
 - [Write a channel](./write-a-channel.md) of your own, with its tests.
+- Run an example project, each on synthetic messages with its tests:
+  [HL7 v2 over MLLP in, HTTP out](./example-mllp-to-http.md),
+  [a file drop to SFTP](./example-file-to-sftp.md), [HL7 v2 to FHIR](./example-hl7-to-fhir.md),
+  [filter, then send to two destinations](./example-filter-and-route.md), and
+  [replay after a failure](./example-replay-after-failure.md).
 - [Transform and filter messages](./transform-and-filter-messages.md): what a transform can return.
 - [Encrypt stored messages](./encrypt-stored-messages.md): the keys to use outside development.
 - [How delivery and errors work](./delivery-and-errors.md).

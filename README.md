@@ -91,6 +91,16 @@ filtered out. Stop the engine with Ctrl+C, and `npx pathways status` counts one 
 [quickstart](https://github.com/cosyte/pathways/blob/main/docs-content/quickstart.md) walks through
 each step and what the engine logs.
 
+For the common shapes, start from an example in
+[`examples/`](https://github.com/cosyte/pathways/tree/main/examples): a small project that runs on
+synthetic messages, with its tests, which CI runs on every change. Each has a page:
+
+- [HL7 v2 over MLLP in, HTTP out](https://github.com/cosyte/pathways/blob/main/docs-content/example-mllp-to-http.md)
+- [A file drop to SFTP](https://github.com/cosyte/pathways/blob/main/docs-content/example-file-to-sftp.md)
+- [HL7 v2 to FHIR](https://github.com/cosyte/pathways/blob/main/docs-content/example-hl7-to-fhir.md)
+- [Filter, then send to two destinations](https://github.com/cosyte/pathways/blob/main/docs-content/example-filter-and-route.md)
+- [Replay after a failure](https://github.com/cosyte/pathways/blob/main/docs-content/example-replay-after-failure.md)
+
 ---
 
 ## Why this exists
@@ -184,6 +194,7 @@ node dist/bin/pathways.mjs --version
 - `src/`: the engine, its connectors, storage, encryption and the `pathways` command.
 - `test/`: the test suites.
 - `templates/starter/`: the starter project `pathways init` writes.
+- `examples/`: example projects, each with its tests and a page in `docs-content/`.
 - `examples/docker-compose/`: the engine under Docker Compose, beside PostgreSQL.
 - `docs-content/`: the documentation pages.
 - `bench/`: the benchmark suites.

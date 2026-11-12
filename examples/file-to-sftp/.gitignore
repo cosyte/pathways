@@ -1,0 +1,11 @@
+# The message database and the development key. Stored messages can hold patient data.
+/.pathways/
+
+# What the channel reads. Real messages land here.
+/data/
+
+# The SFTP login key and the server's known host key.
+/secrets/
+
+# Installed packages.
+node_modules/
