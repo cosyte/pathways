@@ -6,6 +6,7 @@ import type { DatabaseStorage, ServerStorage, StorageKind } from "../src/config/
 import type { Env } from "../src/connectors/endpoint.js";
 import { dialectFor } from "../src/storage/dialects.js";
 import { ENGINE_LEASE, Store, type StoreOptions } from "../src/storage/store.js";
+import { configuredName } from "../src/env.js";
 
 /**
  * One database the storage, engine and operator suites run on. SQLite always runs; each server runs
@@ -83,7 +84,7 @@ export function serverStorage(
 ): ServerStorage {
   return {
     kind,
-    url: { env: URL_ENV },
+    url: { env: configuredName(URL_ENV) },
     tls: undefined,
     plaintext: true,
     pool: { max: 4, idleTimeoutMs: 1_000 },

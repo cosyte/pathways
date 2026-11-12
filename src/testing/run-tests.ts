@@ -12,6 +12,7 @@ import {
   type DestinationResult,
 } from "../engine/channel-worker.js";
 import { formatTable, type DestinationSetup, type FailureSummary } from "../engine/worker-entry.js";
+import { processEnv } from "../env.js";
 
 /** Options for {@link runChannelTests}. */
 export interface ChannelTestOptions {
@@ -107,11 +108,8 @@ export async function runChannelTests(
       continue;
     }
 
-    const config = transformConfigFor(
-      { config: options.project?.config ?? {} },
-      channel,
-      options.env ?? process.env,
-    );
+    const env = options.env ?? processEnv();
+    const config = transformConfigFor({ config: options.project?.config ?? {} }, channel, env);
     if (!("resolved" in config)) {
       options.out(`FAIL ${channel.name}: ${describeFailure(config, channel)}`);
       failed += inputs.length;

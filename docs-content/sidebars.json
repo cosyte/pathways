@@ -49,6 +49,7 @@
         "upgrade-pathways",
         "stop-and-upgrade-a-node",
         "run-in-docker",
+        "run-with-docker-compose",
         "deploy-the-image"
       ]
     },

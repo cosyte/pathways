@@ -10,6 +10,7 @@ import { readMasterKeys } from "../src/encryption/keys.js";
 import { fakeSecretProvider } from "../src/index.js";
 import { resolveSecrets, Secrets } from "../src/secrets/resolve.js";
 import { dialectFor } from "../src/storage/dialects.js";
+import { configuredName } from "../src/env.js";
 import { captureLogger, cleanUp, makeProject } from "./helpers.js";
 import { serverStorage } from "./databases.js";
 import { built } from "./secret-vault.js";
@@ -42,7 +43,7 @@ function thrown(read: () => unknown): unknown {
 }
 
 const env = (text: string): Record<string, string> => ({ SYNTH_SECRET: text });
-const ref: SecretSource = { env: "SYNTH_SECRET" };
+const ref: SecretSource = { env: configuredName("SYNTH_SECRET") };
 
 describe("no secret value in any error", () => {
   it("from a header that cannot carry it", () => {
@@ -64,7 +65,7 @@ describe("no secret value in any error", () => {
       port: 1,
       tls: undefined,
       plaintext: true,
-      auth: { kind: "bearer", env: "SYNTH_SECRET" },
+      auth: { kind: "bearer", env: configuredName("SYNTH_SECRET") },
     };
     fc.assert(
       fc.property(value, (text) => {
@@ -94,7 +95,11 @@ describe("no secret value in any error", () => {
       fc.property(value, (text) => {
         const error = thrown(() =>
           readMasterKeys(
-            { kind: "keys", keys: [{ id: "synth", env: "SYNTH_SECRET" }], current: "synth" },
+            {
+              kind: "keys",
+              keys: [{ id: "synth", env: configuredName("SYNTH_SECRET") }],
+              current: "synth",
+            },
             env(text),
           ),
         );

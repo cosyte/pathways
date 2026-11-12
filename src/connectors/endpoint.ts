@@ -11,11 +11,11 @@ import { createServer as createHttpsServer } from "node:https";
 
 import { ConfigError } from "../config/load.js";
 import { HEADER_VALUE, type HeaderValue, type ListenerConfig } from "../config/schema.js";
+import type { VariableName } from "../env.js";
 import { secretHolder, secretPlace, secretsOf, type SecretReader } from "../secrets/resolve.js";
 import { loadServerTls, serverTlsOptions, type ServerTlsMaterial } from "./tls.js";
 
-/** The environment Pathways reads secrets from: `process.env`, or a stand-in in tests. */
-export type Env = Readonly<Record<string, string | undefined>>;
+export type { Env } from "../env.js";
 
 /** The shortest bearer token an endpoint accepts. */
 export const MIN_TOKEN_LENGTH = 16;
@@ -28,15 +28,16 @@ const CLOSE_GRACE_MS = 5_000;
 
 /**
  * Reads the environment variable `name`, through the same resolver as every other secret. `where`
- * names the file and key that asked for it.
+ * names the file and key that asked for it. `name` is one of ENGINE_VARIABLES or a name
+ * configuration gave (configuredName): a fixed name not on the list is a type error.
  *
  * @throws {ConfigError} when the variable is not set or is empty.
  * @example
  * ```ts
- * const token = readEnv(process.env, "LAB_TOKEN", "channels/adt/channel.yaml: source.http.auth");
+ * const token = readEnv(env, "PATHWAYS_HTTP_TOKEN", "pathways.yaml: health.auth");
  * ```
  */
-export function readEnv(env: SecretReader, name: string, where: string): string {
+export function readEnv(env: SecretReader, name: VariableName, where: string): string {
   return secretsOf(env).read({ env: name }, where);
 }
 

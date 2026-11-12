@@ -15,6 +15,7 @@ import {
 } from "./config/schema.js";
 import type { Env } from "./connectors/endpoint.js";
 import { EncryptionError } from "./encryption/envelope.js";
+import { configuredName, configuredVariable, engineVariable, processEnv } from "./env.js";
 import { checkIndexKeys, projectIndexes } from "./encryption/blind-index.js";
 import { ENCRYPTION_REQUIRED, type KeyProvider } from "./encryption/keys.js";
 import { rekey, rekeyComplete, type RekeyCounts } from "./encryption/rekey.js";
@@ -524,7 +525,7 @@ const INIT_REFUSALS: Readonly<Record<InitError["reason"], string>> = {
 
 async function load(projectDir: string, io: CliIo): Promise<ProjectConfig | undefined> {
   try {
-    return await loadProject(projectDir, { env: io.env ?? process.env });
+    return await loadProject(projectDir, { env: io.env ?? processEnv() });
   } catch (error) {
     if (!(error instanceof ConfigError)) throw error;
     reportConfigError(error, io);
@@ -697,7 +698,7 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
     io.err("pathways: a standby needs a database server; on SQLite a second engine is refused.\n");
     return EXIT.config;
   }
-  const env = io.env ?? process.env;
+  const env = io.env ?? processEnv();
   const logger = io.logger ?? pino({ redact: REDACT });
   for (const warning of project.warnings ?? []) {
     logger.warn({ event: "config-warning", warning });
@@ -1158,7 +1159,7 @@ async function openControl(
 
 /** Where the control socket's folder goes, from the environment the CLI was given. */
 function controlSystem(env: Env): { readonly runtimeDir: string } {
-  return { runtimeDir: env["XDG_RUNTIME_DIR"] ?? "" };
+  return { runtimeDir: engineVariable("XDG_RUNTIME_DIR", env) ?? "" };
 }
 
 const CHANNEL_COMMANDS: readonly ChannelCommand[] = ["pause", "resume", "stop", "halt", "reload"];
@@ -1206,10 +1207,11 @@ async function channelCommand(
   if (deadlineMs !== undefined && deadlineMs > MAX_STOP_DEADLINE_MS) {
     return invalid(io, "--deadline is at most 24 days, the longest wait a timer holds.");
   }
+  const env = io.env ?? processEnv();
   let reply;
   try {
     reply = await sendControl(
-      controlAddress(projectDir, controlSystem(io.env ?? process.env)),
+      controlAddress(projectDir, controlSystem(env)),
       {
         v: CONTROL_VERSION,
         command: command as ChannelCommand,
@@ -1311,7 +1313,8 @@ async function validate(projectDir: string, print: boolean, io: CliIo): Promise<
     // The configuration holds no secret: tokens, secret headers, connection URLs and master keys
     // stay the names of the variables or files start reads them from. A URL read from the
     // environment may carry a token in its query string, so that query string is masked.
-    const hidden = urlsFromEnvironment(project, io.env ?? process.env);
+    const env = io.env ?? processEnv();
+    const hidden = urlsFromEnvironment(project, env);
     const replacer = (key: string, value: unknown): unknown =>
       key === "url" && typeof value === "string" && hidden.has(value) ? maskQuery(value) : value;
     io.out(`${JSON.stringify(project, replacer, 2)}\n`);
@@ -1339,7 +1342,7 @@ async function secretsCheck(projectDir: string, json: boolean, io: CliIo): Promi
     return EXIT.config;
   }
   // Providers log to stderr, so stdout holds only the report.
-  const env = io.env ?? process.env;
+  const env = io.env ?? processEnv();
   const check = await checkSecrets(project, { env, logger: io.logger ?? pino(STDERR_LOG, stderr) });
   io.out(json ? `${JSON.stringify(check, null, 2)}\n` : formatSecretCheck(check));
   return check.ok ? EXIT.ok : EXIT.failed;
@@ -1356,7 +1359,7 @@ function urlsFromEnvironment(project: ProjectConfig, env: Env): ReadonlySet<stri
   if (references === undefined) return urls;
   for (const reference of references) {
     if (reference.from !== "environment" || !reference.key.endsWith(".url")) continue;
-    const value = env[reference.variable];
+    const value = configuredVariable(env, configuredName(reference.variable));
     /* v8 ignore if -- the project was loaded from this same env, and the variable was set there */
     if (value === undefined) continue;
     urls.add(value);
@@ -1405,7 +1408,7 @@ async function rekeyStore(
     return EXIT.config;
   }
   // An extension's log lines go to stderr here, so stdout holds only the counts.
-  const bare = { env: io.env ?? process.env, logger: io.logger ?? pino(STDERR_LOG, stderr) };
+  const bare = { env: io.env ?? processEnv(), logger: io.logger ?? pino(STDERR_LOG, stderr) };
   const secrets = await secretsOrExit(project, bare, "store", io);
   if (typeof secrets === "number") return secrets;
   const context = { ...bare, secrets };
@@ -1495,7 +1498,7 @@ async function test(
     update,
     out: (line) => io.out(`${line}\n`),
     project,
-    env: io.env ?? process.env,
+    env: io.env ?? processEnv(),
   });
   const parts = [`${summary.passed} passed`, `${summary.failed} failed`];
   if (summary.updated > 0) parts.push(`${summary.updated} updated`);
@@ -1547,7 +1550,7 @@ async function operator(
     return EXIT.failed;
   }
   // Extensions log to stderr, so stdout holds only the report.
-  const bare = { env: io.env ?? process.env, logger: io.logger ?? pino(STDERR_LOG, stderr) };
+  const bare = { env: io.env ?? processEnv(), logger: io.logger ?? pino(STDERR_LOG, stderr) };
   // The engine-wide hooks receive each audit entry this command writes, as `pathways start`'s do.
   // status and audit write none, so they load no hooks.
   const withHooks =
@@ -1903,7 +1906,7 @@ async function verifySamples(
   return (
     (await knownChannel(project, parsed.channel, io)) ??
     verifyCommand(
-      { project, json, out: io.out, err: io.err, env: io.env ?? process.env },
+      { project, json, out: io.out, err: io.err, env: io.env ?? processEnv() },
       parsed.selection,
       parsed.channel,
     )

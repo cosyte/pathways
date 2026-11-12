@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { normalisePath } from "../connectors/http-path.js";
+import type { EngineVariable, VariableName } from "../env.js";
 import { unknownPlaceholders } from "../connectors/smtp-template.js";
 import {
   ASSUMABLE_CHARSETS,
@@ -3521,7 +3522,7 @@ export const DEFAULT_DATABASE_FILE = ".pathways/pathways.db";
  * process.env[DEFAULT_DATABASE_URL_ENV]; // "postgres://pathways:...@db.internal/pathways"
  * ```
  */
-export const DEFAULT_DATABASE_URL_ENV = "PATHWAYS_DATABASE_URL";
+export const DEFAULT_DATABASE_URL_ENV = "PATHWAYS_DATABASE_URL" satisfies EngineVariable;
 
 /**
  * The most connections a database server's pool opens, by default.
@@ -3563,10 +3564,10 @@ export const DEFAULT_MAX_BYTES = 10 * 1_048_576;
 export const DEFAULT_HTTP_TIMEOUT_MS = 30_000;
 
 /** The environment variable an HTTP source reads its bearer token from when `auth` is not set. */
-export const DEFAULT_HTTP_TOKEN_ENV = "PATHWAYS_HTTP_TOKEN";
+export const DEFAULT_HTTP_TOKEN_ENV = "PATHWAYS_HTTP_TOKEN" satisfies EngineVariable;
 
 /** The environment variable the health endpoint reads its bearer token from when `auth` is not set. */
-export const DEFAULT_HEALTH_TOKEN_ENV = "PATHWAYS_HEALTH_TOKEN";
+export const DEFAULT_HEALTH_TOKEN_ENV = "PATHWAYS_HEALTH_TOKEN" satisfies EngineVariable;
 
 /**
  * How long one call to a hook may run by default, in milliseconds.
@@ -3790,15 +3791,16 @@ export interface SecretReference {
 
 /**
  * Where a secret is read at start, as the YAML wrote it: an environment variable, a file (an absolute
- * path), or a provider's secret.
+ * path), or a provider's secret. The variable is one of ENGINE_VARIABLES or a name configuration
+ * gave (configuredName), so a fixed name not on the list is a type error.
  *
  * @example
  * ```ts
- * const token: SecretSource = { env: "LAB_TOKEN" };
+ * const token: SecretSource = { env: "PATHWAYS_HTTP_TOKEN" };
  * ```
  */
 export type SecretSource =
-  { readonly env: string } | { readonly file: string } | { readonly secret: SecretReference };
+  { readonly env: VariableName } | { readonly file: string } | { readonly secret: SecretReference };
 
 /** A header an HTTP client or source sends: written in the YAML, or a secret read at start. */
 export type HeaderValue = { readonly value: string } | SecretSource;

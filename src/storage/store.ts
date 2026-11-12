@@ -19,6 +19,7 @@ import {
 import { ConfigError } from "../config/load.js";
 import type { DatabaseStorage, StorageKind } from "../config/schema.js";
 import type { MessageMeta, MetaCondition, MetaTag } from "../encryption/blind-index.js";
+import { processEnv } from "../env.js";
 import type { SecretReader } from "../secrets/resolve.js";
 import { faultPoint } from "../fault-points.js";
 import { dialectFor, type DriverImport } from "./dialects.js";
@@ -2415,7 +2416,7 @@ export class Store implements MessageStore, ContentStore, MetaStore {
     let db: Kysely<Tables>;
     try {
       const dialect = await dialectFor(config, {
-        env: options.env ?? process.env,
+        env: options.env ?? processEnv(),
         ...(importDriver === undefined ? {} : { importDriver }),
       });
       db = new Kysely<Tables>({ dialect });

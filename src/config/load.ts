@@ -7,6 +7,7 @@ import type { z } from "zod";
 import { normalisePath } from "../connectors/http-path.js";
 import { alikeDestinations } from "../engine/destination-key.js";
 import { secretSourceOf, secretUses, type SecretSourceYaml } from "../secrets/sources.js";
+import { type Env, processEnv, type VariableName } from "../env.js";
 import { referencesIn, resolvingEnv, variableAt, type EnvReference } from "./env-ref.js";
 import { DEFAULT_INDEX_BITS, isLowEntropyKey } from "./meta-index.js";
 import {
@@ -120,7 +121,7 @@ export interface LoadOptions {
    * Where each `{ env: NAME }` setting is read from. Defaults to `process.env`. Only the variables
    * the files name are read: there is no scan for a prefix.
    */
-  readonly env?: Readonly<Record<string, string | undefined>> | undefined;
+  readonly env?: Env | undefined;
 }
 
 /**
@@ -135,7 +136,7 @@ export interface LoadOptions {
  * ```
  */
 export async function loadProject(root: string, options: LoadOptions = {}): Promise<ProjectConfig> {
-  const env = options.env ?? process.env;
+  const env = options.env ?? processEnv();
   const projectRoot = resolve(root);
   const problems: string[] = [];
   // The project folder itself shows as ".", so a problem never repeats the path the caller typed.
@@ -955,7 +956,7 @@ function resolveHttpClient(http: Omit<HttpClientYaml, "timeout">, dir: string): 
 function resolveListener(
   listener: ListenerYaml,
   dir: string,
-  defaultTokenEnv: string,
+  defaultTokenEnv: VariableName,
 ): ListenerConfig {
   const { tls } = listener;
   let auth: EndpointAuth;

@@ -1,6 +1,7 @@
 import type { Logger } from "pino";
 
 import { ConfigError } from "../config/load.js";
+import { configuredName, type Env, extensionEnv } from "../env.js";
 import type { ProjectConfig, SecretReference, SecretSource } from "../config/schema.js";
 import { customSecretProvider } from "../extensions/build.js";
 import { withTimeout } from "../extensions/load.js";
@@ -19,9 +20,6 @@ import { secretUses, type DrySkip, type SecretScope } from "./sources.js";
 // read when they are used; a provider a module builds is asked for each of its secrets once, at
 // start, before anything reads them. Errors name the file and key, the secret's name and a code,
 // never a value, nor a provider's own error text.
-
-/** The environment Pathways reads secrets from: `process.env`, or a stand-in in tests. */
-type Env = Readonly<Record<string, string | undefined>>;
 
 /**
  * Whether `provider` is one of the built-in providers, which the resolver reads itself.
@@ -165,7 +163,9 @@ export class Secrets {
  */
 export function readBuiltIn(env: Env, reference: SecretReference): ResolvedSecret {
   const ref = requestOf(reference);
-  return reference.provider === "env" ? readEnvSecret(env, ref) : readFileSecret(ref);
+  return reference.provider === "env"
+    ? readEnvSecret(env, { ...ref, name: configuredName(reference.name) })
+    : readFileSecret(ref);
 }
 
 /** What a provider is asked: the reference without its provider's name. */
@@ -258,7 +258,7 @@ export async function resolveSecrets(
     const logger = context.logger.child({ extension: "secrets", provider: config.name });
     const provider = await customSecretProvider(
       config,
-      { dir: project.root, env: context.env, logger },
+      { dir: project.root, env: extensionEnv(context.env), logger },
       `pathways.yaml: secrets.${config.name}.module`,
     );
     let count = 0;
