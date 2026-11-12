@@ -17,7 +17,7 @@ its synthetic test messages, and CI runs its tests and the pass below on every c
 
 - An [MLLP source](./send-and-receive-mllp.md) that stores each message before it sends the ACK.
 - A transform that filters by message type and edits the header.
-- An [HTTP destination](./send-and-receive-http.md#post-each-output-to-a-url) that POSTs each output.
+- An [HTTP destination](./send-and-receive-http.md#send-each-output-to-a-url) that POSTs each output.
 - Ports and URLs read from the environment, with defaults, so one YAML runs on every machine: see
   [settings from the environment](./configuration-reference.md#settings-from-the-environment).
 - Two small scripts to try it with no other system: `scripts/receiver.ts` stands in for the EHR, and
@@ -143,6 +143,9 @@ destinations:
       # The receiver in scripts/receiver.ts answers plain HTTP on the loopback. A real endpoint is
       # an https:// URL, which needs no plaintext line.
       plaintext: true
+      # The receiver is on this machine, an address the destination refuses unless it is named
+      # here. A real endpoint on another network needs no allowNetworks line.
+      allowNetworks: [127.0.0.1]
 ```
 
 ### channels/adt-to-http/transform.ts

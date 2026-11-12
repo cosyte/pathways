@@ -21,3 +21,6 @@ destinations:
       # The receiver in scripts/receiver.ts answers plain HTTP on the loopback. A real endpoint is
       # an https:// URL, which needs no plaintext line.
       plaintext: true
+      # The receiver is on this machine, an address the destination refuses unless it is named
+      # here. A real endpoint on another network needs no allowNetworks line.
+      allowNetworks: [127.0.0.1]
