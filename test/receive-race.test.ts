@@ -143,9 +143,16 @@ for (const database of TEST_DATABASES) {
               resumed: true,
               metaTags: [{ index: "gate", keyId: "gate", tag: TAGS[index] }],
             });
-          const running = Promise.allSettled([handIn(0), handIn(1)]);
+          let returned = 0;
+          const running = Promise.allSettled(
+            [handIn(0), handIn(1)].map((attempt) =>
+              attempt.finally(() => {
+                returned += 1;
+              }),
+            ),
+          );
           try {
-            await waiting(database, db, 2);
+            await waiting(database, db, 2, () => returned);
           } finally {
             release();
             await holder;
@@ -327,11 +334,17 @@ async function beforeClaims(db: Kysely<Tables>, database: TestDatabase): Promise
 
 /**
  * Waits until `count` statements on this database wait for a lock, as the server's own views show
- * them: the lock views on PostgreSQL and SQL Server, and InnoDB's transactions in `LOCK WAIT` on
- * MySQL and MariaDB. Polls for up to 20 seconds, then fails saying the race's precondition was not
- * observed, with the last count the server showed.
+ * them: the lock views on PostgreSQL and SQL Server, and on MySQL and MariaDB the process list,
+ * where a waiting insert stays with its text, as `Execute`, since the store's statements with values
+ * run as prepared statements. Polls for up to 20 seconds, then fails saying the race's precondition
+ * was not observed, with the last count the server showed and how many hand-ins had returned.
  */
-async function waiting(database: TestDatabase, db: Kysely<Tables>, count: number): Promise<void> {
+async function waiting(
+  database: TestDatabase,
+  db: Kysely<Tables>,
+  count: number,
+  returned: () => number,
+): Promise<void> {
   let seen = 0;
   for (let i = 0; i < 400; i += 1) {
     let query;
@@ -344,9 +357,9 @@ async function waiting(database: TestDatabase, db: Kysely<Tables>, count: number
         break;
       case "mysql":
         query = sql<{ n: number | string }>`
-          select count(*) as n from information_schema.innodb_trx t
-          join information_schema.processlist p on p.id = t.trx_mysql_thread_id
-          where p.db = database() and t.trx_state = 'LOCK WAIT'`;
+          select count(*) as n from information_schema.processlist
+          where db = database() and id <> connection_id() and command in ('Query', 'Execute')
+            and lower(info) like 'insert%'`;
         break;
       case "sqlite":
         throw new Error("SQLite runs this race in two processes, with no lock to wait on");
@@ -362,6 +375,7 @@ async function waiting(database: TestDatabase, db: Kysely<Tables>, count: number
   }
   throw new Error(
     `the race's precondition was not observed: ${database.label} showed ${String(seen)} of ` +
-      `${String(count)} statements waiting for a lock in 20 seconds`,
+      `${String(count)} statements waiting for a lock in 20 seconds, and ${String(returned())} ` +
+      "of the hand-ins had returned",
   );
 }
