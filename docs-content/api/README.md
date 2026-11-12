@@ -6817,8 +6817,8 @@ const from: HandOffFrom = { kind: "delivery", deliveryId: 40 };
 
 > **HandOffResult** = \{ `ids`: readonly `number`[]; `ok`: `true`; \} \| \{ `full`: `string`; `ok`: `false`; \}
 
-What a hand-off came to: the new messages' ids, in order, or, when a target already held its
-`maxPending` messages, nothing changed and the full target's name.
+What a hand-off came to: the new messages' ids, in order, or, when a target would then hold more
+than its `maxPending` messages waiting, nothing changed and the full target's name.
 
 #### Example
 
@@ -7744,6 +7744,15 @@ NODE_ROLES.includes("standby"); // true
 > `const` **TARGET\_FULL\_CODE**: `"ERR_PATHWAYS_TARGET_FULL"` = `"ERR_PATHWAYS_TARGET_FULL"`
 
 The code a channel destination's retry carries while its target holds `maxPending` messages.
+
+***
+
+### TOO\_MANY\_ROUTES\_CODE
+
+> `const` **TOO\_MANY\_ROUTES\_CODE**: `"ERR_PATHWAYS_TOO_MANY_ROUTES"` = `"ERR_PATHWAYS_TOO_MANY_ROUTES"`
+
+The code a transform fails with when it routes more messages to one target in one run than that
+target's `maxPending`: the target could never take them all at once, so waiting would not help.
 
 ***
 

@@ -685,6 +685,119 @@ export default (msg: string, ctx: { route(name: string, message: string): void }
       ).toMatchObject([{ outcome: "refused", reason: "routes" }]);
     });
 
+    /** A channel `a` whose transform routes twice to `b` for a message saying TWICE, else once. */
+    const routesTwice = (block: string): Record<string, string> => ({
+      "channels/a/channel.yaml": `
+format: text
+source:
+  file: { dir: ../../data/inbox, minAge: 0 }
+transform: ./transform.ts
+destinations:
+  - file: { dir: ../../data/a-out }
+`,
+      "channels/a/transform.ts": `
+export default (msg: string, ctx: { route(name: string, message: string): void }) => {
+  ctx.route("b", msg + "-1");
+  if (msg.includes("TWICE")) ctx.route("b", msg + "-2");
+  return msg;
+};
+`,
+      "channels/b/channel.yaml": target(block),
+    });
+
+    for (const path of ["handOff", "receive"] as const) {
+      const wrap =
+        path === "handOff"
+          ? undefined
+          : (opened: Store): MessageStore => fallbackStore(opened, { armed: false });
+
+      it(`through ${path}, fails a message routing more to one target than its maxPending, and goes on`, async () => {
+        const { root, engine, store } = await setUp(
+          database,
+          routesTwice("{ routed: true, maxPending: 1 }"),
+          {
+            ...(wrap === undefined ? {} : { wrap }),
+            before: (opened) => opened.setChannelState("b", "stopped"),
+          },
+        );
+        await dropFile(join(root, "data", "inbox", "1.txt"), "SYNTHETIC-TWICE");
+        await dropFile(join(root, "data", "inbox", "2.txt"), "SYNTHETIC-ONCE");
+        await engine.tick();
+        const [twice, once] = await messagesOf(store, "a");
+        expect(twice?.state).toBe("failed");
+        expect((await store.message(twice?.id ?? 0))?.error).toContain(
+          "ERR_PATHWAYS_TOO_MANY_ROUTES",
+        );
+        expect(once?.state).toBe("delivered");
+        expect((await messagesOf(store, "b")).map((message) => message.body)).toEqual([
+          "SYNTHETIC-ONCE-1",
+        ]);
+      });
+
+      it(`through ${path}, counts the target's backlog before the batch against its maxPending`, async () => {
+        const { root, engine, store } = await setUp(
+          database,
+          routesTwice("{ routed: true, maxPending: 2 }"),
+          {
+            ...(wrap === undefined ? {} : { wrap }),
+            before: (opened) => opened.setChannelState("b", "stopped"),
+          },
+        );
+        await dropFile(join(root, "data", "inbox", "1.txt"), "SYNTHETIC-ONCE");
+        await dropFile(join(root, "data", "inbox", "2.txt"), "SYNTHETIC-TWICE");
+        await engine.tick();
+        const [once, twice] = await messagesOf(store, "a");
+        expect(once?.state).toBe("delivered");
+        // One waiting and two more would be three, past 2: the message waits, unfailed.
+        expect(twice?.state).toBe("received");
+        expect((await messagesOf(store, "b")).map((message) => message.body)).toEqual([
+          "SYNTHETIC-ONCE-1",
+        ]);
+      });
+    }
+
+    it("on a store without handOff, does not count the message a channel routes to itself", async () => {
+      const { root, engine, store } = await setUp(
+        database,
+        {
+          "channels/in/channel.yaml": `
+format: text
+source:
+  file: { dir: ../../data/inbox, minAge: 0 }
+transform: ./transform.ts
+destinations:
+  - file: { dir: ../../data/in-out }
+`,
+          "channels/in/transform.ts": `
+export default (msg: string, ctx: { route(name: string, message: string): void }) => {
+  ctx.route("loop", msg);
+  return null;
+};
+`,
+          "channels/loop/channel.yaml": `
+format: text
+source:
+  channel: { routed: true, maxHops: 3, maxPending: 1 }
+transform: ./transform.ts
+destinations:
+  - file: { dir: ../../data/loop-out }
+`,
+          "channels/loop/transform.ts": `
+export default (msg: string, ctx: { route(name: string, message: string): void }) => {
+  ctx.route("loop", msg);
+  return null;
+};
+`,
+        },
+        { wrap: (opened) => fallbackStore(opened, { armed: false }) },
+      );
+      await dropFile(join(root, "data", "inbox", "1.txt"), "SYNTHETIC-1");
+      await engine.tick();
+      const loop = await messagesOf(store, "loop");
+      expect(loop.map((message) => message.state)).toEqual(["filtered", "filtered", "failed"]);
+      expect((await store.message(loop[2]?.id ?? 0))?.error).toContain(HOP_LIMIT_CODE);
+    });
+
     it("fails a channel destination's delivery past its target's maxHops, or to no target", async () => {
       const { root, engine, store } = await setUp(
         database,

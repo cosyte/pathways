@@ -193,15 +193,15 @@ interface MessagesTable {
    * has none. Since 0010.
    */
   meta: string | null;
-  /** The channel that handed this message over; null for one a source took in. Since 0012. */
+  /** The channel that handed this message over; null for one a source took in. Since 0013. */
   parent_channel: string | null;
-  /** The message of `parent_channel` it was handed over from. Since 0012. */
+  /** The message of `parent_channel` it was handed over from. Since 0013. */
   parent_message: ColumnType<number | string | null, number | null, number | null>;
-  /** The channel destination's delivery that handed it over; null for `ctx.route`. Since 0012. */
+  /** The channel destination's delivery that handed it over; null for `ctx.route`. Since 0013. */
   parent_delivery: ColumnType<number | string | null, number | null, number | null>;
-  /** The parent's generation at the hand-off: above 0 for a replay or a resend. Since 0012. */
+  /** The parent's generation at the hand-off: above 0 for a replay or a resend. Since 0013. */
   parent_generation: number | null;
-  /** How many hand-offs in a row brought it here; null for one a source took in. Since 0012. */
+  /** How many hand-offs in a row brought it here; null for one a source took in. Since 0013. */
   hops: number | null;
 }
 
@@ -447,8 +447,8 @@ export type HandOffFrom =
     };
 
 /**
- * What a hand-off came to: the new messages' ids, in order, or, when a target already held its
- * `maxPending` messages, nothing changed and the full target's name.
+ * What a hand-off came to: the new messages' ids, in order, or, when a target would then hold more
+ * than its `maxPending` messages waiting, nothing changed and the full target's name.
  *
  * @example
  * ```ts
@@ -2195,7 +2195,6 @@ function countOne(tally: Tallying, status: DeliveryStatus): void {
   tally[status] = (tally[status] ?? 0) + 1;
 }
 
-/** Thrown inside a transaction to roll it back and say why. */
 /** Thrown inside a hand-off's transaction when a target is full, so nothing of it is kept. */
 class TargetFull extends Error {
   constructor(readonly channel: string) {
@@ -2204,6 +2203,7 @@ class TargetFull extends Error {
   }
 }
 
+/** Thrown inside a transaction to roll it back and say why. */
 class Refusal extends Error {
   constructor(readonly reason: RefusalReason) {
     super(reason);
@@ -2866,7 +2866,9 @@ export class Store implements MessageStore, ContentStore, MetaStore {
   /**
    * Hands messages to other channels in one transaction with what they come from: see
    * {@link MessageStore.handOff}. The source's record is written first, then each new message, and
-   * only then is its target's backlog counted, so the transaction writes before it reads.
+   * only then is each target's backlog counted, once, so the transaction writes before it reads: a
+   * target is full when what it holds waiting, this batch's messages for it included, comes to more
+   * than its `maxPending`.
    */
   async handOff(
     from: HandOffFrom,
@@ -2893,7 +2895,7 @@ export class Store implements MessageStore, ContentStore, MetaStore {
         }
         const ids: number[] = [];
         for (const handOff of handOffs) {
-          const { channel, body, options, maxPending } = handOff;
+          const { channel, body, options } = handOff;
           const at = this.now().toISOString();
           const id = await this.insertMessage(tx, {
             channel,
@@ -2914,6 +2916,10 @@ export class Store implements MessageStore, ContentStore, MetaStore {
             ...parentColumns(options),
           });
           await this.insertTags(tx, id, channel, options.metaTags ?? []);
+          ids.push(id);
+        }
+        const caps = new Map(handOffs.map(({ channel, maxPending }) => [channel, maxPending]));
+        for (const [channel, maxPending] of caps) {
           const waiting = await tx
             .selectFrom("messages")
             .select((eb) => eb.fn.countAll<number | string>().as("count"))
@@ -2921,7 +2927,6 @@ export class Store implements MessageStore, ContentStore, MetaStore {
             .where("status", "=", "received")
             .executeTakeFirstOrThrow();
           if (Number(waiting.count) > maxPending) throw new TargetFull(channel);
-          ids.push(id);
         }
         return { ok: true as const, ids };
       });

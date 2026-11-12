@@ -12,6 +12,7 @@ import {
   DEFAULT_RETRY,
   HOP_LIMIT_CODE,
   TARGET_FULL_CODE,
+  TOO_MANY_ROUTES_CODE,
   UNKNOWN_ROUTE_CODE,
   type AzblobConfig,
   type ChannelConfig,
@@ -2601,10 +2602,15 @@ export class Engine {
    * Records hand-offs with what they come from, in one transaction through the store's `handOff`.
    * A store without it gets each new message through `receive`, under the idempotency key the
    * hand-off carries, looked up as a source that resumes looks one up, and then the source's record:
-   * a crash between the two hands each one over once when the work is done again. Either way, a
-   * target that already holds its `maxPending` messages waiting takes nothing.
+   * a crash between the two hands each one over once when the work is done again. Either way, the
+   * same rule holds: a target takes nothing when its backlog before the batch, with the batch's
+   * messages for it, would come to more than its `maxPending`. `source` is the channel the
+   * hand-offs come from: the message a transform routes from is still received when the fallback
+   * counts, and a route back into its own channel does not count it, as `handOff`, which records
+   * the transform first, does not.
    */
   private async commitHandOffs(
+    source: string,
     from: HandOffFrom,
     handOffs: readonly HandOff[],
     dropContent: boolean,
@@ -2614,9 +2620,10 @@ export class Engine {
     if (typeof store.handOff === "function" && !dropContent) {
       return store.handOff(from, handOffs, ...this.epoch());
     }
-    for (const handOff of handOffs) {
-      const { received } = await store.messageCounts(handOff.channel);
-      if (received >= handOff.maxPending) return { ok: false, full: handOff.channel };
+    for (const [channel, { count, maxPending }] of batchPerTarget(handOffs)) {
+      const { received } = await store.messageCounts(channel);
+      const self = from.kind === "transform" && channel === source ? 1 : 0;
+      if (received - self + count > maxPending) return { ok: false, full: channel };
     }
     const ids: number[] = [];
     for (const handOff of handOffs) {
@@ -2642,8 +2649,9 @@ export class Engine {
   /**
    * Hands what a transform routed with `ctx.route` to its targets, with the transform's outcome,
    * in one transaction. A route to a channel that takes no hand-offs, or past a target's
-   * `maxHops`, fails the message with a stable code and hands nothing over; a full target leaves
-   * the message received, to run again on a later pass.
+   * `maxHops`, or more routes to one target than its `maxPending`, fails the message with a stable
+   * code and hands nothing over; a full target leaves the message received, to run again on a later
+   * pass.
    */
   private async handRoutes(
     channel: RunningChannel,
@@ -2655,46 +2663,46 @@ export class Engine {
     const { store, logger } = this.options;
     const hops = (message.hops ?? 0) + 1;
     const generation = (await store.message(message.id))?.generation ?? 0;
+    const fail = async (code: string, detail: string, index: number): Promise<"failed"> => {
+      const failure: FailureSummary = { kind: "output", name: "RouteError", code, detail };
+      await store.failTransform(message.id, storedFailure(failure), ...this.epoch());
+      logger.warn({
+        event: "transform-failed",
+        channel: config.name,
+        message: message.id,
+        kind: failure.kind,
+        name: failure.name,
+        code: failure.code,
+        route: index,
+      });
+      this.emit(channel, () => ({
+        type: "transform-failed",
+        at: this.at(),
+        channel: config.name,
+        messageId: message.id,
+        kind: failure.kind,
+        name: failure.name,
+        code: failure.code,
+        where: undefined,
+      }));
+      return "failed";
+    };
     const handOffs: HandOff[] = [];
     for (const [index, route] of routes.entries()) {
       const target = this.handOffTarget(route.channel);
-      const code =
-        target === undefined
-          ? UNKNOWN_ROUTE_CODE
-          : hops > target.maxHops
-            ? HOP_LIMIT_CODE
-            : undefined;
-      if (target === undefined || code !== undefined) {
-        const failure: FailureSummary = {
-          kind: "output",
-          name: "RouteError",
-          code: code ?? UNKNOWN_ROUTE_CODE,
-          detail:
-            code === HOP_LIMIT_CODE
-              ? `the message has come through ${String(hops - 1)} hand-offs, the most its target takes`
-              : "ctx.route named no channel whose source is channel:",
-        };
-        await store.failTransform(message.id, storedFailure(failure), ...this.epoch());
-        logger.warn({
-          event: "transform-failed",
-          channel: config.name,
-          message: message.id,
-          kind: failure.kind,
-          name: failure.name,
-          code: failure.code,
-          route: index,
-        });
-        this.emit(channel, () => ({
-          type: "transform-failed",
-          at: this.at(),
-          channel: config.name,
-          messageId: message.id,
-          kind: failure.kind,
-          name: failure.name,
-          code: failure.code,
-          where: undefined,
-        }));
-        return "failed";
+      if (target === undefined) {
+        return fail(
+          UNKNOWN_ROUTE_CODE,
+          "ctx.route named no channel whose source is channel:",
+          index,
+        );
+      }
+      if (hops > target.maxHops) {
+        return fail(
+          HOP_LIMIT_CODE,
+          `the message has come through ${String(hops - 1)} hand-offs, the most its target takes`,
+          index,
+        );
       }
       handOffs.push({
         channel: route.channel,
@@ -2716,7 +2724,19 @@ export class Engine {
         },
       });
     }
+    // A batch bigger than its target's cap could never be taken whole, however long it waited:
+    // fail it now, or the channel's transform queue would stall behind it for good.
+    for (const [target, { count, maxPending }] of batchPerTarget(handOffs)) {
+      if (count > maxPending) {
+        return fail(
+          TOO_MANY_ROUTES_CODE,
+          `the transform routed ${String(count)} messages to ${target}, more than its maxPending of ${String(maxPending)}`,
+          handOffs.findIndex((handOff) => handOff.channel === target),
+        );
+      }
+    }
     const result = await this.commitHandOffs(
+      config.name,
       {
         kind: "transform",
         messageId: message.id,
@@ -2807,6 +2827,7 @@ export class Engine {
             ),
           );
     const result = await this.commitHandOffs(
+      config.name,
       { kind: "delivery", deliveryId: delivery.id },
       [
         {
@@ -3384,4 +3405,19 @@ function modeOpen(path: string, bits: number): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * How many of `handOffs` go to each target, in the order the targets first appear, with the
+ * target's `maxPending`.
+ */
+function batchPerTarget(
+  handOffs: readonly HandOff[],
+): Map<string, { count: number; maxPending: number }> {
+  const batch = new Map<string, { count: number; maxPending: number }>();
+  for (const { channel, maxPending } of handOffs) {
+    const seen = batch.get(channel);
+    batch.set(channel, { count: (seen?.count ?? 0) + 1, maxPending });
+  }
+  return batch;
 }

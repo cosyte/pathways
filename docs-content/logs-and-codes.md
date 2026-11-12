@@ -51,11 +51,12 @@ A `transform-failed` line's `kind` is `load`, `parse`, `transform`, `output`, `t
 
 A channel destination's `delivered` line also carries `handedTo`, the new message's id in its target.
 
-| Code                         | Meaning                                                                                                         |
-| ---------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `ERR_PATHWAYS_UNKNOWN_ROUTE` | `ctx.route` named no channel whose source is `channel:`; the message fails and nothing is handed over           |
-| `ERR_PATHWAYS_HOP_LIMIT`     | a hand-off would take the message past its target's `maxHops`; the message, or the delivery, fails              |
-| `ERR_PATHWAYS_TARGET_FULL`   | the target holds `maxPending` messages waiting for its transform; the hand-off is tried again later, not failed |
+| Code                           | Meaning                                                                                                                                 |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `ERR_PATHWAYS_UNKNOWN_ROUTE`   | `ctx.route` named no channel whose source is `channel:`; the message fails and nothing is handed over                                   |
+| `ERR_PATHWAYS_HOP_LIMIT`       | a hand-off would take the message past its target's `maxHops`; the message, or the delivery, fails                                      |
+| `ERR_PATHWAYS_TARGET_FULL`     | with the hand-off, the target would hold more than `maxPending` messages waiting for its transform; it is tried again later, not failed |
+| `ERR_PATHWAYS_TOO_MANY_ROUTES` | a transform routed more messages to one target in one run than its `maxPending`; the message fails and nothing is handed over           |
 
 See [Route messages between channels](./route-between-channels.md).
 

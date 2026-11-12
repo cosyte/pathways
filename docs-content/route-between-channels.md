@@ -73,9 +73,10 @@ destinations:
 ```
 
 The routes are stored in the same transaction that records the transform's outcome. When the
-transform fails, none of its routes are kept; when it succeeds, all of them are. A name that is no
-channel with a `channel:` source fails the message with `ERR_PATHWAYS_UNKNOWN_ROUTE`, and nothing
-is handed over.
+transform fails, none of its routes are kept; when it succeeds, all of them are. That includes a
+transform that returns nothing: its routes are kept, and its own message is recorded as filtered.
+A name that is no channel with a `channel:` source fails the message with
+`ERR_PATHWAYS_UNKNOWN_ROUTE`, and nothing is handed over.
 
 A channel with `storage.content: none` stores nothing, so it can neither hand over nor be handed
 to: start refuses a channel destination or a `channel:` source on one, and a transform there that
@@ -85,6 +86,17 @@ code `ERR_PATHWAYS_UNKNOWN_ROUTE`), so its sender is told not to send it again.
 `pathways test` runs a transform that routes, and keeps nothing it routes. `pathways replay`
 refuses a message whose transform routes, and changes nothing; `pathways replay --resend` works,
 since it runs no transform.
+
+### Recover a message a route failed
+
+A message whose transform failed on a route, with `ERR_PATHWAYS_UNKNOWN_ROUTE`,
+`ERR_PATHWAYS_HOP_LIMIT` or `ERR_PATHWAYS_TOO_MANY_ROUTES`, cannot be replayed: the replay runs the
+transform again, which routes again, so `pathways replay` refuses it, and it has no outputs for
+`pathways replay --resend` to send. Fix the configuration or the transform first, then send the
+message in again: from its sender, or, when it was itself handed over by a channel destination, with
+`pathways replay --resend` on its parent in the source channel, which hands it over anew. A channel
+destination's delivery that failed with `ERR_PATHWAYS_HOP_LIMIT` is sent again the same way, with
+`pathways replay --resend` on the source message once the target's `maxHops` is raised.
 
 ## What start checks
 
@@ -115,10 +127,19 @@ destinations:
   - mllp: { host: lab.example.test, port: 2575, tls: {} }
 ```
 
+A target is full for a hand-off when the messages it holds waiting, with the ones this hand-off
+brings it, would come to more than `maxPending`. A store without the `handOff` method counts the
+same way.
+
 When the target is full, a channel destination's delivery waits and is tried again after its
 `retry.first`, without counting an attempt, and the deliveries behind it wait too; its error reads
 `hand-off: ERR_PATHWAYS_TARGET_FULL`. A transform that routes into a full target leaves its
 message received, to run again on a later pass.
+
+A transform that routes more messages to one target in one run than that target's `maxPending`
+could never be taken whole, however long it waited: its message fails with
+`ERR_PATHWAYS_TOO_MANY_ROUTES`, nothing is handed over, and the channel goes on to its next
+message.
 
 ## Order, replays and crashes
 

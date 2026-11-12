@@ -1881,6 +1881,12 @@ export const UNKNOWN_ROUTE_CODE = "ERR_PATHWAYS_UNKNOWN_ROUTE";
 /** The code a channel destination's retry carries while its target holds `maxPending` messages. */
 export const TARGET_FULL_CODE = "ERR_PATHWAYS_TARGET_FULL";
 
+/**
+ * The code a transform fails with when it routes more messages to one target in one run than that
+ * target's `maxPending`: the target could never take them all at once, so waiting would not help.
+ */
+export const TOO_MANY_ROUTES_CODE = "ERR_PATHWAYS_TOO_MANY_ROUTES";
+
 /** A channel source's `channel:` block: messages come from other channels, never from outside. */
 const channelSource = z
   .strictObject({

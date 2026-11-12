@@ -19,6 +19,7 @@ export {
   DEFAULT_MAX_PENDING,
   HOP_LIMIT_CODE,
   TARGET_FULL_CODE,
+  TOO_MANY_ROUTES_CODE,
   UNKNOWN_ROUTE_CODE,
 } from "./config/schema.js";
 export type {
