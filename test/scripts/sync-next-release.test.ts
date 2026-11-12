@@ -152,7 +152,7 @@ describe("rewriteNextRelease", () => {
 
   it("keeps the blank lines between the bullets it keeps in such a list", () => {
     const text = [
-      "## What the latest release ships\n\nIn 0.0.3, the version on npm:\n\n- **Old.** Shipped.\n",
+      "# Synthetic\n\n## What the latest release ships\n\nIn 0.0.3, the version on npm:\n\n- **Old.** Shipped.\n",
       "## In the next release\n\n- Gone. <!-- changesets: a -->\n\n- One. <!-- changesets: b -->",
       "  More of one.\n\n  A second paragraph of one.\n\n- Two. <!-- changesets: c -->\n\nEnd.\n",
     ].join("\n");
@@ -189,7 +189,9 @@ describe("rewriteNextRelease", () => {
   it("rewrites a version line wrapped over two lines", () => {
     const text = "# Synthetic\n\nEarly, and released:\n0.0.3\nis on npm.\n";
     const result = rewriteNextRelease(text, [], "0.0.4");
-    expect(result.ok && result.text).toBe("# Synthetic\n\nEarly, and released:\n0.0.4\nis on npm.\n");
+    expect(result.ok && result.text).toBe(
+      "# Synthetic\n\nEarly, and released:\n0.0.4\nis on npm.\n",
+    );
   });
 
   it("leaves a README with no such sections untouched", () => {
