@@ -73,6 +73,7 @@ A channel destination's `delivered` line also carries `handedTo`, the new messag
 | `ERR_PATHWAYS_HOP_LIMIT`       | a hand-off would take the message past its target's `maxHops`; the message, or the delivery, fails                                      |
 | `ERR_PATHWAYS_TARGET_FULL`     | with the hand-off, the target would hold more than `maxPending` messages waiting for its transform; it is tried again later, not failed |
 | `ERR_PATHWAYS_TOO_MANY_ROUTES` | a transform routed more messages to one target in one run than its `maxPending`; the message fails and nothing is handed over           |
+| `MULTIPLE_MESSAGES`            | a hand-off to an `hl7v2` channel held a second message header; the message, or the delivery, fails and nothing is handed over           |
 
 See [Route messages between channels](./route-between-channels.md).
 

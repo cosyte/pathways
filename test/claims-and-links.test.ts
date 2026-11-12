@@ -12,6 +12,9 @@
 //   ctx.route.
 // - An HTTP destination with `ack: xml` on a channel fed by another checks the acknowledgement
 //   against the control ID of its own transform's output, not the message handed over.
+// - An hl7v2 body holding a second message header, handed to an hl7v2 channel by a channel
+//   destination or by ctx.route, is refused before the target stores it, as a source's is when it
+//   enters the engine: the source's delivery or message fails with MULTIPLE_MESSAGES.
 import { readdir, readFile, writeFile } from "node:fs/promises";
 import type { ServerResponse } from "node:http";
 import { join } from "node:path";
@@ -35,7 +38,7 @@ import {
   type TestDatabase,
   type TestStorage,
 } from "./databases.js";
-import { captureLogger, cleanUp, dropFile, makeProject } from "./helpers.js";
+import { ADT_A01, ADT_A08, captureLogger, cleanUp, dropFile, makeProject } from "./helpers.js";
 import { receiver, type Receiver } from "./net-helpers.js";
 
 const engines: Engine[] = [];
@@ -471,6 +474,84 @@ for (const database of TEST_DATABASES) {
           error: expect.stringContaining("ACK_CONTROL_ID_MISMATCH") as unknown,
         });
       });
+
+      for (const [label, wrap] of [
+        ["through handOff", undefined],
+        ["on a store without handOff", withoutHandOff],
+      ] as const) {
+        it(`refuses an hl7v2 body holding a second message before it is handed over, by a channel destination and by ctx.route, ${label}`, async () => {
+          // Two messages in one body, the second header in lower case, as the HL7 parser would
+          // read it as one message with two MSH segments. The source channels read text, so the
+          // body enters the engine whole; the targets read hl7v2.
+          const two = ADT_A01 + "msh" + ADT_A08.slice(3);
+          const root = await makeProject({
+            "channels/a/channel.yaml":
+              "format: text\nsource:\n  file: { dir: ../../data/inbox-a, minAge: 0 }\n" +
+              "destinations:\n  - channel: { name: b }\n",
+            "channels/r/channel.yaml":
+              "format: text\nsource:\n  file: { dir: ../../data/inbox-r, minAge: 0 }\n" +
+              "transform: ./transform.ts\ndestinations:\n  - file: { dir: ../../data/out-r }\n",
+            "channels/r/transform.ts":
+              'export default (msg: string, ctx: { route(name: string, m: string): void }) => { ctx.route("c", msg); return msg; };\n',
+            "channels/b/channel.yaml":
+              "format: hl7v2\nsource:\n  channel: {}\ndestinations:\n  - file: { dir: ../../data/out-b }\n",
+            "channels/c/channel.yaml":
+              "format: hl7v2\nsource:\n  channel: { routed: true }\ndestinations:\n  - file: { dir: ../../data/out-c }\n",
+          });
+          const { engine, store } = await started(
+            database,
+            root,
+            wrap === undefined ? {} : { wrap },
+          );
+          for (const inbox of ["inbox-a", "inbox-r"]) {
+            await dropFile(join(root, "data", inbox, "two.hl7"), two);
+            await dropFile(join(root, "data", inbox, "one.hl7"), ADT_A01);
+          }
+          await engine.tick();
+          await engine.tick();
+
+          // The channel destination: the two-message body's delivery failed, and only the one
+          // message reached the target.
+          const fromA = (await store.listMessages({ channel: "a", limit: 10 })).items;
+          const outcomes = await Promise.all(
+            fromA.map(async (message) => {
+              const body = new TextDecoder().decode(await store.messageBody(message.id));
+              const [delivery] = await store.deliveries(message.id);
+              return [body === two ? "two" : "one", delivery?.status, delivery?.error ?? null];
+            }),
+          );
+          expect(outcomes.sort()).toEqual([
+            ["one", "delivered", null],
+            ["two", "failed", "hand-off: MULTIPLE_MESSAGES"],
+          ]);
+          const toB = (await store.listMessages({ channel: "b", limit: 10 })).items;
+          expect(toB).toHaveLength(1);
+          expect(new TextDecoder().decode(await store.messageBody(toB[0]?.id ?? 0))).toBe(ADT_A01);
+          expect(await readdir(join(root, "data", "out-b"))).toHaveLength(1);
+
+          // ctx.route: the message whose transform routed the two-message body failed, and
+          // nothing of it was handed over.
+          const fromR = (await store.listMessages({ channel: "r", limit: 10 })).items;
+          const routed = await Promise.all(
+            fromR.map(async (message) => {
+              const body = new TextDecoder().decode(await store.messageBody(message.id));
+              const error = (await store.message(message.id))?.error;
+              return [body === two ? "two" : "one", message.state, error ?? null];
+            }),
+          );
+          expect(routed.sort()).toEqual([
+            ["one", "delivered", null],
+            ["two", "failed", expect.stringContaining("MULTIPLE_MESSAGES") as unknown],
+          ]);
+          const toC = (await store.listMessages({ channel: "c", limit: 10 })).items;
+          expect(toC).toHaveLength(1);
+          expect(new TextDecoder().decode(await store.messageBody(toC[0]?.id ?? 0))).toBe(ADT_A01);
+          expect(await readdir(join(root, "data", "out-c"))).toHaveLength(1);
+          // Both ended, so neither source channel leaves a message unsettled.
+          expect(await store.unsettled("a", 0, 10)).toEqual([]);
+          expect(await store.unsettled("r", 0, 10)).toEqual([]);
+        });
+      }
     },
   );
 }

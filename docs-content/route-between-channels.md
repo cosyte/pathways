@@ -90,7 +90,7 @@ since it runs no transform.
 ### Recover a message a route failed
 
 A message whose transform failed on a route, with `ERR_PATHWAYS_UNKNOWN_ROUTE`,
-`ERR_PATHWAYS_HOP_LIMIT` or `ERR_PATHWAYS_TOO_MANY_ROUTES`, cannot be replayed: the replay runs the
+`ERR_PATHWAYS_HOP_LIMIT`, `ERR_PATHWAYS_TOO_MANY_ROUTES` or `MULTIPLE_MESSAGES`, cannot be replayed: the replay runs the
 transform again, which routes again, so `pathways replay` refuses it, and it has no outputs for
 `pathways replay --resend` to send. Fix the configuration or the transform first, then send the
 message in again: from its sender, or, when it was itself handed over by a channel destination, with
@@ -113,6 +113,11 @@ Each message counts the hand-offs that brought it: 1 for the first, one more for
 hand-off past the target's `maxHops` (8 by default) fails instead, with `ERR_PATHWAYS_HOP_LIMIT`:
 the channel destination's delivery fails, or the transform's message does. This catches a loop
 made through `ctx.route`, which start cannot see.
+
+A target whose format is `hl7v2` takes one message per hand-off, as it does from a source. A body
+that holds a second message header is refused before the target stores it, with
+`MULTIPLE_MESSAGES`: the channel destination's delivery fails, or the transform's message does, and
+nothing is handed over.
 
 ## A full or stopped target
 

@@ -2838,6 +2838,16 @@ export class Engine {
   }
 
   /**
+   * Whether channel `name` reads `hl7v2` and `body` holds a second message header. A source's body
+   * is refused as it enters the engine when it does; a hand-off does not pass that entry point, so
+   * it is refused here, before the target stores it, with the same code.
+   */
+  private holdsSecondMessageFor(name: string, body: Uint8Array): boolean {
+    const target = this.options.project.channels.find((channel) => channel.name === name);
+    return target?.format === "hl7v2" && holdsSecondMessage(body);
+  }
+
+  /**
    * Records hand-offs with what they come from, in one transaction through the store's `handOff`.
    * A store without it gets each new message through `receive`, under the idempotency key the
    * hand-off carries, looked up as a source that resumes looks one up, and then the source's record:
@@ -2944,6 +2954,13 @@ export class Engine {
           index,
         );
       }
+      if (this.holdsSecondMessageFor(route.channel, route.body)) {
+        return fail(
+          MULTIPLE_MESSAGES_CODE,
+          "ctx.route handed an hl7v2 channel a body holding more than one message",
+          index,
+        );
+      }
       handOffs.push({
         channel: route.channel,
         body: route.body,
@@ -3035,9 +3052,20 @@ export class Engine {
       deliveryId: delivery.id,
       attempt: delivery.attempts + 1,
     };
-    if (target === undefined || hops > target.maxHops) {
-      // Checked at start for a target; a hop count past the limit is a loop through ctx.route.
-      const code = target === undefined ? UNKNOWN_ROUTE_CODE : HOP_LIMIT_CODE;
+    if (
+      target === undefined ||
+      hops > target.maxHops ||
+      this.holdsSecondMessageFor(destination.channel, delivery.body)
+    ) {
+      // Checked at start for a target; a hop count past the limit is a loop through ctx.route; and
+      // an hl7v2 target refuses a body holding a second message, as the engine does where a
+      // source's message enters it.
+      const code =
+        target === undefined
+          ? UNKNOWN_ROUTE_CODE
+          : hops > target.maxHops
+            ? HOP_LIMIT_CODE
+            : MULTIPLE_MESSAGES_CODE;
       this.options.fence?.check();
       await store.failDelivery(delivery.id, `hand-off: ${code}`, ...this.epoch());
       logger.warn({
@@ -3659,6 +3687,12 @@ function oneMessage(format: Format, body: Uint8Array, options: ReceiveOptions): 
   // No duplicate key, as for any message a source could not read: its header is not one message's.
   return { ...options, duplicateKey: undefined, failure: "inbound: MULTIPLE_MESSAGES" };
 }
+
+/**
+ * The code a hand-off to an `hl7v2` channel is refused with when its body holds a second message,
+ * the code a source's body is refused with as it enters the engine.
+ */
+const MULTIPLE_MESSAGES_CODE = "MULTIPLE_MESSAGES";
 
 /** A key's SHA-256 in hex, as storage keeps it, or undefined when there is no key. */
 function hashed(key: string | undefined): string | undefined {
