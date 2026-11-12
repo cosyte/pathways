@@ -22,7 +22,7 @@ import type { MessageMeta, MetaCondition, MetaTag } from "../encryption/blind-in
 import { processEnv } from "../env.js";
 import type { SecretReader } from "../secrets/resolve.js";
 import { faultPoint } from "../fault-points.js";
-import { dialectFor, type DriverImport } from "./dialects.js";
+import { dialectFor, repeatsUniqueKey, type DriverImport } from "./dialects.js";
 import {
   ENGINE_LEASE,
   LeaseLostError,
@@ -192,6 +192,13 @@ interface MessagesTable {
   generation: Generated<number>;
   /** A hash of what names this one message to its source, so it is stored once. Since 0004. */
   idempotency_key: string | null;
+  /**
+   * The idempotency key again, on the one message of the channel that holds it: a unique index
+   * covers it, so two messages stored under one key at the same moment cannot both hold it. Null on
+   * a message without a key, on one stored under a key another message already held, and on every
+   * message stored before 0014.
+   */
+  idempotency_claim: string | null;
   /** The SHA-256 of the body as received, in hex, when the engine passed one. Since 0008. */
   content_hash: string | null;
   /** When the bodies were dropped after the last delivery; null while they are kept. Since 0008. */
@@ -361,7 +368,9 @@ export interface StoreReceiveOptions {
    * with the message. With `resumed`, when a message of the channel was already stored with the
    * same key, nothing is stored and that message's id comes back with `alreadyStored`: a source
    * that stored a message and then stopped before it could acknowledge it hands it in again on
-   * restart, and it is stored once.
+   * restart, and it is stored once. That holds for two hand-ins at the same moment too, on two
+   * connections or two nodes: one is stored, and the other gets its id. Without `resumed` the
+   * message is always stored.
    */
   readonly idempotencyKey?: string | undefined;
   /**
@@ -1025,6 +1034,8 @@ export interface StoredMessageRow {
   readonly size: number | null;
   readonly generation: number;
   readonly idempotencyKey: string | null;
+  /** The idempotency key again when this message holds its claim; null when it does not. */
+  readonly idempotencyClaim: string | null;
   readonly contentHash: string | null;
   readonly contentDroppedAt: string | null;
   readonly meta: string | null;
@@ -1324,9 +1335,11 @@ export interface MessageStore {
    * `failed` when `options.failure` is set. Flags it as a possible duplicate when an earlier
    * message of the channel has the same `options.duplicateKey`. Given `options.resumed`, when a
    * message of the channel was already stored with the same `options.idempotencyKey`, stores
-   * nothing and returns that message's id with `alreadyStored: true`. A store that ignores the key
-   * still works, and a source that stops between storing and acknowledging then stores that
-   * message twice.
+   * nothing and returns that message's id with `alreadyStored: true`. A store that more than one
+   * connection writes to makes that lookup and the insert one atomic step (Pathways' own store
+   * claims the key in a column a unique index covers), or two hand-ins of one message at the same
+   * moment can both be stored. A store that ignores the key still works, and a source that stops
+   * between storing and acknowledging then stores that message twice.
    */
   receive(
     channel: string,
@@ -2063,6 +2076,43 @@ export function migrations(kind: StorageKind): Record<string, SchemaStep> {
           .execute();
       },
     },
+    "0014-idempotency-claims": {
+      // Expand only: a column that may be null and a unique index on it, which an older Pathways
+      // never reads or writes; it goes on storing and looking up idempotency keys as before. The
+      // earliest message of each channel under each key takes the claim. A database that already
+      // holds two or more messages of a channel under one key (two hand-ins at the same moment, on
+      // a version before this step) keeps every one of them, each with its body, its key, its
+      // status and its deliveries: only the earliest holds the claim, and a resumed message finds
+      // that one, as it did before. SQL Server counts nulls as equal in a unique index, so there
+      // the index leaves them out. To roll it back, stop every engine and drop the index and the
+      // column; nothing else refers to them.
+      tag: "expand",
+      async up(db: Kysely<unknown>): Promise<void> {
+        await db.schema.alterTable("messages").addColumn("idempotency_claim", t.name).execute();
+        // The derived table is read whole before the update writes: MySQL refuses an update whose
+        // subquery reads the table it changes, unless the subquery is materialized this way.
+        await sql`update ${sql.table("messages")}
+          set ${sql.ref("idempotency_claim")} = ${sql.ref("idempotency_key")}
+          where ${sql.ref("id")} in (
+            select ${sql.ref("firsts.id")} from (
+              select min(${sql.ref("id")}) as ${sql.ref("id")} from ${sql.table("messages")}
+              where ${sql.ref("idempotency_key")} is not null
+              group by ${sql.ref("channel")}, ${sql.ref("idempotency_key")}
+            ) as ${sql.ref("firsts")}
+          )`.execute(db);
+        await db.schema
+          .createIndex("messages_by_channel_idempotency_claim")
+          .unique()
+          .on("messages")
+          .columns(["channel", "idempotency_claim"])
+          .$call((index) =>
+            kind === "sqlserver"
+              ? index.where(sql.ref("idempotency_claim"), "is not", null)
+              : index,
+          )
+          .execute();
+      },
+    },
   };
 }
 
@@ -2496,9 +2546,15 @@ export class Store implements MessageStore, ContentStore, MetaStore {
    * Stores an incoming message as `received` (or `failed`, given `options.failure`) and returns its
    * id, with the earlier message it may duplicate. With a duplicate key, or an idempotency key
    * that is `resumed`, the insert, the lookups and the flag are one transaction; otherwise, the
-   * insert alone, which stores an idempotency key without looking it up. When a resumed message's
-   * idempotency key is already stored on the channel, the new row is deleted again and that
-   * message's id is returned with `alreadyStored`.
+   * insert alone, which stores an idempotency key without looking it up.
+   *
+   * A message with an idempotency key claims it, in a column a unique index covers, in the same
+   * statement that inserts it. Of two hand-ins of one message under one key at the same moment, on
+   * two connections or two nodes, the second's insert waits for the first's transaction and yields
+   * to its row: a resumed one then returns that message's id with `alreadyStored`, and one that is
+   * not resumed is stored without the claim, as the source asked. A resumed message whose claim is
+   * free still looks its key up among the messages stored before claims were (or by an older
+   * Pathways), and when one is there its new row is deleted again and the earliest's id returned.
    *
    * Every transaction here writes before it reads. On SQLite, a transaction that reads first cannot
    * write once another process (an operator command beside the engine) has written meanwhile, and
@@ -2514,56 +2570,76 @@ export class Store implements MessageStore, ContentStore, MetaStore {
     const meta =
       options.storedMeta ?? (options.meta === undefined ? null : JSON.stringify(options.meta));
     const tags = options.metaTags ?? [];
-    const insertOnly = (db: Kysely<Tables>): Promise<number> =>
-      this.insertMessage(db, {
-        channel,
-        received_at: at,
-        body: blob(body),
-        status: failure === undefined ? "received" : "failed",
-        error: failure ?? null,
-        updated_at: at,
-        dedup_key: duplicateKey ?? null,
-        duplicate_of: null,
-        size: size ?? body.byteLength,
-        idempotency_key: idempotencyKey ?? null,
-        content_hash: contentHash ?? null,
-        content_dropped_at: null,
-        meta,
-      });
-    // The tags go in with the message, in the same transaction.
-    const insert = async (db: Kysely<Tables>): Promise<number> => {
-      const id = await insertOnly(db);
-      await this.insertTags(db, id, channel, tags);
-      return id;
-    };
-    // A message handed in for the first time cannot have been stored: its key is only recorded.
+    const row = (claim: string | null): Insertable<MessagesTable> => ({
+      channel,
+      received_at: at,
+      body: blob(body),
+      status: failure === undefined ? "received" : "failed",
+      error: failure ?? null,
+      updated_at: at,
+      dedup_key: duplicateKey ?? null,
+      duplicate_of: null,
+      size: size ?? body.byteLength,
+      idempotency_key: idempotencyKey ?? null,
+      idempotency_claim: claim,
+      content_hash: contentHash ?? null,
+      content_dropped_at: null,
+      meta,
+    });
+    // A message handed in for the first time claims its key when it is free and is stored either
+    // way: the source says it never handed this one in.
+    const insertOnly = async (db: Kysely<Tables>): Promise<number> =>
+      (idempotencyKey === undefined
+        ? undefined
+        : await this.insertClaiming(db, row(idempotencyKey))) ??
+      (await this.insertMessage(db, row(null)));
+    // A message handed in for the first time cannot have been stored: its key is not looked up.
     const lookUp = resumed === true ? idempotencyKey : undefined;
     if (duplicateKey === undefined && lookUp === undefined) {
       if (tags.length === 0) return { id: await insertOnly(this.db), duplicateOf: undefined };
-      return { id: await this.db.transaction().execute(insert), duplicateOf: undefined };
+      return {
+        id: await this.db.transaction().execute(async (tx) => {
+          const id = await insertOnly(tx);
+          await this.insertTags(tx, id, channel, tags);
+          return id;
+        }),
+        duplicateOf: undefined,
+      };
     }
     return this.db.transaction().execute(async (tx) => {
-      const id = await insert(tx);
-      if (lookUp !== undefined) {
-        const stored = await tx
+      let id: number;
+      if (lookUp === undefined) {
+        id = await insertOnly(tx);
+      } else {
+        // The claim first: a hand-in of the same message under way on another connection makes
+        // this insert wait until it commits, and then yield to its row.
+        const claimed = await this.insertClaiming(tx, row(lookUp));
+        // The earliest message stored under the key: the claim's holder when the claim was taken,
+        // and otherwise one stored before claims were, or by an older Pathways, if there is one.
+        let earliest = tx
           .selectFrom("messages")
           .select(["id", "duplicate_of"])
           .where("channel", "=", channel)
-          .where("idempotency_key", "=", lookUp)
-          .where("id", "<", id)
+          .where("idempotency_key", "=", lookUp);
+        if (claimed !== undefined) earliest = earliest.where("id", "<", claimed);
+        const stored = await earliest
           .orderBy("id")
           .$call((query) => this.first(query))
           .executeTakeFirst();
         if (stored !== undefined) {
-          await tx.deleteFrom("meta_index").where("message_id", "=", id).execute();
-          await tx.deleteFrom("messages").where("id", "=", id).execute();
+          if (claimed !== undefined) {
+            await tx.deleteFrom("messages").where("id", "=", claimed).execute();
+          }
           return {
             id: Number(stored.id),
             duplicateOf: int64OrNull(stored.duplicate_of) ?? undefined,
             alreadyStored: true,
           };
         }
+        /* v8 ignore next: only a holder deleted between the claim and the lookup leaves neither */
+        id = claimed ?? (await this.insertMessage(tx, row(null)));
       }
+      await this.insertTags(tx, id, channel, tags);
       if (duplicateKey === undefined) return { id, duplicateOf: undefined };
       const earlier = await tx
         .selectFrom("messages")
@@ -3748,6 +3824,7 @@ export class Store implements MessageStore, ContentStore, MetaStore {
         size: int64OrNull(row.size),
         generation: row.generation,
         idempotencyKey: row.idempotency_key,
+        idempotencyClaim: row.idempotency_claim,
         contentHash: row.content_hash,
         contentDroppedAt: row.content_dropped_at,
         meta: row.meta,
@@ -4151,6 +4228,40 @@ export class Store implements MessageStore, ContentStore, MetaStore {
     return sql<boolean>`(${ref} = ${value} and ${length}(${ref}) = ${length}(${value}))`;
   }
 
+  /**
+   * Inserts a message that claims its idempotency key (`values.idempotency_claim`) and returns its
+   * id, or `undefined`, inserting nothing, when another message of the channel holds the claim. A
+   * claim another transaction has taken and not yet committed makes the insert wait for it: then
+   * it yields when that transaction commits, and claims the key when it rolls back. PostgreSQL and
+   * SQLite say so in the statement (`on conflict do nothing`); MySQL, MariaDB and SQL Server refuse
+   * the insert with a duplicate key error, which ends only the statement, not the transaction.
+   */
+  private async insertClaiming(
+    db: Kysely<Tables>,
+    values: Insertable<MessagesTable>,
+  ): Promise<number | undefined> {
+    switch (this.kind) {
+      case "postgres":
+      case "sqlite": {
+        const inserted = await db
+          .insertInto("messages")
+          .values(values)
+          .onConflict((conflict) => conflict.columns(["channel", "idempotency_claim"]).doNothing())
+          .returning("id")
+          .executeTakeFirst();
+        return inserted === undefined ? undefined : Number(inserted.id);
+      }
+      case "mysql":
+      case "sqlserver":
+        try {
+          return await this.insertMessage(db, values);
+        } catch (error) {
+          if (repeatsUniqueKey(error, CLAIM_INDEX)) return undefined;
+          throw error;
+        }
+    }
+  }
+
   /** Inserts a message and returns its id, which each database hands back its own way. */
   private async insertMessage(
     db: Kysely<Tables>,
@@ -4169,6 +4280,9 @@ export class Store implements MessageStore, ContentStore, MetaStore {
     }
   }
 }
+
+/** The unique index that holds one message per channel to each idempotency key. */
+const CLAIM_INDEX = "messages_by_channel_idempotency_claim";
 
 /** What a dropped body is emptied to: the column holds no nulls, and an empty value holds nothing. */
 const EMPTY = Buffer.alloc(0);

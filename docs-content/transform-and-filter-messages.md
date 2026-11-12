@@ -2,7 +2,7 @@
 id: transform-and-filter-messages
 title: Transform and filter messages
 sidebar_label: Transform and filter
-description: "Write a channel's transform: edit a message, filter it out, send several outputs, transform or filter for one destination, load a lookup table, and fail a message on purpose."
+description: "Write a channel's transform: edit or filter a message, send several outputs, transform for one destination, load a lookup table, and fail a message."
 ---
 
 # Transform and filter messages

@@ -115,6 +115,11 @@ export interface ArchivedMessage {
   readonly dedupKey: string | null;
   /** The hash that names it to its source, so it is stored once. */
   readonly idempotencyKey: string | null;
+  /**
+   * The same hash when it held its channel's claim to the key, the one message stored under it;
+   * `null` when it did not. Absent from an archive an older Pathways wrote.
+   */
+  readonly idempotencyClaim?: string | null;
   /** Why it failed, as stored: can quote the message. */
   readonly error: string | null;
   /** Its `ctx.meta`, which can hold identifiers; `null` when it had none or it was dropped. */
@@ -418,6 +423,7 @@ function asMessage(value: unknown): ArchivedMessage {
   check(isTextOrNull(fields["contentDroppedAt"]) && isTextOrNull(fields["error"]));
   check(isTextOrNull(fields["dedupKey"]) && isTextOrNull(fields["idempotencyKey"]));
   check(isTextOrNull(fields["body"]) && isMetaOrNull(fields["meta"]));
+  check(fields["idempotencyClaim"] === undefined || isTextOrNull(fields["idempotencyClaim"]));
   const outputs = fields["outputs"];
   check(Array.isArray(outputs) && outputs.every(isText));
   const deliveries = fields["deliveries"];
@@ -475,6 +481,7 @@ export async function archivedMessage(
     contentDroppedAt: message.contentDroppedAt,
     dedupKey: message.dedupKey,
     idempotencyKey: message.idempotencyKey,
+    idempotencyClaim: message.idempotencyClaim,
     error: message.error,
     meta: message.meta === null ? null : (JSON.parse(message.meta) as MessageMeta),
     body: base64(message.body),

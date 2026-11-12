@@ -45,40 +45,39 @@ The client reads its credentials from the AWS SDK's default chain: the `AWS_ACCE
 task the engine runs on. Nothing secret goes in the channel's YAML. Give the role these permissions
 on the bucket, under the prefix: `s3:ListBucket`, `s3:GetObject`, `s3:PutObject` and `s3:DeleteObject`.
 
-## How the source claims an object
+## Check that the bucket refuses a second write
 
-S3 has no rename, so the claim is a conditional write. On each pass the source lists the prefix, a
-page at a time, and for each object that is ready:
+S3 has no rename, so the source claims each object by writing a marker under `<dir>/.claimed/` that
+only one engine can write, and each object is stored once even with two engines reading the prefix:
+[How a source claims files and objects](./file-and-object-claims.md#an-object-store-s3-and-azure-blob-storage)
+says how. That needs a server that honours `If-None-Match: *`, which Amazon S3 does. Before its first
+claim the source writes one probe object twice, under `<dir>/.claimed/.probe/`, to check:
 
-1. reads its size, entity tag and modification time with a `HEAD`, and leaves an object larger than
-   `maxSize` by that size where it is;
-2. writes a marker, `<dir>/.claimed/<path>`, with `If-None-Match: *`. S3 writes it for the first
-   engine and answers every other `412 Precondition Failed`, so one engine reads the object;
-3. reads the object with `If-Match` on its tag, stores it under the key
-   `s3:<bucket>/<key>@<tag>@<modified>`, and deletes the object, again with `If-Match`, so an object
-   written at that key since stays;
-4. deletes the marker.
+- A server that does not honour it (some S3-compatible servers) is refused with
+  `ERR_PATHWAYS_OBJECT_NO_CONDITIONAL_WRITE`. Only a second write that succeeds, or a write the server
+  answers `501 Not Implemented`, says that. Set
+  [`singleNode: true`](#a-server-without-conditional-writes) on such a server.
+- Any other error the probe meets is given with its own code and checked again on the next pass:
+  `ERR_PATHWAYS_S3_NOT_INSTALLED` when `@aws-sdk/client-s3` is not installed, and
+  `ERR_PATHWAYS_S3_NO_SUCH_BUCKET` when the bucket is not there. Neither is fixed by `singleNode`.
 
-Each pass first finishes the markers its own channel left. A marker names its channel, and recovery
-is keyed on the channel's name: two engines that store into separate databases must not read one
-prefix with channels of the same name, or each could finish the other's markers and the object
-would be stored in both. A stop at any step stores nothing twice:
-the store answers a message handed in again under its key with the message it already holds, and a
-marker whose object is gone, or was replaced, is deleted. An object written again at the same key
-with the same bytes in the same second as the one taken has the same tag and time, and is taken as
-the same object.
+## Read one prefix from more than one engine
 
-Before its first claim the source writes one probe object twice, under `<dir>/.claimed/.probe/`, to
-check that the bucket refuses the second write. A server that does not honour `If-None-Match` (some
-S3-compatible servers) is refused with `ERR_PATHWAYS_OBJECT_NO_CONDITIONAL_WRITE`: only a second
-write that succeeds, or a write the server answers `501 Not Implemented`, says that. Any other error
-the probe meets is given with its own code and checked again on the next pass:
-`ERR_PATHWAYS_S3_NOT_INSTALLED` when `@aws-sdk/client-s3` is not installed, and
-`ERR_PATHWAYS_S3_NO_SUCH_BUCKET` when the bucket is not there. Neither is fixed by `singleNode`.
+Each object is stored once even when two engines poll the prefix at once. Engines that share a
+database run one at a time, under the engine lease
+([running more than one engine](./running-more-than-one-engine.md)). Two engines that store into
+separate databases must not read one prefix with channels of the same name: a marker names its
+channel, and recovery is keyed on the channel's name, so each could finish the other's markers and
+the object would be stored in both. Give such channels different names, or each engine a prefix of
+its own.
+
+## Choose which objects a source takes
 
 The keys `minAge`, `minSize`, `maxSize`, `maxPerPoll`, `sortBy`, `stable`, `include`, `exclude`,
-`recursive` and `ignoreDot` work as they do on a folder. `keepProcessed`, `doneFile`, `errorDir` and
-`readTries` are refused: an object store claims by a marker and moves no file.
+`recursive` and `ignoreDot` work as they do on a folder
+([choose which files a source takes](./read-and-write-files.md#choose-which-files-a-source-takes)).
+`keepProcessed`, `doneFile`, `errorDir` and `readTries` are refused: an object store claims by a
+marker and moves no file.
 
 ## A server without conditional writes
 
@@ -102,13 +101,30 @@ destinations:
       dir: out
 ```
 
-## How the destination writes
+## Choose whether the destination replaces an object
 
 The destination writes each output as `<dir>/<message id>-<output number>.<extension>` in one
 request, so a reader never sees half of one. By default (`mode: create`) it writes with
 `If-None-Match: *`, so it never replaces an object. An object already there with the same bytes is an
 earlier attempt of the same delivery, cut off before it was recorded, and counts as delivered; one
-with other bytes rejects the message with the reason `OBJECT_EXISTS`. `mode: overwrite` replaces it.
+with other bytes rejects the message with the reason `OBJECT_EXISTS`. To replace it instead, set
+`mode: overwrite` in the destination's `s3:` block:
+
+```yaml title="channels/adt-to-lab/channel.yaml"
+source:
+  file:
+    dir: inbox
+    s3:
+      bucket: example-inbound-adt
+      region: us-east-1
+destinations:
+  - file:
+      dir: outbox
+      s3:
+        bucket: example-outbound-lab
+        region: us-east-1
+        mode: overwrite
+```
 
 ## An S3-compatible server
 
@@ -148,6 +164,7 @@ is later work.
 
 ## Related
 
+- [How a source claims files and objects](./file-and-object-claims.md).
 - [Read and write message files](./read-and-write-files.md), whose keys the source shares.
 - [Read and write Azure Blob Storage](./read-and-write-azure-blob-storage.md).
 - [Configuration reference: S3 block](./configuration-reference.md#s3-block).
