@@ -5,7 +5,9 @@ import cosyte from "@cosyte/eslint-config";
 // and reads a name configuration gives through one function. Everywhere else in src/ these rules
 // refuse the ways to reach the environment around it, and test/env-access.test.ts lints each way a
 // reviewer found against them. An environment object handed along (`io.env`, a context's `env`)
-// may be passed on, but not read, spread or listed outside src/env.ts.
+// may be passed on, but not read, spread or listed outside src/env.ts. The types hold most of this
+// too (src/env.ts makes Env opaque, and test/env-types.ts checks it); these rules also cover
+// `process` itself, which the types cannot, and a fixed name written where configuration gives one.
 const ENV_ONLY_IN_ENV_TS =
   "Read the environment through src/env.ts (engineVariable or configuredVariable).";
 
