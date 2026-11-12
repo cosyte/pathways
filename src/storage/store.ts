@@ -29,6 +29,15 @@ import {
   type LeaseClaimant,
   type LeaseHolder,
 } from "./lease.js";
+import type {
+  NodeInfo,
+  NodeJoin,
+  NodeReplace,
+  NodeRole,
+  NodeRow,
+  NodeSelf,
+  NodeState,
+} from "./nodes.js";
 import { markCopiesBodies } from "./ownership.js";
 import {
   migrateSchema,
@@ -52,6 +61,16 @@ export {
   type LeaseClaimant,
   type LeaseHolder,
 } from "./lease.js";
+export {
+  NODE_ROLES,
+  type NodeInfo,
+  type NodeJoin,
+  type NodeReplace,
+  type NodeRole,
+  type NodeRow,
+  type NodeSelf,
+  type NodeState,
+} from "./nodes.js";
 
 /**
  * Where a stored message stands. `cleared`: it failed, and an operator cleared it with
@@ -291,6 +310,29 @@ interface ChannelStatesTable {
   changed_at: Int64;
 }
 
+/**
+ * The engines on this database, one row per node id: who each is, what it runs, where it stands and
+ * when it last beat. Every time is in epoch milliseconds by the database's clock, never a node's.
+ * Ids, a host name, numbers and states only: no content and no URL. Since 0012.
+ */
+interface NodesTable {
+  node: string;
+  host: string;
+  pid: Int64;
+  /** When the node joined. */
+  started_at: Int64;
+  /** The version of Pathways it runs. */
+  version: string;
+  /** The schema generation that version brings a built-in store to; null for a custom store. */
+  schema_generation: number | null;
+  role: NodeRole;
+  /** 1 while it drains, else 0. */
+  draining: number;
+  /** How long after its last heartbeat it counts as stale. */
+  stale_after_ms: Int64;
+  heartbeat_at: Int64;
+}
+
 interface Tables {
   messages: MessagesTable;
   deliveries: DeliveriesTable;
@@ -298,6 +340,7 @@ interface Tables {
   leases: LeasesTable;
   channel_states: ChannelStatesTable;
   meta_index: MetaIndexTable;
+  nodes: NodesTable;
 }
 
 /**
@@ -995,6 +1038,7 @@ export function retentionStore(store: MessageStore): RetentionStore | undefined 
  *   project's transform; written before the content is read.
  * - `archive`: retention wrote and checked a sealed archive of messages it is about to prune or
  *   delete; written before it changes them.
+ * - `node-forget`: `pathways nodes forget` removed a stale node's row, or was refused.
  *
  * @example
  * ```ts
@@ -1020,6 +1064,7 @@ export const AUDIT_ACTIONS = [
   "verify",
   "bulk-replay",
   "archive",
+  "node-forget",
 ] as const;
 
 /**
@@ -1235,6 +1280,25 @@ export interface MessageStore {
   /** The lease's last holder, or `undefined` when it was never taken. Optional, with {@link acquireLease}. */
   leaseHolder?(name: string): Promise<LeaseHolder | undefined>;
   /**
+   * Writes this node's row, its join time and first heartbeat from the database's clock: a new row,
+   * or over a row of the same id that is stale, or that still names `replace`'s host and process
+   * and has not beaten for `replace.silentMs` (an earlier run of this node whose heartbeat stopped).
+   * Answers with the live row that holds the id instead. Optional, with {@link nodeHeartbeat},
+   * {@link leaveNode}, {@link nodes} and {@link forgetNode}.
+   */
+  joinNode?(info: NodeInfo, replace?: NodeReplace): Promise<NodeJoin>;
+  /**
+   * One UPDATE: sets the node's heartbeat from the database's clock in the same statement, with its
+   * role and draining flag, while the row still names `self`. Returns whether it did. Optional.
+   */
+  nodeHeartbeat?(self: NodeSelf, state: NodeState): Promise<boolean>;
+  /** Removes the node's row while it still names `self`, at a clean stop. Optional. */
+  leaveNode?(self: NodeSelf): Promise<boolean>;
+  /** Every node row, by node id, with its heartbeat age by the database's clock. Optional. */
+  nodes?(): Promise<NodeRow[]>;
+  /** Removes the row of `node` only while it is stale. Returns whether it did. Optional. */
+  forgetNode?(node: string): Promise<boolean>;
+  /**
    * Every channel an operator paused or stopped, by name; a channel missing from it runs. Optional,
    * with {@link setChannelState}: a store without them keeps a channel's state in the engine only,
    * so a restart forgets it.
@@ -1407,6 +1471,48 @@ export function leaseStore(store: MessageStore): LeaseStore | undefined {
     renewLease: (name, epoch, ttlMs) => leases.renewLease(name, epoch, ttlMs),
     releaseLease: (name, epoch) => leases.releaseLease(name, epoch),
     leaseHolder: (name) => leases.leaseHolder(name),
+  };
+}
+
+/**
+ * The node methods of {@link MessageStore}, all five present.
+ *
+ * @example
+ * ```ts
+ * const nodes: NodeStore | undefined = nodeStore(store);
+ * ```
+ */
+export type NodeStore = Required<
+  Pick<MessageStore, "joinNode" | "nodeHeartbeat" | "leaveNode" | "nodes" | "forgetNode">
+>;
+
+/**
+ * `store`'s node methods, or `undefined` when it lacks any of the five: an engine on such a store
+ * writes no node row, and `pathways nodes` has nothing to list. {@link Store} has them; a custom
+ * store may.
+ *
+ * @example
+ * ```ts
+ * const rows = (await nodeStore(store)?.nodes()) ?? [];
+ * ```
+ */
+export function nodeStore(store: MessageStore): NodeStore | undefined {
+  if (
+    typeof store.joinNode !== "function" ||
+    typeof store.nodeHeartbeat !== "function" ||
+    typeof store.leaveNode !== "function" ||
+    typeof store.nodes !== "function" ||
+    typeof store.forgetNode !== "function"
+  ) {
+    return undefined;
+  }
+  const nodes = store as MessageStore & NodeStore;
+  return {
+    joinNode: (info, replace) => nodes.joinNode(info, replace),
+    nodeHeartbeat: (self, state) => nodes.nodeHeartbeat(self, state),
+    leaveNode: (self) => nodes.leaveNode(self),
+    nodes: () => nodes.nodes(),
+    forgetNode: (node) => nodes.forgetNode(node),
   };
 }
 
@@ -1767,6 +1873,28 @@ export function migrations(kind: StorageKind): Record<string, SchemaStep> {
       tag: "expand",
       async up(db: Kysely<unknown>): Promise<void> {
         await db.schema.alterTable("deliveries").addColumn("failed_at", t.time).execute();
+      },
+    },
+    "0012-nodes": {
+      // Expand only: a new table, which an older Pathways never reads. Each engine writes its own
+      // row when it starts and removes it at a clean stop, so the table starts empty. To roll it
+      // back, stop every engine and drop the table; nothing else refers to it.
+      tag: "expand",
+      async up(db: Kysely<unknown>): Promise<void> {
+        await db.schema
+          .createTable("nodes")
+          .addColumn("node", t.name, (col) => col.primaryKey())
+          .addColumn("host", t.name, (col) => col.notNull())
+          .addColumn("pid", t.int64, (col) => col.notNull())
+          .addColumn("started_at", t.int64, (col) => col.notNull())
+          .addColumn("version", t.status, (col) => col.notNull())
+          .addColumn("schema_generation", "integer")
+          .addColumn("role", t.status, (col) => col.notNull())
+          .addColumn("draining", "integer", (col) => col.notNull())
+          .addColumn("stale_after_ms", t.int64, (col) => col.notNull())
+          .addColumn("heartbeat_at", t.int64, (col) => col.notNull())
+          .$call(t.table)
+          .execute();
       },
     },
   };
@@ -2850,6 +2978,130 @@ export class Store implements MessageStore, ContentStore, MetaStore {
       epoch: Number(row.epoch),
       expiresInMs: Number(row.expires_at) - Number(row.now),
     };
+  }
+
+  /**
+   * Writes this node's row: over a stale row of the same id, or one that still names `replace` and
+   * has not beaten for `replace.silentMs`, in one UPDATE that reads the database's clock; else a new
+   * row. A row that beat within that time is live, whatever process it names, so it stays. Of two nodes joining under one id
+   * at once, one insert is refused, and that node reads the other's live row. Every time comes from
+   * the database's clock.
+   */
+  async joinNode(info: NodeInfo, replace?: NodeReplace): Promise<NodeJoin> {
+    const now = DATABASE_NOW[this.kind];
+    const row = {
+      host: info.host,
+      pid: info.pid,
+      version: info.version,
+      schema_generation: info.schemaGeneration,
+      role: info.role,
+      draining: info.draining ? 1 : 0,
+      stale_after_ms: info.staleAfterMs,
+    };
+    for (let round = 0; round < 2; round += 1) {
+      const taken = await this.db
+        .updateTable("nodes")
+        .set({ ...row, started_at: now, heartbeat_at: now })
+        .where("node", "=", info.node)
+        .where((eb) =>
+          eb.or([
+            eb(sql<number>`${sql.ref("heartbeat_at")} + ${sql.ref("stale_after_ms")}`, "<=", now),
+            ...(replace === undefined
+              ? []
+              : [
+                  eb.and([
+                    eb("host", "=", replace.host),
+                    eb("pid", "=", replace.pid),
+                    eb(sql<number>`${sql.ref("heartbeat_at")} + ${replace.silentMs}`, "<=", now),
+                  ]),
+                ]),
+          ]),
+        )
+        .executeTakeFirst();
+      if (taken.numUpdatedRows > 0n) return { joined: true };
+      const holder = (await this.nodes(info.node))[0];
+      if (holder !== undefined) return { joined: false, holder };
+      const inserted = await this.db
+        .insertInto("nodes")
+        .values({ node: info.node, ...row, started_at: now, heartbeat_at: now })
+        .execute()
+        .then(
+          () => true,
+          () => false,
+        );
+      if (inserted) return { joined: true };
+    }
+    /* v8 ignore next 2: a refused insert means a row exists, which the second round updates or reads */
+    throw new Error("the node row could not be written or read");
+  }
+
+  /** One UPDATE: the heartbeat from the database's clock, with the role and draining flag. */
+  async nodeHeartbeat(self: NodeSelf, state: NodeState): Promise<boolean> {
+    const beat = await this.db
+      .updateTable("nodes")
+      .set({
+        heartbeat_at: DATABASE_NOW[this.kind],
+        role: state.role,
+        draining: state.draining ? 1 : 0,
+      })
+      .where("node", "=", self.node)
+      .where("host", "=", self.host)
+      .where("pid", "=", self.pid)
+      .executeTakeFirst();
+    return beat.numUpdatedRows > 0n;
+  }
+
+  /** Removes this node's row while it still names `self`. */
+  async leaveNode(self: NodeSelf): Promise<boolean> {
+    const left = await this.db
+      .deleteFrom("nodes")
+      .where("node", "=", self.node)
+      .where("host", "=", self.host)
+      .where("pid", "=", self.pid)
+      .executeTakeFirst();
+    return left.numDeletedRows > 0n;
+  }
+
+  /** Every node row, or the one of `node`, by node id, aged by the database's clock. */
+  async nodes(node?: string): Promise<NodeRow[]> {
+    const rows = await this.db
+      .selectFrom("nodes")
+      .selectAll()
+      .select(DATABASE_NOW[this.kind].as("now"))
+      .$if(node !== undefined, (q) => q.where("node", "=", node as string))
+      .orderBy("node")
+      .execute();
+    return rows.map((row) => {
+      const heartbeatAgeMs = Math.max(0, Number(row.now) - Number(row.heartbeat_at));
+      const staleAfterMs = Number(row.stale_after_ms);
+      return {
+        node: row.node,
+        host: row.host,
+        pid: Number(row.pid),
+        version: row.version,
+        schemaGeneration: row.schema_generation === null ? null : Number(row.schema_generation),
+        role: row.role,
+        draining: Number(row.draining) !== 0,
+        staleAfterMs,
+        startedAt: new Date(Number(row.started_at)).toISOString(),
+        heartbeatAgeMs,
+        stale: heartbeatAgeMs >= staleAfterMs,
+      };
+    });
+  }
+
+  /** Removes the row of `node` while it is stale, by the database's clock, in one DELETE. */
+  async forgetNode(node: string): Promise<boolean> {
+    const forgotten = await this.db
+      .deleteFrom("nodes")
+      .where("node", "=", node)
+      .where(
+        sql<number>`${sql.ref("heartbeat_at")} + ${sql.ref("stale_after_ms")}`,
+        "<=",
+        DATABASE_NOW[this.kind],
+      )
+      .executeTakeFirst();
+    return forgotten.numDeletedRows > 0n;
   }
 
   /** Every channel an operator paused or stopped. */
