@@ -216,6 +216,8 @@ interface DeliveriesTable {
   sending_attempt: number | null;
   /** The latest attempt found cut off: set means every later send is a possible duplicate. Since 0005. */
   interrupted_attempt: number | null;
+  /** When the delivery failed for good (ISO 8601, UTC); null until then. Since 0011. */
+  failed_at: string | null;
 }
 
 /** The audit log. Rows are only ever inserted: nothing here updates or deletes one. Since 0003. */
@@ -430,6 +432,11 @@ export interface StoredDelivery {
    * flagged as a possible duplicate.
    */
   readonly interruptedAttempt?: number | undefined;
+  /**
+   * When it failed for good (ISO 8601, UTC), by the store's clock. Unset until then, and on a
+   * delivery an older Pathways failed or a store that does not record it.
+   */
+  readonly failedAt?: string | undefined;
 }
 
 /**
@@ -683,6 +690,11 @@ export interface RequeueRequest {
   readonly failure?: string | undefined;
   /** How many destinations the channel has now. */
   readonly destinations: number;
+  /**
+   * The generation the caller read. When set, storage also refuses with `changed` when the message
+   * was replayed or resent since, so a bulk replay never replays a message twice.
+   */
+  readonly expectedGeneration?: number | undefined;
 }
 
 /**
@@ -850,6 +862,8 @@ export interface StoredDeliveryRow {
   readonly sendingAt: number | null;
   readonly sendingAttempt: number | null;
   readonly interruptedAttempt: number | null;
+  /** When it failed for good; unset on a store that does not record it. */
+  readonly failedAt?: string | null | undefined;
 }
 
 /**
@@ -975,6 +989,7 @@ export const AUDIT_ACTIONS = [
   "channel-halt",
   "channel-reload",
   "verify",
+  "bulk-replay",
   "archive",
 ] as const;
 
@@ -1710,6 +1725,15 @@ export function migrations(kind: StorageKind): Record<string, SchemaStep> {
           .execute();
       },
     },
+    "0011-delivery-failed-at": {
+      // Expand only: a column that may be null, which an older Pathways never reads or writes. A
+      // delivery an older Pathways failed has none, and reads as one that failed before any count
+      // a newer Pathways makes. To roll it back, stop every engine and drop the column.
+      tag: "expand",
+      async up(db: Kysely<unknown>): Promise<void> {
+        await db.schema.alterTable("deliveries").addColumn("failed_at", t.time).execute();
+      },
+    },
   };
 }
 
@@ -2272,6 +2296,7 @@ export class Store implements MessageStore, ContentStore, MetaStore {
         "delivered_at",
         "last_error",
         "interrupted_attempt",
+        "failed_at",
       ])
       .where("message_id", "=", messageId)
       .orderBy("id")
@@ -2287,6 +2312,7 @@ export class Store implements MessageStore, ContentStore, MetaStore {
       deliveredAt: row.delivered_at,
       error: row.last_error,
       ...(row.interrupted_attempt === null ? {} : { interruptedAttempt: row.interrupted_attempt }),
+      ...(row.failed_at === null ? {} : { failedAt: row.failed_at }),
     }));
   }
 
@@ -2690,7 +2716,13 @@ export class Store implements MessageStore, ContentStore, MetaStore {
   async failDelivery(deliveryId: number, error: string, epoch?: number): Promise<void> {
     const updated = await this.db
       .updateTable("deliveries")
-      .set({ status: "failed", last_error: error, sending_at: null, sending_attempt: null })
+      .set({
+        status: "failed",
+        last_error: error,
+        sending_at: null,
+        sending_attempt: null,
+        failed_at: this.now().toISOString(),
+      })
       .where("id", "=", deliveryId)
       .$if(epoch !== undefined, (q) => q.where(this.fence("pending", epoch)))
       .executeTakeFirst();
@@ -2946,7 +2978,7 @@ export class Store implements MessageStore, ContentStore, MetaStore {
    */
   async requeue(messageId: number, request: RequeueRequest, actor: string): Promise<RequeueResult> {
     const at = this.now().toISOString();
-    const { mode, expected, outputs, failure, destinations } = request;
+    const { mode, expected, outputs, failure, destinations, expectedGeneration } = request;
     let status: MessageStatus = "transformed";
     if (failure !== undefined) status = "failed";
     else if (outputs.length === 0) status = "filtered";
@@ -2963,6 +2995,9 @@ export class Store implements MessageStore, ContentStore, MetaStore {
           .where("id", "=", messageId)
           .where("status", "=", expected)
           .where("content_dropped_at", "is", null)
+          .$if(expectedGeneration !== undefined, (q) =>
+            q.where("generation", "=", expectedGeneration as number),
+          )
           .executeTakeFirst();
         const message = await tx
           .selectFrom("messages")
@@ -3226,6 +3261,7 @@ export class Store implements MessageStore, ContentStore, MetaStore {
         sendingAt: int64OrNull(delivery.sending_at),
         sendingAttempt: delivery.sending_attempt,
         interruptedAttempt: delivery.interrupted_attempt,
+        failedAt: delivery.failed_at,
       })),
     };
   }
