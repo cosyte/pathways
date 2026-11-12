@@ -2,7 +2,7 @@
 id: pass-messages-through-without-storing
 title: Pass messages through without storing them
 sidebar_label: Store nothing
-description: "Run a channel that stores no message: each one is transformed and delivered while its sender waits, and the sender is answered only once every destination accepted it."
+description: "Run a channel that stores no message: the sender waits while each is transformed and delivered, and is answered once every destination accepted it."
 ---
 
 # Pass messages through without storing them

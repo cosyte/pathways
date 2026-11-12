@@ -541,6 +541,13 @@ Why it failed, as stored: can quote the message.
 
 > `readonly` **id**: `number`
 
+##### idempotencyClaim?
+
+> `readonly` `optional` **idempotencyClaim?**: `string` \| `null`
+
+The same hash when it held its channel's claim to the key, the one message stored under it;
+`null` when it did not. Absent from an archive an older Pathways wrote.
+
 ##### idempotencyKey
 
 > `readonly` **idempotencyKey**: `string` \| `null`
@@ -3495,9 +3502,11 @@ Stores an incoming message, durably, before its source acknowledges it: as `rece
 `failed` when `options.failure` is set. Flags it as a possible duplicate when an earlier
 message of the channel has the same `options.duplicateKey`. Given `options.resumed`, when a
 message of the channel was already stored with the same `options.idempotencyKey`, stores
-nothing and returns that message's id with `alreadyStored: true`. A store that ignores the key
-still works, and a source that stops between storing and acknowledging then stores that
-message twice.
+nothing and returns that message's id with `alreadyStored: true`. A store that more than one
+connection writes to makes that lookup and the insert one atomic step (Pathways' own store
+claims the key in a column a unique index covers), or two hand-ins of one message at the same
+moment can both be stored. A store that ignores the key still works, and a source that stops
+between storing and acknowledging then stores that message twice.
 
 ###### Parameters
 
@@ -5765,6 +5774,12 @@ Why it failed, as stored: can quote the message.
 
 > `readonly` **id**: `number`
 
+##### idempotencyClaim
+
+> `readonly` **idempotencyClaim**: `string` \| `null`
+
+The idempotency key again when this message holds its claim; null when it does not.
+
 ##### idempotencyKey
 
 > `readonly` **idempotencyKey**: `string` \| `null`
@@ -5863,7 +5878,9 @@ An opaque key that names this one message to its source (the engine passes a has
 with the message. With `resumed`, when a message of the channel was already stored with the
 same key, nothing is stored and that message's id comes back with `alreadyStored`: a source
 that stored a message and then stopped before it could acknowledge it hands it in again on
-restart, and it is stored once.
+restart, and it is stored once. That holds for two hand-ins at the same moment too, on two
+connections or two nodes: one is stored, and the other gets its id. Without `resumed` the
+message is always stored.
 
 ##### meta?
 

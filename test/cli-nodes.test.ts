@@ -147,7 +147,7 @@ describe("pathways start's node, on SQLite", () => {
         host: hostname(),
         pid: process.pid,
         version: VERSION,
-        schemaGeneration: 13,
+        schemaGeneration: 14,
         role: "active",
         draining: false,
         staleAfterMs: 3_000,
@@ -341,7 +341,7 @@ describe("pathways nodes forget", () => {
     expect((await cli(["migrate", "-C", root])).code).toBe(EXIT.ok);
     const older = new SqliteDatabase(db(root));
     older.exec(
-      "drop index deliveries_by_destination_key; alter table deliveries drop column destination_key; drop table nodes; delete from kysely_migration where name in ('0012-nodes', '0013-destination-keys'); delete from schema_info where step in ('0012-nodes', '0013-destination-keys')",
+      "drop index messages_by_channel_idempotency_claim; alter table messages drop column idempotency_claim; drop index deliveries_by_destination_key; alter table deliveries drop column destination_key; drop table nodes; delete from kysely_migration where name in ('0012-nodes', '0013-destination-keys', '0014-idempotency-claims'); delete from schema_info where step in ('0012-nodes', '0013-destination-keys', '0014-idempotency-claims')",
     );
     older.close();
     expect(await bad()).toMatchObject({ code: EXIT.usage, out: "", err: rule });
