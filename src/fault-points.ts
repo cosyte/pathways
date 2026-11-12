@@ -36,6 +36,11 @@ import { existsSync, rmSync, writeSync } from "node:fs";
  * - `after-claim-flush`: a file source made the pass's claims durable, and has stored none of them.
  * - `mid-move-back`: a file source moved a file that is not the one it checked to a held name in
  *   `.claimed/` and linked it from there back where it came from, and has not removed the held name.
+ * - `drain-not-ready`: `pathways start`, told to stop, reports draining and has not yet waited
+ *   `drain.notReadyDelay`: its sources still take messages in.
+ * - `drain-sources-closed`: a draining engine closed its listening sources and has not yet ended
+ *   its passes or made its last one.
+ * - `drain-before-release`: a draining engine stopped, and has not yet released its lease.
  */
 export const FAULT_POINTS = [
   "after-store-before-ack",
@@ -46,6 +51,9 @@ export const FAULT_POINTS = [
   "after-claim-move",
   "after-claim-flush",
   "mid-move-back",
+  "drain-not-ready",
+  "drain-sources-closed",
+  "drain-before-release",
 ] as const;
 
 /** One of {@link FAULT_POINTS}. */

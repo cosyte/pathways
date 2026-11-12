@@ -46,8 +46,12 @@ docker run --rm --volume "$PWD:/project" pathways start --once
 docker run --rm --volume "$PWD:/project" pathways status
 ```
 
-`docker stop` sends the engine SIGTERM, the image's stop signal, and it stops cleanly: readiness
-turns 503, sources stop taking messages, what is being stored is answered, and the process exits 0.
+`docker stop` sends the engine SIGTERM, the image's stop signal, and it drains: readiness turns 503,
+sources stop taking messages, what is being stored is answered, the work in flight finishes within
+`drain.timeout`, and the process exits 0. Docker sends SIGKILL 10 seconds after SIGTERM unless told
+otherwise, which is less than the 30 second default `drain.timeout`: give it longer than
+`drain.notReadyDelay` plus `drain.timeout` with `docker stop --time 40`, or `--stop-timeout 40` on
+`docker run`. See [Stop and upgrade a node](./stop-and-upgrade-a-node.md).
 
 ## Health check
 

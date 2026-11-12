@@ -15,7 +15,7 @@ Every command runs on the project in the current folder, or the one `-C <dir>` (
 names. `pathways --help` prints the usage, and `pathways --version` the version.
 
 The commands that read or change stored messages (`start`, `status`, `messages`, `replay`, `clear`,
-`retention`, `audit`, `rekey`, `lease`, and `verify` unless it is given `--samples`) open the database as `start` does, so they need the same
+`retention`, `audit`, `rekey`, `lease`, `nodes`, and `verify` unless it is given `--samples`) open the database as `start` does, so they need the same
 `pathways.yaml`, encryption keys and environment. None of them prints a value you typed back to you:
 an argument can hold a path or a value from a message, and standard error often ends up in a log.
 
@@ -46,10 +46,13 @@ Runs every channel, and the health endpoint and the probe listener if `pathways.
 them, until it receives SIGINT or SIGTERM. Retention runs after the first pass and then every `retentionInterval`. Needs
 `encryption` in `pathways.yaml`.
 
-On either signal it stops cleanly and exits 0: `/readyz` answers 503 `draining` at once, sources stop
-taking messages, what is being stored is
-answered, and each [lifecycle hook](./add-lifecycle-hooks.md) gets up to its time limit to finish the
-events queued for it. Windows has no SIGTERM. There Ctrl+C in the engine's console is SIGINT and
+On either signal it drains and exits 0: `/readyz` answers 503 `draining` at once, it keeps taking
+messages in for `drain.notReadyDelay` (0 by default) so a load balancer stops sending it new ones,
+then its listeners close and polling stops, each MLLP connection finishes the message it is handling
+and its ACK, the transforms and sends under way finish within `drain.timeout` (30 seconds by
+default), it releases its lease, and each [lifecycle hook](./add-lifecycle-hooks.md) gets up to its
+time limit to finish the events queued for it. A second signal stops it at once. See
+[Stop and upgrade a node](./stop-and-upgrade-a-node.md). Windows has no SIGTERM. There Ctrl+C in the engine's console is SIGINT and
 stops it the same way, while ending the process (Task Manager, `taskkill /F`, or a service manager
 that gives up waiting) stops it at once, with no stop at all. A hard stop loses no message: each one
 was stored before its source acknowledged it, and a file the engine had claimed is stored on the
@@ -281,7 +284,7 @@ pathways audit [--action <name>] [--message <id>] [--channel <name>] [--since <t
 
 Reads the audit log, newest first. `--action` takes `search`, `view`, `content-view`, `replay`,
 `resend`, `clear`, `retention`, `config`, `lease-release`, `migrate`, `channel-pause`,
-`channel-resume`, `channel-stop`, `channel-halt`, `channel-reload`, `verify`, `bulk-replay` or `archive`; `--message` takes a
+`channel-resume`, `channel-stop`, `channel-halt`, `channel-reload`, `verify`, `bulk-replay`, `archive` or `node-forget`; `--message` takes a
 message id; the other options are as for `messages`.
 
 ## pathways rekey
@@ -320,6 +323,41 @@ it has left, by the database's clock. `lease release --force` frees the lease of
 host is gone, so the next start takes it at once instead of after it lapses, and writes the release
 to the audit log (`lease-release`); it exits 1 when the lease is already free. An engine still
 running under a lease freed this way stops at its next renewal.
+
+## pathways nodes
+
+```text
+pathways nodes [--json]
+pathways nodes forget <id> [--json]
+```
+
+`nodes` lists every engine on this database, one row per node: its node id, host, process id, role,
+Pathways version, and how long ago its last heartbeat was, by the database's clock, so no engine's own
+clock moves it. A node is `stale` once its last heartbeat is older than three of its heartbeat
+intervals (`node.heartbeat` in `pathways.yaml`, 5 seconds by default, so 15 seconds), and `live`
+before that. The role is `single` (a custom store without leases), `standby`, `active`, `draining`
+(told to stop, closing its sources) or `fenced` (it lost the engine lease and is stopping). An engine
+writes its row when it starts and removes it at a clean stop, so a row that shows stale is an engine
+that was killed or whose host is gone.
+
+```text
+NODE              HOST      PID   ROLE     VERSION  HEARTBEAT  STATE
+3f9a1c2b7d4e5f60  engine-a  4242  active   0.0.2    1.2s ago   live
+engine-b          engine-b  311   standby  0.0.2    3.9s ago   live
+```
+
+`nodes forget <id>` removes a stale node's row, so the list shows it no more, and writes that to the
+audit log (`node-forget`), whichever way it goes. It exits 1, changing nothing, when no node has that
+id, or when the node is live: stop that engine, and its row goes with it. It exits 1 too when the
+rows cannot be read or the row cannot be removed, audited with the error's code, and 2 when the
+argument is not a node id, audited without the argument. That audit entry changes no schema: it is
+written only to a database already at this version's schema, and on SQLite with no database file,
+or a database that will not open at this version's schema, the command exits 2 unaudited. The rows hold ids, a host name, numbers and states: no message content
+and no URL.
+
+With `--json`, `nodes` prints `{ "nodes": [...] }`, each with `node`, `host`, `pid`, `version`,
+`schemaGeneration`, `role`, `draining`, `staleAfterMs`, `startedAt`, `heartbeatAgeMs` and `stale`.
+See [nodes and heartbeats](./check-status-and-health.md#nodes-and-heartbeats).
 
 ## pathways probe
 
@@ -402,13 +440,13 @@ answers, it says `engine not running` and exits 1. See
 
 ## Exit codes
 
-| Code | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0    | done                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| 1    | a test failed; the engine, a command or an extension module could not start or stopped on an error; `init` could not write; `rekey` left a value not under the current key, or on SQLite a read under way kept it from emptying the write-ahead log; a replay, resend or clear was refused, or the message failed again; a bulk replay's count was not typed, or it was stopped; another engine holds the lease, the engine lost its lease, or there was no lease to release; the database schema is one this version will not run on or migrate; `verify` found a difference or a failure; `secrets check` found a secret or the key provider that could not be had; `probe` found the engine not alive or not ready; no engine runs the project, or a channel command was refused |
-| 2    | the command line was not understood, or a bulk replay's count could not be asked for; nothing was done                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| 3    | the configuration is invalid; nothing was done                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| 4    | a message named does not exist; any others named were still acted on; the run given to `replay --resume` does not exist                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Code | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0    | done                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| 1    | a test failed; the engine, a command or an extension module could not start or stopped on an error; `init` could not write; `rekey` left a value not under the current key, or on SQLite a read under way kept it from emptying the write-ahead log; a replay, resend or clear was refused, or the message failed again; a bulk replay's count was not typed, or it was stopped; another engine holds the lease, the engine lost its lease, or there was no lease to release; another live engine runs under the same node id, or a node to forget was unknown or live; the database schema is one this version will not run on or migrate; `verify` found a difference or a failure; `secrets check` found a secret or the key provider that could not be had; `probe` found the engine not alive or not ready; no engine runs the project, or a channel command was refused |
+| 2    | the command line was not understood, or a bulk replay's count could not be asked for; nothing was done, beside the audit entry `nodes forget` writes for a malformed id                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| 3    | the configuration is invalid; nothing was done                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| 4    | a message named does not exist; any others named were still acted on; the run given to `replay --resume` does not exist                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 
 ## Related
 
