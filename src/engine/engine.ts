@@ -128,7 +128,11 @@ export function livenessBoundMs(project: ProjectConfig): number {
  */
 export type EngineWait = (ms: number, signal: AbortSignal) => Promise<void>;
 
-/** {@link EngineWait} on Node's timers, a longer wait than one holds cut to the longest it does. */
+/**
+ * {@link EngineWait} on Node's timers, a longer wait than one holds cut to the longest it does. A
+ * delivery's deadline is kept in full all the same: its {@link DeadlineTimer} arms again until the
+ * deadline is due, so a `timeout` longer than 24 days cuts an attempt off at that time, not at 24.
+ */
 const realWait: EngineWait = (ms, signal) =>
   sleep(Math.min(ms, MAX_STOP_DEADLINE_MS), undefined, { signal }).catch(() => undefined);
 
@@ -2009,7 +2013,8 @@ export class Engine {
         const halt = channel.halt.signal;
         // The whole attempt (connecting, sending, and the receiver's confirmation) is bounded.
         // One controller per attempt: aborted by a halt, with the halt's reason, or at the deadline.
-        // The halt signal is a fresh one here (a halt replaces the one it aborts at once).
+        // A halt replaces the signal it aborts at once, but an `abort` listener never fires on a
+        // signal already aborted, so one is checked first: such an attempt is cut before it sends.
         const limitMs = deliveryDeadlineMs(config.destinations[index]);
         const cutOff = new AbortController();
         const { signal } = cutOff;
@@ -2017,7 +2022,8 @@ export class Engine {
         const onHalt = (): void => {
           cutOff.abort(halt.reason);
         };
-        halt.addEventListener("abort", onHalt, { once: true });
+        if (halt.aborted) onHalt();
+        else halt.addEventListener("abort", onHalt, { once: true });
         deadline.set(this.now() + limitMs, () => {
           expired = true;
           cutOff.abort();
@@ -2028,13 +2034,14 @@ export class Engine {
         };
         try {
           await untilAborted(
-            destination.deliver({
-              messageId: delivery.messageId,
-              seq: delivery.seq,
-              body: delivery.body,
-              ...(resend === undefined ? {} : { resend }),
-              signal,
-            }),
+            () =>
+              destination.deliver({
+                messageId: delivery.messageId,
+                seq: delivery.seq,
+                body: delivery.body,
+                ...(resend === undefined ? {} : { resend }),
+                signal,
+              }),
             signal,
           );
         } catch (thrown) {
@@ -2210,17 +2217,17 @@ export function errorCode(error: unknown): string | undefined {
 }
 
 /**
- * Settles as `work` does, or rejects as soon as `signal` aborts, leaving `work` to settle unheard.
+ * Starts `send` and settles as it does, or rejects as soon as `signal` aborts, leaving it to settle
+ * unheard. A signal already aborted rejects at once, and `send` is never started.
  */
-function untilAborted(work: Promise<void>, signal: AbortSignal): Promise<void> {
-  // The signal is made just before the send starts, with nothing awaited between, so it cannot
-  // have aborted yet: a halt replaces a used signal with a fresh one, and the deadline is a timer.
+function untilAborted(send: () => Promise<void>, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.reject(new Error("the send was cut off"));
   return new Promise((resolve, reject) => {
     const onAbort = (): void => {
       reject(new Error("the send was cut off"));
     };
     signal.addEventListener("abort", onAbort, { once: true });
-    work.then(
+    send().then(
       () => {
         signal.removeEventListener("abort", onAbort);
         resolve();
