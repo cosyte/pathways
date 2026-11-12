@@ -817,6 +817,12 @@ interface RunningChannel {
    */
   readonly facts: Map<number, SourceFacts>;
   /**
+   * The metadata the engine set for each message it took in that waits for its transform, by
+   * message id, kept as `facts` is, so the transform reads it without parsing the message again. A
+   * message past the bound, or taken in before a restart, has it worked out again from its body.
+   */
+  readonly metas: Map<number, MessageMeta>;
+  /**
    * Each `sink.receive` under way, settled once its message's facts are set or it failed: a pass that
    * takes a message whose facts are not set yet waits for these before it runs the transform.
    */
@@ -1056,6 +1062,7 @@ export class Engine {
           draining: false,
           reloads: Promise.resolve(),
           facts: new Map(),
+          metas: new Map(),
           receiving: new Set(),
         };
         this.channels.push(channel);
@@ -1972,6 +1979,8 @@ export class Engine {
           // An engine that lost its lease takes nothing more in: the source answers as it does
           // when a message cannot be stored, so the sender keeps it.
           this.options.fence?.check();
+          // Worked out before the store call, which may take the body over.
+          const meta = messageMetaOf(config.format, body);
           received = await store.receive(config.name, body, {
             // Storage keeps a hash of each key, so a sender's identifiers and a file's name are not
             // stored.
@@ -1982,7 +1991,7 @@ export class Engine {
             size: body.byteLength,
             // The metadata the engine sets (`ctx.meta`), stored with the message, so a
             // destination that fills a URL from it reads what the message carried when it came in.
-            ...metaOption(messageMetaOf(config.format, body)),
+            ...metaOption(meta),
             // Kept with the metadata once the body is dropped, to match a copy held elsewhere.
             ...(config.settings.content === "dropAfterDelivery"
               ? { contentHash: createHash("sha256").update(body).digest("hex") }
@@ -1995,6 +2004,7 @@ export class Engine {
               received.id,
               sourceFacts(config.source.kind, passed, body.byteLength, receivedAt),
             );
+            keepFacts(channel.metas, received.id, meta);
           }
           settled();
         } catch (error) {
@@ -2110,8 +2120,9 @@ export class Engine {
       }
       const source = channel.facts.get(next.id);
       channel.facts.delete(next.id);
-      // Worked out again from the body, as it was at receipt, rather than read back from storage.
-      const meta = messageMetaOf(config.format, next.body);
+      // As set at receipt; worked out again from the body, which gives the same, when not held.
+      const meta = channel.metas.get(next.id) ?? messageMetaOf(config.format, next.body);
+      channel.metas.delete(next.id);
       const outcome: TransformOutcome = await worker.run(next.body, {
         transfer: owned,
         // Every message the engine transforms is on its first run: a replay runs elsewhere.

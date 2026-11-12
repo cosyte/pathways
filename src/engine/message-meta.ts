@@ -4,7 +4,7 @@
 // at receipt, before its transform, on a replay and under `pathways test`. Only the MSH segment and
 // the first PID segment are parsed, never the whole message, since receipt waits on it.
 
-import { parseHL7 } from "@cosyte/hl7";
+import { parseHL7, type Hl7Message } from "@cosyte/hl7";
 
 import type { Format } from "../config/schema.js";
 import type { MessageMeta } from "../encryption/blind-index.js";
@@ -37,6 +37,7 @@ export type MessageMetaKey = (typeof MESSAGE_META_KEYS)[number];
 export const MESSAGE_META_MAX_LENGTH = 200;
 
 const CR = 0x0d;
+const CR_BYTE = Buffer.of(CR);
 const LF = 0x0a;
 
 /**
@@ -59,13 +60,15 @@ export function messageMetaOf(format: Format, body: Uint8Array): MessageMeta {
   const bytes = Buffer.from(body.buffer, body.byteOffset, body.byteLength);
   const segments = firstSegments(bytes);
   if (segments === undefined) return {};
+  // One parse of the two segments; a PID segment that cannot be read is left out, and the MSH
+  // segment alone parsed instead.
+  const message =
+    readable(
+      segments.pid === undefined ? undefined : Buffer.concat([segments.msh, CR_BYTE, segments.pid]),
+    ) ?? readable(segments.msh);
+  if (message === undefined) return {};
+  const header = message.meta;
   const meta: Record<string, string> = {};
-  let header;
-  try {
-    header = parseHL7(segments.msh).meta;
-  } catch {
-    return {};
-  }
   set(meta, "messageType", header.type);
   set(meta, "messageCode", header.messageCode);
   set(meta, "triggerEvent", header.triggerEvent);
@@ -76,15 +79,28 @@ export function messageMetaOf(format: Format, body: Uint8Array): MessageMeta {
   set(meta, "sendingFacility", header.sendingFacility);
   set(meta, "receivingApp", header.receivingApp);
   set(meta, "receivingFacility", header.receivingFacility);
-  if (segments.pid !== undefined) {
-    try {
-      const pair = Buffer.concat([segments.msh, Buffer.of(CR), segments.pid]);
-      set(meta, "mrn", parseHL7(pair).patient?.mrn);
-    } catch {
-      // A PID segment that cannot be read leaves `mrn` out; the header's fields stand.
-    }
-  }
+  set(meta, "mrn", mrnOf(message));
   return meta;
+}
+
+/** The message's medical record number, or undefined when its PID segment cannot be read. */
+function mrnOf(message: Hl7Message): string | undefined {
+  try {
+    return message.patient?.mrn;
+    /* v8 ignore next 3 -- a guard: no PID that parses has been seen to make the getter throw */
+  } catch {
+    return undefined;
+  }
+}
+
+/** `bytes` parsed, or undefined when there are none or they do not parse. */
+function readable(bytes: Buffer | undefined): Hl7Message | undefined {
+  if (bytes === undefined) return undefined;
+  try {
+    return parseHL7(bytes);
+  } catch {
+    return undefined;
+  }
 }
 
 /** Sets `key` to `value` when it holds text, trimmed, within the length bound. */
