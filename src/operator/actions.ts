@@ -191,7 +191,8 @@ export async function replayMessages(
       outputs = message.status === "transformed" ? await store.outputs(id) : [];
       if (outputs.length === 0) return refuse(id, channel.name, "no-output");
     } else {
-      const worker = await workerFor(project, channel, workers, context.env ?? processEnv());
+      const env = context.env ?? processEnv();
+      const worker = await workerFor(project, channel, workers, env);
       if (!(worker instanceof ChannelWorker)) {
         return refuse(id, channel.name, "transform-load", describeFailure(worker, channel));
       }

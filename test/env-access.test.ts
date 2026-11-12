@@ -6,17 +6,20 @@
  * and of an environment object handed along are not.
  */
 
+import { readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { beforeAll, describe, expect, it } from "vitest";
 
 import {
+  configuredName,
   configuredVariable,
   ENGINE_VARIABLES,
   engineVariable,
   type EngineVariable,
+  extensionEnv,
   processEnv,
 } from "../src/env.js";
 
@@ -116,10 +119,26 @@ describe("src/env.ts", () => {
   });
 
   it("reads a variable configuration names", () => {
-    expect(configuredVariable({ LAB_TOKEN: "synthetic-token" }, "LAB_TOKEN")).toBe(
-      "synthetic-token",
-    );
-    expect(configuredVariable({}, "LAB_TOKEN")).toBeUndefined();
+    const name = configuredName("LAB_TOKEN");
+    expect(name).toBe("LAB_TOKEN");
+    expect(configuredVariable({ LAB_TOKEN: "synthetic-token" }, name)).toBe("synthetic-token");
+    expect(configuredVariable({}, name)).toBeUndefined();
+  });
+
+  it("hands an extension the environment it was given", () => {
+    const env = { LAB_TOKEN: "synthetic-token" };
+    expect(extensionEnv(env)).toBe(env);
+  });
+
+  it("makes a configured name only where configuration gives one", () => {
+    // configuredVariable takes only what configuredName makes, and the lint rule refuses a literal
+    // passed to it, so these four calls are every name src/ reads that it does not list.
+    expect(configuredNameCalls()).toEqual([
+      "src/cli.ts: configuredName(reference.variable)",
+      "src/config/env-ref.ts: configuredName(reference.env)",
+      "src/config/transform-config.ts: configuredName(reference.name)",
+      "src/secrets/provider.ts: configuredName(ref.name)",
+    ]);
   });
 
   it("takes only a listed name as a fixed one", () => {
@@ -130,3 +149,18 @@ describe("src/env.ts", () => {
     expect(ENGINE_VARIABLES).not.toContain(unlisted);
   });
 });
+
+/** Every call to configuredName in src/ but src/env.ts, as `file: call`, sorted. */
+function configuredNameCalls(): readonly string[] {
+  const src = join(ROOT, "src");
+  const files = readdirSync(src, { recursive: true, encoding: "utf8" })
+    .filter((file) => file.endsWith(".ts") && file !== "env.ts")
+    .map((file) => join(src, file));
+  return files
+    .flatMap((file) =>
+      [...readFileSync(file, "utf8").matchAll(/\bconfiguredName\([^)]*\)/g)].map(
+        (call) => `${relative(ROOT, file).replaceAll("\\", "/")}: ${call[0]}`,
+      ),
+    )
+    .sort();
+}

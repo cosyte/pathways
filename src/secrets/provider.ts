@@ -1,6 +1,6 @@
 import { closeSync, fstatSync, openSync, readFileSync } from "node:fs";
 
-import { configuredVariable } from "../env.js";
+import { configuredName, configuredVariable, type Env } from "../env.js";
 
 // The secret provider interface, and the two providers every project has: env and file. Nothing a
 // provider returns is ever written to a log or an error; errors here carry the secret's name and a
@@ -181,9 +181,6 @@ function noVersion(ref: SecretRef, what: string): void {
   }
 }
 
-/** The environment Pathways reads secrets from: `process.env`, or a stand-in in tests. */
-type Env = Readonly<Record<string, string | undefined>>;
-
 /**
  * The built-in `env` provider, read now: the variable `ref.name`, or one field of the JSON object it
  * holds. Unset and empty are the same.
@@ -197,7 +194,7 @@ type Env = Readonly<Record<string, string | undefined>>;
 export function readEnvSecret(env: Env, ref: SecretRef): ResolvedSecret {
   const what = `the environment variable ${ref.name}`;
   noVersion(ref, what);
-  const value = configuredVariable(env, ref.name);
+  const value = configuredVariable(env, configuredName(ref.name));
   if (value === undefined || value === "") {
     throw new SecretError("ERR_PATHWAYS_SECRET_NOT_FOUND", ref.name, `${what} is not set`);
   }

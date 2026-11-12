@@ -4,6 +4,7 @@ import type { Logger } from "pino";
 
 import type { HookConfig } from "../config/schema.js";
 import type { Env } from "../connectors/endpoint.js";
+import { extensionEnv } from "../env.js";
 import type { Secrets } from "../secrets/resolve.js";
 import type { LifecycleEvent, LifecycleEventType } from "./events.js";
 import { buildFromModule, isTimeout, methodsMissing, withTimeout } from "./load.js";
@@ -218,7 +219,7 @@ async function buildHook(
     }
     return webhookHook(config.webhook, { timeoutMs: config.timeoutMs, env: secrets ?? env, where });
   }
-  const context: HookContext = { dir, env, logger, channel };
+  const context: HookContext = { dir, env: extensionEnv(env), logger, channel };
   return buildFromModule<LifecycleHook>(
     config.module,
     where,

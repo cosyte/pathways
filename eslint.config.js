@@ -18,6 +18,27 @@ const COPIES = [
   "CallExpression[callee.name='structuredClone']",
 ];
 
+/** Where a value is bound to the name `env`: a variable, a property, a field or a default. */
+const ENV_BINDINGS = [
+  ["VariableDeclarator[id.name='env']", "init"],
+  ["Property[key.name='env']", "value"],
+  ["PropertyDefinition[key.name='env']", "value"],
+  ["AssignmentPattern[left.name='env']", "right"],
+];
+
+/**
+ * processEnv() anywhere but bound to `env`, alone or as `io.env ?? processEnv()`, or handed straight
+ * to engineVariable or configuredVariable: so the process's environment is never read where it is
+ * called, kept under another name, or copied, and every `env` it reaches is held by the rules below.
+ */
+const STRAY_PROCESS_ENV = `CallExpression[callee.name='processEnv']:not(${[
+  ...ENV_BINDINGS.flatMap(([binding, field]) => [
+    `${binding} > CallExpression.${field}`,
+    `${binding} > LogicalExpression[operator='??'].${field} > CallExpression.right`,
+  ]),
+  "CallExpression[callee.name=/^(engineVariable|configuredVariable)$/] > CallExpression.arguments",
+].join(", ")})`;
+
 const envAccess = {
   files: ["src/**/*.ts"],
   ignores: ["src/env.ts"],
@@ -59,6 +80,19 @@ const envAccess = {
         ...ENV_OBJECTS.map((object) => `SpreadElement > ${object}`),
         // `Object.keys(env)`, `Object.assign({}, io.env)`, `structuredClone(env)`.
         ...COPIES.flatMap((call) => ENV_OBJECTS.map((object) => `${call} > ${object}`)),
+        // `io["env"].NAME`, and `env` destructured under another name: `const { env: v } = io`.
+        "MemberExpression[object.type='MemberExpression'][object.property.value='env']",
+        "VariableDeclarator[init.type=/^(Identifier|MemberExpression)$/] > ObjectPattern.id > Property[key.name='env']:not([value.type='Identifier'][value.name='env'])",
+        STRAY_PROCESS_ENV,
+        // An extension's own view of the environment, given only as its context's `env`.
+        "CallExpression[callee.name='extensionEnv']:not(Property[key.name='env'] > CallExpression.value)",
+        // A fixed name where configuration gives one: `configuredVariable(env, "NAME")`,
+        // `configuredName("NAME")`, a secret source `{ env: "NAME" }`. A fixed name goes through
+        // engineVariable, and so ENGINE_VARIABLES.
+        ...["Literal", "TemplateLiteral"].flatMap((literal) => [
+          `CallExpression[callee.name=/^(configuredVariable|configuredName)$/] > ${literal}.arguments`,
+          `Property[key.name='env'] > ${literal}.value`,
+        ]),
       ].map((selector) => ({ selector, message: ENV_ONLY_IN_ENV_TS })),
     ],
   },

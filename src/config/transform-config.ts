@@ -3,7 +3,7 @@ import type { FailureSummary } from "../engine/worker-entry.js";
 import type { JsonValue } from "../transform.js";
 import { ConfigError } from "./load.js";
 import type { ChannelConfig, ProjectConfig, TransformConfigBlock } from "./schema.js";
-import { configuredVariable } from "../env.js";
+import { configuredName, configuredVariable } from "../env.js";
 
 /**
  * A channel's transform configuration, resolved: the project's `config:` block with the channel's
@@ -48,7 +48,7 @@ function resolveValue(value: JsonValue, where: string, env: Env, problems: strin
   if (typeof value !== "object" || value === null) return value;
   const reference = envReference(value);
   if (reference !== undefined) {
-    const read = configuredVariable(env, reference.name);
+    const read = configuredVariable(env, configuredName(reference.name));
     if (read !== undefined && read !== "") return read;
     if ("fallback" in reference) return reference.fallback;
     problems.push(`${where}: the environment variable ${reference.name} is not set`);

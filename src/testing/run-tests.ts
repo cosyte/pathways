@@ -78,11 +78,8 @@ export async function runChannelTests(
       continue;
     }
 
-    const config = transformConfigFor(
-      { config: options.project?.config ?? {} },
-      channel,
-      options.env ?? processEnv(),
-    );
+    const env = options.env ?? processEnv();
+    const config = transformConfigFor({ config: options.project?.config ?? {} }, channel, env);
     if (!("resolved" in config)) {
       options.out(`FAIL ${channel.name}: ${describeFailure(config, channel)}`);
       failed += inputs.length;

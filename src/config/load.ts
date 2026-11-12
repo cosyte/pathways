@@ -6,7 +6,7 @@ import type { z } from "zod";
 
 import { normalisePath } from "../connectors/http-path.js";
 import { secretSourceOf, secretUses, type SecretSourceYaml } from "../secrets/sources.js";
-import { processEnv } from "../env.js";
+import { type Env, processEnv } from "../env.js";
 import { referencesIn, resolvingEnv, variableAt, type EnvReference } from "./env-ref.js";
 import { DEFAULT_INDEX_BITS, isLowEntropyKey } from "./meta-index.js";
 import {
@@ -120,7 +120,7 @@ export interface LoadOptions {
    * Where each `{ env: NAME }` setting is read from. Defaults to `process.env`. Only the variables
    * the files name are read: there is no scan for a prefix.
    */
-  readonly env?: Readonly<Record<string, string | undefined>> | undefined;
+  readonly env?: Env | undefined;
 }
 
 /**

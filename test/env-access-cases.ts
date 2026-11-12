@@ -54,6 +54,27 @@ export const REFUSED: Readonly<Record<string, string>> = {
   envEntries: "function f(io: { env: Env }) { return Object.entries(io.env); }\n",
   envClone: "function f(env: Env) { return structuredClone(env); }\n",
   envForIn: "function f(env: Env) { for (const k in env) { return k; } }\n",
+  envComputedProp: 'function f(io: { env: Env }) { return io["env"].PATHWAYS_NEW; }\n',
+  envRenamed: "function f(io: { env: Env }) { const { env: v } = io; return v.PATHWAYS_NEW; }\n",
+  // processEnv() read where it is called, kept under another name, or copied.
+  processEnvDirect: 'import { processEnv } from "./env.js";\nprocessEnv().PATHWAYS_NEW;\n',
+  processEnvIndex: 'import { processEnv } from "./env.js";\nprocessEnv()["PATHWAYS_NEW"];\n',
+  processEnvAlias:
+    'import { processEnv } from "./env.js";\nconst vars = processEnv();\nvars.PATHWAYS_NEW;\n',
+  processEnvField:
+    'import { processEnv } from "./env.js";\nclass A { vars = processEnv(); r() { return this.vars.PATHWAYS_NEW; } }\n',
+  processEnvSpread: 'import { processEnv } from "./env.js";\nconst a = { ...processEnv() };\n',
+  processEnvKeys: 'import { processEnv } from "./env.js";\nObject.values(processEnv());\n',
+  // A fixed name handed to configuredVariable, or written as a secret source, instead of
+  // engineVariable and so ENGINE_VARIABLES.
+  configuredLiteral:
+    'import { configuredVariable, processEnv } from "./env.js";\nconfiguredVariable(processEnv(), "PATHWAYS_NEW");\n',
+  configuredTemplate:
+    'import { configuredVariable } from "./env.js";\nfunction f(env: Env) { return configuredVariable(env, `PATHWAYS_NEW`); }\n',
+  configuredNameLiteral:
+    'import { configuredName } from "./env.js";\nconst name = configuredName("PATHWAYS_NEW");\n',
+  sourceLiteral: 'const source = { env: "PATHWAYS_NEW" };\n',
+  sourceTemplate: "const source = { env: `PATHWAYS_NEW` };\n",
 };
 
 /** Code ESLint must let through in src/: the process used for anything but its environment. */
@@ -70,4 +91,15 @@ export const ALLOWED: Readonly<Record<string, string>> = {
   passEnv: "function f(env: Env) { return open(project, { env }); }\n",
   envProperty: "function f(reference: { env: string }) { return reference.env; }\n",
   setEnv: "class A { env: Env = {}; set(env: Env) { this.env = env; } }\n",
+  // processEnv() as every call site in src/ uses it: bound to `env`, alone or behind `??`.
+  processEnvBound: 'import { processEnv } from "./env.js";\nconst env = io.env ?? processEnv();\n',
+  processEnvProperty:
+    'import { processEnv } from "./env.js";\nload(dir, { env: io.env ?? processEnv() });\n',
+  processEnvField:
+    'import { processEnv } from "./env.js";\nclass A { private env: Env = processEnv(); }\n',
+  processEnvDefault:
+    'import { processEnv } from "./env.js";\nfunction f(env: Env = processEnv()) { return env; }\n',
+  configuredName:
+    'import { configuredName, configuredVariable } from "./env.js";\nconfiguredVariable(env, configuredName(reference.env));\n',
+  sourceConstant: "const source = { env: DEFAULT_DATABASE_URL_ENV };\n",
 };

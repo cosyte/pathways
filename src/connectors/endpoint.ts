@@ -14,8 +14,7 @@ import { HEADER_VALUE, type HeaderValue, type ListenerConfig } from "../config/s
 import { secretHolder, secretPlace, secretsOf, type SecretReader } from "../secrets/resolve.js";
 import { loadServerTls, serverTlsOptions, type ServerTlsMaterial } from "./tls.js";
 
-/** The environment Pathways reads secrets from: `process.env`, or a stand-in in tests. */
-export type Env = Readonly<Record<string, string | undefined>>;
+export type { Env } from "../env.js";
 
 /** The shortest bearer token an endpoint accepts. */
 export const MIN_TOKEN_LENGTH = 16;

@@ -15,7 +15,7 @@ import {
 } from "./config/schema.js";
 import type { Env } from "./connectors/endpoint.js";
 import { EncryptionError } from "./encryption/envelope.js";
-import { configuredVariable, engineVariable, processEnv } from "./env.js";
+import { configuredName, configuredVariable, engineVariable, processEnv } from "./env.js";
 import { checkIndexKeys, projectIndexes } from "./encryption/blind-index.js";
 import { ENCRYPTION_REQUIRED, type KeyProvider } from "./encryption/keys.js";
 import { rekey, rekeyComplete, type RekeyCounts } from "./encryption/rekey.js";
@@ -1207,10 +1207,11 @@ async function channelCommand(
   if (deadlineMs !== undefined && deadlineMs > MAX_STOP_DEADLINE_MS) {
     return invalid(io, "--deadline is at most 24 days, the longest wait a timer holds.");
   }
+  const env = io.env ?? processEnv();
   let reply;
   try {
     reply = await sendControl(
-      controlAddress(projectDir, controlSystem(io.env ?? processEnv())),
+      controlAddress(projectDir, controlSystem(env)),
       {
         v: CONTROL_VERSION,
         command: command as ChannelCommand,
@@ -1312,7 +1313,8 @@ async function validate(projectDir: string, print: boolean, io: CliIo): Promise<
     // The configuration holds no secret: tokens, secret headers, connection URLs and master keys
     // stay the names of the variables or files start reads them from. A URL read from the
     // environment may carry a token in its query string, so that query string is masked.
-    const hidden = urlsFromEnvironment(project, io.env ?? processEnv());
+    const env = io.env ?? processEnv();
+    const hidden = urlsFromEnvironment(project, env);
     const replacer = (key: string, value: unknown): unknown =>
       key === "url" && typeof value === "string" && hidden.has(value) ? maskQuery(value) : value;
     io.out(`${JSON.stringify(project, replacer, 2)}\n`);
@@ -1357,7 +1359,7 @@ function urlsFromEnvironment(project: ProjectConfig, env: Env): ReadonlySet<stri
   if (references === undefined) return urls;
   for (const reference of references) {
     if (reference.from !== "environment" || !reference.key.endsWith(".url")) continue;
-    const value = configuredVariable(env, reference.variable);
+    const value = configuredVariable(env, configuredName(reference.variable));
     /* v8 ignore if -- the project was loaded from this same env, and the variable was set there */
     if (value === undefined) continue;
     urls.add(value);

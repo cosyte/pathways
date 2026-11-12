@@ -67,7 +67,7 @@ import type { ChannelContext } from "../extensions/types.js";
 import { AuditLog, auditEvent } from "../operator/audit.js";
 import { resolveSecrets, type Secrets, secretsOf } from "../secrets/resolve.js";
 import type { KeyProvider } from "../encryption/keys.js";
-import { processEnv } from "../env.js";
+import { extensionEnv, processEnv } from "../env.js";
 import { recordRetention, runRetention, type RetentionReport } from "../operator/retention.js";
 import { copiesBodies, markCopiesBodies, release } from "../storage/ownership.js";
 import {
@@ -406,7 +406,7 @@ export async function connectorsFor(
     channel: channel.name,
     format: channel.format,
     dir: channel.dir,
-    env,
+    env: extensionEnv(env),
     logger: logger.child({ channel: channel.name, ...fields }),
   });
   const { source } = channel;

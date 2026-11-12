@@ -94,7 +94,8 @@ export async function verifyCommand(
     channel === undefined
       ? context.project.channels
       : context.project.channels.filter((c) => c.name === channel);
-  const runner = new Runner(context.project, context.env ?? processEnv());
+  const env = context.env ?? processEnv();
+  const runner = new Runner(context.project, env);
   const results = new Map<string, Result[]>(channels.map((c) => [c.name, []]));
   let skipped = 0;
   let missing = 0;
