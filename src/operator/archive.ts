@@ -79,6 +79,11 @@ export interface ArchivedDelivery {
   readonly sendingAttempt: number | null;
   /** The latest attempt found cut off, when one was. */
   readonly interruptedAttempt: number | null;
+  /**
+   * The key of the destination it was made for; null when it records none. An archive written
+   * before deliveries recorded one leaves it out.
+   */
+  readonly destinationKey: string | null;
   /** When it failed for good, when it did and the store recorded it. */
   readonly failedAt: string | null;
 }
@@ -425,6 +430,7 @@ function asMessage(value: unknown): ArchivedMessage {
     check(isWhole(d["nextAttemptAt"]) && isTextOrNull(d["body"]));
     check(isWholeOrNull(d["sendingAt"]) && isWholeOrNull(d["sendingAttempt"]));
     check(isWholeOrNull(d["interruptedAttempt"]));
+    check(d["destinationKey"] === undefined || isTextOrNull(d["destinationKey"]));
     check(d["failedAt"] === undefined || isTextOrNull(d["failedAt"]));
   }
   return fields as unknown as ArchivedMessage;
@@ -490,6 +496,7 @@ export async function archivedMessage(
       sendingAt: delivery.sendingAt,
       sendingAttempt: delivery.sendingAttempt,
       interruptedAttempt: delivery.interruptedAttempt,
+      destinationKey: delivery.destinationKey,
       failedAt: delivery.failedAt ?? null,
     })),
   };

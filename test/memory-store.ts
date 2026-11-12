@@ -9,7 +9,10 @@ import type {
   DeliveryCounts,
   DeliveryStatus,
   DeliveryTally,
+  DestinationKey,
+  DestinationOutcome,
   ExpireResult,
+  HeldDeliveries,
   MessageQuery,
   MessageState,
   MessageStatus,
@@ -29,7 +32,17 @@ import type {
   StoredMessage,
   StoreFactory,
   StoreReceiveOptions,
+  TransformOutputs,
 } from "../src/index.js";
+
+/** The status a message takes from what its transform gave, as the store works it out. */
+function statusOf(outputs: TransformOutputs): MessageStatus {
+  if (Array.isArray(outputs)) return outputs.length === 0 ? "filtered" : "transformed";
+  const { byDestination } = outputs as { readonly byDestination: readonly DestinationOutcome[] };
+  return byDestination.every((o) => "notStored" in o || ("outputs" in o && o.outputs.length === 0))
+    ? "filtered"
+    : "transformed";
+}
 
 interface MessageRow {
   readonly id: number;
@@ -60,6 +73,7 @@ interface DeliveryRow {
   deliveredAt: string | null;
   sending: SendingMarker | undefined;
   interruptedAttempt: number | undefined;
+  readonly destinationKey: string | undefined;
   failedAt?: string | undefined;
 }
 
@@ -109,12 +123,14 @@ export class MemoryStore implements MessageStore {
 
   completeTransform(
     messageId: number,
-    outputs: readonly Uint8Array[],
+    outputs: TransformOutputs,
     destinations: number,
+    _epoch?: number,
+    keys?: readonly string[],
   ): Promise<void> {
     const message = this.row(messageId);
-    this.queue(message, outputs, destinations);
-    message.status = outputs.length === 0 ? "filtered" : "transformed";
+    this.queue(message, outputs, destinations, keys);
+    message.status = statusOf(outputs);
     message.updatedAt = now();
     return Promise.resolve();
   }
@@ -132,11 +148,11 @@ export class MemoryStore implements MessageStore {
     destination: number,
     options: NextDeliveryOptions = {},
   ): Promise<PendingDelivery | undefined> {
-    const { dueBy = Number.POSITIVE_INFINITY } = options;
+    const { dueBy = Number.POSITIVE_INFINITY, key } = options;
     const row = this.deliveryRows.find(
       (d) =>
         d.channel === channel &&
-        d.destination === destination &&
+        (key === undefined ? d.destination === destination : d.destinationKey === key) &&
         d.status === "pending" &&
         d.nextAttemptAt <= dueBy,
     );
@@ -198,6 +214,21 @@ export class MemoryStore implements MessageStore {
       failedAt: now(),
     });
     return Promise.resolve();
+  }
+
+  holdDeliveries(channel: string, keys: readonly string[], error: string): Promise<HeldDeliveries> {
+    let unknown = 0;
+    let gone = 0;
+    for (const d of this.deliveryRows) {
+      if (d.channel !== channel || d.status !== "pending") continue;
+      if (d.destinationKey === undefined) {
+        Object.assign(d, { status: "failed", error, sending: undefined, failedAt: now() });
+        unknown += 1;
+      } else if (!keys.includes(d.destinationKey)) {
+        gone += 1;
+      }
+    }
+    return Promise.resolve({ unknown, gone });
   }
 
   messageCounts(channel: string): Promise<Record<MessageStatus, number>> {
@@ -263,17 +294,26 @@ export class MemoryStore implements MessageStore {
           deliveredAt: d.deliveredAt,
           error: d.error,
           interruptedAttempt: d.interruptedAttempt,
+          ...(d.destinationKey === undefined ? {} : { destinationKey: d.destinationKey }),
           ...(d.failedAt === undefined ? {} : { failedAt: d.failedAt }),
         })),
     );
   }
 
-  outputs(messageId: number): Promise<Uint8Array[]> {
+  outputs(messageId: number, destination?: number | DestinationKey): Promise<Uint8Array[]> {
     const message = this.messageRows.find((m) => m.id === messageId);
     const current = this.deliveryRows.filter(
-      (d) => d.messageId === messageId && d.generation === message?.generation,
+      (d) => d.messageId === messageId && d.generation === message?.generation && d.seq >= 0,
     );
-    const first = Math.min(...current.map((d) => d.destination));
+    if (typeof destination === "object") {
+      return Promise.resolve(
+        current
+          .filter((d) => d.destinationKey === destination.key)
+          .sort((a, b) => a.seq - b.seq)
+          .map((d) => d.body),
+      );
+    }
+    const first = destination ?? Math.min(...current.map((d) => d.destination));
     return Promise.resolve(
       current
         .filter((d) => d.destination === first)
@@ -318,7 +358,9 @@ export class MemoryStore implements MessageStore {
   }
 
   requeue(messageId: number, request: RequeueRequest, actor: string): Promise<RequeueResult> {
-    const { mode, expected, outputs, failure, destinations, expectedGeneration } = request;
+    const { mode, expected, failure, destinations, byDestination, expectedGeneration } = request;
+    const outputs: TransformOutputs =
+      byDestination === undefined ? request.outputs : { byDestination };
     const message = this.messageRows.find((m) => m.id === messageId);
     const refuse = (reason: "not-found" | "changed" | "pending"): Promise<RequeueResult> => {
       const entry = this.audit(actor, {
@@ -339,17 +381,19 @@ export class MemoryStore implements MessageStore {
     if (mine.some((d) => d.status === "pending")) return refuse("pending");
     const superseded = mine.filter((d) => d.status === "failed");
     for (const d of superseded) d.status = "cleared";
-    message.status =
-      failure !== undefined ? "failed" : outputs.length === 0 ? "filtered" : "transformed";
+    message.status = failure !== undefined ? "failed" : statusOf(outputs);
     message.error = failure ?? null;
     message.updatedAt = now();
     message.generation += 1;
-    const queued = failure === undefined ? this.queue(message, outputs, destinations) : 0;
+    const queued =
+      failure === undefined ? this.queue(message, outputs, destinations, request.keys) : 0;
+    const notStored = (byDestination ?? []).filter((o) => "notStored" in o).length;
     const done = {
       status: message.status,
       queued,
       superseded: superseded.length,
       generation: message.generation,
+      ...(notStored === 0 ? {} : { notStored }),
     };
     const entry = this.audit(actor, {
       action: mode,
@@ -456,10 +500,43 @@ export class MemoryStore implements MessageStore {
     return row;
   }
 
-  private queue(message: MessageRow, outputs: readonly Uint8Array[], destinations: number): number {
+  private queue(
+    message: MessageRow,
+    given: TransformOutputs,
+    destinations: number,
+    keys: readonly string[] | undefined,
+  ): number {
+    if (Array.isArray(given) && given.length === 0) return 0;
     let queued = 0;
     for (let destination = 0; destination < destinations; destination += 1) {
-      for (const [seq, body] of outputs.entries()) {
+      const outcome: DestinationOutcome = Array.isArray(given)
+        ? { outputs: given as readonly Uint8Array[] }
+        : ((given as { readonly byDestination: readonly DestinationOutcome[] }).byDestination[
+            destination
+          ] ?? { outputs: [] });
+      if ("notStored" in outcome) continue;
+      if ("failure" in outcome || outcome.outputs.length === 0) {
+        this.deliveryRows.push({
+          id: this.deliveryRows.reduce((max, d) => Math.max(max, d.id), 0) + 1,
+          messageId: message.id,
+          channel: message.channel,
+          destination,
+          seq: -1,
+          body: new Uint8Array(),
+          generation: message.generation,
+          status: "failure" in outcome ? "failed" : "filtered",
+          attempts: 0,
+          nextAttemptAt: 0,
+          error: "failure" in outcome ? outcome.failure : null,
+          deliveredAt: null,
+          sending: undefined,
+          interruptedAttempt: undefined,
+          destinationKey: keys?.[destination],
+          ...("failure" in outcome ? { failedAt: now() } : {}),
+        });
+        continue;
+      }
+      for (const [seq, body] of outcome.outputs.entries()) {
         this.deliveryRows.push({
           id: this.deliveryRows.reduce((max, d) => Math.max(max, d.id), 0) + 1,
           messageId: message.id,
@@ -475,6 +552,7 @@ export class MemoryStore implements MessageStore {
           deliveredAt: null,
           sending: undefined,
           interruptedAttempt: undefined,
+          destinationKey: keys?.[destination],
         });
         queued += 1;
       }

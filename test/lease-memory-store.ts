@@ -94,9 +94,10 @@ export class LeasedMemoryStore extends MemoryStore {
     outputs: readonly Uint8Array[],
     destinations: number,
     epoch?: number,
+    keys?: readonly string[],
   ): Promise<void> {
     fence(epoch);
-    return super.completeTransform(messageId, outputs, destinations);
+    return super.completeTransform(messageId, outputs, destinations, undefined, keys);
   }
 
   override failTransform(messageId: number, error: string, epoch?: number): Promise<void> {
