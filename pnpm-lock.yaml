@@ -23,8 +23,8 @@ importers:
         specifier: ^0.1.9
         version: 0.1.9(fast-check@4.10.2)
       '@cosyte/mllp':
-        specifier: ^0.1.7
-        version: 0.1.7(@cosyte/hl7@0.1.9(fast-check@4.10.2))(fast-check@4.10.2)
+        specifier: ^0.1.12
+        version: 0.1.12(@cosyte/hl7@0.1.9(fast-check@4.10.2))(fast-check@4.10.2)
       '@cosyte/x12':
         specifier: ^0.1.11
         version: 0.1.11(fast-check@4.10.2)
@@ -347,8 +347,8 @@ packages:
       fast-check:
         optional: true
 
-  '@cosyte/mllp@0.1.7':
-    resolution: {integrity: sha512-vl/0LWcigDGfnIzxQW7k0gJdl7944Sf2myz741uFB+BntgMjmLUB4UK2XgesjOuUWIG32P1pvbsnBHqgz3r3eA==}
+  '@cosyte/mllp@0.1.12':
+    resolution: {integrity: sha512-R0LCHWrn9fWwqmChrxU1et/+bocWKfd8rl4ICXqiYk85LnPTAKNB56oHH8GJymJNqfh2lPdmqa40bVuKUeAnkw==}
     engines: {node: '>=22.0.0'}
     peerDependencies:
       '@cosyte/hl7': '>=0.0.0'
@@ -3034,7 +3034,7 @@ snapshots:
     optionalDependencies:
       fast-check: 4.10.2
 
-  '@cosyte/mllp@0.1.7(@cosyte/hl7@0.1.9(fast-check@4.10.2))(fast-check@4.10.2)':
+  '@cosyte/mllp@0.1.12(@cosyte/hl7@0.1.9(fast-check@4.10.2))(fast-check@4.10.2)':
     optionalDependencies:
       '@cosyte/hl7': 0.1.9(fast-check@4.10.2)
       fast-check: 4.10.2
