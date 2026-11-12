@@ -1,10 +1,9 @@
 # AGENTS.md
 
 Pathways is our code-first healthcare integration engine for Node.js: channels are YAML files,
-transforms are TypeScript, and a `pathways` command runs and tests them. It will be published to npm
-as `@cosyte/pathways` under MIT, and is not released yet. Code is in `src/`, tests in `test/`, the
-starter project `pathways init` writes in `templates/starter/`, and the docs.cosyte.com pages in
-`docs-content/`.
+transforms are TypeScript, and a `pathways` command runs and tests them. It is published to npm as
+`@cosyte/pathways` under MIT. Code is in `src/`, tests in `test/`, the starter project
+`pathways init` writes in `templates/starter/`, and the docs.cosyte.com pages in `docs-content/`.
 
 ## Build and test
 

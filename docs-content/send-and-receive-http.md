@@ -2,7 +2,7 @@
 id: send-and-receive-http
 title: Send and receive messages over HTTP
 sidebar_label: HTTP
-description: "Take each POST or PUT as one message over HTTPS with a bearer token or mutual TLS, on one path or several, answered with the message id, an HL7 ACK or a fixed response, and POST each output to a URL."
+description: "Take each POST or PUT over HTTPS as one message, with a bearer token or mutual TLS, answered as you choose, and POST each output to a URL."
 ---
 
 # Send and receive messages over HTTP
