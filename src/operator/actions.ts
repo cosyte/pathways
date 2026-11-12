@@ -103,6 +103,26 @@ export interface ReplayContext {
   readonly resend: boolean;
   /** Where the transform's configuration reads its environment variables. Defaults to `process.env`. */
   readonly env?: Env | undefined;
+  /**
+   * What a bulk replay counted: each message is refused as `changed`, and not replayed, unless it is
+   * still at the generation counted and has not changed at or after `countedAt`.
+   */
+  readonly expect?: ReplayExpectation | undefined;
+}
+
+/**
+ * The state a bulk replay counted its messages in, which each must still be in to be replayed.
+ *
+ * @example
+ * ```ts
+ * const expect: ReplayExpectation = { generations: new Map([[9, 0]]), countedAt: "2026-11-11T12:00:00.000Z" };
+ * ```
+ */
+export interface ReplayExpectation {
+  /** Each message's generation when it was counted, by id. */
+  readonly generations: ReadonlyMap<number, number>;
+  /** When the count began, in ISO 8601 UTC. */
+  readonly countedAt: string;
 }
 
 /**
@@ -159,6 +179,10 @@ export async function replayMessages(
     if (message.status === "received") return refuse(id, channel.name, "waiting");
     if (message.contentDroppedAt !== undefined) return refuse(id, channel.name, "content-dropped");
     if (message.deliveries.pending > 0) return refuse(id, channel.name, "pending");
+    const expectedGeneration = context.expect?.generations.get(id);
+    if (context.expect !== undefined && !unchanged(message, context.expect)) {
+      return refuse(id, channel.name, "changed");
+    }
 
     let outputs: readonly Uint8Array[];
     let failure: FailureSummary | undefined;
@@ -192,6 +216,7 @@ export async function replayMessages(
         outputs,
         failure: failure === undefined ? undefined : storedFailure(failure),
         destinations: channel.destinations.length,
+        expectedGeneration,
       },
       audit.actor,
     );
@@ -229,6 +254,17 @@ export async function replayMessages(
     );
   }
   return results;
+}
+
+/** Whether a message stands as a bulk replay counted it: the same generation, no change since. */
+function unchanged(
+  message: { readonly id: number; readonly generation: number; readonly updatedAt: string },
+  expect: ReplayExpectation,
+): boolean {
+  return (
+    expect.generations.get(message.id) === message.generation &&
+    Date.parse(message.updatedAt) < Date.parse(expect.countedAt)
+  );
 }
 
 /**
