@@ -180,7 +180,7 @@ const encoder = new TextEncoder();
 /** `text` keeps its first-slice behaviour: bytes that are not UTF-8 become U+FFFD. */
 const lenientUtf8 = new TextDecoder();
 /**
- * FHIR, X12, C-CDA and JSON are read as UTF-8, and a body that is not UTF-8 fails to parse with
+ * FHIR, X12, C-CDA, XML and JSON are read as UTF-8, and a body that is not UTF-8 fails to parse with
  * `ERR_ENCODING_INVALID_ENCODED_DATA` rather than being changed in silence.
  */
 const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
@@ -336,8 +336,55 @@ export const ASSUMABLE_CHARSETS = Object.freeze([
 ] as const);
 
 /**
+ * How an `xml` channel reads its bodies, from the channel's `xml:` block: the caps a body is held to
+ * as it is parsed. Every key is optional; {@link XML_DEFAULTS} says what an unset one means.
+ *
+ * @example
+ * ```ts
+ * const settings: XmlSettings = { maxBytes: 1_048_576, maxDepth: 64 };
+ * ```
+ */
+export interface XmlSettings {
+  /** The largest body read, in bytes of UTF-8 after a byte order mark. Default 10,485,760. */
+  readonly maxBytes?: number | undefined;
+  /** How deep elements may nest, the root element counting as 1. Default 1,000. */
+  readonly maxDepth?: number | undefined;
+  /** How many elements a body may hold. Default 1,000,000. */
+  readonly maxElements?: number | undefined;
+}
+
+/**
+ * What each unset key of {@link XmlSettings} means.
+ *
+ * @example
+ * ```ts
+ * XML_DEFAULTS.maxBytes; // 10485760
+ * ```
+ */
+export const XML_DEFAULTS = Object.freeze({
+  maxBytes: 10_485_760,
+  maxDepth: 1000,
+  maxElements: 1_000_000,
+} as const);
+
+/**
+ * What an `xml` channel's transform receives, and may return: the document `@cosyte/ccda`'s
+ * hardened XML reader builds, an `@xmldom/xmldom` `Document`. Read and change it with the DOM API
+ * (`documentElement`, `getElementsByTagName`, `getAttribute`, `setAttribute` and the rest). A
+ * document the transform leaves as it was read is written back byte for byte.
+ *
+ * @example
+ * ```ts
+ * const id = (document: XmlDocument): string | null =>
+ *   document.documentElement?.getAttribute("id") ?? null;
+ * ```
+ */
+export type XmlDocument = ReturnType<typeof Ccda.parseSecureXml>;
+
+/**
  * The settings a format reads a channel's bodies with, beside its name: a `csv` channel's `csv:`
- * block, or an `hl7v2` channel's `hl7v2:` block. Plain data, sent to the worker as it starts.
+ * block, an `hl7v2` channel's `hl7v2:` block, or an `xml` channel's `xml:` block. Plain data, sent to
+ * the worker as it starts.
  *
  * @example
  * ```ts
@@ -347,6 +394,7 @@ export const ASSUMABLE_CHARSETS = Object.freeze([
 export interface FormatSettings {
   readonly csv?: CsvSettings | undefined;
   readonly hl7v2?: Hl7v2Settings | undefined;
+  readonly xml?: XmlSettings | undefined;
 }
 
 /**
@@ -431,7 +479,9 @@ function defineFormat<Message>(entry: FormatEntry<Message>): FormatEntry<Message
  * - `ccda`: a `CcdaDocument` from `@cosyte/ccda`;
  * - `json`: the value `JSON.parse` returns;
  * - `text`: the body as a string;
- * - `csv`: a {@link CsvTable}, read by the reader below with the channel's `csv:` settings.
+ * - `csv`: a {@link CsvTable}, read by the reader below with the channel's `csv:` settings;
+ * - `xml`: an {@link XmlDocument}, read by `@cosyte/ccda`'s hardened XML reader with the channel's
+ *   `xml:` caps.
  *
  * @example
  * ```ts
@@ -518,6 +568,19 @@ export const FORMAT_REGISTRY = Object.freeze({
     decode: (body, settings) => readCsv(body, settings.csv ?? {}),
     value: (output, settings) =>
       isCsvTable(output) ? writeCsv(output, settings.csv ?? {}) : undefined,
+  }),
+  xml: defineFormat<XmlDocument>({
+    extension: "xml",
+    contentType: "application/xml",
+    load: libraries.ccda,
+    decode: async (body, settings) => readXml(await libraries.ccda(), body, settings.xml ?? {}),
+    model: {
+      // Told by shape, so a document is written on a channel of any format without loading the
+      // library first; writing it loads the library to read the text back.
+      byShape: true,
+      write: async (value) =>
+        isXmlDocument(value) ? writeXml(await libraries.ccda(), value) : undefined,
+    },
   }),
 });
 
@@ -1350,6 +1413,156 @@ function fixedText(
     for (const [offset, char] of value.entries()) chars[column.start - 1 + offset] = char;
   }
   return chars.join("");
+}
+
+/**
+ * An `xml` document that cannot be written as XML that reads back as the same document. Its text
+ * names no part of the document, since any of it can carry a patient's details.
+ *
+ * Code: `XML_NOT_WRITABLE`.
+ */
+class XmlError extends Error {
+  readonly code: string;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = "XmlError";
+    this.code = code;
+  }
+}
+
+/** What an `xml` body was read from: its bytes, and the document as the serializer wrote it then. */
+interface XmlOrigin {
+  readonly body: Uint8Array;
+  readonly written: string;
+}
+
+/** Each document an `xml` channel read, with what it was read from. */
+const xmlOrigins = new WeakMap<object, XmlOrigin>();
+
+/** A reader's warning (a byte order mark removed, an element outside HL7's namespaces): not ours. */
+function ignoreWarning(): void {
+  // Nothing to do: the body is read as it is, and a byte order mark goes back out with it.
+}
+
+/**
+ * Reads an `xml` body with `@cosyte/ccda`'s hardened XML reader, under the channel's caps. The reader
+ * refuses a DTD or an entity declaration (`XXE_OR_DTD_PRESENT`), and here any custom entity
+ * reference (`ENTITY_EXPANSION_LIMIT`, its cap held at none, since with no DTD none can be
+ * declared); a body over `maxBytes` (`INPUT_SIZE_LIMIT_EXCEEDED`), nested deeper than `maxDepth`
+ * (`ELEMENT_DEPTH_LIMIT_EXCEEDED`) or holding more than `maxElements` elements
+ * (`NODE_COUNT_LIMIT_EXCEEDED`); and a body that is not well-formed (`NOT_WELL_FORMED_XML`). Each
+ * error's text is fixed and names nothing of the body. The body must be UTF-8.
+ *
+ * The document is kept against its bytes and its serialization as read, so {@link writeXml} can
+ * send an untouched one as the bytes it arrived as.
+ */
+function readXml(library: typeof Ccda, body: Uint8Array, settings: XmlSettings): XmlDocument {
+  const limits = library.resolveLimits({
+    maxInputBytes: settings.maxBytes ?? XML_DEFAULTS.maxBytes,
+    maxDepth: settings.maxDepth ?? XML_DEFAULTS.maxDepth,
+    maxNodeCount: settings.maxElements ?? XML_DEFAULTS.maxElements,
+    maxEntityExpansions: 0,
+  });
+  const document = library.parseSecureXml(
+    strictUtf8.decode(body),
+    limits,
+    ignoreWarning,
+    ignoreWarning,
+  );
+  xmlOrigins.set(document, { body, written: serializeXml(document) });
+  return document;
+}
+
+/**
+ * A document as `@xmldom/xmldom`'s serializer writes it: its nodes' own `toString`, which its types
+ * do not declare. `@cosyte/ccda` exports no writer for a bare document yet.
+ */
+function serializeXml(document: XmlDocument): string {
+  return (document as unknown as { toString(): string }).toString();
+}
+
+/** Whether a transform's output is an XML document: a DOM document node, not plain JSON. */
+function isXmlDocument(value: object): value is XmlDocument {
+  const node = value as { nodeType?: unknown; documentElement?: unknown; toString?: unknown };
+  return (
+    !isPlain(value) &&
+    node.nodeType === 9 &&
+    "documentElement" in node &&
+    typeof node.toString === "function"
+  );
+}
+
+/**
+ * Writes an XML document. One that serializes as it did when it was read goes out as the bytes it
+ * arrived as, declaration, quoting, spacing, line endings and byte order mark included. Any other is
+ * serialized, then read back with the same reader (its size and shape caps lifted), and refused with
+ * `XML_NOT_WRITABLE` unless that reads back to the same text and holds no character XML forbids: a
+ * control character, or a carriage return the reader would turn into a line feed, never leaves in a
+ * changed document.
+ */
+function writeXml(library: typeof Ccda, document: XmlDocument): Written {
+  let written: string;
+  try {
+    written = serializeXml(document);
+  } catch (error) {
+    throw notWritable(error);
+  }
+  const origin = xmlOrigins.get(document);
+  if (origin !== undefined && origin.written === written) return origin.body;
+  let again: string;
+  try {
+    again = serializeXml(library.parseSecureXml(written, openLimits(library), ignoreWarning));
+  } catch (error) {
+    throw notWritable(error);
+  }
+  if (again !== written || holdsForbiddenCharacter(written)) throw notWritable(undefined);
+  return written;
+}
+
+/**
+ * A character XML 1.0 forbids (section 2.2): a C0 control other than tab, line feed and carriage
+ * return, an unpaired surrogate (the `u` flag reads a pair as one character, so only an unpaired
+ * one matches the surrogate range), U+FFFE or U+FFFF. The serializer writes one as it is, and the
+ * reader of `@cosyte/ccda` 0.1.6 takes it back, so the writer looks for it itself.
+ */
+const FORBIDDEN_XML_CHARACTER = /[\0-\x08\x0B\x0C\x0E-\x1F\uD800-\uDFFF￾￿]/u;
+
+/** A character reference, `&#...;` or `&#x...;`, as the serializer may write one. */
+const CHARACTER_REFERENCE = /&#(?:x([0-9a-fA-F]+)|([0-9]+));/g;
+
+/** Whether written XML holds a character XML forbids, as it is or as a character reference. */
+function holdsForbiddenCharacter(written: string): boolean {
+  if (FORBIDDEN_XML_CHARACTER.test(written)) return true;
+  for (const [, hex, decimal] of written.matchAll(CHARACTER_REFERENCE)) {
+    const code = hex === undefined ? Number(decimal) : Number.parseInt(hex, 16);
+    if (code > 0x10ffff || FORBIDDEN_XML_CHARACTER.test(String.fromCodePoint(code))) return true;
+  }
+  return false;
+}
+
+/** The caps a written document is read back under: none on size or shape, none for entities. */
+function openLimits(library: typeof Ccda): ReturnType<typeof Ccda.resolveLimits> {
+  return library.resolveLimits({
+    maxInputBytes: Number.POSITIVE_INFINITY,
+    maxDepth: Number.POSITIVE_INFINITY,
+    maxNodeCount: Number.POSITIVE_INFINITY,
+    maxEntityExpansions: 0,
+  });
+}
+
+/** The refusal of a document that cannot be written; the reader's own error stays out of it. */
+function notWritable(cause: unknown): XmlError {
+  const code =
+    typeof cause === "object" &&
+    cause !== null &&
+    typeof (cause as { code?: unknown }).code === "string"
+      ? ` (${(cause as { code: string }).code})`
+      : "";
+  return new XmlError(
+    "XML_NOT_WRITABLE",
+    `the transform's document cannot be written as XML that reads back the same${code}: it holds a character XML does not allow, a carriage return, or a node the serializer cannot write`,
+  );
 }
 
 /** The model writers told by shape, in the registry's order. */

@@ -1,11 +1,11 @@
 ---
 id: work-with-formats
-title: Handle FHIR, X12, C-CDA, JSON, CSV and text
+title: Handle FHIR, X12, C-CDA, JSON, CSV, XML and text
 sidebar_label: Formats
-description: "Set a channel's format, see what its transform receives, read delimited and fixed-width text, and turn one format into another on the way out."
+description: "Set a channel's format, see what its transform receives, read delimited and fixed-width text and XML, and turn one format into another on the way out."
 ---
 
-# Handle FHIR, X12, C-CDA, JSON, CSV and text
+# Handle FHIR, X12, C-CDA, JSON, CSV, XML and text
 
 A channel's `format` says how its transform receives each message. The message is stored as it
 arrived; it is parsed in the channel's worker, right before the transform runs.
@@ -29,8 +29,9 @@ help: a message read this way holds the bytes as they arrived and cannot be move
 | `json`            | the value `JSON.parse` returns                       | `TransformFor<"json">`  |
 | `text`            | the body as a string                                 | `TransformFor<"text">`  |
 | `csv`             | a `CsvTable`: the header and the rows                | `TransformFor<"csv">`   |
+| `xml`             | an `XmlDocument`: any XML, as a DOM document         | `TransformFor<"xml">`   |
 
-FHIR, X12, C-CDA and JSON are read as UTF-8, and a body that is not valid UTF-8 fails to parse rather
+FHIR, X12, C-CDA, XML and JSON are read as UTF-8, and a body that is not valid UTF-8 fails to parse rather
 than being changed in silence. `text` turns bytes that are not UTF-8 into U+FFFD. A `json` body with a
 number that a JavaScript number cannot hold exactly (a long id, say) fails with `INEXACT_JSON_NUMBER`
 rather than being rounded; use `text` to pass it through untouched.
@@ -208,6 +209,65 @@ destinations:
 A changed line is written with each value at its column, padded with spaces, and the gaps between
 columns as spaces; a value wider than its column fails the output.
 
+## Read XML
+
+An `xml` channel reads each body, of any XML vocabulary, into an `XmlDocument`: a DOM document,
+read by the same hardened reader `@cosyte/ccda` reads C-CDA with, so Pathways adds no XML parser of
+its own. Read and change it with the DOM API: `documentElement`, `getElementsByTagName`,
+`getAttribute`, `setAttribute`, `textContent` and the rest. Use `ccda` rather than `xml` for a C-CDA
+document, to get its model.
+
+```yaml title="channels/orders-in/channel.yaml"
+format: xml
+xml:
+  maxBytes: 1048576
+  maxDepth: 64
+source:
+  file: { dir: ../../data/orders-in/in }
+transform: ./transform.ts
+destinations:
+  - file: { dir: ../../data/orders-in/out }
+```
+
+```ts runnable title="channels/orders-in/transform.ts"
+import type { TransformFor } from "@cosyte/pathways";
+
+// Only new orders go on, marked as sent.
+export default ((document) => {
+  const order = document.documentElement;
+  if (order?.getAttribute("status") !== "new") return null;
+  order.setAttribute("status", "sent");
+  return document;
+}) satisfies TransformFor<"xml">;
+```
+
+The `xml:` block takes these keys, each optional:
+
+| Key           | What it sets                                    | Default             |
+| ------------- | ----------------------------------------------- | ------------------- |
+| `maxBytes`    | the largest body read, in bytes                 | `10485760` (10 MiB) |
+| `maxDepth`    | how deep elements may nest, the root counting 1 | `1000`              |
+| `maxElements` | how many elements a body may hold               | `1000000`           |
+
+A body that cannot be read fails with a code, and the error names nothing the body holds:
+
+- `XXE_OR_DTD_PRESENT`: the body declares a DTD or an entity (`<!DOCTYPE`, `<!ENTITY`, in any case).
+  No external entity is ever fetched and no entity is ever expanded;
+- `ENTITY_EXPANSION_LIMIT`: the body uses an entity other than the five XML predefines (`&amp;`,
+  `&lt;`, `&gt;`, `&quot;`, `&apos;`); character references such as `&#233;` are read;
+- `INPUT_SIZE_LIMIT_EXCEEDED`, `ELEMENT_DEPTH_LIMIT_EXCEEDED`, `NODE_COUNT_LIMIT_EXCEEDED`: the body
+  is over `maxBytes`, `maxDepth` or `maxElements`;
+- `NOT_WELL_FORMED_XML`: the body is not well-formed XML, has no root element, or holds a character
+  XML 1.0 forbids;
+- `ERR_ENCODING_INVALID_ENCODED_DATA`: the body is not UTF-8. Send a body in another character set
+  through a `text` or `json` channel, or have the sender write UTF-8.
+
+A document the transform returns as it was read goes out byte for byte as it arrived: its XML
+declaration, quoting, spacing, line endings and byte order mark included. A changed document, or one
+the transform builds, is written as UTF-8 by the DOM serializer and read back before it is sent; when
+it does not read back the same, such as a text that holds a character XML forbids or a carriage
+return, the output fails with `XML_NOT_WRITABLE`, which names nothing the document holds.
+
 ## Turn one format into another
 
 What a transform returns is written back like this, whatever the channel's format:
@@ -221,7 +281,8 @@ What a transform returns is written back like this, whatever the channel's forma
   says, so a Latin-1 message that nothing changed goes out byte for byte as it arrived;
 - on a `json` channel, a plain object, an array, a number or a boolean is written with
   `JSON.stringify`;
-- on a `csv` channel, a `CsvTable` is written with the channel's `csv:` settings.
+- on a `csv` channel, a `CsvTable` is written with the channel's `csv:` settings;
+- an `XmlDocument` is written as [Read XML](#read-xml) says, whatever the channel's format.
 
 So a transform can take one format in and send another out. This one turns an HL7 v2 admission into
 a FHIR Patient:
@@ -263,5 +324,6 @@ destinations:
   [FHIR](https://docs.cosyte.com/fhir), [X12](https://docs.cosyte.com/x12) and
   [C-CDA](https://docs.cosyte.com/ccda).
 - Reference: [`MessageTypes`](./api/README.md#messagetypes),
-  [`TransformFor`](./api/README.md#transformfor), [`CsvTable`](./api/README.md#csvtable) and
-  [`CsvSettings`](./api/README.md#csvsettings).
+  [`TransformFor`](./api/README.md#transformfor), [`CsvTable`](./api/README.md#csvtable),
+  [`CsvSettings`](./api/README.md#csvsettings), [`XmlDocument`](./api/README.md#xmldocument) and
+  [`XmlSettings`](./api/README.md#xmlsettings).

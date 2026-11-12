@@ -169,6 +169,9 @@ const REFUSED: readonly (readonly [string, Kind, string])[] = [
     channel("hl7v2: { assumeCharset: UTF-16 }\n"),
   ],
   ["an unknown hl7v2 key", "channel", channel("hl7v2: { charset: WINDOWS-1252 }\n")],
+  ["an xml size cap of zero", "channel", channel("format: xml\nxml: { maxBytes: 0 }\n")],
+  ["an xml depth that is not whole", "channel", channel("format: xml\nxml: { maxDepth: 1.5 }\n")],
+  ["an unknown xml key", "channel", channel("format: xml\nxml: { entities: true }\n")],
   [
     "options without module",
     "channel",
@@ -351,6 +354,11 @@ const ACCEPTED: readonly (readonly [string, Kind, string])[] = [
   ],
   ["an hl7v2 block with no format", "channel", channel("hl7v2: { assumeCharset: WINDOWS-1252 }\n")],
   [
+    "an xml channel with every cap",
+    "channel",
+    channel("format: xml\nxml: { maxBytes: 1048576, maxDepth: 64, maxElements: 10000 }\n"),
+  ],
+  [
     "a fixed-width csv channel",
     "channel",
     channel(
@@ -417,6 +425,8 @@ const LEFT_TO_START: readonly (readonly [string, Kind, string])[] = [
     channel("format: text\ncsv: { pad: true }\n"),
   ],
   ["a csv block with no format", "channel", channel("csv: { pad: true }\n")],
+  ["an xml block on a channel of another format", "channel", channel("format: ccda\nxml: {}\n")],
+  ["an xml block with no format", "channel", channel("xml: { maxBytes: 1024 }\n")],
   [
     "an hl7v2 block on a channel of another format",
     "channel",

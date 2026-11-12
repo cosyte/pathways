@@ -77,8 +77,8 @@ health:
   Nor is a channel's `index:` block: which `ctx.meta` keys are stored as searchable tags, and how
   many bits each keeps, stays in the file, where the audit sees it. Nor is an SFTP block's
   `weakAlgorithms`: turning a SHA-1 algorithm back on stays in the file too. Nor is a `csv` channel's
-  `csv:` block or an `hl7v2` channel's `hl7v2:` block: how its bodies are read and written belongs
-  with its `format`.
+  `csv:` block, an `hl7v2` channel's `hl7v2:` block or an `xml` channel's `xml:` block: how its
+  bodies are read and written belongs with its `format`.
 - `pathways validate --print` prints the configuration as `start` reads it, with every setting the
   environment gave and the variable it named; see
   [Command reference](./command-reference.md#pathways-validate). The query string of a URL read
@@ -313,9 +313,10 @@ by key. See [Use the message context](./use-the-message-context.md).
 | Key                                                              | Type                                                                                                                                                                                        | Default                                              |
 | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
 | `name`                                                           | lowercase letters, digits and hyphens                                                                                                                                                       | the folder's name; must match it                     |
-| `format`                                                         | `hl7v2`, `fhir`, `x12`, `ccda`, `json`, `text` or `csv`                                                                                                                                     | `hl7v2`                                              |
+| `format`                                                         | `hl7v2`, `fhir`, `x12`, `ccda`, `json`, `text`, `csv` or `xml`                                                                                                                              | `hl7v2`                                              |
 | `csv`                                                            | how a `csv` channel reads and writes; see [Read delimited and fixed-width text](./work-with-formats.md#read-delimited-and-fixed-width-text)                                                 | comma-delimited, with a header                       |
 | `hl7v2`                                                          | how an `hl7v2` channel reads and writes: `assumeCharset`, the character set to assume when MSH-18 is blank; see [Character sets in HL7 v2](./work-with-formats.md#character-sets-in-hl7-v2) | none: a blank MSH-18 means ASCII                     |
+| `xml`                                                            | the caps an `xml` channel reads under: `maxBytes`, `maxDepth` and `maxElements`; see [Read XML](./work-with-formats.md#read-xml)                                                            | 10 MiB, 1000 deep, 1000000 elements                  |
 | `source`                                                         | exactly one [source](#sources)                                                                                                                                                              | required                                             |
 | `transform`                                                      | path to the transform module                                                                                                                                                                | none: messages pass through                          |
 | `destinations`                                                   | a list of at least one [destination](#destinations)                                                                                                                                         | required                                             |

@@ -871,7 +871,7 @@ Where to read credentials and other settings from: `process.env` when the engine
 
 ##### format
 
-> `readonly` **format**: `"hl7v2"` \| `"json"` \| `"fhir"` \| `"x12"` \| `"ccda"` \| `"text"` \| `"csv"`
+> `readonly` **format**: `"hl7v2"` \| `"json"` \| `"fhir"` \| `"x12"` \| `"xml"` \| `"ccda"` \| `"text"` \| `"csv"`
 
 ##### logger
 
@@ -6235,6 +6235,39 @@ read after another key becomes current. Printable ASCII with no space, 1 to 255 
 
 The data key, encrypted by that master key, in the provider's own layout: 1 to 65,535 bytes.
 
+***
+
+### XmlSettings
+
+How an `xml` channel reads its bodies, from the channel's `xml:` block: the caps a body is held to
+as it is parsed. Every key is optional; XML\_DEFAULTS says what an unset one means.
+
+#### Example
+
+```ts
+const settings: XmlSettings = { maxBytes: 1_048_576, maxDepth: 64 };
+```
+
+#### Properties
+
+##### maxBytes?
+
+> `readonly` `optional` **maxBytes?**: `number`
+
+The largest body read, in bytes of UTF-8 after a byte order mark. Default 10,485,760.
+
+##### maxDepth?
+
+> `readonly` `optional` **maxDepth?**: `number`
+
+How deep elements may nest, the root element counting as 1. Default 1,000.
+
+##### maxElements?
+
+> `readonly` `optional` **maxElements?**: `number`
+
+How many elements a body may hold. Default 1,000,000.
+
 ## Type Aliases
 
 ### AckBuilder
@@ -7053,8 +7086,8 @@ const done = (status: MessageStatus): boolean => status === "transformed" || sta
 The message each format hands a transform, by the `format` a channel declares, read from the
 format registry: `hl7v2` an [Hl7Message](#hl7message), `fhir` a [FhirResource](#fhirresource), `x12` an
 [X12Interchange](#x12interchange), `ccda` a [CcdaDocument](#ccdadocument), `json` a [JsonValue](#jsonvalue) (a string a
-`json` transform returns is sent as it is, not JSON-quoted), `text` the body as a string, and
-`csv` a `CsvTable`.
+`json` transform returns is sent as it is, not JSON-quoted), `text` the body as a string, `csv` a
+`CsvTable`, and `xml` an `XmlDocument`.
 
 #### Example
 
@@ -7624,6 +7657,24 @@ An X12 interchange as an `x12` channel's transform receives it: `@cosyte/x12`'s
 import type { Transform, X12Interchange } from "@cosyte/pathways";
 
 export default ((interchange) => interchange) satisfies Transform<X12Interchange>;
+```
+
+***
+
+### XmlDocument
+
+> **XmlDocument** = `ReturnType`\<*typeof* `Ccda.parseSecureXml`\>
+
+What an `xml` channel's transform receives, and may return: the document `@cosyte/ccda`'s
+hardened XML reader builds, an `@xmldom/xmldom` `Document`. Read and change it with the DOM API
+(`documentElement`, `getElementsByTagName`, `getAttribute`, `setAttribute` and the rest). A
+document the transform leaves as it was read is written back byte for byte.
+
+#### Example
+
+```ts
+const id = (document: XmlDocument): string | null =>
+  document.documentElement?.getAttribute("id") ?? null;
 ```
 
 ## Variables
