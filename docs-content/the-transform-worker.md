@@ -44,9 +44,10 @@ lost when a worker is replaced, and never shared between channels.
 
 ## What it does not protect against
 
-A worker thread is not a sandbox. A transform can read files, open connections and import any package
-the project installs: it is your own code, trusted like the rest of the project, and reviewed in the
-same pull requests. The worker keeps a mistake in a transform from taking the engine down; it does not
+A worker thread is not a sandbox. A transform, and the `onStart` and `onStop` its module may export,
+can read files, open connections and import any package the project installs, with the worker's full
+Node.js access: it is your own code, trusted like the rest of the project, and reviewed in the same
+pull requests. The worker keeps a mistake in a transform from taking the engine down; it does not
 keep out a transform written to do harm.
 
 ## The same in tests
@@ -66,7 +67,9 @@ that times out in production times out in its test.
   transform needs.
 
 The cost of a worker is its memory and a short start, paid once for each channel when the engine
-starts, and again whenever a worker is replaced.
+starts, and again whenever a worker is replaced. A module's `onStart` runs in each new worker, a
+replacement among them, before it takes a message: see
+[run code when the worker starts and stops](./transform-and-filter-messages.md#run-code-when-the-worker-starts-and-stops).
 
 ## Apply it
 

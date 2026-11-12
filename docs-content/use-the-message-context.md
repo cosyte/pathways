@@ -10,13 +10,14 @@ description: "Read a message's source facts, its id and the channel's configurat
 A transform receives a second argument, `ctx`, beside the message. It is a frozen plain object, built
 for each message:
 
-| Field           | What it holds                                                                                               |
-| --------------- | ----------------------------------------------------------------------------------------------------------- |
-| `ctx.messageId` | the stored message's id; `0` under `pathways test`                                                          |
-| `ctx.attempt`   | `1` the first time the message is transformed, one more for each replay or resend                           |
-| `ctx.source`    | what the source knew when it took the message in, by kind; see below                                        |
-| `ctx.config`    | the channel's configuration, from `config:` blocks, read when the engine started                            |
-| `ctx.meta`      | a per-message map; always empty in this release; see [search by metadata](./search-messages-by-metadata.md) |
+| Field           | What it holds                                                                                                                                 |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ctx.messageId` | the stored message's id; `0` under `pathways test`                                                                                            |
+| `ctx.attempt`   | `1` the first time the message is transformed, one more for each replay or resend                                                             |
+| `ctx.source`    | what the source knew when it took the message in, by kind; see below                                                                          |
+| `ctx.config`    | the channel's configuration, from `config:` blocks, read when the engine started                                                              |
+| `ctx.meta`      | a per-message map; always empty in this release; see [search by metadata](./search-messages-by-metadata.md)                                   |
+| `ctx.route`     | a function: `ctx.route(name, message)` hands a message to another channel; see [Route messages between channels](./route-between-channels.md) |
 
 A transform that takes one argument keeps working unchanged: `ctx` is optional in the `Transform`
 type, so a test can still call a transform with the message alone. Nothing in `ctx` is logged, sent

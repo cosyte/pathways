@@ -113,6 +113,7 @@ describe("lifecycle hooks in the engine", () => {
     const later = new Date(AT + 1_000).toISOString();
     const base = { channel: "text" };
     const delivery = { ...base, messageId: 1, destination: 0, deliveryId: 1 };
+    const settledAs = (state: string): unknown => [{ index: 0, name: "module", state }];
     expect(bench.events["all"]).toEqual([
       ...[14, 14, 14, 16].map((bytes, index) => ({
         type: "received",
@@ -125,6 +126,7 @@ describe("lifecycle hooks in the engine", () => {
       })),
       { type: "transformed", at, ...base, messageId: 1, outputs: 1 },
       { type: "filtered", at, ...base, messageId: 2 },
+      { type: "settled", at, ...base, messageId: 2, destinations: settledAs("filtered") },
       {
         type: "transform-failed",
         at,
@@ -135,6 +137,7 @@ describe("lifecycle hooks in the engine", () => {
         code: undefined,
         where: expect.stringMatching(/^transform\.ts:3:\d+$/) as unknown,
       },
+      { type: "settled", at, ...base, messageId: 3, destinations: settledAs("failed") },
       { type: "transformed", at, ...base, messageId: 4, outputs: 1 },
       {
         type: "delivery-retry",
@@ -157,6 +160,9 @@ describe("lifecycle hooks in the engine", () => {
         attempt: 1,
         reason: "NOPE",
       },
+      // Each message settles once its last delivery ends: after the pass that ended it.
+      { type: "settled", at: later, ...base, messageId: 1, destinations: settledAs("delivered") },
+      { type: "settled", at: later, ...base, messageId: 4, destinations: settledAs("failed") },
     ]);
     // The channel's own hook asked for deliveries only.
     expect(bench.events["delivered"]).toEqual([
@@ -253,7 +259,8 @@ describe("lifecycle hooks in the engine", () => {
     await engine.stop();
     expect(Date.now() - started).toBeLessThan(2_000);
 
-    expect(bench.events["fine"]).toHaveLength(6);
+    // Each message's received, transformed, delivered and settled.
+    expect(bench.events["fine"]).toHaveLength(8);
     const failed = events.filter((e) => e.event === "hook-failed");
     expect(failed).toContainEqual(
       expect.objectContaining({
@@ -266,7 +273,7 @@ describe("lifecycle hooks in the engine", () => {
     expect(failed).toContainEqual(
       expect.objectContaining({ hook: "pathways.yaml: hooks.1", on: "delivered", code: "EHOOK" }),
     );
-    expect(failed.filter((e) => e["hook"] === "pathways.yaml: hooks.0")).toHaveLength(6);
+    expect(failed.filter((e) => e["hook"] === "pathways.yaml: hooks.0")).toHaveLength(8);
     expect(failed).toContainEqual(
       expect.objectContaining({ hook: "pathways.yaml: hooks.4", on: "received", name: "string" }),
     );

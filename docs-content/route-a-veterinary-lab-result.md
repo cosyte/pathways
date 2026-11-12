@@ -62,7 +62,7 @@ The example's channel, `vet-results-to-fhir`, does four things. Its files are on
    (`http://hl7.org/fhir/StructureDefinition/patient-animal`), each a `valueCodeableConcept`. The
    transform then reads the extension back and fails the message unless it carries the same species
    and breed codes the lab sent, so a later change in either library cannot drop them quietly.
-4. **POST the Bundle.** An [HTTP destination](./send-and-receive-http.md#post-each-output-to-a-url)
+4. **POST the Bundle.** An [HTTP destination](./send-and-receive-http.md#send-each-output-to-a-url)
    sends it as `application/fhir+json` to the FHIR server's `$process-message` URL.
 
 The extension's third part, `genderStatus`, is never written: PID-8 is administrative sex and does

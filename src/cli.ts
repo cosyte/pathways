@@ -92,6 +92,7 @@ import {
   MAX_REPLAY_BATCH,
 } from "./operator/bulk-replay.js";
 import { recordConfigChanges } from "./operator/config-audit.js";
+import { recordEngineStart, recordEngineStop } from "./operator/engine-audit.js";
 import { verifyCommand, type VerifySelection } from "./operator/verify.js";
 import { InitError, initProject, STARTER_CHANNEL, STARTER_KEY_FILE } from "./starter/init.js";
 import { checkSecrets, formatSecretCheck } from "./secrets/check.js";
@@ -873,6 +874,7 @@ async function start(projectDir: string, mode: StartMode, io: CliIo): Promise<nu
       env,
       signal,
       lease,
+      node,
       // A standby's endpoint is listening already.
       health: standby ? undefined : health,
       logger,
@@ -1025,6 +1027,8 @@ async function runEngine(
     readonly env: Env;
     readonly signal: AbortSignal;
     readonly lease: EngineLease | undefined;
+    /** This process's node id, which the engine-start and engine-stop entries carry. */
+    readonly node: string;
     readonly health: HealthEndpoint | undefined;
     readonly logger: Logger;
     readonly onActive: () => void;
@@ -1057,10 +1061,15 @@ async function runEngine(
   }
   run.onActive();
 
+  const particulars = { version: VERSION, channels: project.channels.length, node: run.node };
+  let started = false;
   let control: ControlServer | undefined;
   try {
     try {
-      // After the engine has started, so its hooks receive these entries too.
+      // After the engine has started, so its hooks receive these entries too: an engine-start
+      // hook is where a project runs what it runs once a deployment is up.
+      await recordEngineStart(audit, store, particulars);
+      started = true;
       await recordConfigChanges(project, store, audit);
     } catch {
       io.err("pathways: the audit log could not be written.\n");
@@ -1103,6 +1112,11 @@ async function runEngine(
     return EXIT.failed;
   } finally {
     run.onStopping();
+    if (started) {
+      // Before the engine stops, so its hooks receive it too. A run that leaves none (killed, or
+      // its host lost) is recorded as an unclean shutdown at the next start.
+      await recordEngineStop(audit, particulars, run.logger);
+    }
     await control?.stop();
     await engine.stop();
   }

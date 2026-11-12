@@ -142,10 +142,27 @@ export interface FileSourceFacts {
   readonly kind: "file";
   /** The file's name as it was dropped in the folder. It can carry a patient's name: never log it. */
   readonly name: string;
-  /** The body's size in bytes. */
+  /** The body's size in bytes: with `batch:`, the piece's. */
   readonly size: number;
+  /** With `batch:`, where the message sat in the file it was cut from. */
+  readonly batch?: BatchFacts;
   /** When the message was stored, as an ISO 8601 time. */
   readonly receivedAt: string;
+}
+
+/**
+ * Where a message sat in the batch a source's `batch:` cut it from: its place, from 0, and the first
+ * 16 hexadecimal digits of the SHA-256 of the whole file or request body, which every piece of it
+ * shares.
+ *
+ * @example
+ * ```ts
+ * const first = (source: FileSourceFacts): boolean => source.batch?.piece === 0;
+ * ```
+ */
+export interface BatchFacts {
+  readonly piece: number;
+  readonly hash: string;
 }
 
 /**
@@ -168,6 +185,8 @@ export interface HttpSourceFacts {
   readonly remoteAddress: string | undefined;
   /** The listed headers the request carried, by lower-case name; several values joined by `, `. */
   readonly headers: Readonly<Record<string, string>>;
+  /** With `batch:`, where the message sat in the request body it was cut from. */
+  readonly batch?: BatchFacts;
   /** When the message was stored, as an ISO 8601 time. */
   readonly receivedAt: string;
 }
@@ -274,6 +293,18 @@ export interface TransformContext {
   /** The channel's configuration, resolved when the engine (or the command) started. */
   readonly config: Readonly<TransformConfig>;
   /**
+   * Hands `message` to channel `channel` as a new message of its own, beside what the transform
+   * returns: a model, a string or bytes, written as an output is. Returns nothing. The target's
+   * source is `channel:`. The hand-off is stored in the same transaction as this message's outcome,
+   * so it happens once the transform succeeds and never without it; when the transform fails, none
+   * of its routes are kept. A name that is no such channel fails this message with
+   * `ERR_PATHWAYS_UNKNOWN_ROUTE`, and a message that has come through more hand-offs than the
+   * target's `maxHops` fails with `ERR_PATHWAYS_HOP_LIMIT`. Under `pathways test` it keeps nothing,
+   * and `pathways replay` refuses a message whose transform routes (`--resend` still works). Throws a `TypeError` when `channel` is not a name or `message` is `null` or
+   * `undefined`, and when called after the transform settled.
+   */
+  readonly route: (channel: string, message: object | string | number | boolean) => void;
+  /**
    * The destination whose own transform this is: set only for a destination's `transform:`, never
    * for the channel's.
    */
@@ -292,7 +323,7 @@ export interface TransformContext {
 export interface DestinationFacts {
   readonly index: number;
   readonly name: string | undefined;
-  /** `file`, `http`, `mllp`, `tcp`, `smtp` or `module`. */
+  /** `file`, `http`, `mllp`, `tcp`, `smtp`, `channel` or `module`. */
   readonly kind: string;
 }
 
@@ -344,3 +375,89 @@ export type TransformFor<F extends Format, To extends Format = F> = Transform<
   MessageFor<F>,
   MessageFor<To>
 >;
+
+/**
+ * The logger a channel script receives: each line is a fixed code and numbers only, so nothing of a
+ * message, a patient or a secret can reach the engine's log through it. The code is lower-case
+ * words joined by hyphens, such as `cache-warmed` (anything else is logged as `script-log`); each
+ * id is a finite number under a name of a letter and then letters and digits, at most 16 of them,
+ * and anything else is dropped. Lines land in the engine's log as `channel-script` events, with the
+ * channel's name.
+ *
+ * @example
+ * ```ts
+ * import type { ScriptLogger } from "@cosyte/pathways";
+ *
+ * const warmed = (logger: ScriptLogger, entries: number): void => logger.info("cache-warmed", { entries });
+ * ```
+ */
+export interface ScriptLogger {
+  info(code: string, ids?: Readonly<Record<string, number>>): void;
+  warn(code: string, ids?: Readonly<Record<string, number>>): void;
+  error(code: string, ids?: Readonly<Record<string, number>>): void;
+}
+
+/**
+ * What a channel's `onStart` receives: the channel's name, its configuration as each message's
+ * context holds it, and a logger that takes a code and numbers only. A frozen plain object.
+ *
+ * @example
+ * ```ts
+ * import type { ChannelScriptContext } from "@cosyte/pathways";
+ *
+ * const channelOf = (ctx: ChannelScriptContext): string => ctx.channel;
+ * ```
+ */
+export interface ChannelScriptContext {
+  /** The channel's name. */
+  readonly channel: string;
+  /** The channel's configuration, resolved when the engine (or the command) started. */
+  readonly config: Readonly<TransformConfig>;
+  /** Writes a line to the engine's log: a code and numbers only. */
+  readonly logger: ScriptLogger;
+}
+
+/**
+ * A channel's start script: the `onStart` its `transform.ts` may export beside the transform. It
+ * runs in the channel's transform worker, before the worker takes its first message, on every new
+ * worker: when the engine starts, on a reload, and again for the replacement worker after a
+ * transform runs past its timeout, runs out of memory or crashes. So it must be idempotent: safe to
+ * run again in a fresh worker, with nothing carried over but what it sets up anew.
+ *
+ * It may be async. A throw, or a run past its limit (the channel's `scriptTimeout`, its transform
+ * `timeout` unless set), is a load failure: at engine start, the start stops and says why; for a
+ * replacement worker, that channel stops, the health endpoint says why, and the other channels run
+ * on; on a reload, the reload is refused and the running transform kept.
+ *
+ * It is user code with the worker's full Node access, not a sandbox: it can read files, open
+ * connections and read what the worker can.
+ *
+ * @example
+ * ```ts
+ * import type { OnStart } from "@cosyte/pathways";
+ *
+ * export const onStart: OnStart = async (ctx) => {
+ *   ctx.logger.info("lookup-loaded", { entries: 120 });
+ * };
+ * ```
+ */
+export type OnStart = (ctx: ChannelScriptContext) => void | Promise<void>;
+
+/**
+ * A channel's stop script: the `onStop` its `transform.ts` may export beside the transform. It runs
+ * in the transform worker once the worker's last message is done, before the worker ends: when the
+ * engine stops (on `SIGTERM` and `SIGINT` among the ways), for the old worker on a reload, and when
+ * a `pathways` command that ran the transform ends. It is cut at the channel's `scriptTimeout` (its
+ * transform `timeout` unless set); a throw is logged by name and code, and the worker ends either
+ * way. A worker ended because a transform ran past its timeout or crashed runs no `onStop`.
+ *
+ * @example
+ * ```ts
+ * import type { OnStop } from "@cosyte/pathways";
+ *
+ * export const onStop: OnStop = async () => {
+ *   await Promise.resolve();
+ * };
+ * ```
+ */
+export type OnStop = () => void | Promise<void>;

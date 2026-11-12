@@ -8,6 +8,9 @@ import type {
   DeliveryCounts,
   DestinationOutcome,
   ExpireResult,
+  HandOff,
+  HandOffFrom,
+  HandOffResult,
   LeaseClaim,
   LeaseClaimant,
   LeaseHolder,
@@ -25,6 +28,7 @@ import type {
   Page,
   PendingDelivery,
   SendStart,
+  SettledMessage,
   PendingMessage,
   ReceivedMessage,
   DestinationKey,
@@ -217,6 +221,15 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
   readonly setChannelState?: (channel: string, state: ChannelRunState) => Promise<void>;
   /** Straight through, present only when the store underneath has it. */
   readonly markDryRun?: (deliveryId: number, epoch?: number) => Promise<void>;
+  /** Hashes in and a hash out, no body, so straight through, present only when the store underneath has it. */
+  readonly heldIdempotencyKey?: (
+    channel: string,
+    duplicateKey: string,
+  ) => Promise<string | null | undefined>;
+  /** Ids and states only, so straight through, present only when the store underneath has both. */
+  readonly settle?: (messageId: number) => Promise<SettledMessage | undefined>;
+  readonly unsettled?: (channel: string, after: number, limit: number) => Promise<number[]>;
+  readonly requeuedUnsettled?: (channel: string, limit: number) => Promise<number[]>;
   /** The node methods, straight through, present only when the store underneath has all five. */
   readonly joinNode?: (info: NodeInfo, replace?: NodeReplace) => Promise<NodeJoin>;
   readonly nodeHeartbeat?: (self: NodeSelf, state: NodeState) => Promise<boolean>;
@@ -243,6 +256,18 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
   readonly applyExpiry?: RetentionStore["applyExpiry"];
   /** Every column of a message and its deliveries, each body, error text and metadata read back. */
   readonly archiveRows?: RetentionStore["archiveRows"];
+  /**
+   * Hands messages to other channels: each body, and the outputs of a transform it is recorded
+   * with, through the codec, and each one's metadata as {@link receive} stores it. Present only
+   * when the store underneath has it.
+   */
+  readonly handOff?: (
+    from: HandOffFrom,
+    handOffs: readonly HandOff[],
+    epoch?: number,
+  ) => Promise<HandOffResult>;
+  /** The messages handed over from one: ids, statuses and times, so straight through. */
+  readonly children?: (messageId: number, limit: number) => Promise<MessageSummary[]>;
 
   protected constructor(inner: MessageStore, codec: Codec, indexer?: MetaIndexer) {
     this.#inner = inner;
@@ -270,6 +295,16 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
       this.holdDeliveries = async (channel, keys, error, epoch) =>
         hold(channel, keys, await codec.storeText(error), epoch);
     }
+    if (inner.heldIdempotencyKey !== undefined) {
+      this.heldIdempotencyKey = inner.heldIdempotencyKey.bind(inner);
+    }
+    if (inner.settle !== undefined && inner.unsettled !== undefined) {
+      this.settle = inner.settle.bind(inner);
+      this.unsettled = inner.unsettled.bind(inner);
+      if (inner.requeuedUnsettled !== undefined) {
+        this.requeuedUnsettled = inner.requeuedUnsettled.bind(inner);
+      }
+    }
     const nodes = nodeStore(inner);
     if (nodes !== undefined) {
       this.joinNode = nodes.joinNode;
@@ -286,6 +321,11 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
       this.applyExpiry = (channel, ids, query) => steps.applyExpiry(channel, ids, query);
       this.archiveRows = (id) => this.#archiveRows(steps, id);
     }
+    if (typeof inner.handOff === "function") {
+      const handOff = inner.handOff.bind(inner);
+      this.handOff = (from, handOffs, epoch) => this.#handOff(handOff, from, handOffs, epoch);
+    }
+    if (typeof inner.children === "function") this.children = inner.children.bind(inner);
     this.#innerCopies = copiesBodies(inner);
     // A codec that copies keeps no body it is handed and reads each into a new buffer; one that does
     // not passes bodies straight through, so this store copies when the one underneath does.
@@ -305,6 +345,63 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
     const result = await write(stored);
     if (this.#codec.copies && this.#innerCopies) for (const copy of stored) release(copy);
     return result;
+  }
+
+  /**
+   * A hand-off with every body and its metadata through the codec, as {@link receive} stores them,
+   * and a transform's outputs as {@link completeTransform} stores them.
+   */
+  async #handOff(
+    handOff: NonNullable<MessageStore["handOff"]>,
+    from: HandOffFrom,
+    handOffs: readonly HandOff[],
+    epoch: number | undefined,
+  ): Promise<HandOffResult> {
+    if (from.kind !== "transform") {
+      return this.#sealed(handOffs, (sealed) => handOff(from, sealed, epoch));
+    }
+    const { outputs } = from;
+    if (isByDestination(outputs)) {
+      return this.#storedByDestination(outputs.byDestination, (byDestination) =>
+        this.#sealed(handOffs, (sealed) =>
+          handOff({ ...from, outputs: { byDestination } }, sealed, epoch),
+        ),
+      );
+    }
+    return this.#stored(outputs, (stored) =>
+      this.#sealed(handOffs, (sealed) => handOff({ ...from, outputs: stored }, sealed, epoch)),
+    );
+  }
+
+  /** Each hand-off's body and metadata through the codec, handed to `write`. */
+  async #sealed<T>(
+    handOffs: readonly HandOff[],
+    write: (sealed: HandOff[]) => Promise<T>,
+  ): Promise<T> {
+    return this.#stored(
+      handOffs.map((one) => one.body),
+      async (stored) => {
+        const sealed: HandOff[] = [];
+        for (const [index, one] of handOffs.entries()) {
+          const { meta } = one.options;
+          sealed.push({
+            ...one,
+            body: stored[index] as Uint8Array,
+            options: {
+              ...one.options,
+              ...(meta === undefined
+                ? {}
+                : {
+                    meta: undefined,
+                    storedMeta: await this.#codec.storeText(JSON.stringify(meta)),
+                    metaTags: (await this.#indexer?.tagsFor(one.channel, meta)) ?? [],
+                  }),
+            },
+          });
+        }
+        return write(sealed);
+      },
+    );
   }
 
   /** One message's rows, each body, error text and the metadata read back through the codec. */
@@ -580,6 +677,12 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
   async messageBody(id: number): Promise<Uint8Array | undefined> {
     const body = await this.#inner.messageBody(id);
     return body === undefined ? undefined : this.#read(body);
+  }
+
+  /** A message's metadata as JSON, read back through the codec; undefined when it has none. */
+  async messageMeta(id: number): Promise<string | undefined> {
+    const stored = await this.#inner.messageMeta?.(id);
+    return stored === undefined ? undefined : this.#codec.readText(stored);
   }
 
   /** A message's deliveries, without bodies, each error text read back. */

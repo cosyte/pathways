@@ -348,7 +348,10 @@ describe("an http destination's ack setting", () => {
 
   it("is read from the channel, and the destination it builds settles by the acknowledgement", async () => {
     const r = await serve(answer(ack("AR")));
-    const root = await makeProject(channel(`http: { url: "${r.url}", plaintext: true, ack: xml }`));
+    // The receiver is on loopback, which the destination connects to only when allowNetworks names it.
+    const root = await makeProject(
+      channel(`http: { url: "${r.url}", plaintext: true, allowNetworks: [127.0.0.1], ack: xml }`),
+    );
     const [config] = (await loadProject(root)).channels;
     expect(config?.destinations[0]).toMatchObject({ kind: "http", ack: "xml" });
     const { logger } = captureLogger();
@@ -415,6 +418,26 @@ describe("an http destination's ack setting", () => {
     );
     const [config] = (await loadProject(root)).channels;
     expect(config?.destinations[0]).toMatchObject({ kind: "http", ack: "xml" });
+  });
+
+  it.each(["GET", "DELETE"])(
+    "is refused at load with method %s, which sends no body to acknowledge",
+    async (method) => {
+      const root = await makeProject(
+        channel(`http: { url: "https://lab.example.test/", method: ${method}, ack: xml }`),
+      );
+      const error = await loadProject(root).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(ConfigError);
+      expect((error as ConfigError).problems.join("\n")).toContain("destinations.0.http.ack");
+    },
+  );
+
+  it.each(["POST", "PUT", "PATCH"])("is taken with method %s", async (method) => {
+    const root = await makeProject(
+      channel(`http: { url: "https://lab.example.test/", method: ${method}, ack: xml }`),
+    );
+    const [config] = (await loadProject(root)).channels;
+    expect(config?.destinations[0]).toMatchObject({ kind: "http", method, ack: "xml" });
   });
 
   it("takes xml alone", async () => {

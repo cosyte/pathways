@@ -386,7 +386,9 @@ const CURRENT_SCHEMA = [
   `CREATE INDEX "messages_by_channel_dedup_key" on "messages" ("channel", "dedup_key", "id")`,
   `CREATE UNIQUE INDEX "messages_by_channel_idempotency_claim" on "messages" ("channel", "idempotency_claim")`,
   `CREATE INDEX "messages_by_channel_idempotency_key" on "messages" ("channel", "idempotency_key", "id")`,
+  `CREATE INDEX "messages_by_channel_settled" on "messages" ("channel", "settled_generation", "status")`,
   `CREATE INDEX "messages_by_channel_status" on "messages" ("channel", "status", "id")`,
+  `CREATE INDEX "messages_by_parent" on "messages" ("parent_message", "id")`,
   `CREATE INDEX "meta_index_by_message" on "meta_index" ("message_id")`,
   `CREATE INDEX "meta_index_by_tag" on "meta_index" ("channel", "index_name", "tag", "message_id")`,
   `CREATE TABLE "audit_log" ("id" integer primary key autoincrement, "at" text not null, "actor" text not null, "action" text not null, "outcome" text not null, "channel" text, "message_id" integer, "detail" text)`,
@@ -395,7 +397,7 @@ const CURRENT_SCHEMA = [
   `CREATE TABLE "kysely_migration" ("name" varchar(255) not null primary key, "timestamp" varchar(255) not null)`,
   `CREATE TABLE "kysely_migration_lock" ("id" varchar(255) not null primary key, "is_locked" integer default 0 not null)`,
   `CREATE TABLE "leases" ("name" text primary key, "owner" text not null, "host" text not null, "epoch" integer not null, "since" integer not null, "expires_at" integer not null)`,
-  `CREATE TABLE "messages" ("id" integer primary key autoincrement, "channel" text not null, "received_at" text not null, "body" blob not null, "status" text not null, "error" text, "updated_at" text not null, "dedup_key" text, "duplicate_of" integer, "size" integer, "generation" integer default 0 not null, "idempotency_key" text, "content_hash" text, "content_dropped_at" text, "meta" text, "idempotency_claim" text)`,
+  `CREATE TABLE "messages" ("id" integer primary key autoincrement, "channel" text not null, "received_at" text not null, "body" blob not null, "status" text not null, "error" text, "updated_at" text not null, "dedup_key" text, "duplicate_of" integer, "size" integer, "generation" integer default 0 not null, "idempotency_key" text, "content_hash" text, "content_dropped_at" text, "meta" text, "idempotency_claim" text, "parent_channel" text, "parent_message" integer, "parent_delivery" integer, "parent_generation" integer, "hops" integer, "settled_generation" integer)`,
   `CREATE TABLE "meta_index" ("id" integer primary key autoincrement, "message_id" integer not null, "channel" text not null, "index_name" text not null, "key_id" text not null, "tag" text not null)`,
   `CREATE TABLE "nodes" ("node" text primary key, "host" text not null, "pid" integer not null, "started_at" integer not null, "version" text not null, "schema_generation" integer, "role" text not null, "draining" integer not null, "stale_after_ms" integer not null, "heartbeat_at" integer not null)`,
   `CREATE TABLE "schema_info" ("step" text primary key, "generation" integer not null, "tag" text not null, "min_engine" text not null, "applied_by" text not null, "applied_at" text not null)`,
@@ -476,6 +478,8 @@ describe("Store on SQLite files the first slice made", () => {
       "0012-nodes",
       "0013-destination-keys",
       "0014-idempotency-claims",
+      "0015-channel-links",
+      "0016-settled",
     ]);
     db.close();
   });

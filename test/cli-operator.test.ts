@@ -547,9 +547,11 @@ describe("the audit log from pathways start", () => {
     });
     expect((await running).code).toBe(EXIT.ok);
     expect(seen.map((e) => [e.action, e.channel, e.detail["change"]])).toEqual([
+      ["engine-start", null, undefined],
       ["config", null, "added"],
       ["config", "adt", "added"],
       ["retention", null, undefined],
+      ["engine-stop", null, undefined],
     ]);
     expect(seen.every((e) => e.actor.length > 0)).toBe(true);
 

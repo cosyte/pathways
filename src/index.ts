@@ -14,8 +14,18 @@
  */
 export { VERSION } from "./version.js";
 export type { Format } from "./config/schema.js";
+export {
+  DEFAULT_MAX_HOPS,
+  DEFAULT_MAX_PENDING,
+  HOP_LIMIT_CODE,
+  TARGET_FULL_CODE,
+  TOO_MANY_ROUTES_CODE,
+  UNKNOWN_ROUTE_CODE,
+} from "./config/schema.js";
 export type {
+  BatchFacts,
   CcdaDocument,
+  ChannelScriptContext,
   CsvColumn,
   CsvRecord,
   CsvSettings,
@@ -31,6 +41,9 @@ export type {
   MessageTypes,
   MllpSourceFacts,
   ModuleSourceFacts,
+  OnStart,
+  OnStop,
+  ScriptLogger,
   SourceFacts,
   TcpSourceFacts,
   Transform,
@@ -48,10 +61,12 @@ export {
   type DestinationConnector,
   type MessageSink,
   type OutgoingMessage,
+  type ReceivedPiece,
   type ReceiveOptions,
   type Resend,
   type SourceConnector,
 } from "./connectors/types.js";
+export type { BatchResult } from "./connectors/batch.js";
 export {
   defaultAckBuilder,
   type AckBuilder,
@@ -112,6 +127,8 @@ export {
   type LifecycleEventType,
   type ReceivedEvent,
   type ReceiveFailedEvent,
+  type SettledDestinationState,
+  type SettledEvent,
   type SourceDownEvent,
   type SourceUpEvent,
   type AuditEvent,
@@ -139,7 +156,11 @@ export type {
   DestinationOutcome,
   ExpireResult,
   HeldDeliveries,
+  HandOff,
+  HandOffFrom,
+  HandOffResult,
   LeaseStore,
+  MessageParent,
   MessageQuery,
   MessageRows,
   MetaCandidate,
@@ -164,6 +185,7 @@ export type {
   RetryingDelivery,
   SendingMarker,
   SendStart,
+  SettledMessage,
   StoredContent,
   StoredDelivery,
   StoredDeliveryRow,

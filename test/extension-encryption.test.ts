@@ -111,19 +111,24 @@ describe("a custom store under encryption at rest", () => {
     expect(ran.events.some((e) => e.event === "unencrypted-storage")).toBe(false);
 
     // The hook saw every step, by ids and counts only: no body, encrypted or decrypted. First come
-    // the audit log's entries for the configuration this first start saw.
+    // the audit log's entries for the start and the configuration this first start saw, and last
+    // the one for its stop. The custom store has no settle, so no settled event.
     const events = bench.events["all"] ?? [];
     expect(events.map((e) => (e as { type: string }).type)).toEqual([
+      "audit",
       "audit",
       "audit",
       "received",
       "transformed",
       "delivered",
+      "audit",
     ]);
-    expect(events.slice(0, 2)).toEqual([
+    expect(events.slice(0, 3)).toEqual([
+      expect.objectContaining({ action: "engine-start", channel: undefined }),
       expect.objectContaining({ action: "config", channel: undefined }),
       expect.objectContaining({ action: "config", channel: "adt" }),
     ]);
+    expect(events.at(-1)).toEqual(expect.objectContaining({ action: "engine-stop" }));
     const json = JSON.stringify(events);
     for (const body of [ADT_A01, PLAIN, ...stored]) {
       for (const piece of body.split(/[\r|^]/).filter((part) => part.length >= 6)) {

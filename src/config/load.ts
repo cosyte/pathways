@@ -8,11 +8,13 @@ import { normalisePath } from "../connectors/http-path.js";
 import { alikeDestinations } from "../engine/destination-key.js";
 import { secretSourceOf, secretUses, type SecretSourceYaml } from "../secrets/sources.js";
 import { type Env, processEnv, type VariableName } from "../env.js";
+import { channelGraphProblems } from "./channel-graph.js";
 import { referencesIn, resolvingEnv, variableAt, type EnvReference } from "./env-ref.js";
 import { DEFAULT_INDEX_BITS, isLowEntropyKey } from "./meta-index.js";
 import {
   BUILT_IN_SECRET_PROVIDERS,
   channelSchema,
+  DEFAULT_BATCH_HOLD_MS,
   DEFAULT_DATABASE_CONNECT_TIMEOUT_MS,
   DEFAULT_DATABASE_FILE,
   DEFAULT_DATABASE_URL_ENV,
@@ -26,6 +28,8 @@ import {
   DEFAULT_LEASE_TTL_MS,
   DEFAULT_DELIVERY_TIMEOUT_MS,
   DEFAULT_MAX_BYTES,
+  DEFAULT_MAX_HOPS,
+  DEFAULT_MAX_PENDING,
   DEFAULT_MIN_AGE_MS,
   DEFAULT_POLL_DEADLINE_MS,
   DEFAULT_READ_TRIES,
@@ -43,6 +47,7 @@ import {
   DEFAULT_TCP_TIMEOUT_MS,
   projectSchema,
   type AzblobConfig,
+  type BatchConfig,
   type ChannelConfig,
   type ClientTlsFiles,
   type MllpClientTlsFiles,
@@ -415,6 +420,20 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
     });
   }
 
+  if (problems.length === 0) {
+    problems.push(
+      ...channelGraphProblems(
+        channels.map((channel) => ({
+          name: channel.name,
+          takesHandOffs: channel.source.kind === "channel",
+          routed: channel.source.kind === "channel" && channel.source.routed,
+          targets: channel.destinations.flatMap((destination, index) =>
+            destination.kind === "channel" ? [{ index, name: destination.channel }] : [],
+          ),
+        })),
+      ),
+    );
+  }
   if (problems.length === 0 && channels.length === 0) {
     problems.push(
       `${show(channelsDir)}: no channels; each channel lives in channels/<name>/channel.yaml`,
@@ -592,9 +611,17 @@ function resolveSource(
   dir: string,
   settings: Settings,
 ): ChannelConfig["source"] {
-  const { http, mllp, tcp } = source;
+  const { http, mllp, tcp, channel } = source;
   const module = resolveModule(source, dir);
   if (module !== undefined) return module;
+  if (channel !== undefined) {
+    return {
+      kind: "channel",
+      routed: channel.routed === true,
+      maxPending: channel.maxPending ?? DEFAULT_MAX_PENDING,
+      maxHops: channel.maxHops ?? DEFAULT_MAX_HOPS,
+    };
+  }
   if (tcp !== undefined) {
     const { reply } = tcp;
     return {
@@ -648,6 +675,7 @@ function resolveSource(
       response: resolveSourceResponse(http.response, dir),
       maxBytes: http.maxBytes ?? DEFAULT_MAX_BYTES,
       contextHeaders: (http.contextHeaders ?? []).map((name) => name.toLowerCase()),
+      ...(http.batch === undefined ? {} : { batch: resolveBatch(http.batch, "fail") }),
     };
   }
   // The schema lets exactly one kind through, so a source that is not HTTP is a file source.
@@ -677,6 +705,28 @@ function resolveSource(
     readTries: file.readTries ?? DEFAULT_READ_TRIES,
     sftp,
     ...objects,
+    ...(file.batch === undefined ? {} : { batch: resolveBatch(file.batch, "hold") }),
+  };
+}
+
+/** A source's `batch:`, resolved: the delimiter as UTF-8 bytes, and the defaults filled in. */
+function resolveBatch(
+  batch: {
+    readonly split: BatchConfig["split"];
+    readonly delimiter?: string | undefined;
+    readonly maxFileSize?: number | undefined;
+    readonly onIncomplete?: BatchConfig["onIncomplete"] | undefined;
+    readonly holdFor?: number | undefined;
+  },
+  incomplete: BatchConfig["onIncomplete"],
+): BatchConfig {
+  return {
+    split: batch.split,
+    delimiter:
+      batch.delimiter === undefined ? undefined : new TextEncoder().encode(batch.delimiter),
+    maxFileSize: batch.maxFileSize,
+    onIncomplete: batch.onIncomplete ?? incomplete,
+    holdForMs: batch.holdFor ?? DEFAULT_BATCH_HOLD_MS,
   };
 }
 
@@ -828,9 +878,12 @@ function resolveConnector(
   dir: string,
   settings: Settings,
 ): ChannelConfig["destinations"][number] {
-  const { http, mllp, smtp, tcp } = destination;
+  const { http, mllp, smtp, tcp, channel } = destination;
   const module = resolveModule(destination, dir);
   if (module !== undefined) return module;
+  if (channel !== undefined) {
+    return { kind: "channel", channel: channel.name, carryMeta: channel.carryMeta ?? [] };
+  }
   if (smtp !== undefined) {
     return resolveSmtp(smtp, dir, destination.timeout ?? DEFAULT_DELIVERY_TIMEOUT_MS);
   }
@@ -871,6 +924,10 @@ function resolveConnector(
     ...resolveHttpClient(http, dir),
     timeoutMs: http.timeout ?? DEFAULT_HTTP_TIMEOUT_MS,
     resendHeader: http.resendHeader,
+    method: http.method ?? "POST",
+    query: http.query ?? {},
+    idempotencyHeader: http.idempotencyHeader,
+    allowNetworks: http.allowNetworks ?? [],
     ack: http.ack,
   };
 }
@@ -1038,6 +1095,7 @@ function mergeSettings(
   override: {
     timeout?: number | undefined;
     memory?: number | undefined;
+    scriptTimeout?: number | undefined;
     pollInterval?: number | undefined;
     onStoreFailure?: OnStoreFailure | undefined;
     ackTimeout?: number | undefined;
@@ -1052,6 +1110,10 @@ function mergeSettings(
   return {
     timeoutMs: override.timeout ?? base.timeoutMs,
     memoryMb: override.memory ?? base.memoryMb,
+    // Set only when written, so settings without it resolve as they always have.
+    ...((override.scriptTimeout ?? base.scriptTimeoutMs) === undefined
+      ? {}
+      : { scriptTimeoutMs: override.scriptTimeout ?? base.scriptTimeoutMs }),
     pollIntervalMs: override.pollInterval ?? base.pollIntervalMs,
     onStoreFailure: override.onStoreFailure ?? base.onStoreFailure,
     ackTimeoutMs: override.ackTimeout ?? base.ackTimeoutMs,

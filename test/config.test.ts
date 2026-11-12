@@ -294,6 +294,9 @@ destinations:
         timeoutMs: 30_000,
         tls: undefined,
         plaintext: false,
+        method: "POST",
+        query: {},
+        allowNetworks: [],
       },
     ]);
   });
@@ -318,6 +321,10 @@ destinations:
       timeout: 5s
       tls: { ca: lab-ca.crt, cert: client.crt, key: client.key }
       resendHeader: X-Possible-Duplicate
+      method: PUT
+      query: { visit: "{visit}", site: LAB }
+      idempotencyHeader: Idempotency-Key
+      allowNetworks: [10.20.0.0/16, 127.0.0.1]
   - http: { url: "http://127.0.0.1:9000/in", plaintext: true }
   - file: { dir: out }
 `,
@@ -344,6 +351,10 @@ destinations:
         },
         plaintext: false,
         resendHeader: "X-Possible-Duplicate",
+        method: "PUT",
+        query: { visit: "{visit}", site: "LAB" },
+        idempotencyHeader: "Idempotency-Key",
+        allowNetworks: ["10.20.0.0/16", "127.0.0.1"],
       },
       {
         kind: "http",
@@ -352,6 +363,9 @@ destinations:
         timeoutMs: 30_000,
         tls: undefined,
         plaintext: true,
+        method: "POST",
+        query: {},
+        allowNetworks: [],
       },
       { kind: "file", dir: join(dir, "out") },
     ]);
@@ -566,6 +580,41 @@ destinations:
     ]);
   });
 
+  it("names a bad method, URL template, query value, idempotency header or network by key", async () => {
+    const problems = await problemsOf({
+      "channels/a/channel.yaml": `
+source:
+  file: { dir: in }
+destinations:
+  - http: { url: "https://example.test/", method: HEAD }
+  - http: { url: "https://{host}.example.test/" }
+  - http: { url: "https://example.test/in?mrn={mrn}" }
+  - http: { url: "https://example.test/{mrn", query: { visit: "{visit" } }
+  - http: { url: "https://example.test/", idempotencyHeader: "Bad Name" }
+  - http: { url: "https://example.test/", idempotencyHeader: Content-Length }
+  - http: { url: "https://example.test/", idempotencyHeader: x-key, headers: { X-Key: { env: K } } }
+  - http: { url: "https://example.test/", idempotencyHeader: X-Dup, resendHeader: x-dup }
+  - http: { url: "https://example.test/", allowNetworks: [10.0.0.0/8, lab.example.test, 10.0.0.0/40] }
+  - http: { url: "https://example.test/{mrn}", query: { visit: "{visit}" }, idempotencyHeader: Idempotency-Key }
+`,
+    });
+    const at = (n: number, rest: string): string =>
+      `channels/a/channel.yaml: destinations.${n}.http.${rest}`;
+    expect(problems).toEqual([
+      expect.stringMatching(/^channels\/a\/channel\.yaml: destinations\.0\.http\.method: /),
+      at(1, "url: a placeholder may fill only the path"),
+      at(2, "url: a placeholder may fill only the path; fill a query value with query:"),
+      at(3, "url: a placeholder is a metadata key in braces, such as {mrn}"),
+      at(3, "query.visit: a placeholder is a metadata key in braces, such as {mrn}"),
+      at(4, "idempotencyHeader: not a valid header name"),
+      at(5, "idempotencyHeader: Pathways sets this header itself"),
+      at(6, "idempotencyHeader: already set in headers"),
+      at(7, "idempotencyHeader: already named by resendHeader"),
+      at(8, "allowNetworks.1: an address or a CIDR range, such as 10.20.0.0/16"),
+      at(8, "allowNetworks.2: an address or a CIDR range, such as 10.20.0.0/16"),
+    ]);
+  });
+
   it("names a bad url, port, size, path, auth and client TLS by key", async () => {
     const problems = await problemsOf({
       "channels/a/channel.yaml": `
@@ -604,8 +653,8 @@ destinations:
 `,
     });
     expect(problems).toEqual([
-      "channels/a/channel.yaml: source: name exactly one of: file, http, mllp, tcp, module",
-      "channels/a/channel.yaml: destinations.0: name exactly one of: file, http, mllp, tcp, smtp, module",
+      "channels/a/channel.yaml: source: name exactly one of: file, http, mllp, tcp, channel, module",
+      "channels/a/channel.yaml: destinations.0: name exactly one of: file, http, mllp, tcp, smtp, channel, module",
     ]);
   });
 
@@ -903,7 +952,7 @@ describe("loadProject: extensions", () => {
       "pathways.yaml: hooks.7.options: goes with module: it is what the module's factory is given",
       'pathways.yaml: hooks.8: Unrecognized key: "colour"',
       "channels/a/channel.yaml: source.options: goes with module: it is what the module's factory is given",
-      "channels/a/channel.yaml: destinations.0: name exactly one of: file, http, mllp, tcp, smtp, module",
+      "channels/a/channel.yaml: destinations.0: name exactly one of: file, http, mllp, tcp, smtp, channel, module",
     ]);
   });
 });

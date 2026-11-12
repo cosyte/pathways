@@ -30,7 +30,7 @@ real veterinary feed, and what it does not.
   `RelatedPerson`, and an `Observation` for each result.
 - Entry ids made from the message's control id, so the same message always gives the same Bundle:
   `pathways test` compares it byte for byte, and a replay sends what the first pass sent.
-- An [HTTP destination](./send-and-receive-http.md#post-each-output-to-a-url) that POSTs each Bundle
+- An [HTTP destination](./send-and-receive-http.md#send-each-output-to-a-url) that POSTs each Bundle
   as `application/fhir+json`.
 - Two small scripts to try it with no other system: `scripts/receiver.ts` stands in for the FHIR
   server, and `scripts/send.ts` sends files over MLLP.
@@ -186,6 +186,10 @@ destinations:
       # The receiver in scripts/receiver.ts answers plain HTTP on the loopback. A FHIR server is
       # an https:// URL, which needs no plaintext line.
       plaintext: true
+      # The receiver is on this machine, an address the destination refuses unless it is named
+      # here. A real endpoint on the public internet needs no allowNetworks line; one on a private
+      # network, such as 10.20.0.0/16, needs that network named here.
+      allowNetworks: [127.0.0.1]
 ```
 
 ### channels/vet-results-to-fhir/transform.ts

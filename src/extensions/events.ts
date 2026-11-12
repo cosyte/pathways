@@ -22,6 +22,7 @@ export const LIFECYCLE_EVENTS = [
   "delivery-redirected",
   "delivery-rejected",
   "delivery-exhausted",
+  "settled",
   "source-down",
   "source-up",
   "audit",
@@ -274,6 +275,51 @@ export interface DeliveryExhaustedEvent extends DeliveryEventBase {
 }
 
 /**
+ * Where a message stands with one destination once it has settled: `delivered` (every output it
+ * was given was accepted), `failed` (one failed for good, or the message's transform failed, so
+ * nothing was sent), `filtered` (the transform returned nothing for it), `cleared` (an operator
+ * cleared a failed one) or `dry-run` (recorded and never sent).
+ *
+ * @example
+ * ```ts
+ * const reached = (state: SettledDestinationState): boolean => state === "delivered";
+ * ```
+ */
+export type SettledDestinationState = "delivered" | "failed" | "filtered" | "cleared" | "dry-run";
+
+/**
+ * A message has settled: its last delivery was delivered or failed for good, or it was filtered,
+ * or its transform failed. Sent once per message, and once more for each replay or resend, which
+ * settles again: the engine records it on the message's row by one conditional update, so a
+ * restart sends one the engine stopped before sending, and neither a restart nor a second engine
+ * sends one twice. It carries the message's id and where it stands with each destination, never
+ * content.
+ *
+ * Hooks are best effort: past 1,000 events waiting for one hook, new ones are dropped, and a hard
+ * stop loses those waiting. Where every settled message must be counted, read the message states
+ * (`pathways messages`) or the audit log rather than the events.
+ *
+ * @example
+ * ```ts
+ * if (event.type === "settled" && event.destinations.some((d) => d.state === "failed")) {
+ *   page(`${event.channel}: message ${event.messageId} did not reach every destination`);
+ * }
+ * ```
+ */
+export interface SettledEvent extends LifecycleEventBase {
+  readonly type: "settled";
+  readonly messageId: number;
+  /** Each destination in the channel's `destinations:` list, in order. */
+  readonly destinations: readonly {
+    /** Its place in the channel's `destinations:` list, from 0. */
+    readonly index: number;
+    /** Its kind, such as `mllp`, `http` or `module`: destinations carry no name of their own. */
+    readonly name: string;
+    readonly state: SettledDestinationState;
+  }[];
+}
+
+/**
  * A source could not start listening (its port is taken, say), or a running source said it lost its
  * connection (`MessageSink.sourceDown`; then `name` is `SourceDown`). A listener is tried again after
  * `retryInMs`; a source that lost its connection is told to wait that long. Each is reported again
@@ -318,8 +364,11 @@ export interface SourceUpEvent extends LifecycleEventBase {
  * `channel-halt` and `channel-reload` (a `pathways channel` command), `verify` (a stored
  * message read by `pathways verify`), `bulk-replay` (a run of `pathways replay --status failed`:
  * its scope, each batch and a summary), `archive` (a sealed archive retention wrote and checked
- * before changing what it holds), and `node-forget` (a stale node's row removed by
- * `pathways nodes forget`). Kept equal to the audit log's own list by a test.
+ * before changing what it holds), `node-forget` (a stale node's row removed by
+ * `pathways nodes forget`), `engine-start` and `engine-stop` (`pathways start` began running or
+ * began to stop, with the version, the channel count and the node id), and `unclean-shutdown`
+ * (found at a start: the run before it left no `engine-stop`). Kept equal to the audit log's own
+ * list by a test.
  *
  * @example
  * ```ts
@@ -345,7 +394,11 @@ export type AuditEventAction =
   | "verify"
   | "bulk-replay"
   | "archive"
-  | "node-forget";
+  | "batch"
+  | "node-forget"
+  | "engine-start"
+  | "engine-stop"
+  | "unclean-shutdown";
 
 /**
  * An entry of the audit log, once it is stored: who did what, to which message, and how it ended.
@@ -409,6 +462,7 @@ export type LifecycleEvent =
   | DeliveryRedirectedEvent
   | DeliveryRejectedEvent
   | DeliveryExhaustedEvent
+  | SettledEvent
   | SourceDownEvent
   | SourceUpEvent
   | AuditEvent;

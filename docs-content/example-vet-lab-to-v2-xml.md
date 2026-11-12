@@ -192,6 +192,10 @@ destinations:
         ca: ../../.pathways/tls/ca.crt
         cert: ../../.pathways/tls/client.crt
         key: ../../.pathways/tls/client.key
+      # The stand-in service is on this machine, an address the destination refuses unless it is named
+      # here. A real endpoint on the public internet needs no allowNetworks line; one on a private
+      # network, such as 10.20.0.0/16, needs that network named here.
+      allowNetworks: [127.0.0.1]
       # Read each 2xx answer as an HL7 v2 XML acknowledgement and settle the delivery by its MSA.1:
       # AA delivered, AE retried, AR failed. An answer to another MSH.10 is retried.
       ack: xml

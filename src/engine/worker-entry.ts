@@ -76,6 +76,23 @@ export type DestinationReply =
   | { readonly ok: true; readonly outputs: readonly Uint8Array[] }
   | { readonly ok: false; readonly failure: FailureSummary };
 
+/** One message a transform handed to another channel with `ctx.route`, serialized. */
+export interface RoutedMessage {
+  /** The channel it goes to, as the transform named it. */
+  readonly channel: string;
+  readonly body: Uint8Array;
+}
+
+/**
+ * What one message's run came to: its outputs, what it handed to other channels, and, on a channel
+ * with destination transforms, each destination's reply as {@link runDestinations} gives them.
+ */
+export interface TransformResult {
+  readonly outputs: Uint8Array[];
+  readonly routes: RoutedMessage[];
+  readonly destinations?: (DestinationReply | null)[];
+}
+
 /**
  * The worker's reply to one request. On a channel with destination transforms, `destinations`
  * holds one entry per destination, in order: its reply, or `null` for a destination without a
@@ -87,14 +104,24 @@ export type TransformReply =
       readonly ok: true;
       readonly outputs: readonly Uint8Array[];
       readonly destinations?: readonly (DestinationReply | null)[];
+      readonly routes?: readonly RoutedMessage[];
     }
   | { readonly id: number; readonly ok: false; readonly failure: FailureSummary };
 
+/** What `ctx.route` does with one call: given a channel's name and a message. */
+export type RouteFunction = (channel: string, message: unknown) => void;
+
+/** A `ctx.route` that keeps nothing: the context of a run whose hand-offs go nowhere. */
+const DISCARD_ROUTE: RouteFunction = () => undefined;
+
 /**
- * The worker's first message: ready, or a transform could not be loaded. `destination` is the index
- * of the destination whose transform failed to load, absent for the channel's own.
+ * The worker's first messages: `starting` once the module is loaded and its `onStart` is about to
+ * run (so the engine times `onStart` alone), then ready, or a transform could not be loaded.
+ * `destination` is the index of the destination whose transform failed to load, absent for the
+ * channel's own.
  */
 export type WorkerHello =
+  | { readonly hello: "starting" }
   | { readonly hello: "ready" }
   | {
       readonly hello: "load-failed";
@@ -116,6 +143,39 @@ export interface DestinationSetup {
   readonly transformFile: string | undefined;
 }
 
+/** The engine's request before it ends the worker: run the module's `onStop`, if it has one. */
+export interface StopRequest {
+  readonly stop: true;
+}
+
+/** The worker's reply to a {@link StopRequest}: done, with what went wrong if `onStop` threw. */
+export interface StopReply {
+  readonly stopped: true;
+  readonly failure?: FailureSummary;
+}
+
+/** One line a channel script logs: a level, a fixed code and numbers only. */
+export interface ScriptLogLine {
+  readonly level: "info" | "warn" | "error";
+  readonly code: string;
+  readonly ids: Readonly<Record<string, number>>;
+}
+
+/** How a {@link ScriptLogLine} crosses to the engine. */
+export interface ScriptLogMessage {
+  readonly scriptLog: ScriptLogLine;
+}
+
+/**
+ * A channel's module as the worker runs it: the transform, and the `onStart` and `onStop` it may
+ * export beside it.
+ */
+export interface ChannelScripts {
+  readonly transform: TransformFunction;
+  readonly onStart: ((ctx: unknown) => unknown) | undefined;
+  readonly onStop: (() => unknown) | undefined;
+}
+
 /** What the engine hands a new worker. */
 export interface WorkerSetup {
   /** Always true: marks a thread the engine started, as opposed to a test runner's own thread. */
@@ -134,6 +194,8 @@ export interface WorkerSetup {
   readonly destinations?: readonly DestinationSetup[] | undefined;
   /** How the channel's format reads and writes its bodies, from the channel's own block. */
   readonly formatSettings?: FormatSettings;
+  /** The channel's name, which `onStart` receives. Defaults to an empty name. */
+  readonly channel?: string;
 }
 
 /**
@@ -155,10 +217,13 @@ export function isWorkerSetup(data: unknown): data is WorkerSetup {
 
 class StageError extends Error {
   readonly kind: FailureKind;
+  /** The code a failure carries when its error has none of its own. */
+  readonly fallbackCode: string | undefined;
 
-  constructor(kind: FailureKind, cause: unknown) {
+  constructor(kind: FailureKind, cause: unknown, fallbackCode?: string) {
     super("stage failed", { cause });
     this.kind = kind;
+    this.fallbackCode = fallbackCode;
   }
 }
 
@@ -2109,14 +2174,85 @@ export function freezeDeep<T>(value: T): T {
 export function buildContext(
   message: MessageContext,
   config: Readonly<Record<string, unknown>>,
-): Readonly<MessageContext & { readonly config: Readonly<Record<string, unknown>> }> {
+  route: RouteFunction = DISCARD_ROUTE,
+): Readonly<
+  MessageContext & {
+    readonly config: Readonly<Record<string, unknown>>;
+    readonly route: RouteFunction;
+  }
+> {
   return freezeDeep({
     messageId: message.messageId,
     attempt: message.attempt,
     source: message.source,
     meta: message.meta,
     config: freezeDeep(config),
+    route,
   });
+}
+
+/**
+ * Runs one message through `transform` as {@link runTransform} does, with a `ctx.route` that keeps
+ * each message handed to another channel, and serializes those as it does the outputs, in the order
+ * they were routed. `ctx.route` takes a channel's name and a message (anything a transform may
+ * return but `null` and `undefined`), returns nothing, and throws a `TypeError` for anything else,
+ * or once the transform has settled. Given `destinations`, each destination's transform then runs
+ * on the outputs as {@link runDestinations} runs it; the channel's transform has settled by then,
+ * so a destination transform that calls `ctx.route` fails that destination.
+ *
+ * @example
+ * ```ts
+ * const { outputs, routes } = await transformMessage((msg, ctx) => {
+ *   ctx.route("audit-copy", msg);
+ *   return msg;
+ * }, "text", body, UNSTORED, {});
+ * ```
+ */
+export async function transformMessage(
+  transform: TransformFunction,
+  format: WorkerFormat,
+  body: Uint8Array,
+  message: MessageContext,
+  config: Readonly<Record<string, unknown>>,
+  settings: FormatSettings = {},
+  destinations?: readonly LoadedDestination[],
+): Promise<TransformResult> {
+  const routed: { readonly channel: string; readonly output: unknown }[] = [];
+  let settled = false;
+  const route: RouteFunction = (channel, output) => {
+    if (settled) throw new TypeError("ctx.route was called after the transform settled");
+    if (typeof channel !== "string" || channel === "") {
+      throw new TypeError("ctx.route takes a channel's name first");
+    }
+    if (output === null || output === undefined) {
+      throw new TypeError("ctx.route takes a message to hand over second");
+    }
+    routed.push({ channel, output });
+  };
+  const ctx = buildContext(message, config, route);
+  let outputs: Uint8Array[];
+  try {
+    outputs = await runTransform(transform, format, body, ctx, settings);
+  } finally {
+    settled = true;
+  }
+  let routes: RoutedMessage[];
+  try {
+    routes = await Promise.all(
+      routed.map(async ({ channel, output }) => ({
+        channel,
+        body: await encode(format, output, settings),
+      })),
+    );
+  } catch (error) {
+    throw new StageError("output", error);
+  }
+  if (destinations === undefined) return { outputs, routes };
+  return {
+    outputs,
+    routes,
+    destinations: await destinationReplies(outputs, format, ctx, destinations, settings),
+  };
 }
 
 /**
@@ -2210,6 +2346,23 @@ export async function runDestinations(
   settings: FormatSettings = {},
 ): Promise<{ outputs: Uint8Array[]; destinations: (DestinationReply | null)[] }> {
   const outputs = await runTransform(transform, format, body, ctx, settings);
+  return {
+    outputs,
+    destinations: await destinationReplies(outputs, format, ctx, destinations, settings),
+  };
+}
+
+/**
+ * Each destination's reply for a message's channel `outputs`, as {@link runDestinations} gives
+ * them: its transform run once per output, or `null` for a destination without one.
+ */
+async function destinationReplies(
+  outputs: readonly Uint8Array[],
+  format: WorkerFormat,
+  ctx: object,
+  destinations: readonly LoadedDestination[],
+  settings: FormatSettings,
+): Promise<(DestinationReply | null)[]> {
   const replies: (DestinationReply | null)[] = [];
   for (const { setup, transform: own } of destinations) {
     if (own === undefined) {
@@ -2227,7 +2380,7 @@ export async function runDestinations(
       replies.push({ ok: false, failure: summarize(error, setup.transformFile) });
     }
   }
-  return { outputs, destinations: replies };
+  return replies;
 }
 
 /**
@@ -2289,11 +2442,27 @@ export class DestinationLoadError extends Error {
  * ```
  */
 export async function loadTransform(transformFile: string | undefined): Promise<TransformFunction> {
+  return (await loadScripts(transformFile)).transform;
+}
+
+/**
+ * Loads the transform module: its default export, and the `onStart` and `onStop` it may export.
+ * An `onStart` or `onStop` that is exported and is not a function will not load. With no
+ * transform, each message passes through as it was parsed, and there are no scripts.
+ *
+ * @example
+ * ```ts
+ * const { transform, onStart } = await loadScripts("/project/channels/adt-to-lab/transform.ts");
+ * ```
+ */
+export async function loadScripts(transformFile: string | undefined): Promise<ChannelScripts> {
   // Wrapped, so a message that is itself an array (a JSON array) passes through as one message.
-  if (transformFile === undefined) return (message) => [message];
-  let module: { default?: unknown };
+  if (transformFile === undefined) {
+    return { transform: (message) => [message], onStart: undefined, onStop: undefined };
+  }
+  let module: { default?: unknown; onStart?: unknown; onStop?: unknown };
   try {
-    module = (await import(pathToFileURL(transformFile).href)) as { default?: unknown };
+    module = (await import(pathToFileURL(transformFile).href)) as typeof module;
   } catch (error) {
     throw new StageError("load", error);
   }
@@ -2303,7 +2472,139 @@ export async function loadTransform(transformFile: string | undefined): Promise<
       new TypeError("the transform module has no default export function"),
     );
   }
-  return module.default as TransformFunction;
+  for (const name of ["onStart", "onStop"] as const) {
+    if (module[name] !== undefined && typeof module[name] !== "function") {
+      throw new StageError(
+        "load",
+        new TypeError(`the transform module's ${name} is not a function`),
+      );
+    }
+  }
+  return {
+    transform: module.default as TransformFunction,
+    onStart: module.onStart as ChannelScripts["onStart"],
+    onStop: module.onStop as ChannelScripts["onStop"],
+  };
+}
+
+/** A script log line's code: lower-case words joined by hyphens, as the engine's own events are. */
+const SCRIPT_CODE = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+/** A script log line's id names: a letter, then letters and digits. */
+const SCRIPT_ID = /^[A-Za-z][A-Za-z0-9]*$/;
+/** At most this many ids on one line, and this long a code or an id's name. */
+const SCRIPT_IDS = 16;
+const SCRIPT_NAME_LENGTH = 64;
+
+/**
+ * One line a channel script logs, kept to what is safe in the engine's log: a code of lower-case
+ * words joined by hyphens (anything else becomes `script-log`), and ids that are finite numbers,
+ * named by a letter and then letters and digits, at most 16 of them. Strings, and anything else
+ * that could carry a message's content, are dropped.
+ *
+ * @example
+ * ```ts
+ * scriptLogLine("info", "cache-warmed", { entries: 12, name: "dropped" });
+ * // { level: "info", code: "cache-warmed", ids: { entries: 12 } }
+ * ```
+ */
+export function scriptLogLine(
+  level: ScriptLogLine["level"],
+  code: unknown,
+  ids: unknown,
+): ScriptLogLine {
+  const safeCode =
+    typeof code === "string" && code.length <= SCRIPT_NAME_LENGTH && SCRIPT_CODE.test(code)
+      ? code
+      : "script-log";
+  const kept: Record<string, number> = {};
+  if (typeof ids === "object" && ids !== null) {
+    for (const [name, value] of Object.entries(ids)) {
+      if (Object.keys(kept).length >= SCRIPT_IDS) break;
+      if (name.length > SCRIPT_NAME_LENGTH || !SCRIPT_ID.test(name)) continue;
+      if (typeof value === "number" && Number.isFinite(value)) kept[name] = value;
+    }
+  }
+  return { level, code: safeCode, ids: kept };
+}
+
+/**
+ * The context `onStart` receives: the channel's name, its configuration (frozen, as each message's
+ * context holds it), and a logger that takes a code and numbers only, each line posted to the
+ * engine through `post`.
+ *
+ * @example
+ * ```ts
+ * const ctx = scriptContext("adt-to-lab", freezeDeep({}), (line) => lines.push(line));
+ * ```
+ */
+export function scriptContext(
+  channel: string,
+  config: Readonly<Record<string, unknown>>,
+  post: (line: ScriptLogLine) => void,
+): unknown {
+  const at =
+    (level: ScriptLogLine["level"]) =>
+    (code: unknown, ids?: unknown): void => {
+      post(scriptLogLine(level, code, ids));
+    };
+  return Object.freeze({
+    channel,
+    config: freezeDeep(config),
+    logger: Object.freeze({ info: at("info"), warn: at("warn"), error: at("error") }),
+  });
+}
+
+/**
+ * Runs the module's `onStart`, when it has one: a throw is a load failure, coded `ON_START_FAILED`
+ * unless the error has a code of its own.
+ *
+ * @example
+ * ```ts
+ * await runOnStart(scripts.onStart, ctx);
+ * ```
+ */
+export async function runOnStart(onStart: ChannelScripts["onStart"], ctx: unknown): Promise<void> {
+  if (onStart === undefined) return;
+  try {
+    await onStart(ctx);
+  } catch (error) {
+    throw new StageError("load", error, "ON_START_FAILED");
+  }
+}
+
+/**
+ * Runs the module's `onStop`, when it has one, and says how it went: a throw is described, never
+ * passed on, since the worker ends either way.
+ *
+ * @example
+ * ```ts
+ * port.postMessage(await runOnStop(scripts.onStop, transformFile));
+ * ```
+ */
+export async function runOnStop(
+  onStop: ChannelScripts["onStop"],
+  transformFile?: string,
+): Promise<StopReply> {
+  if (onStop === undefined) return { stopped: true };
+  try {
+    await onStop();
+    return { stopped: true };
+  } catch (error) {
+    const failure = summarize(new StageError("load", error, "ON_STOP_FAILED"), transformFile);
+    return { stopped: true, failure };
+  }
+}
+
+/**
+ * Whether a message from the engine is a {@link StopRequest}.
+ *
+ * @example
+ * ```ts
+ * isStopRequest({ stop: true }); // true
+ * ```
+ */
+export function isStopRequest(message: unknown): message is StopRequest {
+  return typeof message === "object" && message !== null && (message as StopRequest).stop === true;
 }
 
 /**
@@ -2319,7 +2620,12 @@ export function summarize(error: unknown, transformFile?: string): FailureSummar
   const cause = error instanceof StageError ? error.cause : error;
   const name = cause instanceof Error ? cause.name : typeof cause;
   const rawCode = cause instanceof Error ? (cause as Error & { code?: unknown }).code : undefined;
-  const code = typeof rawCode === "string" ? rawCode : undefined;
+  const code =
+    typeof rawCode === "string"
+      ? rawCode
+      : error instanceof StageError
+        ? error.fallbackCode
+        : undefined;
   const detail = cause instanceof Error ? cause.message : String(cause);
   const where = transformFile === undefined ? undefined : locate(cause, transformFile);
   return {
@@ -2412,38 +2718,44 @@ if (!isMainThread && parentPort !== null && isWorkerSetup(workerData)) {
   // Frozen once: every message's context shares it.
   const config = freezeDeep(setup.config);
   const formatSettings = freezeDeep(setup.formatSettings ?? {});
-  Promise.all([loadTransform(setup.transformFile), parser])
-    .then(async ([transform]) => ({
-      transform,
-      destinations:
-        setup.destinations === undefined ? undefined : await loadDestinations(setup.destinations),
-    }))
+  const post = (line: ScriptLogLine): void => {
+    port.postMessage({ scriptLog: line } satisfies ScriptLogMessage);
+  };
+  Promise.all([loadScripts(setup.transformFile), parser])
+    .then(async ([scripts]) => {
+      const destinations =
+        setup.destinations === undefined ? undefined : await loadDestinations(setup.destinations);
+      if (scripts.onStart !== undefined) {
+        // Told first, so the engine times onStart alone, not the modules' load.
+        port.postMessage({ hello: "starting" } satisfies WorkerHello);
+        await runOnStart(scripts.onStart, scriptContext(setup.channel ?? "", config, post));
+      }
+      return { ...scripts, destinations };
+    })
     .then(
-      ({ transform, destinations }) => {
-        port.on("message", (request: TransformRequest) => {
-          const ctx = buildContext(request, config);
-          const run: Promise<{
-            outputs: Uint8Array[];
-            destinations?: (DestinationReply | null)[];
-          }> =
-            destinations === undefined
-              ? runTransform(transform, setup.format, request.body, ctx, formatSettings).then(
-                  (outputs) => ({ outputs }),
-                )
-              : runDestinations(
-                  transform,
-                  setup.format,
-                  request.body,
-                  ctx,
-                  destinations,
-                  formatSettings,
-                );
-          run.then(
+      ({ transform, onStop, destinations }) => {
+        port.on("message", (request: TransformRequest | StopRequest) => {
+          if (isStopRequest(request)) {
+            void runOnStop(onStop, setup.transformFile).then((reply) => {
+              port.postMessage(reply);
+            });
+            return;
+          }
+          transformMessage(
+            transform,
+            setup.format,
+            request.body,
+            request,
+            config,
+            formatSettings,
+            destinations,
+          ).then(
             (result) =>
               port.postMessage(
                 { id: request.id, ok: true, ...result } satisfies TransformReply,
                 transferable([
                   ...result.outputs,
+                  ...result.routes.map((routed) => routed.body),
                   ...(result.destinations ?? []).flatMap((reply) =>
                     reply?.ok === true ? reply.outputs : [],
                   ),

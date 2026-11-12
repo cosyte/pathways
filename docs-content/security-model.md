@@ -31,9 +31,10 @@ together.
 
 ## What a transform can do
 
-A transform, a hook and a custom connector are code your project runs with the engine's own rights.
-Pathways runs each transform in a worker thread that stops it on a time limit and a memory cap, but a
-worker thread is not a sandbox: review that code as you review the rest of the project. See
+A transform, its `onStart` and `onStop` scripts, a hook and a custom connector are code your project
+runs with the engine's own rights. Pathways runs each transform and its scripts in a worker thread
+that stops them on a time limit and a memory cap, but a worker thread is not a sandbox: they have the
+worker's full Node.js access, and you review that code as you review the rest of the project. See
 [transforms in worker threads](./the-transform-worker.md).
 
 ## What we sign

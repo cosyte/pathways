@@ -111,6 +111,11 @@ export interface ArchivedMessage {
   readonly duplicateOf: number | null;
   readonly contentHash: string | null;
   readonly contentDroppedAt: string | null;
+  /**
+   * The generation whose settled event was recorded, when one was and the store recorded it; null
+   * otherwise, and in an archive written before Pathways recorded it. Read back, it is always set.
+   */
+  readonly settledGeneration?: number | null;
   /** The hash of who sent it and its control ID, for spotting a repeat. */
   readonly dedupKey: string | null;
   /** The hash that names it to its source, so it is stored once. */
@@ -124,6 +129,16 @@ export interface ArchivedMessage {
   readonly error: string | null;
   /** Its `ctx.meta`, which can hold identifiers; `null` when it had none or it was dropped. */
   readonly meta: MessageMeta | null;
+  /**
+   * The channel that handed it over, the message there, the channel destination's delivery and
+   * that message's generation, and how many hand-offs in a row brought it: `null` for a message
+   * a source took in, and absent from an archive written before channels could hand over.
+   */
+  readonly parentChannel?: string | null;
+  readonly parentMessage?: number | null;
+  readonly parentDelivery?: number | null;
+  readonly parentGeneration?: number | null;
+  readonly hops?: number | null;
   /** The body as it arrived, in base64; `null` once dropped. */
   readonly body: string | null;
   /** The outputs of its current generation, in order, in base64: those of its first destination. */
@@ -421,8 +436,13 @@ function asMessage(value: unknown): ArchivedMessage {
   check(isWholeOrNull(fields["size"]) && isWhole(fields["generation"]));
   check(isWholeOrNull(fields["duplicateOf"]) && isTextOrNull(fields["contentHash"]));
   check(isTextOrNull(fields["contentDroppedAt"]) && isTextOrNull(fields["error"]));
+  check(fields["settledGeneration"] === undefined || isWholeOrNull(fields["settledGeneration"]));
   check(isTextOrNull(fields["dedupKey"]) && isTextOrNull(fields["idempotencyKey"]));
   check(isTextOrNull(fields["body"]) && isMetaOrNull(fields["meta"]));
+  check(fields["parentChannel"] === undefined || isTextOrNull(fields["parentChannel"]));
+  for (const key of ["parentMessage", "parentDelivery", "parentGeneration", "hops"]) {
+    check(fields[key] === undefined || isWholeOrNull(fields[key]));
+  }
   check(fields["idempotencyClaim"] === undefined || isTextOrNull(fields["idempotencyClaim"]));
   const outputs = fields["outputs"];
   check(Array.isArray(outputs) && outputs.every(isText));
@@ -439,7 +459,7 @@ function asMessage(value: unknown): ArchivedMessage {
     check(d["destinationKey"] === undefined || isTextOrNull(d["destinationKey"]));
     check(d["failedAt"] === undefined || isTextOrNull(d["failedAt"]));
   }
-  return fields as unknown as ArchivedMessage;
+  return { settledGeneration: null, ...fields } as unknown as ArchivedMessage;
 }
 
 /**
@@ -479,11 +499,17 @@ export async function archivedMessage(
     duplicateOf: message.duplicateOf,
     contentHash: message.contentHash,
     contentDroppedAt: message.contentDroppedAt,
+    settledGeneration: message.settledGeneration ?? null,
     dedupKey: message.dedupKey,
     idempotencyKey: message.idempotencyKey,
     idempotencyClaim: message.idempotencyClaim,
     error: message.error,
     meta: message.meta === null ? null : (JSON.parse(message.meta) as MessageMeta),
+    parentChannel: message.parentChannel ?? null,
+    parentMessage: message.parentMessage ?? null,
+    parentDelivery: message.parentDelivery ?? null,
+    parentGeneration: message.parentGeneration ?? null,
+    hops: message.hops ?? null,
     body: base64(message.body),
     outputs: current
       .filter((delivery) => delivery.destination === first)

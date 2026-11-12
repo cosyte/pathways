@@ -52,11 +52,18 @@ const STORE_METHOD_LIST = {
   markDryRun: false,
   holdDeliveries: false,
   metaCandidates: false,
+  messageMeta: false,
+  settle: false,
+  unsettled: false,
+  requeuedUnsettled: false,
   joinNode: false,
   nodeHeartbeat: false,
   leaveNode: false,
   nodes: false,
   forgetNode: false,
+  heldIdempotencyKey: false,
+  handOff: false,
+  children: false,
 } satisfies Record<keyof MessageStore, boolean>;
 
 const STORE_METHODS = Object.entries(STORE_METHOD_LIST)

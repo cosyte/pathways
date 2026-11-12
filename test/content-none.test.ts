@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { ConfigError, loadProject } from "../src/config/load.js";
-import { DEFAULT_PASS_TIMEOUT_MS } from "../src/config/schema.js";
+import { DEFAULT_PASS_TIMEOUT_MS, UNKNOWN_ROUTE_CODE } from "../src/config/schema.js";
 import { RetryableError } from "../src/connectors/http-core.js";
 import {
   DeliveryRejected,
@@ -55,10 +55,14 @@ afterEach(async () => {
   await cleanUp();
 });
 
-/** A text transform: `drop` is filtered, `throw` fails, anything else goes on in capitals. */
+/**
+ * A text transform: `drop` is filtered, `throw` fails, `route` is routed to another channel too,
+ * and anything else goes on in capitals.
+ */
 const TEXT_TRANSFORM = `
-export default (text: string): string | null => {
+export default (text: string, ctx?: { route(name: string, message: string): void }): string | null => {
   if (text === "drop") return null;
+  if (text === "route") ctx?.route("elsewhere", text);
   if (text === "slow") {
     const end = Date.now() + 300;
     while (Date.now() < end) {}
@@ -335,6 +339,18 @@ describe("a channel that stores nothing", () => {
     expect((await engine.health()).channels["notes"]?.passes).toMatchObject({ deferred: 2 });
   });
 
+  it("refuses for good a message whose transform routes, which nothing here could store", async () => {
+    const { sink, destinations, events } = await startNone();
+    expect(await refusal(sink.receive(text("route")))).toMatchObject({
+      permanent: true,
+      code: "ROUTE_UNSTORED",
+    });
+    expect(destinations.map((destination) => destination.sent)).toEqual([[], []]);
+    expect(events).toContainEqual(
+      expect.objectContaining({ event: "pass-transform-failed", code: UNKNOWN_ROUTE_CODE }),
+    );
+  });
+
   it("refuses for good when a destination rejects, and still sends to the others", async () => {
     const { engine, sink, destinations } = await startNone();
     const [first, second] = destinations as [Scripted, Scripted];
@@ -603,7 +619,7 @@ source:
   http: { port: ${String(port)}, plaintext: true, auth: none${extra} }
 transform: ./transform.ts
 destinations:
-  - http: { url: "${lab.url}", plaintext: true }
+  - http: { url: "${lab.url}", plaintext: true, allowNetworks: [127.0.0.1] }
 `,
       "channels/adt/transform.ts": LAB_TRANSFORM,
     });
@@ -753,6 +769,97 @@ export default () => ({ deliver: () => Promise.reject(Object.assign(new Error("s
     await engine.tick();
     expect(await visible(join(root, "data/error"))).toHaveLength(2);
   });
+});
+
+describe("a batch file source on a channel that stores nothing", () => {
+  /** A synthetic ADT^A01 whose control ID is `MSG<n>`: every value is made up. */
+  const adt = (n: number): string =>
+    ADT_A01.replace("MSG00001", `MSG${String(n).padStart(5, "0")}`);
+
+  /**
+   * An engine on an HL7 batch channel that stores nothing, whose one destination writes each
+   * control ID it accepts to `data/sent.log`. With `throwOn`, the transform throws on that control
+   * ID; with `rejectOn`, the destination rejects it for good.
+   */
+  async function startBatch(refuse: {
+    throwOn?: string;
+    rejectOn?: string;
+  }): Promise<{ root: string; engine: Engine; events: LogEvent[] }> {
+    const root = await makeProject({
+      "channels/adt/channel.yaml": `format: hl7v2
+storage: { content: none }
+source:
+  file:
+    dir: ../../data/in
+    errorDir: ../../data/error
+    minAge: 0
+    batch: { split: hl7 }
+transform: ./transform.ts
+destinations:
+  - module: ../../record.ts
+`,
+      "channels/adt/transform.ts": `interface Msg { get(path: string): string | undefined }
+export default (msg: Msg): Msg => {
+  if (msg.get("MSH.10") === ${JSON.stringify(refuse.throwOn ?? "")}) throw new Error("synthetic failure");
+  return msg;
+};
+`,
+      // A DeliveryRejected by its mark, as one from another copy of Pathways is.
+      "record.ts": `import { appendFileSync } from "node:fs";
+const mark = Symbol.for("@cosyte/pathways/DeliveryRejected");
+const log = new URL("./data/sent.log", import.meta.url);
+export default () => ({
+  deliver: (message: { body: Uint8Array }) => {
+    const id = /MSG\\d{5}/.exec(Buffer.from(message.body).toString("latin1"))?.[0] ?? "none";
+    if (id === ${JSON.stringify(refuse.rejectOn ?? "")}) {
+      return Promise.reject(Object.assign(new Error("synthetic"), { reason: "SYNTHETIC", [mark]: true }));
+    }
+    appendFileSync(log, id + "\\n");
+    return Promise.resolve();
+  },
+});
+`,
+    });
+    const project = await loadProject(root);
+    const store = await Store.open(project.databaseFile);
+    stores.push(store);
+    const { logger, events } = captureLogger();
+    const engine = new Engine({ project, store, logger });
+    engines.push(engine);
+    await engine.start();
+    return { root, engine, events };
+  }
+
+  const sent = async (root: string): Promise<string[]> =>
+    (await readFile(join(root, "data/sent.log"), "utf8").catch(() => "")).split("\n").slice(0, -1);
+
+  for (const [what, refuse] of [
+    ["the transform throws on", { throwOn: "MSG00003" }],
+    ["a destination rejects", { rejectOn: "MSG00003" }],
+  ] as const) {
+    it(`sends the pieces before one ${what} once, and sets the file aside in errorDir`, async () => {
+      const { root, engine, events } = await startBatch(refuse);
+      const batch = `BHS|^~\\&\r${adt(1)}${adt(2)}${adt(3)}${adt(4)}BTS|4\r`;
+      await dropFile(join(root, "data/in/feed.hl7"), batch);
+      for (let pass = 0; pass < 4; pass += 1) await engine.tick();
+      // Delivered before the refusal, and never again: the file is not read a second time.
+      expect(await sent(root)).toEqual(["MSG00001", "MSG00002"]);
+      expect(await readdir(join(root, "data/in/.claimed/adt"))).toEqual([]);
+      expect(await readdir(join(root, "data/error"))).toEqual(["feed.hl7"]);
+      expect(await readFile(join(root, "data/error/feed.hl7"), "latin1")).toBe(batch);
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          event: "source-file-set-aside",
+          reason: "rejected",
+          moved: true,
+        }),
+      );
+      expect((await engine.health()).channels["adt"]?.passes).toMatchObject({
+        accepted: 2,
+        rejected: 1,
+      });
+    });
+  }
 });
 
 describe("a channel that stores nothing, started again", () => {

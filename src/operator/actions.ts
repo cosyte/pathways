@@ -27,6 +27,8 @@ import type { AuditLog } from "./audit.js";
  * - `changed`: it changed while the replay ran, so nothing was recorded;
  * - `unreadable`: what is stored of it could not be decrypted;
  * - `not-failed`: a clear, but nothing about it had failed;
+ * - `routes`: a replay whose transform handed messages to other channels with `ctx.route`, which a
+ *   replay does not hand over yet: nothing was recorded, and a resend still works;
  * - `content-dropped`: its content was dropped after delivery (`storage.content:
  *   dropAfterDelivery`), so there is nothing to replay or resend;
  * - `destination-unknown`: a resend, but its outputs were stored before deliveries recorded their
@@ -47,7 +49,8 @@ export type ActionRefusal =
   | "unreadable"
   | "not-failed"
   | "content-dropped"
-  | "destination-unknown";
+  | "destination-unknown"
+  | "routes";
 
 /**
  * What a replay or a resend did to one message. Ids, counts, states and codes only.
@@ -236,6 +239,10 @@ export async function replayMessages(
       const outcome = await worker.run(body, {
         context: { messageId: id, attempt: message.generation + 2, source: undefined, meta: {} },
       });
+      // Its hand-offs would have to be stored with the replay's record, in its transaction, which a
+      // replay does not do: refused, rather than queue the outputs and drop the hand-offs.
+      if (outcome.ok && (outcome.routes?.length ?? 0) > 0)
+        return refuse(id, channel.name, "routes");
       outputs = outcome.ok ? outcome.outputs : [];
       byDestination = outcome.ok ? destinationOutcomes(outcome) : undefined;
       failure = outcome.ok ? undefined : outcome.failure;

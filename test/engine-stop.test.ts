@@ -271,3 +271,92 @@ describe("pathways start, ended in the middle of a send", () => {
     expect(await sent()).toHaveLength(4);
   }, 30_000);
 });
+
+const ENGINE_ACTIONS = new Set(["engine-start", "engine-stop", "unclean-shutdown"]);
+
+/** {@link LAB_TRANSFORM}, with scripts that append `start` and `stop` to `journal` beside it. */
+const SCRIPTED_TRANSFORM = `${LAB_TRANSFORM}
+import { appendFileSync } from "node:fs";
+import { join } from "node:path";
+const journal = join(import.meta.dirname, "journal");
+export function onStart(): void {
+  appendFileSync(journal, "start\\n");
+}
+export async function onStop(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  appendFileSync(journal, "stop\\n");
+}
+`;
+
+/** The engine's own audit entries (start, stop, unclean shutdown), oldest first. */
+async function engineEntries(root: string): Promise<{ action: string; detail: unknown }[]> {
+  const store = await Store.open(join(root, ".pathways/pathways.db"));
+  try {
+    const { items } = await store.auditEntries({ limit: 100 });
+    return items
+      .filter((entry) => ENGINE_ACTIONS.has(entry.action))
+      .map((entry) => ({ action: entry.action, detail: entry.detail }))
+      .reverse();
+  } finally {
+    await store.close();
+  }
+}
+
+describe("pathways start, its channel scripts and its audit entries", () => {
+  // Windows: Node's kill ends the process whatever the signal, so no signal can be sent to test.
+  it.skipIf(windows)(
+    "runs each channel's onStop on SIGTERM, and records engine-start and engine-stop",
+    async () => {
+      const { root } = await project("10m");
+      await writeFile(join(root, "channels/adt/transform.ts"), SCRIPTED_TRANSFORM);
+      const engine = start(root);
+      try {
+        await sendThrough(root);
+      } finally {
+        engine.child.kill("SIGTERM");
+      }
+      expect({ ...(await engine.exited), stderr: engine.stderr() }).toEqual({
+        code: 0,
+        signal: null,
+        stderr: "",
+      });
+      expect(await readFile(join(root, "channels/adt/journal"), "utf8")).toBe("start\nstop\n");
+      const particulars = {
+        version: expect.any(String) as unknown,
+        channels: 1,
+        node: expect.stringMatching(/^[0-9a-f]+$/) as unknown,
+      };
+      expect(await engineEntries(root)).toEqual([
+        { action: "engine-start", detail: particulars },
+        { action: "engine-stop", detail: particulars },
+      ]);
+    },
+    30_000,
+  );
+
+  it("records an unclean shutdown at the start after a hard stop, naming the run it ended", async () => {
+    const { root } = await project();
+    const engine = start(root);
+    try {
+      await sendThrough(root);
+    } finally {
+      engine.child.kill("SIGKILL");
+    }
+    await engine.exited;
+    await leaseLapsed(() => Store.open(join(root, ".pathways/pathways.db")));
+    const again = start(root, true);
+    expect(await again.exited).toEqual({ code: 0, signal: null });
+    const entries = await engineEntries(root);
+    expect(entries.map((entry) => entry.action)).toEqual([
+      "engine-start",
+      "unclean-shutdown",
+      "engine-start",
+      "engine-stop",
+    ]);
+    expect(entries[1]?.detail).toEqual({
+      since: expect.any(Number) as unknown,
+      version: expect.any(String) as unknown,
+      node: expect.any(String) as unknown,
+    });
+  }, 30_000);
+});

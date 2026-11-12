@@ -20,7 +20,7 @@ Patient with `@cosyte/fhir`'s validator.
   [turn one format into another](./work-with-formats.md#turn-one-format-into-another).
 - Fields read from the parsed message (`PID-3`, `PID-5`, `PID-7`, `PID-8`) and mapped to FHIR, with
   a value table for administrative sex.
-- An [HTTP destination](./send-and-receive-http.md#post-each-output-to-a-url) whose `Content-Type`
+- An [HTTP destination](./send-and-receive-http.md#send-each-output-to-a-url) whose `Content-Type`
   is set for what goes out, since the channel's format names what comes in.
 - Tests whose expected output is JSON: an input's expected file keeps its extension, so the expected
   output of `a01.hl7` is `a01.expected.hl7`.
@@ -134,6 +134,10 @@ destinations:
       # The receiver in scripts/receiver.ts answers plain HTTP on the loopback. A FHIR server is
       # an https:// URL, which needs no plaintext line.
       plaintext: true
+      # The receiver is on this machine, an address the destination refuses unless it is named
+      # here. A real endpoint on the public internet needs no allowNetworks line; one on a private
+      # network, such as 10.20.0.0/16, needs that network named here.
+      allowNetworks: [127.0.0.1]
 ```
 
 ### channels/adt-to-fhir/transform.ts

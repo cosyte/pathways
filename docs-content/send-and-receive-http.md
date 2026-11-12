@@ -2,13 +2,13 @@
 id: send-and-receive-http
 title: Send and receive messages over HTTP
 sidebar_label: HTTP
-description: "Take each POST or PUT over HTTPS as one message, with a bearer token or mutual TLS, answered as you choose, and POST each output to a URL."
+description: "Take each POST or PUT over HTTPS as one message, with a bearer token or mutual TLS, answered as you choose, and send each output to a URL by the method you set."
 ---
 
 # Send and receive messages over HTTP
 
 The HTTP source takes the body of each POST (or PUT, when you allow it) as one message. The HTTP
-destination POSTs each output to a URL. Both run over HTTPS unless the block says `plaintext: true`,
+destination sends each output to a URL, by POST unless you name another method. Both run over HTTPS unless the block says `plaintext: true`,
 and both work with any format.
 
 ## Take messages over HTTPS
@@ -177,7 +177,7 @@ destinations:
 
 Refusals and a store failure are answered as in the table above.
 
-## POST each output to a URL
+## Send each output to a URL
 
 ```yaml title="channels/adt-to-fhir/channel.yaml"
 source:
@@ -207,6 +207,77 @@ destinations:
   attempt was cut off by a stop, so the server may have the message already. Its value is the number
   of attempts before, such as `1`. The body is the same either way. See
   [Delivery and errors](./delivery-and-errors.md#a-resend-after-a-crash-is-flagged).
+
+## Choose the method, fill the URL, and name each output
+
+```yaml title="channels/orders-out/channel.yaml"
+source:
+  file: { dir: ../../data/orders-out/in }
+transform: ./transform.ts
+destinations:
+  - http:
+      url: https://orders.example.com/patients/{mrn}/orders
+      method: PUT
+      query:
+        visit: "{visit}"
+        source: pathways
+      idempotencyHeader: Idempotency-Key
+      headers:
+        Authorization: { env: ORDERS_AUTH }
+```
+
+- **`method`** is `POST` (the default), `PUT`, `PATCH`, `DELETE` or `GET`. `GET` and `DELETE` send no
+  body and no `Content-Type`.
+- **A placeholder**, a [`ctx.meta`](./use-the-message-context.md) key in braces such as `{mrn}`, may
+  stand in the URL's path and in each `query` value. Each message's own value fills it,
+  percent-encoded: `SYN/0001` becomes `SYN%2F0001`, so it stays one path segment, and no value can
+  change the scheme, the host or the port. A placeholder in the host, the port or the URL's own
+  query is refused when the configuration loads; put query values in `query:`.
+- **A message that cannot fill the URL** fails that delivery for good, and the destination moves on:
+  a key its metadata lacks (`rejected: URL_TEMPLATE_MISSING mrn`), an empty value in the path
+  (`URL_TEMPLATE_EMPTY`), a value of `.` or `..`, which would move the path (`URL_TEMPLATE_REFUSED`),
+  or text that cannot be encoded (`URL_TEMPLATE_ENCODING`). The error names the key, never the
+  value.
+- **The metadata** is the message's stored `ctx.meta`. In this release nothing sets it yet (see
+  [Use the message context](./use-the-message-context.md)), so a URL with a placeholder fails each
+  delivery until it is.
+- **`idempotencyHeader`** names a header sent on every attempt, `<messageId>-<seq>` such as `12-0`,
+  the same for each attempt of one output, so a receiver that keeps idempotency keys drops a copy
+  it already has.
+
+:::warning
+A value in a URL is written to the server's access log, and to the log of any proxy on the way.
+Fill a URL with an identifier such as an MRN only when the receiver's API asks for it there, and
+send the rest in the body.
+:::
+
+## Allow a destination on your own network
+
+Every connection the destination opens is checked against the address it connects to, at each
+connect, so a name that once resolved to a public address and now resolves to an internal one (DNS
+rebinding) is caught too. These are refused unless the destination allows them:
+
+- loopback: `127.0.0.0/8` and `::1`;
+- link-local: `169.254.0.0/16` and `fe80::/10`, where cloud metadata services answer;
+- private: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10` and `fc00::/7`;
+- unspecified: `0.0.0.0/8` and `::`.
+
+A refused connection is retried, with the code `ADDRESS_REFUSED`, until the configuration changes.
+List the networks a destination may reach in `allowNetworks`, each an address or a CIDR range:
+
+```yaml title="channels/adt-to-lab/channel.yaml"
+source:
+  file: { dir: ../../data/adt-to-lab/in }
+destinations:
+  - http:
+      url: https://lab.internal.example.com/hl7
+      allowNetworks: [10.20.0.0/16]
+```
+
+A name that resolves to both refused and allowed addresses connects to an allowed one. The webhook
+hook is not checked this way.
+
+## What the answer does
 
 The answer decides what happens:
 
@@ -298,7 +369,8 @@ destinations:
   sent with `ack: xml` is not checked: its answer is settled by its code alone. A destination whose
   format is `hl7v2` or `text` sends whichever text its transform returns, pipe-delimited or XML, so
   that cannot be told at load. A destination whose format is `fhir`, `x12`, `ccda`, `json` or `csv`
-  is refused at load with `ack: xml`, since what it sends is not an HL7 v2 message.
+  is refused at load with `ack: xml`, since what it sends is not an HL7 v2 message. So is one whose
+  `method` is `GET` or `DELETE`, since it sends no body for the acknowledgement to answer.
 - **The body is sent as the transform returned it.** Writing the message in the v2 XML encoding is
   the transform's work; `ack: xml` reads the answer only.
   [Send a lab result as v2 XML over HTTPS](./send-a-lab-result-as-v2-xml.md) writes it with

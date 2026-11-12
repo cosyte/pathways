@@ -44,7 +44,10 @@ segment, in any case and after any line ending) is stored as failed with
 `inbound: MULTIPLE_MESSAGES` as it arrives, from any source, and never reaches the transform or a
 destination; on a channel that stores nothing it is counted as unreadable. The transform worker
 refuses such a body with `MULTIPLE_MESSAGES` too, so a replay of one stored before this check does
-not reach the transform either. Split a file of several messages into one file per message before you
+not reach the transform either. A message handed over from another channel, by a channel
+destination or `ctx.route`, is held to the same rule before the target stores it: the hand-off is
+refused with `MULTIPLE_MESSAGES`, and the source's delivery, or the message whose transform routed
+it, fails. Split a file of several messages into one file per message before you
 drop it in.
 
 An HL7 v2 body is read in the character set its MSH-18 declares, and written back in that same
