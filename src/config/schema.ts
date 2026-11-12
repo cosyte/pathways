@@ -312,10 +312,11 @@ const retentionProjectKeys = {
         "Write every message to a sealed archive before retention changes or deletes it. Needs encryption keys.",
     })
     .optional(),
-  audit: z
-    .literal("never")
-    .meta({ description: "How long the audit log is kept: never pruned. Default never." })
-    .optional(),
+  audit: envable(
+    z
+      .literal("never")
+      .meta({ description: "How long the audit log is kept: never pruned. Default never." }),
+  ).optional(),
 };
 
 const RETENTION_DESCRIPTION =
