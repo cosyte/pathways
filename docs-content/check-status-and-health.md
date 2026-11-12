@@ -165,8 +165,9 @@ shortened) can take longer than the bound to delete, and `/livez` answers `stall
 done. Run `pathways retention` by hand first in that case. Point a restart policy at `/livez`.
 
 **Readiness** is 503 until the engine is running, and while it runs when storage cannot be read
-(read at most once a second, and counted unreachable after 5 seconds without an answer) or a source
-is down. On SIGTERM or SIGINT it turns 503 `draining` at once, and the sources keep taking
+(read at most once a second, and counted unreachable after 5 seconds without an answer; while a read
+that timed out has not answered or failed, no new one starts and storage stays unreachable) or a
+source is down. On SIGTERM or SIGINT it turns 503 `draining` at once, and the sources keep taking
 messages in for `drain.notReadyDelay` before they close; the listener closes last. See
 [Stop and upgrade a node](./stop-and-upgrade-a-node.md). Point a load balancer or a readiness probe at `/readyz`.
 

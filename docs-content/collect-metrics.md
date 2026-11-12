@@ -72,7 +72,23 @@ One set of store gauges costs four counting reads of the database per channel, a
 seconds, so several collectors, or one that retries, read the database once. A scrape waits at most
 5 seconds for them: a database that hangs, neither answering nor failing, reads as
 `pathways_store_up 0` within that time, so the scrape does not hang with it and the
-`PathwaysStoreDown` alert below can fire.
+`PathwaysStoreDown` alert below can fire. Reads that time out are left running, and until they
+answer or fail no scrape starts another set: each answers `pathways_store_up 0` at once, with
+`pathways_store_latency_seconds` counted from when the hung set began. So a database that hangs for
+an hour holds one set of abandoned reads, not one every 5 seconds; the first scrape at least 5
+seconds after the last set began, once it has settled, reads the database again.
+
+What ends a read that hangs depends on the database, since Pathways sets no query timeout of its own:
+
+- **SQLite**: a read runs in the process and waits at most 5 seconds for a lock, then fails.
+- **PostgreSQL**: a read waiting for a connection fails after `storage.postgres.connectTimeout` (10 seconds by
+  default). A read already sent waits as long as the server takes; a `statement_timeout` on the
+  database role bounds it.
+- **MySQL and MariaDB**: nothing. A read waits for a connection with no limit, and a read already
+  sent waits as long as the server takes. A server-side limit (`max_execution_time` on MySQL,
+  `max_statement_time` on MariaDB) bounds it.
+- **SQL Server**: a read fails after 15 seconds (the driver's request timeout), and one waiting for a
+  connection fails after 30 seconds (the pool's acquire timeout).
 
 ## Read them right
 
@@ -129,6 +145,10 @@ groups:
         expr: pathways_store_up == 0
         for: 1m
 ```
+
+While the database is down or hangs, the store gauges are absent, not 0, so `PathwaysQueueStuck`,
+`PathwaysRetrying` and any other alert on a store gauge go quiet, and `PathwaysStoreDown`
+(`pathways_store_up == 0`) is the one that fires: keep it alongside them.
 
 A message that waits longer than its destination should take is the alarm that matters most:
 `pathways_oldest_pending_age_seconds` rises while a destination is down or refusing, whatever the

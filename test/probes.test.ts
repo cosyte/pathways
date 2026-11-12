@@ -452,6 +452,47 @@ describe("the engine's liveness and readiness", () => {
     await vi.advanceTimersByTimeAsync(5_000);
     expect(await ready).toBe(false);
   });
+
+  it("starts no new storage read while one that timed out still hangs, and reads again once it answers", async () => {
+    const loaded = await loadProject(await project(""));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let reads = 0;
+    let letGo: () => void = () => undefined;
+    const hung = new Promise<undefined>((resolve) => {
+      letGo = () => {
+        resolve(undefined);
+      };
+    });
+    const store = {
+      message: () => {
+        reads += 1;
+        return reads === 1 ? hung : Promise.resolve(undefined);
+      },
+    } as unknown as MessageStore;
+    const { logger } = captureLogger();
+    const clock = { now: 0 };
+    const engine = new Engine({ project: loaded, store, logger, monotonic: () => clock.now });
+    const first = engine.ready();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(await first).toBe(false);
+    // Later checks while the read still hangs: not ready at once, and no new read.
+    for (let check = 0; check < 2; check += 1) {
+      clock.now += 1_000;
+      let answered = false;
+      const later = engine.ready().finally(() => {
+        answered = true;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(reads).toBe(1);
+      expect(answered).toBe(true);
+      expect(await later).toBe(false);
+    }
+    letGo();
+    await vi.advanceTimersByTimeAsync(0);
+    clock.now += 1_000;
+    expect(await engine.ready()).toBe(true);
+    expect(reads).toBe(2);
+  });
 });
 
 describe("pathways start with probes", () => {
