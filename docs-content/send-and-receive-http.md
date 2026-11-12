@@ -369,7 +369,8 @@ destinations:
   sent with `ack: xml` is not checked: its answer is settled by its code alone. A destination whose
   format is `hl7v2` or `text` sends whichever text its transform returns, pipe-delimited or XML, so
   that cannot be told at load. A destination whose format is `fhir`, `x12`, `ccda`, `json` or `csv`
-  is refused at load with `ack: xml`, since what it sends is not an HL7 v2 message.
+  is refused at load with `ack: xml`, since what it sends is not an HL7 v2 message. So is one whose
+  `method` is `GET` or `DELETE`, since it sends no body for the acknowledgement to answer.
 - **The body is sent as the transform returned it.** Writing the message in the v2 XML encoding is
   the transform's work; `ack: xml` reads the answer only.
   [Send a lab result as v2 XML over HTTPS](./send-a-lab-result-as-v2-xml.md) writes it with

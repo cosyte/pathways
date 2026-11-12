@@ -1289,7 +1289,7 @@ const httpDestination = restate(
       ack: envable(
         z.enum(["xml"]).meta({
           description:
-            "xml: read each 2xx answer as an HL7 v2 XML acknowledgement and settle by its MSA.1: AA or CA delivered, AR or CR failed, AE or CE (or an answer that is not exactly one acknowledgement or answers another MSH.10) retried. A message sent as XML is read first and, unsent, fails at once: SENT_XML_UNREADABLE when the XML cannot be read, SENT_XML_NO_CONTROL_ID when it holds no single MSH with one MSH.10. Needs the destination's format to be hl7v2 or text. Default: the status alone decides.",
+            "xml: read each 2xx answer as an HL7 v2 XML acknowledgement and settle by its MSA.1: AA or CA delivered, AR or CR failed, AE or CE (or an answer that is not exactly one acknowledgement or answers another MSH.10) retried. A message sent as XML is read first and, unsent, fails at once: SENT_XML_UNREADABLE when the XML cannot be read, SENT_XML_NO_CONTROL_ID when it holds no single MSH with one MSH.10. Needs the destination's format to be hl7v2 or text, and its method POST, PUT or PATCH: GET and DELETE send no body. Default: the status alone decides.",
         }),
       ).optional(),
     })
@@ -3608,6 +3608,15 @@ export const channelSchema = restate(
             code: "custom",
             path: ["destinations", index, "http", "ack"],
             message: `an HL7 v2 XML acknowledgement answers HL7 v2 only, and this destination sends ${sends}; set its format to hl7v2 or text, or drop ack`,
+          });
+        }
+        // GET and DELETE send no body, so there is no message for an acknowledgement to answer.
+        const method = destination.http?.method;
+        if (destination.http?.ack === "xml" && (method === "GET" || method === "DELETE")) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["destinations", index, "http", "ack"],
+            message: `${method} sends no body, so there is no message for an HL7 v2 XML acknowledgement to answer; send by POST, PUT or PATCH, or drop ack`,
           });
         }
       }

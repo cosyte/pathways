@@ -715,7 +715,9 @@ acknowledgement or one that answers another `MSH.10`, retried. `AE` and `AR` set
 round from an MLLP destination. A message sent as XML the reader refuses fails at once, unsent,
 with the reason `SENT_XML_UNREADABLE`, and one sent as XML without exactly one `MSH` holding one
 `MSH.10` with the reason `SENT_XML_NO_CONTROL_ID`; the control ID check is skipped only for a body that is not
-XML at all. The destination's format must be `hl7v2` or `text`. See
+XML at all. The destination's format must be `hl7v2` or `text`, and its `method` `POST`, `PUT` or
+`PATCH`: `GET` and `DELETE` send no body, so `ack: xml` with either is refused when the
+configuration loads. See
 [Settle by an HL7 v2 XML acknowledgement](./send-and-receive-http.md#settle-by-an-hl7-v2-xml-acknowledgement).
 
 #### MLLP destination

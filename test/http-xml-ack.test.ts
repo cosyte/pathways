@@ -420,6 +420,26 @@ describe("an http destination's ack setting", () => {
     expect(config?.destinations[0]).toMatchObject({ kind: "http", ack: "xml" });
   });
 
+  it.each(["GET", "DELETE"])(
+    "is refused at load with method %s, which sends no body to acknowledge",
+    async (method) => {
+      const root = await makeProject(
+        channel(`http: { url: "https://lab.example.test/", method: ${method}, ack: xml }`),
+      );
+      const error = await loadProject(root).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(ConfigError);
+      expect((error as ConfigError).problems.join("\n")).toContain("destinations.0.http.ack");
+    },
+  );
+
+  it.each(["POST", "PUT", "PATCH"])("is taken with method %s", async (method) => {
+    const root = await makeProject(
+      channel(`http: { url: "https://lab.example.test/", method: ${method}, ack: xml }`),
+    );
+    const [config] = (await loadProject(root)).channels;
+    expect(config?.destinations[0]).toMatchObject({ kind: "http", method, ack: "xml" });
+  });
+
   it("takes xml alone", async () => {
     const root = await makeProject(channel(`http: { url: "https://lab.example.test/", ack: er7 }`));
     const error = await loadProject(root).catch((caught: unknown) => caught);
