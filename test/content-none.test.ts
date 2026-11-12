@@ -549,7 +549,7 @@ source:
   http: { port: ${String(port)}, plaintext: true, auth: none${extra} }
 transform: ./transform.ts
 destinations:
-  - http: { url: "${lab.url}", plaintext: true }
+  - http: { url: "${lab.url}", plaintext: true, allowNetworks: [127.0.0.1] }
 `,
       "channels/adt/transform.ts": LAB_TRANSFORM,
     });
