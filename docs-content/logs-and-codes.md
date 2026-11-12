@@ -68,6 +68,20 @@ the channel's `encoding`, and the message was read as the channel says.
 | `mllp-ack-builder-failed`                                          | a custom ACK builder threw or ran out of time; the default ACK was sent                                                                               |
 | `mllp-ack-unsendable`                                              | an ACK held an MLLP framing byte, so none was sent                                                                                                    |
 | `mllp-source-error`, `mllp-source-failed`, `mllp-security-warning` | the MLLP server reported an error or a warning, by name and code                                                                                      |
+| `tcp-listening`                                                    | a tcp source is listening, on `port`, with `tls` true or false                                                                                        |
+| `tcp-store-failed`                                                 | a tcp message could not be stored; no reply was sent and the connection closed                                                                        |
+| `tcp-oversize`                                                     | a frame was longer than `maxMessageSize`; the connection closed, the frame unstored                                                                   |
+| `tcp-bad-length`                                                   | an inclusive length prefix was smaller than the prefix; the connection closed                                                                         |
+| `tcp-stalled`                                                      | a frame begun sent no byte for `stallTimeout`; the connection closed, the part dropped                                                                |
+| `tcp-idle`                                                         | a connection began no frame for `idleTimeout`, and was closed                                                                                         |
+| `tcp-partial-frame`                                                | a connection ended mid-frame; the part, `bytes` long, was dropped                                                                                     |
+| `tcp-connection-refused`                                           | a tcp source closed a connection at accept because it held `maxConnections` already; with the cap, never who connected                                |
+| `tcp-frames-dropped`                                               | `count` whole frames a tcp source could not store: a store or reply failure closed the connection, or it was closing or stopping                      |
+| `tcp-empty-frame`                                                  | an empty frame came, and was skipped                                                                                                                  |
+| `tcp-discarded-bytes`                                              | `bytes` came outside a start and end frame, and were dropped                                                                                          |
+| `tcp-reply-failed`                                                 | a reply builder threw, ran out of time or returned neither bytes nor a string, for `message`; the connection closed                                   |
+| `tcp-reply-unsendable`                                             | a reply held the delimiter or the end bytes, or was too long for the prefix (`code`); the connection closed                                           |
+| `tcp-tls-refused`, `tcp-connection-error`, `tcp-source-error`      | a TLS handshake failed, a connection reset or the server reported an error, by name and code                                                          |
 
 ### Configuration and storage
 
@@ -108,17 +122,27 @@ the channel's `encoding`, and the message was read as the channel says.
 A retried delivery stores and logs a code. These come from Pathways' own connectors; a network error
 keeps the operating system's code, such as `ECONNREFUSED` or `ENOTFOUND`.
 
-| Code                      | Connector | Meaning                                       |
-| ------------------------- | --------- | --------------------------------------------- |
-| `CONNECT_TIMEOUT`         | MLLP      | no connection within `ackTimeout`             |
-| `ACK_TIMEOUT`             | MLLP      | no ACK within `ackTimeout`                    |
-| `ACK_AR`, `ACK_CR`        | MLLP      | the receiver answered with a reject code      |
-| `ACK_UNREADABLE`          | MLLP      | the answer was not an ACK Pathways could read |
-| `ACK_CONTROL_ID_MISMATCH` | MLLP      | the ACK answered another message's MSH-10     |
-| `MLLP_CONNECTION`         | MLLP      | the connection ended with no other code       |
-| `HTTP_<status>`           | HTTP      | a 408, 425, 429 or 5xx answer, or a held 3xx  |
-| `ETIMEDOUT`               | HTTP      | no answer within `timeout`                    |
-| `DELIVERY_TIMEOUT`        | any       | the attempt ran past its deadline, cut off    |
+| Code                      | Connector | Meaning                                                             |
+| ------------------------- | --------- | ------------------------------------------------------------------- |
+| `CONNECT_TIMEOUT`         | MLLP      | no connection within `ackTimeout`                                   |
+| `ACK_TIMEOUT`             | MLLP      | no ACK within `ackTimeout`                                          |
+| `ACK_AR`, `ACK_CR`        | MLLP      | the receiver answered with a reject code                            |
+| `ACK_UNREADABLE`          | MLLP      | the answer was not an ACK Pathways could read                       |
+| `ACK_CONTROL_ID_MISMATCH` | MLLP      | the ACK answered another message's MSH-10                           |
+| `MLLP_CONNECTION`         | MLLP      | the connection ended with no other code                             |
+| `CONNECT_TIMEOUT`         | tcp       | no connection within `timeout`                                      |
+| `REPLY_TIMEOUT`           | tcp       | no whole reply within `timeout`                                     |
+| `WRITE_TIMEOUT`           | tcp       | the output was not taken in within `timeout`, with no `expectReply` |
+| `REPLY_OVERSIZE`          | tcp       | the reply was longer than `maxMessageSize`                          |
+| `REPLY_BAD_LENGTH`        | tcp       | the reply's inclusive length prefix was smaller than the prefix     |
+| `CONNECTION_CLOSED`       | tcp       | the receiver closed before a whole reply                            |
+| `REPLY_RETRY`             | tcp       | the reply check said `retry`                                        |
+| `REPLY_CHECK_FAILED`      | tcp       | the reply check threw, ran out of time or said something else       |
+| `ABORTED`                 | tcp       | the channel was halted while the delivery ran                       |
+| `TCP_CONNECTION`          | tcp       | the connection failed with no other code                            |
+| `HTTP_<status>`           | HTTP      | a 408, 425, 429 or 5xx answer, or a held 3xx                        |
+| `ETIMEDOUT`               | HTTP      | no answer within `timeout`                                          |
+| `DELIVERY_TIMEOUT`        | any       | the attempt ran past its deadline, cut off                          |
 
 A `delivery-retry` line's `retryInMs` is the backoff, or the wait a 429's or a 503's `Retry-After`
 asked for when that is longer, up to the destination's `retry.max`, 5 minutes by default. A
@@ -129,8 +153,10 @@ host (and port, when it names one) of the 3xx answer's `Location`, never its pat
 absent when there is no `Location` or it names no host.
 
 A delivery rejected for good stores its reason: the ACK code (`AE`, `CE`), `HTTP <status>` for a
-101 or a 4xx other than 408, 425 and 429, or `MLLP_PAYLOAD_CONTAINS_...` for an output that
-holds a framing byte.
+101 or a 4xx other than 408, 425 and 429, `MLLP_PAYLOAD_CONTAINS_...` for an output that
+holds a framing byte, `REPLY_REJECTED` when a tcp reply check said `rejected`, or
+`TCP_PAYLOAD_CONTAINS_DELIMITER`, `TCP_PAYLOAD_CONTAINS_END` or `TCP_PAYLOAD_TOO_LONG` for an output
+a tcp destination's framing cannot carry.
 
 ## MLLP problem codes
 

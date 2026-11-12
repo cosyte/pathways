@@ -891,7 +891,7 @@ Absent otherwise.
 
 ##### type
 
-> `readonly` **type**: `"received"` \| `"receive-failed"` \| `"transformed"` \| `"filtered"` \| `"transform-failed"` \| `"delivered"` \| `"delivery-retry"` \| `"delivery-redirected"` \| `"delivery-rejected"` \| `"delivery-exhausted"` \| `"source-down"` \| `"source-up"` \| `"audit"`
+> `readonly` **type**: `"delivered"` \| `"received"` \| `"receive-failed"` \| `"transformed"` \| `"filtered"` \| `"transform-failed"` \| `"delivery-retry"` \| `"delivery-redirected"` \| `"delivery-rejected"` \| `"delivery-exhausted"` \| `"source-down"` \| `"source-up"` \| `"audit"`
 
 ###### Inherited from
 
@@ -2092,7 +2092,7 @@ The channel's name.
 
 ##### type
 
-> `readonly` **type**: `"received"` \| `"receive-failed"` \| `"transformed"` \| `"filtered"` \| `"transform-failed"` \| `"delivered"` \| `"delivery-retry"` \| `"delivery-redirected"` \| `"delivery-rejected"` \| `"delivery-exhausted"` \| `"source-down"` \| `"source-up"` \| `"audit"`
+> `readonly` **type**: `"delivered"` \| `"received"` \| `"receive-failed"` \| `"transformed"` \| `"filtered"` \| `"transform-failed"` \| `"delivery-retry"` \| `"delivery-redirected"` \| `"delivery-rejected"` \| `"delivery-exhausted"` \| `"source-down"` \| `"source-up"` \| `"audit"`
 
 ***
 
@@ -2230,7 +2230,7 @@ Received at or after this time (ISO 8601, UTC).
 
 ##### state?
 
-> `readonly` `optional` **state?**: `"received"` \| `"filtered"` \| `"delivered"` \| `"failed"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
+> `readonly` `optional` **state?**: `"delivered"` \| `"received"` \| `"filtered"` \| `"failed"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
 
 ##### until?
 
@@ -3146,7 +3146,7 @@ The body's size in bytes, or null for a message stored before sizes were kept.
 
 ##### state
 
-> `readonly` **state**: `"received"` \| `"filtered"` \| `"delivered"` \| `"failed"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
+> `readonly` **state**: `"delivered"` \| `"received"` \| `"filtered"` \| `"failed"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
 
 The status and the current deliveries, as an operator sees them.
 
@@ -3232,7 +3232,7 @@ Received at or after this time (ISO 8601, UTC).
 
 ##### state?
 
-> `readonly` `optional` **state?**: `"received"` \| `"filtered"` \| `"delivered"` \| `"failed"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
+> `readonly` `optional` **state?**: `"delivered"` \| `"received"` \| `"filtered"` \| `"failed"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
 
 ##### until?
 
@@ -4554,7 +4554,7 @@ The body's size in bytes, or null for a message stored before sizes were kept.
 
 ##### state
 
-> `readonly` **state**: `"received"` \| `"filtered"` \| `"delivered"` \| `"failed"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
+> `readonly` **state**: `"delivered"` \| `"received"` \| `"filtered"` \| `"failed"` \| `"cleared"` \| `"dry-run"` \| `"queued"` \| `"retrying"`
 
 The status and the current deliveries, as an operator sees them.
 
@@ -4700,6 +4700,96 @@ changes the body on its way in, such as encryption, passes the original size alo
 > `readonly` `optional` **storedMeta?**: `string`
 
 The metadata as the store keeps it: JSON, encrypted under encryption. Set by a wrapper.
+
+***
+
+### TcpReply
+
+The reply a tcp destination read for one output, for its reply check to judge.
+
+#### Example
+
+```ts
+const text = (reply: TcpReply): string => Buffer.from(reply.body).toString("latin1");
+```
+
+#### Properties
+
+##### body
+
+> `readonly` **body**: `Uint8Array`
+
+The reply's bytes, without the framing. Empty for an empty frame.
+
+##### messageId
+
+> `readonly` **messageId**: `number`
+
+The id of the stored message the output came from.
+
+##### seq
+
+> `readonly` **seq**: `number`
+
+Which output of that message's transform it was, from 0.
+
+***
+
+### TcpReplyRequest
+
+What a tcp source's reply builder is given: the id of the message just stored. It runs only once
+the message is stored.
+
+#### Example
+
+```ts
+const request: TcpReplyRequest = { messageId: 42 };
+```
+
+#### Properties
+
+##### messageId
+
+> `readonly` **messageId**: `number`
+
+The stored message's id.
+
+***
+
+### TcpSourceFacts
+
+What a tcp source knows about a message: the sender's address and, over mutual TLS, the common
+name in the subject of the certificate the sender presented.
+
+#### Example
+
+```ts
+const peer = (source: TcpSourceFacts): string => source.tlsPeerSubject ?? "unknown";
+```
+
+#### Properties
+
+##### kind
+
+> `readonly` **kind**: `"tcp"`
+
+##### receivedAt
+
+> `readonly` **receivedAt**: `string`
+
+When the message was stored, as an ISO 8601 time.
+
+##### remoteAddress
+
+> `readonly` **remoteAddress**: `string` \| `undefined`
+
+The sender's IP address, when the connection had one.
+
+##### tlsPeerSubject
+
+> `readonly` **tlsPeerSubject**: `string` \| `undefined`
+
+The common name (CN) in the subject of the sender's TLS certificate, when it presented one.
 
 ***
 
@@ -5957,7 +6047,7 @@ export default ((options, context) => ({
 
 ### SourceFacts
 
-> **SourceFacts** = [`FileSourceFacts`](#filesourcefacts) \| [`HttpSourceFacts`](#httpsourcefacts) \| [`MllpSourceFacts`](#mllpsourcefacts) \| [`ModuleSourceFacts`](#modulesourcefacts)
+> **SourceFacts** = [`FileSourceFacts`](#filesourcefacts) \| [`HttpSourceFacts`](#httpsourcefacts) \| [`MllpSourceFacts`](#mllpsourcefacts) \| [`TcpSourceFacts`](#tcpsourcefacts) \| [`ModuleSourceFacts`](#modulesourcefacts)
 
 What the source knew about a message when it took it in, by the kind of source.
 
@@ -6009,6 +6099,86 @@ export default (async (options, context) => {
   await migrate(pool);
   return new PoolStore(pool) satisfies MessageStore;
 }) satisfies StoreFactory<{ url: string }>;
+```
+
+***
+
+### TcpReplyBuilder
+
+> **TcpReplyBuilder** = (`request`) => `Uint8Array` \| `string` \| `Promise`\<`Uint8Array` \| `string`\>
+
+Builds the reply a tcp source sends once a message is stored, named in the channel's YAML as
+`source: { tcp: { ..., reply: { builder: ./reply.ts } } }` and exported as the module's default.
+It returns the reply's bytes, or a string sent as UTF-8; the source adds the framing. It runs in
+the engine's own thread, once per message, under the channel's transform time limit. If it throws,
+runs past the limit or returns something else, the source logs `tcp-reply-failed` and closes the
+connection without a reply: the message is stored, and a sender that sends it again stores it twice.
+
+#### Parameters
+
+##### request
+
+[`TcpReplyRequest`](#tcpreplyrequest)
+
+#### Returns
+
+`Uint8Array` \| `string` \| `Promise`\<`Uint8Array` \| `string`\>
+
+#### Example
+
+```ts
+// channels/orders-in/reply.ts: answers OK and the stored id, one line.
+import type { TcpReplyBuilder } from "@cosyte/pathways";
+
+export default (({ messageId }) => `OK ${messageId}`) satisfies TcpReplyBuilder;
+```
+
+***
+
+### TcpReplyCheck
+
+> **TcpReplyCheck** = (`reply`) => [`TcpReplyVerdict`](#tcpreplyverdict) \| `Promise`\<[`TcpReplyVerdict`](#tcpreplyverdict)\>
+
+Judges the reply a tcp destination with `expectReply: true` read, named in the channel's YAML as
+`replyCheck: ./check.ts` and exported as the module's default. Without one, any reply means
+delivered. If it throws, runs past the channel's transform time limit or returns anything but a
+[TcpReplyVerdict](#tcpreplyverdict), the delivery is retried with the code `REPLY_CHECK_FAILED`.
+
+#### Parameters
+
+##### reply
+
+[`TcpReply`](#tcpreply)
+
+#### Returns
+
+[`TcpReplyVerdict`](#tcpreplyverdict) \| `Promise`\<[`TcpReplyVerdict`](#tcpreplyverdict)\>
+
+#### Example
+
+```ts
+// channels/orders-out/check.ts: the receiver answers ACK or NAK.
+import type { TcpReplyCheck } from "@cosyte/pathways";
+
+export default ((reply) => {
+  const text = Buffer.from(reply.body).toString("latin1");
+  return text === "ACK" ? "delivered" : text === "NAK" ? "rejected" : "retry";
+}) satisfies TcpReplyCheck;
+```
+
+***
+
+### TcpReplyVerdict
+
+> **TcpReplyVerdict** = `"delivered"` \| `"retry"` \| `"rejected"`
+
+What a reply check decides: `delivered`, `retry` (the engine tries the same output again, holding
+later ones behind it), or `rejected` (failed for good; the destination moves on).
+
+#### Example
+
+```ts
+const verdict: TcpReplyVerdict = "retry";
 ```
 
 ***

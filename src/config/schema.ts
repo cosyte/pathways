@@ -1142,6 +1142,206 @@ const mllpDestination = restate(
   (json) => Object.assign(json, TLS_OR_PLAINTEXT),
 );
 
+/** Bytes written in hex, two digits each, such as `0d0a`. */
+const HEX_BYTES = /^(?:[0-9A-Fa-f]{2})+$/;
+
+/** Bytes written in hex in quotes, at most `most` of them, with the hover text for the key. */
+const hexBytes = (most: number, description: string) =>
+  envable(
+    z
+      .string({ error: 'hex bytes in quotes, such as "0d0a"' })
+      .regex(HEX_BYTES, 'hex bytes, two digits each, such as "0d0a"')
+      .refine((text) => text.length <= most * 2, `at most ${most} bytes`)
+      .meta({ description }),
+  );
+
+/** The framings a tcp block names exactly one of. */
+const TCP_FRAMINGS = ["raw", "delimiter", "lengthPrefix", "startEnd"] as const;
+
+/** A tcp block's `framing:`: exactly one of raw, delimiter, lengthPrefix or startEnd. */
+const tcpFraming = restate(
+  z
+    .strictObject({
+      raw: envable(
+        z.literal(true).meta({
+          description:
+            "raw: true reads one message per connection, every byte until the sender closes its side. Needs maxMessageSize.",
+        }),
+      ).optional(),
+      delimiter: hexBytes(
+        16,
+        'Each message ends with these bytes, in hex in quotes, such as "0a" or "0d0a": at most 16.',
+      ).optional(),
+      lengthPrefix: z
+        .strictObject({
+          bytes: envable(
+            z.literal([1, 2, 4]).meta({ description: "How long the prefix is: 1, 2 or 4." }),
+          ),
+          endian: envable(
+            z
+              .enum(["big", "little"])
+              .meta({ description: "The prefix's byte order: big or little. Default big." }),
+          ).optional(),
+          inclusive: envable(
+            z.boolean().meta({
+              description:
+                "true when the length counts the prefix's own bytes as well as the message's. Default false.",
+            }),
+          ).optional(),
+        })
+        .meta({
+          description: "Each message comes after its length, in bytes, as an unsigned number.",
+        })
+        .optional(),
+      startEnd: z
+        .strictObject({
+          start: hexBytes(16, 'The bytes that open each message, in hex in quotes, such as "02".'),
+          end: hexBytes(16, 'The bytes that close each message, in hex in quotes, such as "03".'),
+        })
+        .meta({
+          description:
+            "Each message comes between these start and end bytes; bytes between messages are dropped.",
+        })
+        .optional(),
+    })
+    .meta({
+      description:
+        "How messages are cut from the stream: exactly one of raw: true, delimiter, lengthPrefix or startEnd.",
+    })
+    .superRefine(oneKind(TCP_FRAMINGS)),
+  (json) => {
+    json.oneOf = exactlyOneOf(TCP_FRAMINGS);
+  },
+);
+
+/** The kinds of reply a tcp source's `reply:` names exactly one of. */
+const TCP_REPLIES = ["hex", "builder"] as const;
+
+/** The largest message a tcp block takes in, with the hover text for the key. */
+const tcpMaxMessageSize = (description: string) => bytes.meta({ description });
+
+/** Raw framing reads to the close, so its size cap is set in the file, never left to a default. */
+function rawNeedsCap(
+  value: {
+    readonly framing: { readonly raw?: true | undefined };
+    readonly maxMessageSize?: number | undefined;
+  },
+  ctx: z.RefinementCtx,
+): void {
+  if (value.framing.raw === true && value.maxMessageSize === undefined) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["maxMessageSize"],
+      message: "required with raw framing: the most bytes one connection may send, such as 1MB",
+    });
+  }
+}
+
+const tcpSource = restate(
+  z
+    .strictObject({
+      port,
+      host: listenerShape.host,
+      tls: serverTls.optional(),
+      plaintext,
+      framing: tcpFraming,
+      maxConnections: maxConnections.optional(),
+      maxMessageSize: tcpMaxMessageSize(
+        "The most bytes one message may hold: a size such as 64KB or 1MB, or a number of bytes. A longer frame closes the connection, unstored. Default 10MB; required with raw framing.",
+      ).optional(),
+      idleTimeout: duration(
+        "How long a connection may go with no message begun before it is closed: a duration such as 5m, or a number of milliseconds. Default 5m.",
+        { ms: 1, message: 'a duration of at least 1ms, such as "5m"' },
+      ).optional(),
+      stallTimeout: duration(
+        "How long a message begun may go without a byte before the connection is closed and the part dropped: a duration such as 30s, or a number of milliseconds. Default 30s.",
+        { ms: 1, message: 'a duration of at least 1ms, such as "30s"' },
+      ).optional(),
+      reply: restate(
+        z
+          .strictObject({
+            hex: hexBytes(
+              4_096,
+              'The same reply for every message stored, in hex in quotes, such as "06": at most 4,096 bytes.',
+            ).optional(),
+            builder: path
+              .meta({
+                description:
+                  "A module whose default export builds each reply from the stored message's id, relative to this file.",
+              })
+              .optional(),
+          })
+          .meta({
+            description:
+              "What to answer once each message is stored, framed as messages are: exactly one of hex or builder. Default: no reply.",
+          })
+          .superRefine(oneKind(TCP_REPLIES)),
+        (json) => {
+          json.oneOf = exactlyOneOf(TCP_REPLIES);
+        },
+      ).optional(),
+    })
+    .meta({
+      description:
+        "Listen for messages over TCP that are not HL7 v2 over MLLP: each frame is stored, then answered when reply is set. TLS unless plaintext: true.",
+    })
+    .superRefine((value, ctx) => tlsOrPlaintext(value, ctx, LISTENER_TLS_REQUIRED))
+    .superRefine(rawNeedsCap),
+  (json) => Object.assign(json, TLS_OR_PLAINTEXT),
+);
+
+const tcpDestination = restate(
+  z
+    .strictObject({
+      host: host.meta({ description: "The address to connect to." }),
+      port,
+      tls: clientTls.optional(),
+      plaintext,
+      framing: tcpFraming,
+      maxMessageSize: tcpMaxMessageSize(
+        "The most bytes a reply may hold: a size such as 64KB, or a number of bytes. Default 10MB; required with raw framing and expectReply.",
+      ).optional(),
+      timeout: duration(
+        "How long to wait to connect, and then for the send and its reply: a duration such as 10s, or a number of milliseconds. Default 10s.",
+        { ms: 1, message: 'a duration of at least 1ms, such as "10s"' },
+      ).optional(),
+      expectReply: envable(
+        z.boolean().meta({
+          description:
+            "true reads one framed reply for each output; any reply means delivered unless replyCheck says otherwise. Default false.",
+        }),
+      ).optional(),
+      replyCheck: path
+        .meta({
+          description:
+            "A module whose default export judges each reply: delivered, retry or rejected. Relative to this file. Needs expectReply: true.",
+        })
+        .optional(),
+    })
+    .meta({
+      description:
+        "Send each output over TCP as one frame on a connection of its own, and with expectReply: true read one framed reply. TLS unless plaintext: true; tls: {} verifies the server against Node.js's built-in roots.",
+    })
+    .superRefine((value, ctx) =>
+      tlsOrPlaintext(
+        value,
+        ctx,
+        "required: set tls: {} to verify the server against Node's built-in roots, tls: { ca } to trust your own CA, or plaintext: true to run without TLS",
+      ),
+    )
+    .superRefine((value, ctx) => {
+      if (value.replyCheck !== undefined && value.expectReply !== true) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["replyCheck"],
+          message: "goes with expectReply: true: without a reply there is nothing to check",
+        });
+      }
+      if (value.expectReply === true) rawNeedsCap(value, ctx);
+    }),
+  (json) => Object.assign(json, TLS_OR_PLAINTEXT),
+);
+
 /**
  * A database server's connection URL, read at startup. It carries the password, so it never goes in
  * the YAML.
@@ -1340,8 +1540,8 @@ const restateKinds =
     json["dependencies"] = { options: ["module"] };
   };
 
-const SOURCE_KINDS = ["file", "http", "mllp", "module"] as const;
-const DESTINATION_KINDS = ["file", "http", "mllp", "module"] as const;
+const SOURCE_KINDS = ["file", "http", "mllp", "tcp", "module"] as const;
+const DESTINATION_KINDS = ["file", "http", "mllp", "tcp", "module"] as const;
 const HOOK_KINDS = ["module", "webhook"] as const;
 
 /**
@@ -2040,12 +2240,13 @@ const source = restate(
         .optional(),
       http: httpSource.optional(),
       mllp: mllpSource.optional(),
+      tcp: tcpSource.optional(),
       module: modulePath.optional(),
       options: moduleOptions.optional(),
       poll: pollBlock.optional(),
     })
     .meta({
-      description: "Where messages come from: exactly one of file, http, mllp or module.",
+      description: "Where messages come from: exactly one of file, http, mllp, tcp or module.",
     })
     .superRefine(oneKind(SOURCE_KINDS))
     .superRefine(optionsWithModule)
@@ -2056,7 +2257,7 @@ const source = restate(
       ctx.addIssue({
         code: "custom",
         path: ["poll"],
-        message: "goes with file or module: http and mllp listen rather than poll",
+        message: "goes with file or module: http, mllp and tcp listen rather than poll",
       });
     }),
   restateKinds(SOURCE_KINDS),
@@ -2078,11 +2279,12 @@ const destination = restate(
         .optional(),
       http: httpDestination.optional(),
       mllp: mllpDestination.optional(),
+      tcp: tcpDestination.optional(),
       module: modulePath.optional(),
       options: moduleOptions.optional(),
       retry: settingsShape.retry,
       timeout: duration(
-        "How long one delivery to a file or module destination may take in all before it is cut off and retried: a duration such as 30s, or a number of milliseconds. Default 30s. An http destination sets its own timeout, and an mllp one its ackTimeout.",
+        "How long one delivery to a file or module destination may take in all before it is cut off and retried: a duration such as 30s, or a number of milliseconds. Default 30s. An http or tcp destination sets its own timeout, and an mllp one its ackTimeout.",
         { ms: 1, message: 'a duration of at least 1ms, such as "30s"' },
       ).optional(),
       dryRun: envable(
@@ -2094,19 +2296,18 @@ const destination = restate(
     })
     .meta({
       description:
-        "One destination: exactly one of file, http, mllp or module, its own retry settings, and dryRun.",
+        "One destination: exactly one of file, http, mllp, tcp or module, its own retry settings, and dryRun.",
     })
     .superRefine(oneKind(DESTINATION_KINDS))
     .superRefine(optionsWithModule)
     .superRefine((value, ctx) => {
-      if (value.timeout === undefined || (value.http === undefined && value.mllp === undefined)) {
-        return;
-      }
+      const own = value.http ?? value.mllp ?? value.tcp;
+      if (value.timeout === undefined || own === undefined) return;
       ctx.addIssue({
         code: "custom",
         path: ["timeout"],
         message:
-          "goes with file or module: an http destination sets timeout in its block, and an mllp one ackTimeout",
+          "goes with file or module: an http or tcp destination sets timeout in its block, and an mllp one ackTimeout",
       });
     }),
   restateKinds(DESTINATION_KINDS),
@@ -2966,6 +3167,76 @@ export interface MllpDestination {
   readonly ackTimeoutMs: number;
 }
 
+/**
+ * How a tcp source or destination cuts messages from the stream, resolved: the delimiter, start and
+ * end bytes in hex.
+ *
+ * @example
+ * ```ts
+ * const framing: TcpFraming = { kind: "lengthPrefix", size: 4, endian: "big", inclusive: false };
+ * ```
+ */
+export type TcpFraming =
+  | { readonly kind: "raw" }
+  | { readonly kind: "delimiter"; readonly delimiter: string }
+  | {
+      readonly kind: "lengthPrefix";
+      readonly size: 1 | 2 | 4;
+      readonly endian: "big" | "little";
+      readonly inclusive: boolean;
+    }
+  | { readonly kind: "startEnd"; readonly start: string; readonly end: string };
+
+/**
+ * A tcp source: each frame on a connection is one message, stored and then, when `reply` is set,
+ * answered. `tls` is undefined exactly when `plaintext`.
+ */
+export interface TcpSource {
+  readonly kind: "tcp";
+  readonly host: string;
+  readonly port: number;
+  readonly tls: ServerTlsFiles | undefined;
+  readonly plaintext: boolean;
+  readonly framing: TcpFraming;
+  /** The most connections held at once, or `undefined` for the source's default (100). */
+  readonly maxConnections?: number | undefined;
+  readonly maxMessageSize: number;
+  readonly idleTimeoutMs: number;
+  readonly stallTimeoutMs: number;
+  /** The same reply for every message (`hex`), a module that builds each, or none. */
+  readonly reply:
+    | { readonly kind: "fixed"; readonly hex: string }
+    | { readonly kind: "builder"; readonly module: string }
+    | undefined;
+}
+
+/**
+ * A tcp destination: each output is sent as one frame on a connection of its own, and with
+ * `expectReply` one framed reply is read. `tls` is undefined exactly when `plaintext`.
+ */
+export interface TcpDestination {
+  readonly kind: "tcp";
+  readonly host: string;
+  readonly port: number;
+  readonly tls: ClientTlsFiles | undefined;
+  readonly plaintext: boolean;
+  readonly framing: TcpFraming;
+  readonly maxMessageSize: number;
+  readonly timeoutMs: number;
+  readonly expectReply: boolean;
+  /** A module whose default export judges each reply, or `undefined` to take any reply. */
+  readonly replyCheck: string | undefined;
+}
+
+/** How long a tcp source's connection may go with no message begun: 5 minutes. */
+export const DEFAULT_TCP_IDLE_TIMEOUT_MS = 300_000;
+
+/** How long a message begun on a tcp source may go without a byte: 30 seconds. */
+export const DEFAULT_TCP_STALL_TIMEOUT_MS = 30_000;
+
+/** How long a tcp destination waits to connect, and then for the send and its reply: 10 seconds. */
+export const DEFAULT_TCP_TIMEOUT_MS = 10_000;
+
 /** The health endpoint, from `pathways.yaml`. */
 export type HealthConfig = ListenerConfig;
 
@@ -3060,7 +3331,7 @@ export type HookConfig =
  * ```
  */
 export type DestinationConfig = (
-  FileDestination | HttpDestination | MllpDestination | ModuleConnector
+  FileDestination | HttpDestination | MllpDestination | TcpDestination | ModuleConnector
 ) & {
   readonly retry?: RetryPolicy;
   /**
@@ -3115,7 +3386,7 @@ export interface ChannelConfig {
   readonly format: Format;
   /** A `csv` channel's `csv:` block, as written; unset for another format or no block. */
   readonly csv?: CsvSettings | undefined;
-  readonly source: FileSource | HttpSource | MllpSource | ModuleConnector;
+  readonly source: FileSource | HttpSource | MllpSource | TcpSource | ModuleConnector;
   /** The transform module, or `undefined` to pass each message through unchanged. */
   readonly transform: string | undefined;
   /**

@@ -294,11 +294,13 @@ by key. See [Use the message context](./use-the-message-context.md).
 | `timeout`, `memory`, `onStoreFailure`, `ackTimeout`, `retention` | see [Settings](#settings)                                                                                                                                                                           | the project's                                                                |
 | `resendFlag`, `retry`                                            | see [Settings](#settings)                                                                                                                                                                           | the project's                                                                |
 
-A channel with an MLLP source or destination must have the format `hl7v2`.
+A channel with an MLLP source or destination must have the format `hl7v2`. A channel with a tcp
+source or destination and the format `hl7v2`, said or by default, loads with a warning: tcp sends no
+HL7 ACK, so HL7 v2 with ACKs goes over MLLP.
 
 ### Sources
 
-Exactly one of `file`, `http`, `mllp` or `module`. A `file` or `module` source may add `poll` beside
+Exactly one of `file`, `http`, `mllp`, `tcp` or `module`. A `file` or `module` source may add `poll` beside
 it.
 
 #### Poll schedule
@@ -423,13 +425,50 @@ that long without a whole message, a part-sent one included. A message over `max
 the connection and is not stored. `keepOpen: false` closes each connection once its messages are
 answered. See [Bound connections and messages](./send-and-receive-mllp.md#bound-connections-and-messages).
 
+#### TCP source
+
+| Key              | Type                             | Default                     |
+| ---------------- | -------------------------------- | --------------------------- |
+| `port`           | 1 to 65,535                      | required                    |
+| `host`           | an address                       | `127.0.0.1`                 |
+| `tls`            | [server TLS](#tls)               | required unless `plaintext` |
+| `plaintext`      | boolean                          | `false`                     |
+| `framing`        | a [TCP framing](#tcp-framing)    | required                    |
+| `maxConnections` | 1 to 100,000                     | `100`                       |
+| `maxMessageSize` | byte size                        | `10MB`; required with `raw` |
+| `idleTimeout`    | duration                         | `5m`                        |
+| `stallTimeout`   | duration                         | `30s`                       |
+| `reply`          | `{ hex }` or `{ builder: path }` | none: no reply is sent      |
+
+A connection over `maxConnections` is closed at accept, before any byte is read. A frame longer than
+`maxMessageSize`, or one that stalls for `stallTimeout`, closes the connection once the messages
+before it are stored and answered; the frame is never stored. A sender that closes or resets still
+has every whole frame it sent stored. A connection that
+begins no frame for `idleTimeout` is closed. An empty frame is skipped. `reply.hex` is the same reply
+for every message, at most 4,096 bytes in hex; `reply.builder` is a module whose default export, a
+[`TcpReplyBuilder`](./api/README.md#tcpreplybuilder), builds each one from the stored message's id.
+Either is framed as messages are. See [Send and receive over TCP](./send-and-receive-tcp.md).
+
+#### TCP framing
+
+`framing` names exactly one of:
+
+| Framing                                          | A message is                                                                                                                                               |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `{ raw: true }`                                  | every byte on a connection until the sender closes its side; one per connection                                                                            |
+| `{ delimiter: "0a" }`                            | the bytes before the delimiter, 1 to 16 bytes in hex                                                                                                       |
+| `{ lengthPrefix: { bytes, endian, inclusive } }` | the bytes after a length of `bytes` 1, 2 or 4, `endian` `big` (default) or `little`, the length counting the prefix too when `inclusive` (default `false`) |
+| `{ startEnd: { start: "02", end: "03" } }`       | the bytes between the start and the end bytes, each 1 to 16 bytes in hex                                                                                   |
+
+Hex goes in quotes, two digits a byte, such as `"0d0a"`: unquoted, YAML reads `10` as a number.
+
 #### Module source
 
 `module: path`, with `options:` any mapping handed to its factory.
 
 ### Destinations
 
-Each entry is exactly one of `file`, `http`, `mllp` or `module`, and may add a [`retry`](#retry)
+Each entry is exactly one of `file`, `http`, `mllp`, `tcp` or `module`, and may add a [`retry`](#retry)
 block of its own and `dryRun`, beside that key:
 
 ```yaml title="channels/results-out/channel.yaml"
@@ -459,14 +498,15 @@ At the deadline the engine stops waiting, aborts the `signal` it handed the dest
 the attempt as failed with the code `DELIVERY_TIMEOUT`: it is retried by the destination's
 [`retry`](#retry) settings, as any other failure.
 
-| Destination | Deadline                                                                |
-| ----------- | ----------------------------------------------------------------------- |
-| `http`      | its `timeout` and one second                                            |
-| `mllp`      | twice its `ackTimeout` (one to connect, one for the ACK) and one second |
-| `file`      | its `timeout`, `30s` by default                                         |
-| `module`    | its `timeout`, `30s` by default                                         |
+| Destination | Deadline                                                                            |
+| ----------- | ----------------------------------------------------------------------------------- |
+| `http`      | its `timeout` and one second                                                        |
+| `mllp`      | twice its `ackTimeout` (one to connect, one for the ACK) and one second             |
+| `tcp`       | twice its `timeout` (one to connect, one for the send and its reply) and one second |
+| `file`      | its `timeout`, `30s` by default                                                     |
+| `module`    | its `timeout`, `30s` by default                                                     |
 
-The second of grace lets an HTTP or MLLP destination's own timeout, with its own code, come first.
+The second of grace lets an HTTP, MLLP or tcp destination's own timeout, with its own code, come first.
 A deadline longer than 24 days (the longest one Node timer holds) is kept in full: the engine waits
 24 days at a time until it is due, so a `timeout: 30d` cuts an attempt off at 30 days, never sooner.
 A receiver may have the message when an attempt is cut off, and a destination that does not honour
@@ -539,6 +579,26 @@ answer after it, and is retried when none comes within `timeout` or the connecti
 | `tls`        | [MLLP TLS](#tls) | required unless `plaintext`; `{}` uses Node.js's built-in roots |
 | `plaintext`  | boolean          | `false`                                                         |
 | `ackTimeout` | duration         | the channel's                                                   |
+
+#### TCP destination
+
+| Key              | Type                          | Default                                                         |
+| ---------------- | ----------------------------- | --------------------------------------------------------------- |
+| `host`           | an address                    | required                                                        |
+| `port`           | 1 to 65,535                   | required                                                        |
+| `tls`            | [client TLS](#tls)            | required unless `plaintext`; `{}` uses Node.js's built-in roots |
+| `plaintext`      | boolean                       | `false`                                                         |
+| `framing`        | a [TCP framing](#tcp-framing) | required                                                        |
+| `maxMessageSize` | byte size                     | `10MB`; required with `raw` and `expectReply`                   |
+| `timeout`        | duration                      | `10s`                                                           |
+| `expectReply`    | boolean                       | `false`                                                         |
+| `replyCheck`     | path to a module              | none: any reply means delivered; needs `expectReply: true`      |
+
+Each output goes as one frame on a connection of its own. Without `expectReply`, it is delivered once
+it is written; with it, the destination reads one framed reply, at most `maxMessageSize`, within
+`timeout`. `replyCheck` is a module whose default export, a
+[`TcpReplyCheck`](./api/README.md#tcpreplycheck), answers `delivered`, `retry` or `rejected`. An
+output the framing cannot carry fails for good.
 
 #### Module destination
 

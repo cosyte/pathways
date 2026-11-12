@@ -1,5 +1,6 @@
 import type { ModuleConnector, ModuleOptions } from "../config/schema.js";
 import type { AckBuilder } from "../connectors/ack.js";
+import type { TcpReplyBuilder, TcpReplyCheck } from "../connectors/tcp.js";
 import type { DestinationConnector, SourceConnector } from "../connectors/types.js";
 import type { KeyProvider } from "../encryption/keys.js";
 import type { SecretProvider } from "../secrets/provider.js";
@@ -237,4 +238,26 @@ export async function loadAckBuilder(
 ): Promise<AckBuilder> {
   const builder = (await loadDefaultFunction(file, where, "an ACK builder")) as AckBuilder;
   return (request) => withTimeout(() => builder(request), timeoutMs);
+}
+
+/**
+ * Loads a tcp source's reply builder or a tcp destination's reply check: its module's default
+ * export, a function. Like an ACK builder it runs in the engine's thread, once per message, so it
+ * gets the channel's transform time limit: past it, the call fails, as it does when it throws.
+ *
+ * @throws {ExtensionLoadError} naming `where` when the module will not load or has no default
+ *   export function.
+ * @example
+ * ```ts
+ * const check = await loadTcpFunction<TcpReplyCheck>(file, "channels/orders/channel.yaml: destinations.0.tcp.replyCheck", "a reply check", 5_000);
+ * ```
+ */
+export async function loadTcpFunction<T extends TcpReplyBuilder | TcpReplyCheck>(
+  file: string,
+  where: string,
+  what: string,
+  timeoutMs: number,
+): Promise<T> {
+  const call = await loadDefaultFunction(file, where, what);
+  return ((input: unknown) => withTimeout(() => call(input), timeoutMs)) as T;
 }

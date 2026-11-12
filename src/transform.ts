@@ -215,6 +215,25 @@ export interface MllpSourceFacts {
 }
 
 /**
+ * What a tcp source knows about a message: the sender's address and, over mutual TLS, the common
+ * name in the subject of the certificate the sender presented.
+ *
+ * @example
+ * ```ts
+ * const peer = (source: TcpSourceFacts): string => source.tlsPeerSubject ?? "unknown";
+ * ```
+ */
+export interface TcpSourceFacts {
+  readonly kind: "tcp";
+  /** The sender's IP address, when the connection had one. */
+  readonly remoteAddress: string | undefined;
+  /** The common name (CN) in the subject of the sender's TLS certificate, when it presented one. */
+  readonly tlsPeerSubject: string | undefined;
+  /** When the message was stored, as an ISO 8601 time. */
+  readonly receivedAt: string;
+}
+
+/**
  * What a custom source knows about a message: whatever it passed as `source` to `sink.receive`.
  *
  * @example
@@ -239,7 +258,8 @@ export interface ModuleSourceFacts {
  *   source.kind === "http" || source.kind === "mllp" ? source.remoteAddress : undefined;
  * ```
  */
-export type SourceFacts = FileSourceFacts | HttpSourceFacts | MllpSourceFacts | ModuleSourceFacts;
+export type SourceFacts =
+  FileSourceFacts | HttpSourceFacts | MllpSourceFacts | TcpSourceFacts | ModuleSourceFacts;
 
 /**
  * The second argument a transform receives: a frozen plain object, built for each message.

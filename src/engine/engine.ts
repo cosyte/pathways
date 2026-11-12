@@ -31,14 +31,26 @@ import { HttpDestination, HttpSource } from "../connectors/http.js";
 import { RedirectHeld, RetryableError } from "../connectors/http-core.js";
 import { MllpDestination, MllpSource } from "../connectors/mllp.js";
 import { loadMllpClientTls, loadMllpServerTls } from "../connectors/mllp-tls.js";
-import { loadClientTls } from "../connectors/tls.js";
+import {
+  TcpDestination,
+  TcpSource,
+  type TcpReplyBuilder,
+  type TcpReplyCheck,
+} from "../connectors/tcp.js";
+import { framingOf } from "../connectors/tcp-framing.js";
+import { loadClientTls, loadServerTls } from "../connectors/tls.js";
 import {
   DeliveryRejected,
   type DestinationConnector,
   type MessageSink,
   type SourceConnector,
 } from "../connectors/types.js";
-import { customDestination, customSource, loadAckBuilder } from "../extensions/build.js";
+import {
+  customDestination,
+  customSource,
+  loadAckBuilder,
+  loadTcpFunction,
+} from "../extensions/build.js";
 import { faultPoint } from "../fault-points.js";
 import type { LifecycleEvent } from "../extensions/events.js";
 import { HookSet } from "../extensions/hooks.js";
@@ -86,7 +98,8 @@ export const LIVE_GRACE_MS = 60_000;
  * How long one delivery to `destination` may take in all (connecting, sending and waiting for the
  * receiver to confirm) before the engine cuts it off and counts the attempt as failed, to be
  * retried: an HTTP destination's `timeout` plus a second, twice an MLLP destination's `ackTimeout`
- * (one to connect, one for the ACK) plus a second, and a file or module destination's `timeout`,
+ * (one to connect, one for the ACK) plus a second, twice a tcp destination's `timeout` (one to
+ * connect, one for the send and its reply) plus a second, and a file or module destination's `timeout`,
  * 30 seconds by default. The second of grace lets the destination's own timeout, with its code,
  * come first.
  *
@@ -98,6 +111,7 @@ export const LIVE_GRACE_MS = 60_000;
 export function deliveryDeadlineMs(destination: DestinationConfig | undefined): number {
   if (destination?.kind === "http") return destination.timeoutMs + 1_000;
   if (destination?.kind === "mllp") return 2 * destination.ackTimeoutMs + 1_000;
+  if (destination?.kind === "tcp") return 2 * destination.timeoutMs + 1_000;
   return destination?.timeoutMs ?? DEFAULT_DELIVERY_TIMEOUT_MS;
 }
 
@@ -457,6 +471,37 @@ export async function connectorsFor(
         },
       });
       break;
+    case "tcp": {
+      const { reply } = source;
+      sourceConnector = new TcpSource({
+        host: source.host,
+        port: source.port,
+        tls:
+          source.tls === undefined
+            ? undefined
+            : loadServerTls(source.tls, `${file}: source.tcp.tls`),
+        framing: framingOf(source.framing),
+        maxConnections: source.maxConnections,
+        maxMessageSize: source.maxMessageSize,
+        idleTimeoutMs: source.idleTimeoutMs,
+        stallTimeoutMs: source.stallTimeoutMs,
+        reply:
+          reply === undefined
+            ? undefined
+            : reply.kind === "fixed"
+              ? Buffer.from(reply.hex, "hex")
+              : await loadTcpFunction<TcpReplyBuilder>(
+                  reply.module,
+                  `${file}: source.tcp.reply.builder`,
+                  "a reply builder",
+                  channel.settings.timeoutMs,
+                ),
+        onEvent: ({ level, event, ...fields }) => {
+          logger[level]({ event, channel: channel.name, ...fields });
+        },
+      });
+      break;
+    }
     case "module":
       sourceConnector = await customSource(
         source,
@@ -527,6 +572,34 @@ export async function connectorsFor(
           }),
         );
         break;
+      case "tcp": {
+        const where = `${file}: destinations.${index}.tcp`;
+        destinations.push(
+          new TcpDestination({
+            host: destination.host,
+            port: destination.port,
+            tls:
+              destination.tls === undefined
+                ? undefined
+                : loadClientTls(destination.tls, `${where}.tls`),
+            framing: framingOf(destination.framing),
+            maxMessageSize: destination.maxMessageSize,
+            timeoutMs: destination.timeoutMs,
+            expectReply: destination.expectReply,
+            ...(destination.replyCheck === undefined
+              ? {}
+              : {
+                  replyCheck: await loadTcpFunction<TcpReplyCheck>(
+                    destination.replyCheck,
+                    `${where}.replyCheck`,
+                    "a reply check",
+                    channel.settings.timeoutMs,
+                  ),
+                }),
+          }),
+        );
+        break;
+      }
       case "module":
         destinations.push(
           await customDestination(
@@ -1308,12 +1381,12 @@ export class Engine {
   }
 
   /**
-   * How many connections a channel's MLLP source closed at accept for being over its cap, for the
-   * health body; nothing for any other source. A count only, never who connected.
+   * How many connections a channel's MLLP or tcp source closed at accept for being over its cap, for
+   * the health body; nothing for any other source. A count only, never who connected.
    */
   private connectionCounts(name: string): Pick<ChannelHealth, "connections"> {
     const source = this.channels.find((channel) => channel.config.name === name)?.connectors.source;
-    return source instanceof MllpSource
+    return source instanceof MllpSource || source instanceof TcpSource
       ? { connections: { refused: source.refusedConnections } }
       : {};
   }
@@ -1325,15 +1398,18 @@ export class Engine {
       for (const warning of listenerWarnings(source)) {
         logger.warn({ event: warning, channel: config.name, endpoint: "source" });
       }
-    } else if (source.kind === "mllp" && source.plaintext) {
-      // MLLP carries no credentials of its own: mutual TLS (tls.ca) is how a source checks who sends.
+    } else if ((source.kind === "mllp" || source.kind === "tcp") && source.plaintext) {
+      // MLLP and tcp carry no credentials of their own: mutual TLS (tls.ca) is how a source checks
+      // who sends.
       logger.warn({ event: "plaintext", channel: config.name, endpoint: "source" });
     } else if (source.kind === "file" && source.keepProcessed) {
       // Each stored file stays in processed/ as it arrived: patient data outside the encrypted store.
       logger.warn({ event: "plaintext-copies", channel: config.name, endpoint: "source" });
     }
     for (const [index, destination] of config.destinations.entries()) {
-      if ((destination.kind === "http" || destination.kind === "mllp") && destination.plaintext) {
+      const connects =
+        destination.kind === "http" || destination.kind === "mllp" || destination.kind === "tcp";
+      if (connects && destination.plaintext) {
         logger.warn({
           event: "plaintext",
           channel: config.name,
