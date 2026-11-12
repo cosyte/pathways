@@ -148,13 +148,11 @@ export interface DecodeOptions extends InboundSettings, FormatSettings {
 
 /**
  * The warning codes an `hl7v2` parse raises that the engine stores with the message and counts:
- * those about its character set, so a sender that mislabels its bytes is seen.
+ * `ENCODING_MISMATCH`, raised only when the channel's `encoding:` overrides an MSH-18 that names
+ * another character set, so a sender that mislabels its bytes is seen. A channel without an
+ * `encoding:` raises none, and runs as it did.
  */
-export const INBOUND_WARNINGS: ReadonlySet<string> = new Set([
-  "ENCODING_MISMATCH",
-  "UNKNOWN_CHARSET",
-  "UNSUPPORTED_CHARSET",
-]);
+export const INBOUND_WARNINGS: ReadonlySet<string> = new Set(["ENCODING_MISMATCH"]);
 
 /**
  * What a preprocessor is told about the body it is handed: the message's stored id (0 for one that

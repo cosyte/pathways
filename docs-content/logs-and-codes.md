@@ -42,10 +42,8 @@ preprocessor for `preprocess`, when it threw. A `preprocess` failure always has 
 own, `PREPROCESS_FAILED` when it has none, `PREPROCESS_EMPTY` for an empty result, or
 `PREPROCESS_INVALID` for a result that is neither bytes nor a string. A `load` failure with the code
 `ENCODING_UNSUPPORTED` is an `hl7v2` channel with `encoding: windows-1252` on an `@cosyte/hl7` that
-cannot decode it. An `inbound-warning` line's `codes` are comma-separated: `ENCODING_MISMATCH` (MSH-18
-names another character set than the channel's `encoding`), `UNKNOWN_CHARSET` (MSH-18 names a set the
-parser does not know) or `UNSUPPORTED_CHARSET` (a set it knows and does not decode, or bytes that are
-not valid in the one it was told), each read as Latin-1 would.
+cannot decode it. An `inbound-warning` line's `codes` is `ENCODING_MISMATCH`: MSH-18 names another character set than
+the channel's `encoding`, and the message was read as the channel says.
 
 ### Sources and endpoints
 

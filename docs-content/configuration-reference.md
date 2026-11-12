@@ -77,7 +77,8 @@ health:
   Nor is a channel's `index:` block: which `ctx.meta` keys are stored as searchable tags, and how
   many bits each keeps, stays in the file, where the audit sees it. Nor is an SFTP block's
   `weakAlgorithms`: turning a SHA-1 algorithm back on stays in the file too. Nor is a `csv` channel's
-  `csv:` block: how its bodies are read and written belongs with its `format`.
+  `csv:` block, nor a channel's `encoding` or `parse` block: how its bodies are read and written
+  belongs with its `format`.
 - `pathways validate --print` prints the configuration as `start` reads it, with every setting the
   environment gave and the variable it named; see
   [Command reference](./command-reference.md#pathways-validate). The query string of a URL read
