@@ -60,6 +60,11 @@ on one machine, from the command line or in Docker.
 - [Install Pathways](./installation.md), then follow the [quickstart](./quickstart.md) from
   `pathways init` to a delivered message.
 - [Write a channel](./write-a-channel.md) from nothing, with its tests.
+- Start from an example, a small project that runs on synthetic messages:
+  [HL7 v2 over MLLP in, HTTP out](./example-mllp-to-http.md),
+  [a file drop to SFTP](./example-file-to-sftp.md), [HL7 v2 to FHIR](./example-hl7-to-fhir.md),
+  [filter, then send to two destinations](./example-filter-and-route.md), and
+  [replay after a failure](./example-replay-after-failure.md).
 - [How delivery and errors work](./delivery-and-errors.md), before you run Pathways for real.
 
 The repository: https://github.com/cosyte/pathways
