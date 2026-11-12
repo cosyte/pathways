@@ -57,6 +57,7 @@ import { HookSet } from "../extensions/hooks.js";
 import type { ChannelContext } from "../extensions/types.js";
 import { AuditLog, auditEvent } from "../operator/audit.js";
 import { resolveSecrets, type Secrets, secretsOf } from "../secrets/resolve.js";
+import type { KeyProvider } from "../encryption/keys.js";
 import { recordRetention, runRetention, type RetentionReport } from "../operator/retention.js";
 import { copiesBodies, markCopiesBodies, release } from "../storage/ownership.js";
 import {
@@ -627,6 +628,11 @@ export interface EngineOptions {
    * engine resolves its project's at start.
    */
   readonly secrets?: Secrets | undefined;
+  /**
+   * The project's encryption keys, which seal retention's archives when `retention.archive` is set.
+   * Without them, a channel retention would archive is left alone, and its code logged.
+   */
+  readonly keys?: KeyProvider | undefined;
   /**
    * The audit log the engine records retention runs in. Defaults to one over `store`, naming the
    * operating system user; pass one to share it, and its listeners, with other callers.
@@ -1288,12 +1294,19 @@ export class Engine {
         onChannel: () => {
           this.step();
         },
+        onSkip: (channel, code) => {
+          logger.error({ event: "retention-skipped", channel, code });
+        },
+        keys: this.options.keys,
+        audit: this.audit,
       });
       await recordRetention(this.audit, report);
       logger.info({
         event: "retention",
         messages: report.messages,
         deliveries: report.deliveries,
+        ...(report.pruned === undefined ? {} : { pruned: report.pruned }),
+        ...(report.archives === undefined ? {} : { archives: report.archives }),
       });
       return report;
     } catch (error) {

@@ -169,17 +169,17 @@ See [Store messages in a database server](./store-messages-in-a-database.md).
 `retry`, at the top level of its `channel.yaml`; an MLLP source overrides `onStoreFailure`, an MLLP
 destination `ackTimeout`, and any destination `retry`.
 
-| Key                 | Type                  | Default | Meaning                                                                                                                                                      |
-| ------------------- | --------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `timeout`           | duration              | `5s`    | how long one message's transform may run                                                                                                                     |
-| `memory`            | memory size           | `256MB` | the memory cap of a channel's transform worker                                                                                                               |
-| `onStoreFailure`    | `close`, `AE` or `AR` | `close` | what an MLLP source answers when a message cannot be stored                                                                                                  |
-| `ackTimeout`        | duration              | `10s`   | how long an MLLP destination waits to connect, then for each ACK                                                                                             |
-| `retention`         | duration              | `30d`   | how long a done message is kept after its last activity                                                                                                      |
-| `resendFlag`        | boolean               | `true`  | write a marker before each send, so a resend after a crash is flagged; see [Delivery and errors](./delivery-and-errors.md#a-resend-after-a-crash-is-flagged) |
-| `pollInterval`      | duration              | `1s`    | how often the engine looks for new work, and polls a source that sets no [`poll`](#poll-schedule); project only                                              |
-| `retentionInterval` | duration              | `1h`    | how often a running engine runs retention; project only                                                                                                      |
-| `retry`             | see [Retry](#retry)   | below   | how a failed delivery is retried                                                                                                                             |
+| Key                 | Type                  | Default | Meaning                                                                                                                                                                                                        |
+| ------------------- | --------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `timeout`           | duration              | `5s`    | how long one message's transform may run                                                                                                                                                                       |
+| `memory`            | memory size           | `256MB` | the memory cap of a channel's transform worker                                                                                                                                                                 |
+| `onStoreFailure`    | `close`, `AE` or `AR` | `close` | what an MLLP source answers when a message cannot be stored                                                                                                                                                    |
+| `ackTimeout`        | duration              | `10s`   | how long an MLLP destination waits to connect, then for each ACK                                                                                                                                               |
+| `retention`         | duration, or a block  | `30d`   | how long a done message is kept after its last activity, or `{ content, metadata, failed }` with `archive` and `audit` in the project; see [Set message retention](./set-message-retention.md#separate-clocks) |
+| `resendFlag`        | boolean               | `true`  | write a marker before each send, so a resend after a crash is flagged; see [Delivery and errors](./delivery-and-errors.md#a-resend-after-a-crash-is-flagged)                                                   |
+| `pollInterval`      | duration              | `1s`    | how often the engine looks for new work, and polls a source that sets no [`poll`](#poll-schedule); project only                                                                                                |
+| `retentionInterval` | duration              | `1h`    | how often a running engine runs retention; project only                                                                                                                                                        |
+| `retry`             | see [Retry](#retry)   | below   | how a failed delivery is retried                                                                                                                                                                               |
 
 #### Retry
 

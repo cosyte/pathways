@@ -281,6 +281,48 @@ const retryBlock = z
       "How a failed delivery is retried. The narrowest of defaults, the channel and the destination wins, key by key. Default: 1s, doubling to 5m, no jitter, no limit and no age.",
   });
 
+/** The shorthand `retention: 30d`: how long a done message is kept, its metadata clock. */
+const retentionPeriod = duration(
+  "How long a delivered, filtered or cleared message is kept after its last activity before it is deleted: a duration such as 30d, or a number of milliseconds. Default 30d.",
+);
+
+/** The clocks of a `retention:` block, which a channel can set as well as `pathways.yaml`. */
+const retentionClocks = {
+  content: duration(
+    "How long a done message keeps its content (its body, its outputs, its error texts and its ctx.meta) after its last activity; then the content goes and the row stays. Default: kept as long as the row.",
+  ).optional(),
+  metadata: duration(
+    "How long a done message's row is kept after its last activity before it is deleted: its ids, times and statuses. Never shorter than content. Default 30d.",
+  ).optional(),
+  failed: duration(
+    "How long a failed message is kept after its last activity before it is deleted. Default: kept until it is replayed or cleared.",
+  ).optional(),
+};
+
+/** The keys of a `retention:` block only `pathways.yaml` sets: they are engine-wide. */
+const retentionProjectKeys = {
+  archive: z
+    .strictObject({
+      dir: envable(z.string().min(1)).meta({
+        description:
+          "The folder sealed archives are written to, relative to pathways.yaml. Each is checked before anything it holds is deleted.",
+      }),
+    })
+    .meta({
+      description:
+        "Write every message to a sealed archive before retention changes or deletes it. Needs encryption keys.",
+    })
+    .optional(),
+  audit: envable(
+    z
+      .literal("never")
+      .meta({ description: "How long the audit log is kept: never pruned. Default never." }),
+  ).optional(),
+};
+
+const RETENTION_DESCRIPTION =
+  "How long stored messages are kept: a duration such as 30d (the metadata clock), or { content, metadata, failed } with archive and audit in pathways.yaml. Default 30d.";
+
 /** Settings an engine sets as defaults and a channel can override. */
 const settingsShape = {
   timeout: duration(
@@ -294,9 +336,10 @@ const settingsShape = {
   ackTimeout: duration(
     "How long an MLLP destination waits to connect, and then for each ACK: a duration such as 10s, or a number of milliseconds. Default 10s.",
   ).optional(),
-  retention: duration(
-    "How long a delivered, filtered or cleared message is kept after its last activity before it is deleted: a duration such as 30d, or a number of milliseconds. Default 30d.",
-  ).optional(),
+  retention: z
+    .union([retentionPeriod, z.strictObject({ ...retentionClocks, ...retentionProjectKeys })])
+    .meta({ description: RETENTION_DESCRIPTION })
+    .optional(),
   resendFlag: envable(
     z.boolean().meta({
       description:
@@ -2518,7 +2561,10 @@ export const channelSchema = restate(
       memory: settingsShape.memory,
       onStoreFailure: settingsShape.onStoreFailure,
       ackTimeout: settingsShape.ackTimeout,
-      retention: settingsShape.retention,
+      retention: z
+        .union([retentionPeriod, z.strictObject(retentionClocks)])
+        .meta({ description: RETENTION_DESCRIPTION })
+        .optional(),
       resendFlag: settingsShape.resendFlag,
       config: transformConfig.optional(),
       retry: settingsShape.retry,
@@ -2650,6 +2696,12 @@ export interface Settings {
   readonly resendFlag: boolean;
   /** How often `pathways start` runs retention, in milliseconds. Engine-wide. */
   readonly retentionIntervalMs: number;
+  /**
+   * The content and failed clocks, set only when a `retention:` block is written out
+   * (`retention: { content, metadata, failed }`); `retentionMs` is then the metadata clock. Without
+   * it, retention runs as `retention: 30d` always has.
+   */
+  readonly retentionClocks?: RetentionClocks | undefined;
   /** How a failed delivery is retried. A destination can override it, key by key. */
   readonly retry: RetryPolicy;
   /**
@@ -2657,6 +2709,38 @@ export interface Settings {
    * `keep`, or `dropAfterDelivery` to delete the bodies once every delivery is delivered.
    */
   readonly content: ContentPolicy;
+}
+
+/**
+ * The clocks of a written-out `retention:` block, beside `Settings.retentionMs`, the metadata clock.
+ * A clock left `undefined` never runs.
+ *
+ * @example
+ * ```ts
+ * const clocks: RetentionClocks = { contentMs: 7 * 86_400_000, failedMs: 180 * 86_400_000 };
+ * ```
+ */
+export interface RetentionClocks {
+  /**
+   * How long a done message keeps its content after its last activity, in milliseconds: then its
+   * bodies, error texts and `ctx.meta` go and its row stays. Never longer than the metadata clock.
+   */
+  readonly contentMs?: number | undefined;
+  /** How long a failed message is kept after its last activity before it is deleted, in milliseconds. */
+  readonly failedMs?: number | undefined;
+}
+
+/**
+ * Where retention writes its sealed archives, from `retention.archive` in `pathways.yaml`.
+ *
+ * @example
+ * ```ts
+ * const archive: ArchiveConfig = { dir: "/srv/pathways/archive" };
+ * ```
+ */
+export interface ArchiveConfig {
+  /** The folder, absolute. */
+  readonly dir: string;
 }
 
 /**
@@ -3509,6 +3593,11 @@ export interface ProjectConfig {
   /** The secret providers `secrets:` names; `env` and `file` are built in and not listed. */
   readonly secrets: readonly SecretProviderConfig[];
   readonly channels: readonly ChannelConfig[];
+  /**
+   * Where retention writes a sealed archive of what it is about to prune or delete, from
+   * `retention.archive` in `pathways.yaml`; `undefined` when it writes none.
+   */
+  readonly archive?: ArchiveConfig | undefined;
   /**
    * Each setting `pathways.yaml` and the channels' `channel.yaml` files read from the environment
    * with `{ env: NAME }`: its key and the variable it names, never the value. Empty when none does;
