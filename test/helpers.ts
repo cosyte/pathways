@@ -21,6 +21,24 @@ export const ADT_A08 = ADT_A01.replace("ADT^A01^ADT_A01", "ADT^A08^ADT_A01").rep
   "MSG00002",
 );
 
+/** A UTF-8 byte order mark, as the text a body read as latin1 holds. */
+const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf]).toString("latin1");
+
+/**
+ * Bodies holding {@link ADT_A01} and then {@link ADT_A08}, whose header stands behind bytes the HL7
+ * parser keeps as part of the segment id: it reads that line as an unknown segment and attaches the
+ * second message's segments to the first. Each is to be read as latin1, one byte per character.
+ */
+export const SECOND_HEADER_BEHIND: readonly (readonly [string, string])[] = [
+  ["a space", `${ADT_A01} ${ADT_A08}`],
+  ["a tab", `${ADT_A01}\t${ADT_A08}`],
+  ["a NUL", `${ADT_A01}\u0000${ADT_A08}`],
+  ["a form feed", `${ADT_A01}\f${ADT_A08}`],
+  ["a byte order mark", `${ADT_A01}${UTF8_BOM}${ADT_A08}`],
+  ["several, before a lowercase msh", `${ADT_A01}\r\n \t\u0000msh${ADT_A08.slice(3)}`],
+  ["a space, as a batch header", `${ADT_A01} BHS|^~\\&\r${ADT_A08.slice(ADT_A08.indexOf("EVN|"))}`],
+];
+
 /**
  * A synthetic FHIR R4 Patient, compact and spec-clean, so it round-trips byte for byte. The tokens are
  * the same declared synthetic ones the HL7 fixtures use (`scripts/phi-allow-list.txt`).

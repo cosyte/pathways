@@ -10,7 +10,7 @@ import {
   type MllpSourceOptions,
 } from "../src/connectors/mllp.js";
 import type { MessageSink, ReceiveOptions } from "../src/connectors/types.js";
-import { ADT_A01, ADT_A08 } from "./helpers.js";
+import { ADT_A01, ADT_A08, SECOND_HEADER_BEHIND } from "./helpers.js";
 import { errOf, exchange, msaOf, OPENSSL, TLS_TESTS } from "./mllp-helpers.js";
 import { makeCertificates, removeCertificates, type Certificates } from "./net-helpers.js";
 
@@ -214,6 +214,28 @@ describe("MllpSource", () => {
       const { replies } = await exchange(port, [message], { replies: 1 });
 
       // Kept as failed, for the operator, and never handed on as a message.
+      expect(received).toEqual([
+        { body: message, options: { failure: "inbound: MULTIPLE_MESSAGES" } },
+      ]);
+      const [ack = ""] = replies;
+      expect(msaOf(ack)).toEqual(["AR", "MSG00001"]);
+      expect(errOf(ack)).toBe("100");
+      expect(events).toContainEqual({
+        level: "warn",
+        event: "mllp-unreadable",
+        message: 1,
+        problem: "MULTIPLE_MESSAGES",
+      });
+    },
+  );
+
+  it.each(SECOND_HEADER_BEHIND)(
+    "refuses a frame holding a second message whose header stands behind %s, answering AR",
+    async (_, message) => {
+      const { sink, received } = recordingSink();
+      const { port, events } = await startSource(sink);
+      const { replies } = await exchange(port, [message], { replies: 1 });
+
       expect(received).toEqual([
         { body: message, options: { failure: "inbound: MULTIPLE_MESSAGES" } },
       ]);

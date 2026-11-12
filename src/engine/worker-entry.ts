@@ -672,14 +672,142 @@ function readHl7(
     assumeCharset === undefined || !msh18Blank(first)
       ? first
       : library.parseHL7(body, { charset: assumeCharset });
-  if (OPENERS.reduce((count, id) => count + message.segments(id).length, 0) > 1) {
-    throw new MultipleMessagesError();
+  if (holdsSecondMessage(body)) throw new MultipleMessagesError();
+  if (message.segments("PID").length > 1 && patientRepeated(library, message)) {
+    throw new MultiplePatientsError();
   }
   return message;
 }
 
-/** Segment ids that open a message or a batch: one message holds exactly one, its MSH. */
-const OPENERS = ["MSH", "FHS", "BHS"] as const;
+/**
+ * Whether a message holding more than one PID breaks the structure HL7 publishes for its type at a
+ * PID: one PID too many, or one where the structure does not let a patient start again. ADT^A17,
+ * which swaps two patients, and ORU^R01, which repeats its patient group, hold two PIDs and pass. A
+ * message type the published structures do not cover passes too: there is nothing to tell a second
+ * patient from a structure that repeats one, and a query response such as RSP^K22 lists many.
+ */
+function patientRepeated(library: typeof Hl7, message: Hl7.Hl7Message): boolean {
+  const { findings } = library.validateMessageStructure(message);
+  return findings.some(
+    (finding) =>
+      finding.locus.segment === "PID" &&
+      (finding.code === "STRUCTURE_SEGMENT_CARDINALITY" ||
+        finding.code === "STRUCTURE_SEGMENT_OUT_OF_ORDER"),
+  );
+}
+
+/**
+ * A parsed `hl7v2` message with a second PID where the structure HL7 publishes for its type allows
+ * one: a second patient's segments that would reach the transform as the first's.
+ */
+class MultiplePatientsError extends Error {
+  readonly code = "MULTIPLE_PATIENTS";
+
+  constructor() {
+    super("the message holds a second PID where its type allows one patient: send one per message");
+    this.name = "MultiplePatientsError";
+  }
+}
+
+const CR = 0x0d;
+const LF = 0x0a;
+/** The MLLP start and end bytes, which `@cosyte/hl7` removes wherever they stand before it splits segments. */
+const VT = 0x0b;
+const FS = 0x1c;
+/** The segment ids that open a message (MSH) or a batch (FHS, BHS), as bytes, in upper case. */
+const M = 0x4d;
+const S = 0x53;
+const H = 0x48;
+const F = 0x46;
+const B = 0x42;
+
+/**
+ * Whether an HL7 v2 body holds a second message: its first segment is not a batch header (FHS or
+ * BHS), and a later segment opens a message or a batch. Read the way `@cosyte/hl7` reads segments,
+ * so every body it would parse as one message with two headers is caught: a segment starts after
+ * any CR or LF (CR, LF, CR LF, mixed, blank lines between), the MLLP start and end bytes count for
+ * nothing, and a segment id is matched in any case, as the parser upper-cases it. Bytes in front of
+ * a segment id that are not printable ASCII (a space, a tab, a NUL, a form feed, a byte order mark)
+ * are passed over too: the parser keeps them as part of the id and reads the line as an unknown
+ * segment, so the second message's segments would attach to the first's. A body that opens with FHS
+ * or BHS is a batch, which is not one message either: the parser refuses it with its own code
+ * (`NO_MSH_SEGMENT`).
+ *
+ * Here, in the worker, which imports no module of its own, and imported by the MLLP and HTTP
+ * sources and the engine, so every check reads a body the same way.
+ *
+ * @example
+ * ```ts
+ * holdsSecondMessage(Buffer.from("MSH|^~\\&|A\rPID|1\r")); // false
+ * holdsSecondMessage(Buffer.from("MSH|^~\\&|A\r msh|^~\\&|B\r")); // true
+ * ```
+ */
+export function holdsSecondMessage(bytes: Uint8Array): boolean {
+  let start = 0;
+  while (start < bytes.length && (isBreak(bytes[start]) || isFraming(bytes[start]))) start += 1;
+  if (openerAt(bytes, start) === "batch") return false;
+  let end = start;
+  while (end < bytes.length && !isBreak(bytes[end])) end += 1;
+  for (let at = end; at < bytes.length; at += 1) {
+    if (isBreak(bytes[at]) && openerAt(bytes, at + 1) !== undefined) return true;
+  }
+  return false;
+}
+
+/**
+ * What the segment starting at `at` opens, matched without regard to case, past any bytes in front
+ * of its id that are not printable ASCII, and skipping the MLLP start and end bytes within it:
+ * `message` for MSH, `batch` for FHS or BHS, `undefined` for anything else.
+ */
+function openerAt(bytes: Uint8Array, at: number): "message" | "batch" | undefined {
+  const a = bytes[at];
+  const b = bytes[at + 1];
+  const c = bytes[at + 2];
+  // The common case, an id that starts at once with no MLLP byte in it, reads in place.
+  if (isPrintable(a) && !isFraming(b) && !isFraming(c)) return opener(a, b, c);
+  let next = at;
+  // Never past a line break: the next line is read from its own break, so each byte is passed over
+  // once and a body of short lines costs no more than one of long ones.
+  while (next < bytes.length && !isPrintable(bytes[next]) && !isBreak(bytes[next])) next += 1;
+  const id: number[] = [];
+  for (; id.length < 3 && next < bytes.length; next += 1) {
+    const byte = bytes[next] as number;
+    if (!isFraming(byte)) id.push(byte);
+  }
+  return opener(id[0], id[1], id[2]);
+}
+
+/** What a segment whose id starts with these three bytes opens, matched without regard to case. */
+function opener(
+  a: number | undefined,
+  b: number | undefined,
+  c: number | undefined,
+): "message" | "batch" | undefined {
+  const first = upper(a);
+  const second = upper(b);
+  const third = upper(c);
+  if (first === M && second === S && third === H) return "message";
+  if (second === H && third === S && (first === F || first === B)) return "batch";
+  return undefined;
+}
+
+/** An ASCII letter in upper case; any other byte as it is, and `undefined` past the end. */
+function upper(byte: number | undefined): number | undefined {
+  return byte !== undefined && byte >= 0x61 && byte <= 0x7a ? byte - 0x20 : byte;
+}
+
+function isBreak(byte: number | undefined): boolean {
+  return byte === CR || byte === LF;
+}
+
+function isFraming(byte: number | undefined): boolean {
+  return byte === VT || byte === FS;
+}
+
+/** A printable ASCII byte other than the space: one a segment id can start with. */
+function isPrintable(byte: number | undefined): boolean {
+  return byte !== undefined && byte > 0x20 && byte < 0x7f;
+}
 
 /**
  * An `hl7v2` body that parsed as one message with a second header in it: the second message's

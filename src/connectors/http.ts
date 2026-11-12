@@ -100,10 +100,18 @@ export interface HttpSourceOptions {
   /** Told the status of each request refused before storing (400, 401, 404, 405, 413, 415). */
   readonly onRefused?: (status: number) => void;
   /**
-   * In `ack` mode, told of each message stored as failed because its header could not be used:
-   * its id and the problem's code, never its content.
+   * Told of each message stored as failed because the channel refuses it (`refuses`) or, in `ack`
+   * mode, because its header could not be used: its id and the problem's code, never its content.
    */
   readonly onUnreadable?: (messageId: number, problem: string) => void;
+  /**
+   * Why the channel refuses a body, as a code, or undefined when it takes it. Outside `ack` mode a
+   * refused body is stored as failed with `inbound: <code>` and answered 422, whatever `response`
+   * says, so the sender is not told it was taken; in `ack` mode the header reading refuses it and
+   * the ACK is `AE`. The engine refuses an `hl7v2` body holding a second message
+   * (`MULTIPLE_MESSAGES`). Default: none refused.
+   */
+  readonly refuses?: ((body: Uint8Array) => string | undefined) | undefined;
   /**
    * Reads each body as a batch of messages, cut as `split` says, and stores each piece as a message
    * of its own, under a key of the request's `Idempotency-Key` header, or the body's hash without
@@ -124,6 +132,7 @@ const IDEMPOTENCY_KEY = /^(?:"([\x20\x21\x23-\x5b\x5d-\x7e]{1,255})"|([\x21-\x7e
 const STORE_FAILED = "the message could not be stored; send it again";
 const PASS_DEFERRED = "the message could not be passed on yet; send it again";
 const PASS_REJECTED = "the message was not accepted; sending it again will not help";
+const BODY_REFUSED = "the message was refused; sending it again will not help";
 
 /** The `Retry-After` of a 503 for a pass that may succeed later: whole seconds, at least 1. */
 function retryAfter(error: PassFailed): OutgoingHttpHeaders {
@@ -139,6 +148,8 @@ function retryAfter(error: PassFailed): OutgoingHttpHeaders {
  * - 401 without the bearer token, 404 on another path, 405 for another method, with `Allow`;
  * - 413 for a body over `maxBytes`, 415 for a compressed body;
  * - 503 when the message could not be stored, so the sender sends it again;
+ * - 422 with the code for a body the channel refuses (`refuses`), stored as failed, whatever
+ *   `response` says;
  * - on a channel that stores nothing, where a message is answered once every destination accepted
  *   it: 503 with `Retry-After` when it could not be passed on yet, and 422 (in `ack` mode, an `AE`
  *   ACK) when sending it again will not help.
@@ -240,9 +251,14 @@ export class HttpSource implements SourceConnector {
     if (answer.kind === "ack") {
       return this.acknowledge(body, String(mediaType), response, sink, source);
     }
+    // Stored as failed, for the operator, as every refused message is, and never answered as taken.
+    const problem = this.options.refuses?.(body);
     let id: number;
     try {
-      id = await sink.receive(body, { source });
+      id = await sink.receive(
+        body,
+        problem === undefined ? { source } : { failure: `inbound: ${problem}` },
+      );
     } catch (error) {
       if (error instanceof PassFailed) {
         if (error.permanent) reply(response, 422, { error: PASS_REJECTED, code: error.code });
@@ -251,6 +267,10 @@ export class HttpSource implements SourceConnector {
       }
       reply(response, 503, { error: STORE_FAILED });
       return;
+    }
+    if (problem !== undefined) {
+      this.options.onUnreadable?.(id, problem);
+      return reply(response, 422, { error: BODY_REFUSED, code: problem, id });
     }
     if (answer.kind === "id") return reply(response, 202, { id });
     fixedAnswer(response, answer);

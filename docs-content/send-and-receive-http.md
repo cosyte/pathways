@@ -62,7 +62,17 @@ The source answers once it knows what became of the message, and never echoes th
 | 405    | a method `methods` does not name; `Allow` lists the ones it does  |
 | 413    | the body is larger than `maxBytes`                                |
 | 415    | the body is compressed (`Content-Encoding` other than `identity`) |
+| 422    | the channel refuses the body; sending it again will not help      |
 | 503    | the message could not be stored; the sender should send it again  |
+
+On an `hl7v2` channel a body that holds a second message (see
+[Work with formats](./work-with-formats.md)) is stored as failed with
+`inbound: MULTIPLE_MESSAGES` and answered 422, with
+`{"error": ..., "code": "MULTIPLE_MESSAGES", "id": <message id>}`, whatever `response` says: a sender
+is never told such a body was taken. Before this release it was answered 202 (or the fixed
+response), though the engine stored it as failed and a replay failed again; a sender that read every
+2xx as taken now sees the refusal. With `response: ack` it is answered `AE` at 200, as before. The
+engine logs `http-unreadable` with the message id and the code.
 
 On a channel that stores nothing (`storage.content: none`), 202 means every destination accepted the
 message, and its `id` is the message's pass id, which no command can look up. A destination that failed in a way that may pass

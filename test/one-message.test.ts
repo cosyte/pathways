@@ -13,7 +13,15 @@ import { holdsSecondMessage, readHeader } from "../src/connectors/mllp.js";
 import { Engine } from "../src/engine/engine.js";
 import { decode } from "../src/engine/worker-entry.js";
 import { TEST_DATABASES, testStorage } from "./databases.js";
-import { ADT_A01, ADT_A08, captureLogger, cleanUp, dropFile, makeProject } from "./helpers.js";
+import {
+  ADT_A01,
+  ADT_A08,
+  captureLogger,
+  cleanUp,
+  dropFile,
+  makeProject,
+  SECOND_HEADER_BEHIND,
+} from "./helpers.js";
 
 afterEach(cleanUp);
 
@@ -29,6 +37,7 @@ const TWO_MESSAGES: readonly (readonly [string, string])[] = [
   ["mixed line endings", ADT_A01.replaceAll("\r", "\r\n") + second("mSh", "\n")],
   ["a header after a blank line", `${ADT_A01}\r\n${second("msh")}`],
   ["a lowercase batch header", `${ADT_A01}bhs|^~\\&\r${second("msh")}`],
+  ...SECOND_HEADER_BEHIND.map(([name, body]) => [`a header behind ${name}`, body] as const),
 ];
 
 describe("readHeader", () => {
@@ -51,6 +60,15 @@ describe("readHeader", () => {
       problem: undefined,
       controlId: "MSG00001",
     });
+  });
+
+  it("reads one message whose later lines have leading bytes but open nothing", () => {
+    const body = `${ADT_A01} NTE|1||MSH in a note\r\tZMSH|1\r\u0000ms\r\f\r`;
+    expect(readHeader(Buffer.from(body, "latin1"))).toMatchObject({
+      problem: undefined,
+      controlId: "MSG00001",
+    });
+    expect(holdsSecondMessage(Buffer.from(body, "latin1"))).toBe(false);
   });
 });
 
@@ -87,6 +105,37 @@ describe("the hl7v2 parse a transform receives", () => {
   it("reads one message as before", async () => {
     const message = await decode("hl7v2", Buffer.from(ADT_A01, "latin1"));
     expect(message.get("MSH.10")).toBe("MSG00001");
+  });
+});
+
+describe("a parsed hl7v2 message holding more than one PID", () => {
+  /** The PID and PV1 segments of {@link ADT_A01}, which a test repeats. */
+  const PATIENT = ADT_A01.slice(ADT_A01.indexOf("PID|"));
+  const typed = (type: string): string =>
+    ADT_A01.slice(0, ADT_A01.indexOf("EVN|")).replace("ADT^A01^ADT_A01", type);
+
+  it("is refused where the published structure allows one PID", async () => {
+    const body = ADT_A01 + PATIENT;
+    await expect(decode("hl7v2", Buffer.from(body, "latin1"))).rejects.toMatchObject({
+      name: "MultiplePatientsError",
+      code: "MULTIPLE_PATIENTS",
+    });
+  });
+
+  it("is read where the published structure repeats the patient", async () => {
+    const swap = `${typed("ADT^A17^ADT_A17")}EVN|A17|20261107120000\r${PATIENT}${PATIENT}`;
+    const result = "OBR|1||TESTORDER1|TESTCODE\rOBX|1|ST|TESTCODE||TESTVALUE\r";
+    const results = `${typed("ORU^R01^ORU_R01")}${PATIENT}${result}${PATIENT}${result}`;
+    for (const body of [swap, results]) {
+      const message = await decode("hl7v2", Buffer.from(body, "latin1"));
+      expect(message.segments("PID")).toHaveLength(2);
+    }
+  });
+
+  it("is read when the message type has no published structure to check it against", async () => {
+    const body = `${typed("ZZZ^Z01")}${PATIENT}${PATIENT}`;
+    const message = await decode("hl7v2", Buffer.from(body, "latin1"));
+    expect(message.segments("PID")).toHaveLength(2);
   });
 });
 

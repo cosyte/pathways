@@ -40,7 +40,8 @@ A message that does not parse is marked failed with the parser's stable code, su
 `NO_MSH_SEGMENT` or `X12_NO_ISA_HEADER`, and the transform never sees it.
 
 An HL7 v2 body is one message. A body that holds a second message (a later `MSH`, `FHS` or `BHS`
-segment, in any case and after any line ending) is stored as failed with
+segment, in any case, after any line ending, and behind any bytes in front of its id that are not
+printable ASCII, such as a space, a tab, a NUL, a form feed or a byte order mark) is stored as failed with
 `inbound: MULTIPLE_MESSAGES` as it arrives, from any source, and never reaches the transform or a
 destination; on a channel that stores nothing it is counted as unreadable. The transform worker
 refuses such a body with `MULTIPLE_MESSAGES` too, so a replay of one stored before this check does
@@ -49,6 +50,13 @@ destination or `ctx.route`, is held to the same rule before the target stores it
 refused with `MULTIPLE_MESSAGES`, and the source's delivery, or the message whose transform routed
 it, fails. Split a file of several messages into one file per message before you
 drop it in.
+
+A message with more than one PID segment is refused by the transform worker with
+`MULTIPLE_PATIENTS`, and stored as failed, when the structure HL7 publishes for its type
+(`@cosyte/hl7`'s `validateMessageStructure`) allows one PID there: a second patient's segments would
+otherwise reach the transform as the first's. A type whose structure repeats the patient, such as
+ADT^A17 or ORU^R01, passes, and so does a type the published structures do not cover, such as
+RSP^K22, which can list many patients: nothing there tells a second patient from a list of them.
 
 An HL7 v2 body is read in the character set its MSH-18 declares, and written back in that same
 set; [Character sets in HL7 v2](#character-sets-in-hl7-v2) has the detail.
