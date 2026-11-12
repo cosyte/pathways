@@ -170,6 +170,112 @@ if (error instanceof LeaseLostError) process.exitCode = 1;
 
 ***
 
+### PassFailed
+
+Why `sink.receive` refused a message of a channel that stores nothing (`storage.content: none`),
+where each message is transformed and delivered before `receive` resolves. `permanent` says
+whether the sender should send it again:
+
+- `false`: a destination failed in a way that may pass (it was down, it timed out, the pass ran
+  past `passTimeout`), so the sender should send again. `retryAfterMs` is how long it might wait.
+  An MLLP source closes without an ACK and an HTTP source answers 503 with `Retry-After`.
+- `true`: sending the same message again cannot help (the transform failed, or a destination
+  rejected it). An MLLP source answers `AE`, an HTTP source 422, and a file source moves the file
+  into its `errorDir`.
+
+A source that does not know this class treats it as any failed `receive`: it does not
+acknowledge, and the sender sends again. `instanceof PassFailed` holds for one made by any copy
+of Pathways in the process.
+
+#### Example
+
+```ts
+try {
+  await sink.receive(body);
+} catch (error) {
+  if (error instanceof PassFailed && error.permanent) answer("AE");
+  else closeWithoutAnswer();
+}
+```
+
+#### Extends
+
+- `Error`
+
+#### Constructors
+
+##### Constructor
+
+> **new PassFailed**(`code`, `permanent`, `retryAfterMs?`): [`PassFailed`](#passfailed)
+
+###### Parameters
+
+###### code
+
+`string`
+
+A short, stable code. Never message content.
+
+###### permanent
+
+`boolean`
+
+Whether sending the same message again cannot help.
+
+###### retryAfterMs?
+
+`number`
+
+For a failure that may pass, how long the sender might wait.
+
+###### Returns
+
+[`PassFailed`](#passfailed)
+
+###### Overrides
+
+`Error.constructor`
+
+#### Properties
+
+##### code
+
+> `readonly` **code**: `string`
+
+A short, stable code, such as `PASS_TIMEOUT` or `DESTINATION_REJECTED`. Never message content.
+
+##### permanent
+
+> `readonly` **permanent**: `boolean`
+
+Whether sending the same message again cannot help.
+
+##### retryAfterMs
+
+> `readonly` **retryAfterMs**: `number` \| `undefined`
+
+For a failure that may pass: how long the sender might wait before it sends again.
+
+#### Methods
+
+##### \[hasInstance\]()
+
+> `static` **\[hasInstance\]**(`value`): `boolean`
+
+Whether `value` is a PassFailed from any copy of Pathways; a subclass checks as usual.
+
+###### Parameters
+
+###### value
+
+`unknown`
+
+###### Returns
+
+`boolean`
+
+***
+
 ### SecretError
 
 A secret could not be resolved. Its text names the secret, never a value. A provider can reject with
@@ -262,7 +368,8 @@ the header is parsed: never the segments after it.
 
 > `readonly` **messageId**: `number` \| `undefined`
 
-The stored message's id, or `undefined` when it could not be stored.
+The stored message's id, or `undefined` when it could not be stored. On a channel that stores
+nothing, the message's pass id, which no command can look up.
 
 ##### problem
 
@@ -2567,6 +2674,10 @@ losing a message. If it rejects, do not acknowledge; the sender should send agai
 
 `options` is optional, so a source that passes only `body` keeps working unchanged.
 
+On a channel that stores nothing (`storage.content: none`), nothing is stored: this resolves
+once the message was transformed and every destination accepted it, with its pass id (the
+time it came in, in microseconds since 1970, never given twice), and rejects with a [PassFailed](#passfailed) that says whether the sender should send again.
+
 ###### Parameters
 
 ###### body
@@ -4189,7 +4300,9 @@ const name = (message: OutgoingMessage): string => `${message.messageId}-${messa
 
 > `readonly` **messageId**: `number`
 
-The id of the stored message this came from.
+The id of the stored message this came from; on a channel that stores nothing, the message's
+pass id: the time it came in, in microseconds since 1970, never given twice, so outputs named by
+it stay apart across restarts.
 
 ##### resend?
 
@@ -6257,11 +6370,13 @@ export default ((request) => {
 
 ### AckReason
 
-> **AckReason** = `"stored"` \| `"store-failed"` \| `"unreadable"`
+> **AckReason** = `"stored"` \| `"store-failed"` \| `"unreadable"` \| `"rejected"`
 
-Why an MLLP source answers as it does: `stored` (the message is durable), `store-failed` (it
-could not be stored, and `onStoreFailure` asked for an ACK), or `unreadable` (it was stored,
-marked failed, because it has no usable header or arrived damaged).
+Why an MLLP source answers as it does: `stored` (the message is durable or, on a channel that
+stores nothing, every destination accepted it), `store-failed` (it could not be stored, and
+`onStoreFailure` asked for an ACK), `unreadable` (it was stored, marked failed, because it has no
+usable header or arrived damaged), or `rejected` (on a channel that stores nothing, the transform
+failed or a destination rejected it, so sending it again will not help; answered `AE`).
 
 #### Example
 
@@ -7709,7 +7824,8 @@ console.log(VERSION);
 
 Builds an MLLP source's ACK with `@cosyte/hl7`'s `buildAck`: sender and receiver swapped, MSA-2
 echoing the inbound MSH-10, and, for a negative ACK, one ERR segment with an HL7 table 0357
-condition code (207 when storing failed, 101 for a missing MSH-10, 100 otherwise). It never puts
+condition code (207 when storing failed or a channel that stores nothing could not pass the
+message on, 101 for a missing MSH-10, 100 otherwise). It never puts
 message content in the ERR segment. An inbound header that declares an ISO 8859 character set in
 MSH-18 is answered in Latin-1, so MSA-2 echoes the control ID byte for byte; anything else is
 answered in UTF-8.

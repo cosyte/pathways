@@ -1,10 +1,10 @@
 # @cosyte/pathways
 
-Pathways, our code-first healthcare integration engine, published (once released) to npm as
-`@cosyte/pathways` under MIT. Channels are YAML files, transforms are TypeScript, and a `pathways`
-command runs and tests them. This repository is public. It started from scratch on 2026-11-07.
-The plan is the umbrella's `plans/pathways.md`, with the control map in `plans/hitrust.md`: read
-both before changing behavior, and update them in the same change that moves the work.
+Pathways, our code-first healthcare integration engine, published to npm as `@cosyte/pathways`
+under MIT. Channels are YAML files, transforms are TypeScript, and a `pathways` command runs and
+tests them. This repository is public. It started from scratch on 2026-11-07. The plan is the
+umbrella's `plans/pathways.md`, with the control map in `plans/hitrust.md`: read both before
+changing behavior, and update them in the same change that moves the work.
 
 @AGENTS.md
 
