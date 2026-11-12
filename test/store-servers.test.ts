@@ -149,8 +149,8 @@ for (const database of SERVER_DATABASES) {
         ADT_A01.replace("|LAB|", "|LAB2|"),
       );
 
-      // Rotate: rekey moves every stored value (two bodies, one delivery, and the metadata the engine
-      // set) under the new key, and says the server may still hold the old row versions, so the old
+      // Rotate: rekey moves every stored value (two bodies, one delivery, and the two messages'
+      // metadata) under the new key, and says the server may still hold the old row versions, so the old
       // key is not yet safe to go.
       await writeFile(join(root, "pathways.yaml"), `${storage}${keys("new", ["new", "old"])}`);
       const rekeyed = await pathways("rekey");
@@ -158,7 +158,7 @@ for (const database of SERVER_DATABASES) {
       expect(rekeyed.err).toMatch(
         /^pathways: every value is under the current key, but this store is not SQLite, .*Keep each older key until it no longer does\.\n$/,
       );
-      expect((await pathways("rekey")).out).toContain("already under the current key: 4\n");
+      expect((await pathways("rekey")).out).toContain("already under the current key: 5\n");
 
       // Retire the old key. A second run finds everything done: nothing is taken in, transformed or
       // delivered twice, and nothing stored needs the old key.
