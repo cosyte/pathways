@@ -45,9 +45,8 @@ destinations:
 ```
 
 - **`format`** says how the transform receives each message: `hl7v2` (the default), `fhir`, `x12`,
-  `ccda`, `json`, `text` or `raw`. See
-  [Handle FHIR, X12, C-CDA, JSON, text and raw bytes](./work-with-formats.md), which also covers
-  `encoding`, `parse` and `preprocess`.
+  `ccda`, `json`, `text`, `csv` or `raw`. See
+  [Handle FHIR, X12, C-CDA, JSON, CSV, text and raw bytes](./work-with-formats.md), which also covers `encoding`, `parse` and `preprocess`.
 - **`source`** names exactly one of `file`, `http`, `mllp` or `module` (your own).
 - **`transform`** is optional. Without one, each message passes through as it arrived.
 - **`destinations`** is a list. Each output of the transform goes to every destination, and each

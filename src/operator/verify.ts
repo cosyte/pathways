@@ -169,6 +169,7 @@ class Runner {
       transformFile: config.transform,
       ...inboundOf(config),
       format: config.format,
+      csv: config.csv,
       timeoutMs: config.settings.timeoutMs,
       memoryMb: config.settings.memoryMb,
       config: resolved.resolved,

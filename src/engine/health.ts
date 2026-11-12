@@ -41,6 +41,11 @@ export interface ChannelHealth {
    * `ENCODING_MISMATCH` when MSH-18 disagrees with the channel's `encoding:`. Absent while none has.
    */
   readonly warnings?: Readonly<Record<string, number>>;
+  /**
+   * An MLLP source's connections: `refused` counts those closed at accept because the source
+   * already held `maxConnections`, since the engine started. Absent for any other source.
+   */
+  readonly connections?: { readonly refused: number };
 }
 
 /**

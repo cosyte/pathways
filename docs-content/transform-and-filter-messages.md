@@ -117,9 +117,9 @@ Set both limits per channel or for the project; see [Configure a channel](./conf
 ## Related
 
 - [Test a channel](./test-a-channel.md), so a change to a transform shows in a pull request.
-- [Handle FHIR, X12, C-CDA, JSON, text and raw bytes](./work-with-formats.md): what each format
-  hands a transform, reading another encoding, repairing a body before it is read, and turning one
-  format into another.
+- [Handle FHIR, X12, C-CDA, JSON, CSV, text and raw bytes](./work-with-formats.md): what each
+  format hands a transform, reading another encoding, repairing a body before it is read, and
+  turning one format into another.
 - [Transforms in worker threads](./the-transform-worker.md): why each channel has its own.
 - Reference: [`Transform`](./api/README.md#transform), [`TransformFor`](./api/README.md#transformfor)
   and [`TransformOutput`](./api/README.md#transformoutput).

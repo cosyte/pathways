@@ -15,6 +15,10 @@ export { VERSION } from "./version.js";
 export type { Format } from "./config/schema.js";
 export type {
   CcdaDocument,
+  CsvColumn,
+  CsvRecord,
+  CsvSettings,
+  CsvTable,
   FhirResource,
   FileSourceFacts,
   Hl7Message,

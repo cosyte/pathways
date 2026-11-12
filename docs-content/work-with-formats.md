@@ -1,11 +1,11 @@
 ---
 id: work-with-formats
-title: Handle FHIR, X12, C-CDA, JSON, text and raw bytes
+title: Handle FHIR, X12, C-CDA, JSON, CSV, text and raw bytes
 sidebar_label: Formats
-description: "Set a channel's format and encoding, repair a body before it is read, see what its transform receives, and turn one format into another on the way out."
+description: "Set a channel's format and encoding, repair a body before it is read, see what its transform receives, read delimited and fixed-width text, and turn one format into another on the way out."
 ---
 
-# Handle FHIR, X12, C-CDA, JSON, text and raw bytes
+# Handle FHIR, X12, C-CDA, JSON, CSV, text and raw bytes
 
 A channel's `format` says how its transform receives each message. The message is stored as it
 arrived; it is parsed in the channel's worker, right before the transform runs.
@@ -18,6 +18,7 @@ arrived; it is parsed in the channel's worker, right before the transform runs.
 | `ccda`            | a `CcdaDocument` from `@cosyte/ccda`                 | `TransformFor<"ccda">`  |
 | `json`            | the value `JSON.parse` returns                       | `TransformFor<"json">`  |
 | `text`            | the body as a string                                 | `TransformFor<"text">`  |
+| `csv`             | a `CsvTable`: the header and the rows                | `TransformFor<"csv">`   |
 | `raw`             | a copy of the body's bytes, as a `Uint8Array`        | `TransformFor<"raw">`   |
 
 FHIR, X12, C-CDA and JSON are read as UTF-8, and a body that is not valid UTF-8 fails to parse rather
@@ -37,7 +38,8 @@ replaying a message reads them again, the same way.
 ## Read another encoding
 
 `encoding` says what character set an `hl7v2` or a `text` channel's bodies are in: `utf-8`, `latin1`
-or `windows-1252`.
+or `windows-1252`. On a `csv` channel it may be `utf-8` or `latin1`, and sets the `csv:` block's
+`encoding` (one that disagrees with the block's own is refused).
 
 | `encoding`     | Bytes 0x80 to 0x9F                                               | Bytes 0xA0 to 0xFF              |
 | -------------- | ---------------------------------------------------------------- | ------------------------------- |
@@ -174,6 +176,97 @@ export default ((interchange) =>
     : null) satisfies TransformFor<"x12">;
 ```
 
+## Read delimited and fixed-width text
+
+A `csv` channel reads each body into a `CsvTable`, `{ header, rows }`. With a header line (the
+default), `header` holds the column names and each row is an object of cells by name, made with no
+prototype, so a column named `__proto__` or `constructor` is a cell like any other. With
+`header: false`, `header` is `null` and each row is an array of cells. Every cell is a string.
+
+```yaml title="channels/codes-in/channel.yaml"
+format: csv
+csv:
+  delimiter: ";"
+  newline: lf
+  escapeFormulas: true
+source:
+  file: { dir: ../../data/codes-in/in }
+transform: ./transform.ts
+destinations:
+  - file: { dir: ../../data/codes-in/out }
+```
+
+```ts runnable title="channels/codes-in/transform.ts"
+import type { TransformFor } from "@cosyte/pathways";
+
+// Drops the rows marked inactive, and upper-cases each code.
+export default ((table) => {
+  if (table.header === null) return table;
+  table.rows = table.rows.filter((row) => row["status"] !== "inactive");
+  for (const row of table.rows) row["code"] = (row["code"] ?? "").toUpperCase();
+  return table;
+}) satisfies TransformFor<"csv">;
+```
+
+The `csv:` block takes these keys, each optional:
+
+| Key              | What it sets                                                                       | Default                       |
+| ---------------- | ---------------------------------------------------------------------------------- | ----------------------------- |
+| `delimiter`      | the one character between cells                                                    | `,`                           |
+| `quote`          | the one character a cell is quoted with                                            | `"`                           |
+| `escape`         | the one character that escapes a quote inside a quoted cell                        | the quote, doubled            |
+| `header`         | whether the first line names the columns                                           | `true`                        |
+| `encoding`       | `utf-8` (strict: a body that is not UTF-8 fails) or `latin1`                       | `utf-8`                       |
+| `newline`        | `crlf`, `lf` or `cr`: the ending written after a line the transform changed        | the body's first, else `crlf` |
+| `pad`            | pad a short line with empty cells (spaces in fixed-width mode) rather than fail it | `false`                       |
+| `escapeFormulas` | write a cell that starts with `=`, `+`, `-`, `@`, a tab or a CR as `'` and quoted  | `false`                       |
+| `maxRowLength`   | the longest line read, in characters                                               | `1048576`                     |
+| `columns`        | fixed-width columns, below                                                         | none: delimited               |
+
+Lines are read on CRLF, LF and a bare CR alike, and a quoted cell may hold any of them. What the
+transform returns is written back line by line: a line whose cells are as they were read goes out as
+it came, quoting, line ending and all, and a changed or new line is quoted where it needs to be and
+ends with `newline`. A UTF-8 byte order mark is kept, and so is a body's lack of a final line ending,
+so a table the transform leaves alone goes out byte for byte. With `escapeFormulas`, every cell that
+a spreadsheet would run as a formula is guarded, in untouched lines too.
+
+A body that cannot be read fails with a code, and its text names a line, never a cell:
+
+- `CSV_RAGGED_ROW`: a line has more cells than the first, or fewer and `pad` is not set;
+- `CSV_DUPLICATE_HEADER`: the header names a column twice;
+- `CSV_UNTERMINATED_QUOTE`: a quote opens and never closes;
+- `CSV_INVALID_QUOTE`: a quote inside an unquoted cell, or text after a closing quote;
+- `CSV_ROW_TOO_LONG`: a line is longer than `maxRowLength`;
+- `CSV_SHORT_LINE`: a fixed-width line is shorter than its columns, and `pad` is not set.
+
+A table that cannot be written fails its output with `CSV_UNKNOWN_COLUMN` (a cell under a name the
+header does not hold), `CSV_VALUE_TOO_WIDE` (a fixed-width value wider than its column),
+`CSV_INVALID_CELL` (a cell that is not a string, a finite number or a boolean, or a row of the wrong
+shape) or `CSV_NOT_ENCODABLE` (a character Latin-1 cannot write).
+
+### Fixed-width lines
+
+With `columns`, each line is cut into columns rather than split on a delimiter, and each row is an
+object by column name. `start` is the position of a column's first character, counting from 1, and
+positions and lengths count characters, not bytes. Cells keep their padding: trim them in the
+transform if you need to. `delimiter`, `quote`, `escape`, `header` and `escapeFormulas` do not apply.
+
+```yaml title="channels/roster-in/channel.yaml"
+format: csv
+csv:
+  pad: true
+  columns:
+    - { name: code, start: 1, length: 8 }
+    - { name: name, start: 10, length: 20 }
+source:
+  file: { dir: ../../data/roster-in/in }
+destinations:
+  - file: { dir: ../../data/roster-in/out }
+```
+
+A changed line is written with each value at its column, padded with spaces, and the gaps between
+columns as spaces; a value wider than its column fails the output.
+
 ## Turn one format into another
 
 What a transform returns is written back like this, whatever the channel's format:
@@ -184,7 +277,8 @@ What a transform returns is written back like this, whatever the channel's forma
 - a model from `@cosyte/hl7`, `@cosyte/fhir`, `@cosyte/x12` or `@cosyte/ccda` is written by its own
   library;
 - on a `json` channel, a plain object, an array, a number or a boolean is written with
-  `JSON.stringify`.
+  `JSON.stringify`;
+- on a `csv` channel, a `CsvTable` is written with the channel's `csv:` settings.
 
 So a transform can take one format in and send another out. This one turns an HL7 v2 admission into
 a FHIR Patient:
@@ -226,4 +320,5 @@ destinations:
   [FHIR](https://docs.cosyte.com/fhir), [X12](https://docs.cosyte.com/x12) and
   [C-CDA](https://docs.cosyte.com/ccda).
 - Reference: [`MessageTypes`](./api/README.md#messagetypes),
-  [`TransformFor`](./api/README.md#transformfor) and [`Preprocess`](./api/README.md#preprocess).
+  [`TransformFor`](./api/README.md#transformfor), [`CsvTable`](./api/README.md#csvtable),
+  [`CsvSettings`](./api/README.md#csvsettings) and [`Preprocess`](./api/README.md#preprocess).

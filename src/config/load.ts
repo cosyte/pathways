@@ -31,6 +31,9 @@ import {
   projectSchema,
   type ChannelConfig,
   type ClientTlsFiles,
+  type MllpClientTlsFiles,
+  type MllpServerTlsFiles,
+  type MllpTlsChoices,
   type ContentPolicy,
   type EncryptionConfig,
   type EndpointAuth,
@@ -327,6 +330,13 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
       name: folder,
       dir: channelDir,
       format: channel.format ?? "hl7v2",
+      // A csv channel's encoding: is how its csv: block reads and writes, where the block sets none.
+      ...(channel.format === "csv" &&
+      (channel.encoding === "utf-8" || channel.encoding === "latin1")
+        ? { csv: { ...channel.csv, encoding: channel.encoding } }
+        : channel.csv === undefined
+          ? {}
+          : { csv: channel.csv }),
       source,
       transform,
       // Each set only when the channel sets it, so a channel without them resolves as it always has.
@@ -521,10 +531,14 @@ function resolveSource(
       kind: "mllp",
       host: mllp.host ?? DEFAULT_HOST,
       port: mllp.port,
-      tls: mllp.tls === undefined ? undefined : resolveServerTls(mllp.tls, dir),
+      tls: mllp.tls === undefined ? undefined : resolveMllpServerTls(mllp.tls, dir),
       plaintext: mllp.plaintext === true,
       onStoreFailure: mllp.onStoreFailure ?? settings.onStoreFailure,
       ackBuilder: mllp.ackBuilder === undefined ? undefined : resolve(dir, mllp.ackBuilder),
+      ...(mllp.maxConnections === undefined ? {} : { maxConnections: mllp.maxConnections }),
+      ...(mllp.receiveTimeout === undefined ? {} : { receiveTimeoutMs: mllp.receiveTimeout }),
+      ...(mllp.maxMessageSize === undefined ? {} : { maxMessageSize: mllp.maxMessageSize }),
+      ...(mllp.keepOpen === undefined ? {} : { keepOpen: mllp.keepOpen }),
     };
   }
   if (http !== undefined) {
@@ -563,6 +577,15 @@ function resolveSource(
     readTries: file.readTries ?? DEFAULT_READ_TRIES,
     sftp,
   };
+}
+
+/** An MLLP block's TLS keys beyond the shared ones, as the YAML wrote them. */
+interface MllpTlsYaml {
+  readonly minVersion?: MllpTlsChoices["minVersion"];
+  readonly profile?: MllpTlsChoices["profile"];
+  readonly ciphers?: string | undefined;
+  readonly pfx?: string | undefined;
+  readonly passphrase?: SecretSourceYaml | undefined;
 }
 
 /** An `sftp:` block as the YAML wrote it. */
@@ -645,7 +668,7 @@ function resolveConnector(
       kind: "mllp",
       host: mllp.host,
       port: mllp.port,
-      tls: mllp.tls === undefined ? undefined : resolveClientTls(mllp.tls, dir),
+      tls: mllp.tls === undefined ? undefined : resolveMllpClientTls(mllp.tls, dir),
       plaintext: mllp.plaintext === true,
       ackTimeoutMs: mllp.ackTimeout ?? settings.ackTimeoutMs,
     };
@@ -737,6 +760,43 @@ function resolveServerTls(
     key: resolve(dir, tls.key),
     ca: tls.ca === undefined ? undefined : resolve(dir, tls.ca),
   };
+}
+
+/** An MLLP block's TLS keys beyond the shared ones, resolved: only those the YAML set. */
+function resolveMllpTls(tls: MllpTlsYaml, dir: string): MllpTlsChoices {
+  return {
+    ...(tls.minVersion === undefined ? {} : { minVersion: tls.minVersion }),
+    ...(tls.profile === undefined ? {} : { profile: tls.profile }),
+    ...(tls.ciphers === undefined ? {} : { ciphers: tls.ciphers }),
+    ...(tls.pfx === undefined ? {} : { pfx: resolve(dir, tls.pfx) }),
+    ...(tls.passphrase === undefined ? {} : { passphrase: secretSourceOf(tls.passphrase, dir) }),
+  };
+}
+
+/** An MLLP source's `tls:`, resolved against `dir`. */
+function resolveMllpServerTls(
+  tls: MllpTlsYaml & {
+    cert?: string | undefined;
+    key?: string | undefined;
+    ca?: string | undefined;
+  },
+  dir: string,
+): MllpServerTlsFiles {
+  const at = (file: string | undefined): string | undefined =>
+    file === undefined ? undefined : resolve(dir, file);
+  return { cert: at(tls.cert), key: at(tls.key), ca: at(tls.ca), ...resolveMllpTls(tls, dir) };
+}
+
+/** An MLLP destination's `tls:`, resolved against `dir`. */
+function resolveMllpClientTls(
+  tls: MllpTlsYaml & {
+    cert?: string | undefined;
+    key?: string | undefined;
+    ca?: string | undefined;
+  },
+  dir: string,
+): MllpClientTlsFiles {
+  return { ...resolveClientTls(tls, dir), ...resolveMllpTls(tls, dir) };
 }
 
 function resolveClientTls(

@@ -459,6 +459,7 @@ for (const database of TEST_DATABASES) {
         ccda: "xml",
         json: "json",
         text: "txt",
+        csv: "csv",
         raw: "bin",
       });
       expect(CONTENT_TYPES).toEqual({
@@ -468,6 +469,7 @@ for (const database of TEST_DATABASES) {
         ccda: "application/xml",
         json: "application/json",
         text: "text/plain",
+        csv: "text/csv",
         raw: "application/octet-stream",
       });
     });

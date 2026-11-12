@@ -288,6 +288,7 @@ async function workerFor(
     transformFile: channel.transform,
     ...inboundOf(channel),
     format: channel.format,
+    csv: channel.csv,
     timeoutMs: channel.settings.timeoutMs,
     memoryMb: channel.settings.memoryMb,
     config: config.resolved,

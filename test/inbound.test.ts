@@ -84,7 +84,7 @@ async function run(
   transform: TransformFunction = identity,
 ): Promise<{ outputs: Uint8Array[]; warnings: string[] }> {
   const warnings: string[] = [];
-  const outputs = await runTransform(transform, format, body, undefined, { ...step, warnings });
+  const outputs = await runTransform(transform, format, body, undefined, {}, { ...step, warnings });
   return { outputs, warnings };
 }
 
@@ -385,6 +385,27 @@ describe("a channel's inbound settings in channel.yaml", () => {
     });
     expect(b).not.toHaveProperty("preprocess");
     expect(b).not.toHaveProperty("inbound");
+  });
+
+  it("set a csv channel's csv.encoding, and refuse one csv cannot read or that disagrees", async () => {
+    const root = await makeProject({
+      "channels/a/channel.yaml": channel("encoding: latin1\ncsv: { delimiter: ';' }", "csv"),
+    });
+    const [a] = (await loadProject(root)).channels;
+    expect(a?.csv).toEqual({ delimiter: ";", encoding: "latin1" });
+    const refused = await makeProject({
+      "channels/b/channel.yaml": channel("encoding: windows-1252", "csv"),
+      "channels/c/channel.yaml": channel("encoding: latin1\ncsv: { encoding: utf-8 }", "csv"),
+    });
+    const error = await loadProject(refused).then(
+      () => undefined,
+      (caught: unknown) => caught as Error & { problems?: readonly string[] },
+    );
+    const problems = (error?.problems ?? []).join("\n");
+    expect(problems).toMatch(
+      /channels\/b\/channel\.yaml: encoding: format csv reads utf-8 or latin1/,
+    );
+    expect(problems).toMatch(/channels\/c\/channel\.yaml: encoding: .*disagrees/);
   });
 
   it("refuse what a format cannot take, an unknown option and a missing preprocessor", async () => {

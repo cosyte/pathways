@@ -2,6 +2,7 @@ import { Worker } from "node:worker_threads";
 
 import { ownsBuffer } from "../storage/ownership.js";
 import type {
+  CsvSettings,
   FailureSummary,
   InboundSettings,
   MessageContext,
@@ -82,6 +83,8 @@ export interface ChannelWorkerOptions {
   readonly preprocessFile?: string | undefined;
   /** The channel's `encoding:` and `parse:` options. Defaults to none. */
   readonly inbound?: InboundSettings | undefined;
+  /** A `csv` channel's `csv:` block, as validated: how its bodies are read and written. */
+  readonly csv?: CsvSettings | undefined;
   readonly workerUrl?: URL;
 }
 
@@ -184,6 +187,7 @@ export class ChannelWorker {
       config: this.options.config ?? {},
       ...(preprocessFile === undefined ? {} : { preprocessFile }),
       ...(inbound === undefined ? {} : { inbound }),
+      ...(this.options.csv === undefined ? {} : { formatSettings: { csv: this.options.csv } }),
     };
     const worker = new Worker(this.options.workerUrl ?? defaultWorkerUrl(), {
       workerData: setup,
