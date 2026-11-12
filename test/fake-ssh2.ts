@@ -126,7 +126,7 @@ function statusOf(error: NodeJS.ErrnoException): number {
 
 type Callback = (error?: Error | null, ...values: unknown[]) => void;
 
-/** SFTP attributes from a Node stat, with the change time in whole seconds; a link's when `link`. */
+/** SFTP attributes from a Node stat, with the modification time in whole seconds; a link's when `link`. */
 function attrs(stats: Stats, link = false): object {
   return {
     mode: link ? 0o120_777 : stats.mode,
@@ -138,14 +138,37 @@ function attrs(stats: Stats, link = false): object {
   };
 }
 
-/** The fake SFTP channel: each request done on the folder under `root`. */
-class FakeSftp {
+/**
+ * The fake SFTP channel: each request done on the folder under `root`. Like the real one, it is an
+ * event emitter with the channel's `outgoing.state`, and once closed it never sends a request.
+ */
+class FakeSftp extends EventEmitter {
   readonly _extensions = { ...fakeServer.extensions };
+  readonly outgoing = { state: "open" };
   private readonly client: FakeClient;
 
   constructor(client: FakeClient) {
+    super();
     this.client = client;
   }
+
+  /**
+   * The server closes the channel and keeps SSH up, as when its `sftp-server` ends: as the real
+   * channel does, each request waiting is answered with no status, the channel says `end` and then
+   * `close`, and a request made after is kept and never sent, so it is never answered. With
+   * `silent`, the state changes and no event comes yet, as in the moment before the events run.
+   */
+  closeChannel(silent = false): void {
+    this.outgoing.state = "closed";
+    for (const fail of [...this.waiting]) fail();
+    this.waiting.clear();
+    if (silent) return;
+    this.emit("end");
+    setImmediate(() => this.emit("close"));
+  }
+
+  /** Each request sent and not yet answered, failed with no status when the channel closes. */
+  private readonly waiting = new Set<() => void>();
 
   /** Where a server path is on this machine: through a link, the file it names. */
   private local(path: string): string {
@@ -163,12 +186,17 @@ class FakeSftp {
    * error that has none, thrown, or the connection dropped.
    */
   private request(op: string, cb: Callback, work: (done: Callback) => void): void {
+    // As the real channel does once closed: the request is kept, never sent, never answered.
+    if (this.outgoing.state !== "open") return;
     if (fakeServer.throws?.(op) === true) throw new Error("the request could not be made");
     if (fakeServer.dropOn?.(op) === true) {
       this.client.drop();
       return;
     }
-    if (fakeServer.stall?.(op) === true) return;
+    if (fakeServer.stall?.(op) === true) {
+      this.waiting.add(() => cb(new Error("No response from server")));
+      return;
+    }
     const status = fakeServer.status?.(op);
     if (status !== undefined) {
       setImmediate(() => cb(Object.assign(new Error("status"), { code: status })));
@@ -180,7 +208,7 @@ class FakeSftp {
     }
     const answer: Callback = (error, ...values) => {
       // As the real channel does when it closes, a request still waiting is answered with no status.
-      if (this.client.dropped) {
+      if (this.client.dropped || this.outgoing.state !== "open") {
         cb(new Error("No response from server"));
         return;
       }
@@ -392,6 +420,8 @@ export interface FakeConnect {
 
 export class FakeClient extends EventEmitter {
   config: FakeConnect | undefined;
+  /** Each SFTP channel opened on this client, in order. */
+  readonly channels: FakeSftp[] = [];
   dropped = false;
   destroyed = false;
 
@@ -436,8 +466,13 @@ export class FakeClient extends EventEmitter {
 
   sftp(cb: (error: Error | undefined, sftp?: FakeSftp) => void): void {
     setImmediate(() => {
-      if (fakeServer.refuseChannel) cb(new Error("channel refused"));
-      else cb(undefined, new FakeSftp(this));
+      if (fakeServer.refuseChannel) {
+        cb(new Error("channel refused"));
+        return;
+      }
+      const channel = new FakeSftp(this);
+      this.channels.push(channel);
+      cb(undefined, channel);
     });
   }
 

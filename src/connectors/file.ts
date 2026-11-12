@@ -73,7 +73,7 @@ interface Found {
   readonly path: string;
 }
 
-/** A found file that is ready to be claimed, with its size, change time and id when found. */
+/** A found file that is ready to be claimed, with its size, modification time and id when found. */
 interface Ready extends Found {
   readonly size: number;
   readonly mtimeMs: number;
@@ -278,10 +278,10 @@ export interface FileSourceOptions {
   readonly maxSize?: number | undefined;
   /** The most files claimed in one pass. Default: no limit. */
   readonly maxPerPoll?: number | undefined;
-  /** The order files are claimed in: by path (the default) or oldest change first. */
+  /** The order files are claimed in: by path (the default) or least recently modified first. */
   readonly sortBy?: "name" | "mtime";
   /**
-   * Takes a file only once a pass finds the size and change time the pass before it found, as well
+   * Takes a file only once a pass finds the size and modification time the pass before it found, as well
    * as `minAgeMs` old. Held in memory, so the first pass after a start takes nothing. Default false.
    */
   readonly stable?: boolean;
@@ -348,7 +348,7 @@ export class FileSource implements SourceConnector {
   private readonly fs: Location;
   private readonly include: readonly ((rel: string) => boolean)[];
   private readonly exclude: readonly ((rel: string) => boolean)[];
-  /** The size and change time of each file the last pass found, for `stable`. */
+  /** The size and modification time of each file the last pass found, for `stable`. */
   private seen = new Map<string, string>();
   /** How many passes in a row each file has failed to open, for `readTries`. */
   private tries = new Map<string, number>();
@@ -727,6 +727,7 @@ export class FileSource implements SourceConnector {
         continue;
       }
       taken.push({ name, path, rel: file.rel });
+      faultPoint("after-claim-move");
     }
     const folders = new Set([claims, fs.join(dir, CLAIMED_DIR)]);
     for (const file of taken) folders.add(fs.dirname(fs.join(dir, ...file.rel.split("/"))));
@@ -754,6 +755,7 @@ export class FileSource implements SourceConnector {
         await fs.remove(doomed);
       }
     }
+    faultPoint("after-claim-flush");
     return taken;
   }
 

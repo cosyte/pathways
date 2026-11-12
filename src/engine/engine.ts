@@ -2318,7 +2318,8 @@ function hashed(key: string | undefined): string | undefined {
  * key check from its known hosts file or its one key, read now. `where` names the block.
  *
  * @throws {ConfigError} when the key cannot be read, its file can be read by its group or others,
- *   the known hosts file cannot be read or holds no entry, or `hostKey` is not a key.
+ *   the known hosts file can be written by its group or others, cannot be read or holds no entry,
+ *   or `hostKey` is not a key.
  */
 function sftpLocation(sftp: SftpConfig, secrets: Secrets, where: string): SftpLocation {
   if ("file" in sftp.key) keyFileClosed(sftp.key.file, `${where}.key`);
@@ -2337,6 +2338,7 @@ function sftpLocation(sftp: SftpConfig, secrets: Secrets, where: string): SftpLo
       ]);
     }
   } else {
+    knownHostsClosed(sftp.knownHosts, `${where}.knownHosts`);
     let known: KnownHosts;
     try {
       known = KnownHosts.parse(readFileSync(sftp.knownHosts, "utf8"));
@@ -2371,17 +2373,35 @@ function sftpLocation(sftp: SftpConfig, secrets: Secrets, where: string): SftpLo
  * macOS. Windows keeps no such mode bits, so there the check is the folder's own access control.
  */
 function keyFileClosed(path: string, where: string): void {
-  if (process.platform === "win32") return;
-  let mode: number;
-  try {
-    mode = statSync(path).mode;
-  } catch {
-    // Said by the secret's own read, with its code.
-    return;
-  }
-  if ((mode & 0o077) !== 0) {
+  if (modeOpen(path, 0o077)) {
     throw new ConfigError([
       `${where}: the key file can be read by its group or others; chmod 600 it`,
     ]);
+  }
+}
+
+/**
+ * Refuses a known hosts file its group or others can write, as ssh(1) refuses such a config file:
+ * whoever can write it can add a key, and so stand in for the server. Others may read it, since it
+ * holds only public keys. On Linux and macOS, as {@link keyFileClosed}.
+ */
+function knownHostsClosed(path: string, where: string): void {
+  if (modeOpen(path, 0o022)) {
+    throw new ConfigError([
+      `${where}: the file can be written by its group or others; chmod go-w it`,
+    ]);
+  }
+}
+
+/**
+ * Whether the file at `path` has any of the mode bits in `bits`: never on Windows, which keeps no
+ * such bits, nor for a file that cannot be read, which its own read then says, with its code.
+ */
+function modeOpen(path: string, bits: number): boolean {
+  if (process.platform === "win32") return false;
+  try {
+    return (statSync(path).mode & bits) !== 0;
+  } catch {
+    return false;
   }
 }

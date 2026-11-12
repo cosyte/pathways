@@ -169,7 +169,7 @@ destinations:
 - **`maxSize`** sets a larger file aside, by the size read before the claim and again by the open
   file's own size, so a file that grew in between is held to it too.
 - **`maxPerPoll`** claims at most that many files in one pass. The rest wait for the next.
-- **`sortBy`** takes files by path (`name`, the default, comparing code units) or by change time,
+- **`sortBy`** takes files by path (`name`, the default, comparing code units) or by modification time,
   oldest first (`mtime`), by path when two tie.
 
 ### Know when a file is finished
@@ -178,7 +178,7 @@ A file still being written must not be taken. `minAge` (1 second by default) is 
 file is taken only once it has not changed for that long. Two more are there for writers that need
 them:
 
-- **`stable: true`** takes a file only once two passes in a row find the same size and change time,
+- **`stable: true`** takes a file only once two passes in a row find the same size and modification time,
   as well as `minAge`. The source keeps what it saw in memory, so after a start the first pass takes
   nothing.
 - **`doneFile: .done`** takes `a.hl7` only once `a.hl7.done` is there too, for a writer that cannot
@@ -288,7 +288,9 @@ destinations:
   the channel's folder: plain or hashed (`ssh-keygen -H`) names, `[host]:port` for a port other than
   22, `*` and `?` wildcards, `!` to leave a name out, and `@revoked` lines. `hostKey` is the one key:
   the server's public key as its `.pub` file holds it (`ssh-ed25519 AAAA...`), or its fingerprint as
-  `ssh-keygen -l` prints it (`SHA256:...`). A key the file does not hold is refused as
+  `ssh-keygen -l` prints it (`SHA256:...`). The known hosts file is read once, at start; a file its
+  group or others can write is refused then, since whoever can write it can add a key (`chmod go-w`
+  it). Others may read it: it holds only public keys. A key the file does not hold is refused as
   `ERR_PATHWAYS_SFTP_HOST_KEY_UNKNOWN`; one that differs from the key the file holds for that host as
   `ERR_PATHWAYS_SFTP_HOST_KEY_CHANGED`; a key on an `@revoked` line, for any host, as
   `ERR_PATHWAYS_SFTP_HOST_KEY_REVOKED`. The error names the host and the key's SHA256 fingerprint,
@@ -310,8 +312,8 @@ has it, and also these two, which Pathways uses where the server names them in i
   a folder, so a power cut on the server before its own disk catches up can undo a claim, and a file
   stored just before can be stored again. Without the extension nothing is flushed.
 
-SFTP gives no inode, so the source tells one file from another by its mode, owner, group, size and
-change time together, and an SFTP open follows a link, so the source reads a file's own entry first,
+SFTP gives no inode and no change time, so the source tells one file from another by its mode,
+owner, group, size and modification time together (in whole seconds, as SFTP gives it), and an SFTP open follows a link, so the source reads a file's own entry first,
 refuses a link, and checks after the open that the open file is that entry. A file being written when
 the source finds it changes size, so its claim is refused that pass and taken on a later one.
 
@@ -324,7 +326,10 @@ the source finds it changes size, so its claim is refused that pass and taken on
 | `keepalive`      | `15s`   | how often a keepalive is sent while connected; three unanswered drop the link |
 
 A request past its deadline drops the connection, and a connection that drops fails every request in
-flight: a pass never hangs on a silent server. The next request connects again. After each transfer
+flight: a pass never hangs on a silent server. The next request connects again. A server can also
+close the SFTP channel and keep the SSH connection up (its `sftp-server` ended): Pathways sees that
+at once, fails each request in flight as `ERR_PATHWAYS_SFTP_CONNECTION_LOST`, and the next request
+connects again, rather than waiting out its deadline. After each transfer
 the bytes read or written are checked against the file's size, and a difference fails it
 (`ERR_PATHWAYS_SFTP_SIZE_MISMATCH`), so a short read is never stored and a short write is never
 renamed into place.

@@ -89,7 +89,7 @@ async function tree(dir: string): Promise<string[]> {
     .sort();
 }
 
-/** Backdates `path` by `seconds`, so files can be told apart by their change time. */
+/** Backdates `path` by `seconds`, so files can be told apart by their modification time. */
 async function age(path: string, seconds: number): Promise<void> {
   const when = new Date(Date.now() - seconds * 1_000);
   await utimes(path, when, when);
@@ -407,7 +407,7 @@ describe.each([
     expect(await pass(source)).toEqual(["c.hl7"]);
   });
 
-  it("takes files oldest change first with sortBy: mtime, by name when two tie", async () => {
+  it("takes files least recently modified first with sortBy: mtime, by name when two tie", async () => {
     const dir = await inbox();
     for (const [name, seconds] of [
       ["a.hl7", 10],

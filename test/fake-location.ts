@@ -8,7 +8,7 @@ import type {
   OpenFile,
 } from "../src/connectors/file-system.js";
 
-/** One file in a {@link FakeLocation}: its bytes, its change time and its id. */
+/** One file in a {@link FakeLocation}: its bytes, its modification time and its id. */
 interface FakeFile {
   body: Uint8Array;
   readonly mtimeMs: number;
@@ -47,7 +47,7 @@ export class FakeLocation implements Location {
     };
   }
 
-  /** Puts a file at `path`, making its folders, with a change time in the past. */
+  /** Puts a file at `path`, making its folders, with a modification time in the past. */
   put(path: string, body: string): void {
     this.mkdirSync(posix.dirname(path));
     this.next += 1;

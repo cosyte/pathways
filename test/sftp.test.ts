@@ -309,6 +309,59 @@ describe("SftpLocation, each request", () => {
     });
   });
 
+  // The server can close the SFTP channel and keep SSH up (its sftp-server ended). The SSH package
+  // then keeps each new request and never sends it, so without a check each would wait its whole
+  // deadline: the deadline here is far longer than the test may run.
+  describe("when the server closes the SFTP channel and keeps SSH up", () => {
+    it("opens it again at once for the next request", async () => {
+      const location = sftp({ timeoutMs: 60_000 });
+      await location.list("/inbox");
+      fakeServer.clients[0]?.channels[0]?.closeChannel();
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(await location.list("/inbox")).toEqual([]);
+      expect(fakeServer.clients).toHaveLength(2);
+      expect(fakeServer.clients[0]?.destroyed).toBe(true);
+    }, 2_000);
+
+    it("opens it again at once when the request comes before the channel says it closed", async () => {
+      const location = sftp({ timeoutMs: 60_000 });
+      await location.list("/inbox");
+      fakeServer.clients[0]?.channels[0]?.closeChannel(true);
+      expect(await location.list("/inbox")).toEqual([]);
+      expect(fakeServer.clients).toHaveLength(2);
+    }, 2_000);
+
+    it("fails a request in flight as the connection lost, and the next one opens it again", async () => {
+      const location = sftp({ timeoutMs: 60_000 });
+      await location.list("/inbox");
+      fakeServer.stall = nth("readdir", 1);
+      const waiting = failure(location.list("/inbox"));
+      await new Promise((resolve) => setImmediate(resolve));
+      // Answered with no status, and nothing said yet of the close: the next request still reopens.
+      fakeServer.clients[0]?.channels[0]?.closeChannel(true);
+      expect(await waiting).toMatchObject({
+        code: "ERR_PATHWAYS_SFTP_CONNECTION_LOST",
+        down: true,
+      });
+      fakeServer.stall = undefined;
+      expect(await location.list("/inbox")).toEqual([]);
+      expect(fakeServer.clients).toHaveLength(2);
+    }, 2_000);
+
+    it("drops the connection when the channel fails, rather than let its error stop the process", async () => {
+      const location = sftp({ timeoutMs: 60_000 });
+      await location.list("/inbox");
+      const channel = fakeServer.clients[0]?.channels[0];
+      channel?.emit(
+        "error",
+        Object.assign(new Error("Invalid packet length"), { level: "sftp-protocol" }),
+      );
+      channel?.closeChannel();
+      expect(await location.list("/inbox")).toEqual([]);
+      expect(fakeServer.clients).toHaveLength(2);
+    }, 2_000);
+  });
+
   it("gives each SFTP status a code, and a failure with no status the connection lost", async () => {
     const location = sftp();
     const cases: [number, string][] = [
