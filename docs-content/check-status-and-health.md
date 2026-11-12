@@ -89,7 +89,7 @@ connection (a broker, a remote server or a socket it dialled), until it says it 
 channel `retrying`, and the answer stays 200, because restarting the engine would not bring the
 destination back. Point a restart policy at the status code, and an alert at the channels.
 
-A channel whose source is MLLP also has `connections`, with `refused`: how many connections the
+A channel whose source is MLLP or tcp also has `connections`, with `refused`: how many connections the
 source closed at accept since the engine started, because it already held its `maxConnections`. A
 count only, never who connected. A rising count means senders are being turned away: raise the cap, or
 find the sender that opens connections and leaves them.
