@@ -34,7 +34,11 @@ import {
   DEFAULT_SMTP_GREETING_TIMEOUT_MS,
   DEFAULT_SMTP_SOCKET_TIMEOUT_MS,
   DEFAULT_SMTP_SUBJECT,
+  DEFAULT_TCP_IDLE_TIMEOUT_MS,
+  DEFAULT_TCP_STALL_TIMEOUT_MS,
+  DEFAULT_TCP_TIMEOUT_MS,
   projectSchema,
+  type AzblobConfig,
   type ChannelConfig,
   type ClientTlsFiles,
   type MllpClientTlsFiles,
@@ -55,11 +59,13 @@ import {
   type ProjectConfig,
   type RetryPolicy,
   type SecretProviderConfig,
+  type S3Config,
   type ServerTlsFiles,
   type SftpConfig,
   type Settings,
   type SmtpDestination,
   type StorageConfig,
+  type TcpFraming,
   type TransformConfigBlock,
 } from "./schema.js";
 
@@ -72,6 +78,7 @@ type HookYaml = NonNullable<ChannelYaml["hooks"]>[number];
 type HttpClientYaml = NonNullable<DestinationYaml["http"]>;
 type RetryYaml = NonNullable<ChannelYaml["retry"]>;
 type PollYaml = NonNullable<ChannelYaml["source"]["poll"]>;
+type TcpFramingYaml = NonNullable<ChannelYaml["source"]["tcp"]>["framing"];
 
 /**
  * A project that could not be loaded. `problems` name the file and the key at fault; they hold no
@@ -164,10 +171,19 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
     fromEnv: projectEnv,
   };
   problems.push(...retryProblems(show(projectFile), [projectRetry], settings.retry));
+  problems.push(...retentionProblem(show(projectFile), settings));
   const databaseFile = resolve(projectRoot, project.storage?.sqlite?.file ?? DEFAULT_DATABASE_FILE);
   const storage = resolveStorage(project.storage, projectRoot, databaseFile);
   const hooks = (project.hooks ?? []).map((hook) => resolveHook(hook, projectRoot));
   const encryption = resolveEncryption(project.encryption, projectRoot);
+  const retention = project.defaults?.retention;
+  const archiveDir = typeof retention === "object" ? retention.archive?.dir : undefined;
+  const archive = archiveDir === undefined ? undefined : { dir: resolve(projectRoot, archiveDir) };
+  if (archive !== undefined && encryption?.kind === "none") {
+    problems.push(
+      `${show(projectFile)}: defaults.retention.archive: an archive is sealed under encryption keys, and pathways.yaml sets encryption: none`,
+    );
+  }
   const secrets: SecretProviderConfig[] = Object.entries(project.secrets ?? {}).map(
     ([name, provider]) => ({
       name,
@@ -282,6 +298,7 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
         ),
       ),
     ];
+    badRetry.push(...retentionProblem(show(file), channelSettings));
     if (badRetry.length > 0) {
       problems.push(...badRetry);
       continue;
@@ -290,6 +307,17 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
     const missing = await missingModules(show(file), show, channelEnv, [
       ["source.module", source.kind === "module" ? source.module : undefined],
       ["source.mllp.ackBuilder", source.kind === "mllp" ? source.ackBuilder : undefined],
+      [
+        "source.tcp.reply.builder",
+        source.kind === "tcp" && source.reply?.kind === "builder" ? source.reply.module : undefined,
+      ],
+      ...destinations.map(
+        (destination, index) =>
+          [
+            `destinations.${index}.tcp.replyCheck`,
+            destination.kind === "tcp" ? destination.replyCheck : undefined,
+          ] as const,
+      ),
       ...destinations.map(
         (destination, index) =>
           [
@@ -304,6 +332,20 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
       continue;
     }
     environment.push(...references);
+    const format = channel.format ?? "hl7v2";
+    const tcp = [
+      ...(source.kind === "tcp" ? ["source.tcp"] : []),
+      ...destinations.flatMap((destination, index) =>
+        destination.kind === "tcp" ? [`destinations.${index}.tcp`] : [],
+      ),
+    ];
+    if (format === "hl7v2") {
+      for (const key of tcp) {
+        warnings.push(
+          `${show(file)}: ${key}: tcp sends no HL7 ACK and checks no MSH-10, and this channel's format is hl7v2; for HL7 v2 with ACKs use mllp, or set the format this feed carries`,
+        );
+      }
+    }
     const indexes = (channel.index ?? []).map((entry) =>
       typeof entry === "string"
         ? { key: entry, bits: DEFAULT_INDEX_BITS }
@@ -324,7 +366,7 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
     channels.push({
       name: folder,
       dir: channelDir,
-      format: channel.format ?? "hl7v2",
+      format,
       ...(channel.csv === undefined ? {} : { csv: channel.csv }),
       source,
       transform,
@@ -372,6 +414,8 @@ export async function loadProject(root: string, options: LoadOptions = {}): Prom
     channels,
     environment,
     ...(warnings.length > 0 ? { warnings } : {}),
+    // Set only when pathways.yaml names one, so a project without resolves as it always has.
+    ...(archive === undefined ? {} : { archive }),
   };
 }
 
@@ -509,9 +553,31 @@ function resolveSource(
   dir: string,
   settings: Settings,
 ): ChannelConfig["source"] {
-  const { http, mllp } = source;
+  const { http, mllp, tcp } = source;
   const module = resolveModule(source, dir);
   if (module !== undefined) return module;
+  if (tcp !== undefined) {
+    const { reply } = tcp;
+    return {
+      kind: "tcp",
+      host: tcp.host ?? DEFAULT_HOST,
+      port: tcp.port,
+      tls: tcp.tls === undefined ? undefined : resolveServerTls(tcp.tls, dir),
+      plaintext: tcp.plaintext === true,
+      framing: resolveFraming(tcp.framing),
+      ...(tcp.maxConnections === undefined ? {} : { maxConnections: tcp.maxConnections }),
+      maxMessageSize: tcp.maxMessageSize ?? DEFAULT_MAX_BYTES,
+      idleTimeoutMs: tcp.idleTimeout ?? DEFAULT_TCP_IDLE_TIMEOUT_MS,
+      stallTimeoutMs: tcp.stallTimeout ?? DEFAULT_TCP_STALL_TIMEOUT_MS,
+      reply:
+        reply === undefined
+          ? undefined
+          : reply.builder === undefined
+            ? // The schema lets exactly one of hex and builder through.
+              { kind: "fixed", hex: (reply.hex as string).toLowerCase() }
+            : { kind: "builder", module: resolve(dir, reply.builder) },
+    };
+  }
   if (mllp !== undefined) {
     return {
       kind: "mllp",
@@ -542,8 +608,11 @@ function resolveSource(
   // The schema lets exactly one kind through, so a source that is not HTTP is a file source.
   const file = source.file as NonNullable<typeof source.file>;
   const sftp = resolveSftp(file.sftp, dir);
-  // On an SFTP server the folders are the server's own absolute paths, never this machine's.
-  const place = (written: string): string => (sftp === undefined ? resolve(dir, written) : written);
+  const objects = resolveObjectStores(file, dir);
+  // On an SFTP server the folders are the server's own absolute paths, never this machine's, and
+  // in an object store dir is a key prefix.
+  const remote = sftp !== undefined || objects.s3 !== undefined || objects.azblob !== undefined;
+  const place = (written: string): string => (remote ? written : resolve(dir, written));
   return {
     kind: "file",
     dir: place(file.dir),
@@ -562,7 +631,52 @@ function resolveSource(
     errorDir: file.errorDir === undefined ? undefined : place(file.errorDir),
     readTries: file.readTries ?? DEFAULT_READ_TRIES,
     sftp,
+    ...objects,
   };
+}
+
+/** An `s3:` and an `azblob:` block as the YAML wrote them. */
+type ObjectYaml = Pick<NonNullable<DestinationYaml["file"]>, "s3" | "azblob">;
+
+/**
+ * A file block's `s3:` and `azblob:`, resolved, each only when written: the connection string's
+ * file against `dir`.
+ */
+function resolveObjectStores(
+  file: ObjectYaml,
+  dir: string,
+): { s3?: S3Config; azblob?: AzblobConfig } {
+  const { s3, azblob } = file;
+  if (s3 !== undefined) {
+    return {
+      s3: {
+        bucket: s3.bucket,
+        region: s3.region,
+        endpoint: s3.endpoint,
+        pathStyle: s3.pathStyle ?? false,
+        timeoutMs: s3.timeout,
+        singleNode: s3.singleNode ?? false,
+        mode: s3.mode ?? "create",
+      },
+    };
+  }
+  if (azblob !== undefined) {
+    return {
+      azblob: {
+        account: azblob.account,
+        container: azblob.container,
+        endpoint: azblob.endpoint,
+        connectionString:
+          azblob.connectionString === undefined
+            ? undefined
+            : secretSourceOf(azblob.connectionString, dir),
+        plaintext: azblob.plaintext === true,
+        singleNode: azblob.singleNode ?? false,
+        mode: azblob.mode ?? "create",
+      },
+    };
+  }
+  return {};
 }
 
 /** An MLLP block's TLS keys beyond the shared ones, as the YAML wrote them. */
@@ -593,6 +707,29 @@ function resolveSftp(sftp: SftpYaml | undefined, dir: string): SftpConfig | unde
     timeoutMs: sftp.timeout,
     keepaliveMs: sftp.keepalive,
   };
+}
+
+/** A tcp block's `framing:`, resolved: hex in lower case, and each default filled in. */
+function resolveFraming(framing: TcpFramingYaml): TcpFraming {
+  const { delimiter, lengthPrefix, startEnd } = framing;
+  if (delimiter !== undefined) return { kind: "delimiter", delimiter: delimiter.toLowerCase() };
+  if (lengthPrefix !== undefined) {
+    return {
+      kind: "lengthPrefix",
+      size: lengthPrefix.bytes,
+      endian: lengthPrefix.endian ?? "big",
+      inclusive: lengthPrefix.inclusive ?? false,
+    };
+  }
+  if (startEnd !== undefined) {
+    return {
+      kind: "startEnd",
+      start: startEnd.start.toLowerCase(),
+      end: startEnd.end.toLowerCase(),
+    };
+  }
+  // The schema lets exactly one framing through, so one that is none of the others is raw.
+  return { kind: "raw" };
 }
 
 /** A source's `poll:`, resolved: its schedule, and its deadline or the default. */
@@ -646,11 +783,25 @@ function resolveConnector(
   dir: string,
   settings: Settings,
 ): ChannelConfig["destinations"][number] {
-  const { http, mllp, smtp } = destination;
+  const { http, mllp, smtp, tcp } = destination;
   const module = resolveModule(destination, dir);
   if (module !== undefined) return module;
   if (smtp !== undefined) {
     return resolveSmtp(smtp, dir, destination.timeout ?? DEFAULT_DELIVERY_TIMEOUT_MS);
+  }
+  if (tcp !== undefined) {
+    return {
+      kind: "tcp",
+      host: tcp.host,
+      port: tcp.port,
+      tls: tcp.tls === undefined ? undefined : resolveClientTls(tcp.tls, dir),
+      plaintext: tcp.plaintext === true,
+      framing: resolveFraming(tcp.framing),
+      maxMessageSize: tcp.maxMessageSize ?? DEFAULT_MAX_BYTES,
+      timeoutMs: tcp.timeout ?? DEFAULT_TCP_TIMEOUT_MS,
+      expectReply: tcp.expectReply === true,
+      replyCheck: tcp.replyCheck === undefined ? undefined : resolve(dir, tcp.replyCheck),
+    };
   }
   if (mllp !== undefined) {
     return {
@@ -666,7 +817,9 @@ function resolveConnector(
     // The schema lets exactly one kind through, so a destination that is not HTTP is a file one.
     const file = destination.file as NonNullable<typeof destination.file>;
     const sftp = resolveSftp(file.sftp, dir);
-    return { kind: "file", dir: sftp === undefined ? resolve(dir, file.dir) : file.dir, sftp };
+    const objects = resolveObjectStores(file, dir);
+    const remote = sftp !== undefined || objects.s3 !== undefined || objects.azblob !== undefined;
+    return { kind: "file", dir: remote ? file.dir : resolve(dir, file.dir), sftp, ...objects };
   }
   return {
     kind: "http",
@@ -842,7 +995,7 @@ function mergeSettings(
     pollInterval?: number | undefined;
     onStoreFailure?: OnStoreFailure | undefined;
     ackTimeout?: number | undefined;
-    retention?: number | undefined;
+    retention?: RetentionYaml;
     resendFlag?: boolean | undefined;
     retentionInterval?: number | undefined;
     content?: ContentPolicy | undefined;
@@ -855,12 +1008,54 @@ function mergeSettings(
     pollIntervalMs: override.pollInterval ?? base.pollIntervalMs,
     onStoreFailure: override.onStoreFailure ?? base.onStoreFailure,
     ackTimeoutMs: override.ackTimeout ?? base.ackTimeoutMs,
-    retentionMs: override.retention ?? base.retentionMs,
     resendFlag: override.resendFlag ?? base.resendFlag,
     retentionIntervalMs: override.retentionInterval ?? base.retentionIntervalMs,
+    ...mergeRetention(base, override.retention),
     content: override.content ?? base.content,
     retry: override.retry === undefined ? base.retry : mergeRetry(base.retry, override.retry),
   };
+}
+
+/** A `retention:` value as parsed: the shorthand duration, or the block written out. */
+type RetentionYaml =
+  | number
+  | {
+      readonly content?: number | undefined;
+      readonly metadata?: number | undefined;
+      readonly failed?: number | undefined;
+    }
+  | undefined;
+
+/**
+ * `retention`'s clocks over `base`'s, key by key. The shorthand sets the metadata clock alone; a
+ * block written out sets the clocks it names and turns the others on with what `base` holds.
+ */
+function mergeRetention(
+  base: Settings,
+  retention: RetentionYaml,
+): Pick<Settings, "retentionMs" | "retentionClocks"> {
+  const inherited =
+    base.retentionClocks === undefined ? {} : { retentionClocks: base.retentionClocks };
+  if (retention === undefined) return { retentionMs: base.retentionMs, ...inherited };
+  if (typeof retention === "number") return { retentionMs: retention, ...inherited };
+  const contentMs = retention.content ?? base.retentionClocks?.contentMs;
+  const failedMs = retention.failed ?? base.retentionClocks?.failedMs;
+  return {
+    retentionMs: retention.metadata ?? base.retentionMs,
+    retentionClocks: {
+      ...(contentMs === undefined ? {} : { contentMs }),
+      ...(failedMs === undefined ? {} : { failedMs }),
+    },
+  };
+}
+
+/** A problem when the metadata clock in force is shorter than the content clock. */
+function retentionProblem(file: string, settings: Settings): string[] {
+  const contentMs = settings.retentionClocks?.contentMs;
+  if (contentMs === undefined || settings.retentionMs >= contentMs) return [];
+  return [
+    `${file}: retention.metadata: ${String(settings.retentionMs)}ms is shorter than retention.content, ${String(contentMs)}ms; a message's row must outlive its content`,
+  ];
 }
 
 /** `override`'s retry keys over `base`'s, key by key; `none` lifts a limit `base` set. */

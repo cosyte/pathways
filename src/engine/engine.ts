@@ -9,11 +9,13 @@ import { ConfigError } from "../config/load.js";
 import {
   DEFAULT_DELIVERY_TIMEOUT_MS,
   DEFAULT_RETRY,
+  type AzblobConfig,
   type ChannelConfig,
   type DestinationConfig,
   type Format,
   type ProjectConfig,
   type RetryPolicy,
+  type S3Config,
   type SftpConfig,
   type TransformConfigBlock,
 } from "../config/schema.js";
@@ -24,28 +26,44 @@ import {
   resolveHeaders,
   type Env,
 } from "../connectors/endpoint.js";
-import { FileDestination, FileSource } from "../connectors/file.js";
+import { AzureContainer } from "../connectors/azblob.js";
+import { type FileFault, FileDestination, FileSource } from "../connectors/file.js";
 import { KnownHosts, pinnedKey } from "../connectors/known-hosts.js";
+import { ObjectDestination, ObjectSource, type ObjectStore } from "../connectors/object-store.js";
+import { S3Bucket } from "../connectors/s3.js";
 import { SftpLocation } from "../connectors/sftp.js";
 import { HttpDestination, HttpSource } from "../connectors/http.js";
 import { RedirectHeld, RetryableError } from "../connectors/http-core.js";
 import { MllpDestination, MllpSource } from "../connectors/mllp.js";
 import { loadMllpClientTls, loadMllpServerTls } from "../connectors/mllp-tls.js";
+import {
+  TcpDestination,
+  TcpSource,
+  type TcpReplyBuilder,
+  type TcpReplyCheck,
+} from "../connectors/tcp.js";
 import { SmtpDestination } from "../connectors/smtp.js";
-import { loadClientTls } from "../connectors/tls.js";
+import { framingOf } from "../connectors/tcp-framing.js";
+import { loadClientTls, loadServerTls } from "../connectors/tls.js";
 import {
   DeliveryRejected,
   type DestinationConnector,
   type MessageSink,
   type SourceConnector,
 } from "../connectors/types.js";
-import { customDestination, customSource, loadAckBuilder } from "../extensions/build.js";
+import {
+  customDestination,
+  customSource,
+  loadAckBuilder,
+  loadTcpFunction,
+} from "../extensions/build.js";
 import { faultPoint } from "../fault-points.js";
 import type { LifecycleEvent } from "../extensions/events.js";
 import { HookSet } from "../extensions/hooks.js";
 import type { ChannelContext } from "../extensions/types.js";
 import { AuditLog, auditEvent } from "../operator/audit.js";
 import { resolveSecrets, type Secrets, secretsOf } from "../secrets/resolve.js";
+import type { KeyProvider } from "../encryption/keys.js";
 import { recordRetention, runRetention, type RetentionReport } from "../operator/retention.js";
 import { copiesBodies, markCopiesBodies, release } from "../storage/ownership.js";
 import {
@@ -82,7 +100,8 @@ export const LIVE_GRACE_MS = 60_000;
  * How long one delivery to `destination` may take in all (connecting, sending and waiting for the
  * receiver to confirm) before the engine cuts it off and counts the attempt as failed, to be
  * retried: an HTTP destination's `timeout` plus a second, twice an MLLP destination's `ackTimeout`
- * (one to connect, one for the ACK) plus a second, and a file or module destination's `timeout`,
+ * (one to connect, one for the ACK) plus a second, twice a tcp destination's `timeout` (one to
+ * connect, one for the send and its reply) plus a second, and a file or module destination's `timeout`,
  * 30 seconds by default. The second of grace lets the destination's own timeout, with its code,
  * come first.
  *
@@ -94,6 +113,7 @@ export const LIVE_GRACE_MS = 60_000;
 export function deliveryDeadlineMs(destination: DestinationConfig | undefined): number {
   if (destination?.kind === "http") return destination.timeoutMs + 1_000;
   if (destination?.kind === "mllp") return 2 * destination.ackTimeoutMs + 1_000;
+  if (destination?.kind === "tcp") return 2 * destination.timeoutMs + 1_000;
   return destination?.timeoutMs ?? DEFAULT_DELIVERY_TIMEOUT_MS;
 }
 
@@ -364,7 +384,39 @@ export async function connectorsFor(
   const { source } = channel;
   let sourceConnector: SourceConnector;
   switch (source.kind) {
-    case "file":
+    case "file": {
+      const said = {
+        onReadError: (error: unknown) => {
+          logger.warn({
+            event: "source-read-failed",
+            channel: channel.name,
+            code: errorCode(error),
+          });
+        },
+        // The reason and a code, never the file's name: a name can carry an identifier.
+        onFileFault: ({ reason, moved, error }: FileFault) => {
+          logger.warn({
+            event: "source-file-set-aside",
+            channel: channel.name,
+            reason,
+            moved,
+            code: errorCode(error),
+          });
+        },
+      };
+      const store = objectStore(source, secretsOf(secrets), `${file}: source.file`);
+      if (store !== undefined) {
+        sourceConnector = new ObjectSource({
+          ...source,
+          ...said,
+          store,
+          prefix: source.dir,
+          channel: channel.name,
+          now,
+          singleNode: (source.s3 ?? source.azblob)?.singleNode === true,
+        });
+        break;
+      }
       sourceConnector = new FileSource({
         ...source,
         channel: channel.name,
@@ -374,25 +426,10 @@ export async function connectorsFor(
           : {
               location: sftpLocation(source.sftp, secretsOf(secrets), `${file}: source.file.sftp`),
             }),
-        onReadError: (error) => {
-          logger.warn({
-            event: "source-read-failed",
-            channel: channel.name,
-            code: errorCode(error),
-          });
-        },
-        // The reason and a code, never the file's name: a name can carry an identifier.
-        onFileFault: ({ reason, moved, error }) => {
-          logger.warn({
-            event: "source-file-set-aside",
-            channel: channel.name,
-            reason,
-            moved,
-            code: errorCode(error),
-          });
-        },
+        ...said,
       });
       break;
+    }
     case "http": {
       const { tls, token } = listenerSecurity(source, secrets, `${file}: source.http`);
       const { response } = source;
@@ -453,6 +490,37 @@ export async function connectorsFor(
         },
       });
       break;
+    case "tcp": {
+      const { reply } = source;
+      sourceConnector = new TcpSource({
+        host: source.host,
+        port: source.port,
+        tls:
+          source.tls === undefined
+            ? undefined
+            : loadServerTls(source.tls, `${file}: source.tcp.tls`),
+        framing: framingOf(source.framing),
+        maxConnections: source.maxConnections,
+        maxMessageSize: source.maxMessageSize,
+        idleTimeoutMs: source.idleTimeoutMs,
+        stallTimeoutMs: source.stallTimeoutMs,
+        reply:
+          reply === undefined
+            ? undefined
+            : reply.kind === "fixed"
+              ? Buffer.from(reply.hex, "hex")
+              : await loadTcpFunction<TcpReplyBuilder>(
+                  reply.module,
+                  `${file}: source.tcp.reply.builder`,
+                  "a reply builder",
+                  channel.settings.timeoutMs,
+                ),
+        onEvent: ({ level, event, ...fields }) => {
+          logger[level]({ event, channel: channel.name, ...fields });
+        },
+      });
+      break;
+    }
     case "module":
       sourceConnector = await customSource(
         source,
@@ -468,7 +536,20 @@ export async function connectorsFor(
       continue;
     }
     switch (destination.kind) {
-      case "file":
+      case "file": {
+        const where = `${file}: destinations.${index}.file`;
+        const store = objectStore(destination, secretsOf(secrets), where);
+        if (store !== undefined) {
+          destinations.push(
+            new ObjectDestination({
+              store,
+              prefix: destination.dir,
+              extension: EXTENSIONS[channel.format],
+              mode: (destination.s3 ?? destination.azblob)?.mode ?? "create",
+            }),
+          );
+          break;
+        }
         destinations.push(
           new FileDestination({
             dir: destination.dir,
@@ -485,6 +566,7 @@ export async function connectorsFor(
           }),
         );
         break;
+      }
       case "http": {
         const where = `${file}: destinations.${index}.http`;
         destinations.push(
@@ -578,6 +660,34 @@ export async function connectorsFor(
         );
         break;
       }
+      case "tcp": {
+        const where = `${file}: destinations.${index}.tcp`;
+        destinations.push(
+          new TcpDestination({
+            host: destination.host,
+            port: destination.port,
+            tls:
+              destination.tls === undefined
+                ? undefined
+                : loadClientTls(destination.tls, `${where}.tls`),
+            framing: framingOf(destination.framing),
+            maxMessageSize: destination.maxMessageSize,
+            timeoutMs: destination.timeoutMs,
+            expectReply: destination.expectReply,
+            ...(destination.replyCheck === undefined
+              ? {}
+              : {
+                  replyCheck: await loadTcpFunction<TcpReplyCheck>(
+                    destination.replyCheck,
+                    `${where}.replyCheck`,
+                    "a reply check",
+                    channel.settings.timeoutMs,
+                  ),
+                }),
+          }),
+        );
+        break;
+      }
       case "module":
         destinations.push(
           await customDestination(
@@ -610,6 +720,11 @@ export interface EngineOptions {
    * engine resolves its project's at start.
    */
   readonly secrets?: Secrets | undefined;
+  /**
+   * The project's encryption keys, which seal retention's archives when `retention.archive` is set.
+   * Without them, a channel retention would archive is left alone, and its code logged.
+   */
+  readonly keys?: KeyProvider | undefined;
   /**
    * The audit log the engine records retention runs in. Defaults to one over `store`, naming the
    * operating system user; pass one to share it, and its listeners, with other callers.
@@ -1271,12 +1386,19 @@ export class Engine {
         onChannel: () => {
           this.step();
         },
+        onSkip: (channel, code) => {
+          logger.error({ event: "retention-skipped", channel, code });
+        },
+        keys: this.options.keys,
+        audit: this.audit,
       });
       await recordRetention(this.audit, report);
       logger.info({
         event: "retention",
         messages: report.messages,
         deliveries: report.deliveries,
+        ...(report.pruned === undefined ? {} : { pruned: report.pruned }),
+        ...(report.archives === undefined ? {} : { archives: report.archives }),
       });
       return report;
     } catch (error) {
@@ -1354,12 +1476,12 @@ export class Engine {
   }
 
   /**
-   * How many connections a channel's MLLP source closed at accept for being over its cap, for the
-   * health body; nothing for any other source. A count only, never who connected.
+   * How many connections a channel's MLLP or tcp source closed at accept for being over its cap, for
+   * the health body; nothing for any other source. A count only, never who connected.
    */
   private connectionCounts(name: string): Pick<ChannelHealth, "connections"> {
     const source = this.channels.find((channel) => channel.config.name === name)?.connectors.source;
-    return source instanceof MllpSource
+    return source instanceof MllpSource || source instanceof TcpSource
       ? { connections: { refused: source.refusedConnections } }
       : {};
   }
@@ -1371,8 +1493,9 @@ export class Engine {
       for (const warning of listenerWarnings(source)) {
         logger.warn({ event: warning, channel: config.name, endpoint: "source" });
       }
-    } else if (source.kind === "mllp" && source.plaintext) {
-      // MLLP carries no credentials of its own: mutual TLS (tls.ca) is how a source checks who sends.
+    } else if ((source.kind === "mllp" || source.kind === "tcp") && source.plaintext) {
+      // MLLP and tcp carry no credentials of their own: mutual TLS (tls.ca) is how a source checks
+      // who sends.
       logger.warn({ event: "plaintext", channel: config.name, endpoint: "source" });
     } else if (source.kind === "file" && source.keepProcessed) {
       // Each stored file stays in processed/ as it arrived: patient data outside the encrypted store.
@@ -1388,12 +1511,12 @@ export class Engine {
           destination: index,
         });
       }
-      if (
-        (destination.kind === "http" ||
-          destination.kind === "mllp" ||
-          destination.kind === "smtp") &&
-        destination.plaintext
-      ) {
+      const connects =
+        destination.kind === "http" ||
+        destination.kind === "mllp" ||
+        destination.kind === "tcp" ||
+        destination.kind === "smtp";
+      if (connects && destination.plaintext) {
         logger.warn({
           event: "plaintext",
           channel: config.name,
@@ -2405,6 +2528,51 @@ function errorName(error: unknown): string {
 function hashed(key: string | undefined): string | undefined {
   return key === undefined ? undefined : createHash("sha256").update(key).digest("hex");
 }
+
+/**
+ * The object store a file block's `s3:` or `azblob:` names, or `undefined` when it names neither.
+ * An Azure connection string is read through `secrets` now; nothing else is secret, and the clients
+ * are made on the first request. `where` names the file block.
+ *
+ * @throws {ConfigError} when the connection string cannot be read.
+ */
+function objectStore(
+  block: { readonly s3?: S3Config | undefined; readonly azblob?: AzblobConfig | undefined },
+  secrets: Secrets,
+  where: string,
+): ObjectStore | undefined {
+  const { s3, azblob } = block;
+  if (s3 !== undefined) {
+    return new S3Bucket({
+      bucket: s3.bucket,
+      region: s3.region,
+      endpoint: s3.endpoint,
+      pathStyle: s3.pathStyle,
+      timeoutMs: s3.timeoutMs,
+    });
+  }
+  if (azblob === undefined) return undefined;
+  const at = `${where}.azblob.connectionString`;
+  const connectionString =
+    azblob.connectionString === undefined ? undefined : secrets.read(azblob.connectionString, at);
+  // TLS unless the block says plaintext: a connection string can name an http endpoint too. The
+  // error names the key, never the string, which holds the account key.
+  if (connectionString !== undefined && !azblob.plaintext && PLAIN_AZURE.test(connectionString)) {
+    throw new ConfigError([
+      `${at}: names an http endpoint, which sends in the clear: set plaintext: true to allow it`,
+    ]);
+  }
+  return new AzureContainer({
+    account: azblob.account,
+    container: azblob.container,
+    endpoint: azblob.endpoint,
+    connectionString,
+  });
+}
+
+/** A connection string that sends in the clear: an http protocol or endpoint, or Azurite's own. */
+const PLAIN_AZURE =
+  /(?:^|;)\s*(?:DefaultEndpointsProtocol\s*=\s*http\s*(?:;|$)|BlobEndpoint\s*=\s*http:|UseDevelopmentStorage\s*=\s*true)/i;
 
 /**
  * The location an `sftp:` block names: its key and passphrase read through `secrets`, and its host

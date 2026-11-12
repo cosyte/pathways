@@ -2,7 +2,8 @@
  * Public entry point for `@cosyte/pathways`, a code-first healthcare integration engine.
  *
  * Pathways is early: this entry point exports what an extension is written against (a channel's
- * transform, a custom source or destination, an MLLP source's ACK builder, a lifecycle hook and its
+ * transform, a custom source or destination, an MLLP source's ACK builder, a tcp source's reply
+ * builder and a tcp destination's reply check, a lifecycle hook and its
  * events, among them the audit log's entries, a storage adapter, a key provider for encryption at
  * rest, and a secret provider), the ACK builder an MLLP source uses by default, which a custom one can
  * wrap, and a fake secret provider for tests. The engine itself runs through the `pathways` command.
@@ -29,6 +30,7 @@ export type {
   MllpSourceFacts,
   ModuleSourceFacts,
   SourceFacts,
+  TcpSourceFacts,
   Transform,
   TransformConfig,
   TransformContext,
@@ -52,6 +54,13 @@ export {
   type AckRequest,
   type SourceAckCode,
 } from "./connectors/ack.js";
+export type {
+  TcpReply,
+  TcpReplyBuilder,
+  TcpReplyCheck,
+  TcpReplyRequest,
+  TcpReplyVerdict,
+} from "./connectors/tcp.js";
 export { EncryptionError, type EncryptionErrorCode } from "./encryption/envelope.js";
 export type { KeyProvider, WrappedKey } from "./encryption/keys.js";
 export type { MessageMeta, MetaCondition, MetaTag } from "./encryption/blind-index.js";
@@ -124,6 +133,7 @@ export type {
   ExpireResult,
   LeaseStore,
   MessageQuery,
+  MessageRows,
   MetaCandidate,
   MetaCandidateQuery,
   MetaStore,
@@ -139,12 +149,17 @@ export type {
   RefusalReason,
   RequeueRequest,
   RequeueResult,
+  RetentionQuery,
+  RetentionStep,
+  RetentionStore,
   RetryingDelivery,
   SendingMarker,
   SendStart,
   StoredContent,
   StoredDelivery,
+  StoredDeliveryRow,
   StoredMessage,
+  StoredMessageRow,
   StoredMeta,
   StoreReceiveOptions,
 } from "./storage/store.js";
@@ -156,3 +171,9 @@ export {
   type LeaseHolder,
 } from "./storage/lease.js";
 export type { AuditListener } from "./operator/audit.js";
+export type {
+  ArchivedDelivery,
+  ArchivedMessage,
+  ArchiveErrorCode,
+  ArchiveHeader,
+} from "./operator/archive.js";

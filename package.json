@@ -100,6 +100,9 @@
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "0.18.5",
+    "@aws-sdk/client-s3": "3.1166.0",
+    "@azure/identity": "4.14.1",
+    "@azure/storage-blob": "12.34.0",
     "@changesets/cli": "2.31.0",
     "@cosyte/bench": "^0.1.2",
     "@cosyte/eslint-config": "^0.1.4",
@@ -144,6 +147,9 @@
     "zod": "^4.6.7"
   },
   "peerDependencies": {
+    "@aws-sdk/client-s3": "^3.1166.0",
+    "@azure/identity": "^4.14.1",
+    "@azure/storage-blob": "^12.34.0",
     "mysql2": "^3.0.0",
     "pg": "^8.0.0",
     "tarn": "^3.0.0",
@@ -151,6 +157,15 @@
     "ssh2": "1.17.0"
   },
   "peerDependenciesMeta": {
+    "@aws-sdk/client-s3": {
+      "optional": true
+    },
+    "@azure/identity": {
+      "optional": true
+    },
+    "@azure/storage-blob": {
+      "optional": true
+    },
     "mysql2": {
       "optional": true
     },
