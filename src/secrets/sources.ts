@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 
 import type {
+  AzblobConfig,
   ChannelConfig,
   HeaderValue,
   HookConfig,
@@ -122,7 +123,10 @@ function channelUses(channel: ChannelConfig, skipDry: DrySkip | undefined): Secr
       uses.push(...headerUses(source.response.headers, `${file}: source.http.response`));
     }
   }
-  if (source.kind === "file") uses.push(...sftpUses(source.sftp, `${file}: source.file.sftp`));
+  if (source.kind === "file") {
+    uses.push(...sftpUses(source.sftp, `${file}: source.file.sftp`));
+    uses.push(...azblobUses(source.azblob, `${file}: source.file.azblob`));
+  }
   for (const [index, destination] of channel.destinations.entries()) {
     // A destination that runs dry builds no connector, so its secrets are never needed.
     const dry = skipDry === "all" || (skipDry === "each" && destination.dryRun === true);
@@ -131,6 +135,7 @@ function channelUses(channel: ChannelConfig, skipDry: DrySkip | undefined): Secr
     }
     if (destination.kind === "file" && !dry) {
       uses.push(...sftpUses(destination.sftp, `${file}: destinations.${index}.file.sftp`));
+      uses.push(...azblobUses(destination.azblob, `${file}: destinations.${index}.file.azblob`));
     }
   }
   uses.push(...hookUses(channel.hooks, file));
@@ -145,6 +150,12 @@ function sftpUses(sftp: SftpConfig | undefined, where: string): SecretUse[] {
     uses.push({ source: sftp.passphrase, where: `${where}.passphrase` });
   }
   return uses;
+}
+
+/** An `azblob:` block's connection string, when the block names one. */
+function azblobUses(azblob: AzblobConfig | undefined, where: string): SecretUse[] {
+  if (azblob?.connectionString === undefined) return [];
+  return [{ source: azblob.connectionString, where: `${where}.connectionString` }];
 }
 
 function hookUses(hooks: readonly HookConfig[], file: string): SecretUse[] {

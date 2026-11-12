@@ -1761,6 +1761,183 @@ function sftpPaths(keys: readonly string[]) {
   };
 }
 
+/** An object store's endpoint: an `https://` URL, or `http://` with `plaintext: true`. */
+function objectEndpoint(description: string) {
+  return envable(
+    z
+      .string()
+      .refine((value) => {
+        const url = URL.parse(value);
+        return (
+          url !== null &&
+          (url.protocol === "https:" || url.protocol === "http:") &&
+          url.username === "" &&
+          url.password === ""
+        );
+      }, "an https:// URL with no user name or password, or http:// with plaintext: true")
+      .meta({ description }),
+  );
+}
+
+/** How an object store's claim and write behave, the keys an `s3:` and an `azblob:` block share. */
+const objectStoreKeys = {
+  plaintext: z
+    .boolean()
+    .meta({
+      description:
+        "Allow an http:// endpoint, for a local emulator. Never read from the environment. Default false.",
+    })
+    .optional(),
+  singleNode: envable(
+    z.boolean().meta({
+      description:
+        "A source only: run on a store that does not honour If-None-Match, deleting each object once stored and claiming none. Safe only when one engine and one channel read dir. Default false, which refuses such a store at start.",
+    }),
+  ).optional(),
+  mode: envable(
+    z.enum(["create", "overwrite"]).meta({
+      description:
+        "A destination only: create (the default) writes an object only where none is (If-None-Match: *); overwrite replaces one.",
+    }),
+  ).optional(),
+};
+
+/** A file source's or destination's `s3:` block: the bucket `dir` is a key prefix in. */
+const s3Block = z
+  .strictObject({
+    bucket: envable(
+      z
+        .string()
+        .regex(/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/, "an S3 bucket name, such as inbound-adt")
+        .meta({ description: "The bucket's name." }),
+    ),
+    region: envable(
+      z.string().min(1).meta({
+        description: "The bucket's region, such as us-east-1. Default: the AWS SDK's own chain.",
+      }),
+    ).optional(),
+    endpoint: objectEndpoint(
+      "Another endpoint than Amazon's, for an S3-compatible server, such as https://s3.example.test.",
+    ).optional(),
+    pathStyle: envable(
+      z.boolean().meta({
+        description:
+          "Name the bucket in the path rather than the host, as most S3-compatible servers need. Default false.",
+      }),
+    ).optional(),
+    timeout: duration("How long one request may take. Default 30s.", {
+      ms: 1,
+      message: 'a duration of at least 1ms, such as "30s"',
+    }).optional(),
+    ...objectStoreKeys,
+  })
+  .meta({
+    description:
+      "Read or write objects in an Amazon S3 bucket, with dir as the key prefix. Credentials come from the AWS SDK's default chain, never the YAML.",
+  });
+
+/** A file source's or destination's `azblob:` block: the container `dir` is a prefix in. */
+const azblobBlock = z
+  .strictObject({
+    account: envable(
+      z
+        .string()
+        .regex(/^[a-z0-9]{3,24}$/, "a storage account name: 3 to 24 lowercase letters and digits")
+        .meta({ description: "The storage account's name." }),
+    ),
+    container: envable(
+      z
+        .string()
+        .regex(/^[a-z0-9](?!.*--)[a-z0-9-]{1,61}[a-z0-9]$/, "a container name, such as inbound")
+        .meta({ description: "The container's name." }),
+    ),
+    endpoint: objectEndpoint(
+      "The blob service's address. Default https://<account>.blob.core.windows.net; Azurite listens on http://127.0.0.1:10000/<account>.",
+    ).optional(),
+    connectionString: secretSource("a connection string")
+      .meta({
+        description:
+          "A connection string with the account key, read at start: { env: NAME }, { file: path } or { secret: { provider, name } }. Default: none, so the identity is Azure's default chain (a managed identity, a workload identity, or the environment).",
+      })
+      .optional(),
+    ...objectStoreKeys,
+  })
+  .meta({
+    description:
+      "Read or write blobs in an Azure Blob Storage container, with dir as the name prefix.",
+  });
+
+/** The kinds of remote location a file block can name, at most one. */
+const REMOTE_KINDS = ["sftp", "s3", "azblob"] as const;
+
+/** The source keys an object store has no use for: it claims by a marker and never moves a file. */
+const OBJECT_UNUSED_SOURCE_KEYS = ["keepProcessed", "doneFile", "errorDir", "readTries"] as const;
+
+/**
+ * With `s3:` or `azblob:`, `dir` is a key prefix: no slash at either end, and no empty, `.` or `..`
+ * part. At most one remote kind, and on a source none of the keys an object store does not use.
+ * `singleNode` goes on a source and `mode` on a destination.
+ */
+function objectRules(role: "source" | "destination") {
+  return (value: Readonly<Record<string, unknown>>, ctx: z.RefinementCtx): void => {
+    const named = REMOTE_KINDS.filter((kind) => value[kind] !== undefined);
+    if (named.length > 1) {
+      ctx.addIssue({ code: "custom", message: `name at most one of ${REMOTE_KINDS.join(", ")}` });
+    }
+    const kind = named.find((name) => name !== "sftp");
+    if (kind === undefined) return;
+    const dir = value["dir"];
+    if (
+      typeof dir === "string" &&
+      dir.split("/").some((part) => part === "" || part === "." || part === "..")
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["dir"],
+        message: "a key prefix such as inbox or adt/in, with no slash at either end",
+      });
+    }
+    const block = value[kind] as Readonly<Record<string, unknown>>;
+    const endpoint = block["endpoint"];
+    if (typeof endpoint === "string") {
+      const plain = endpoint.toLowerCase().startsWith("http:");
+      if (plain !== (block["plaintext"] === true)) {
+        ctx.addIssue({
+          code: "custom",
+          path: [kind, plain ? "endpoint" : "plaintext"],
+          message: plain
+            ? "an http:// endpoint sends in the clear: set plaintext: true to allow it"
+            : "plaintext: true goes only with an http:// endpoint",
+        });
+      }
+    } else if (block["plaintext"] === true && kind === "s3") {
+      ctx.addIssue({
+        code: "custom",
+        path: [kind, "plaintext"],
+        message: "plaintext: true goes only with an http:// endpoint",
+      });
+    }
+    const wrong = role === "source" ? "mode" : "singleNode";
+    if (block[wrong] !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: [kind, wrong],
+        message: `goes on a ${role === "source" ? "destination" : "source"} only`,
+      });
+    }
+    if (role === "destination") return;
+    for (const key of OBJECT_UNUSED_SOURCE_KEYS) {
+      if (value[key] !== undefined) {
+        ctx.addIssue({
+          code: "custom",
+          path: [key],
+          message: `is not used with ${kind}: an object store claims by a marker and moves no file`,
+        });
+      }
+    }
+  };
+}
+
 /** A channel's `source:` block: exactly one kind. */
 const source = restate(
   z
@@ -1851,9 +2028,12 @@ const source = restate(
             }),
           ).optional(),
           sftp: sftpBlock.optional(),
+          s3: s3Block.optional(),
+          azblob: azblobBlock.optional(),
         })
         .meta({ description: "Read each file dropped into dir as one message." })
         .superRefine(sftpPaths(["dir", "errorDir"]))
+        .superRefine(objectRules("source"))
         .optional(),
       http: httpSource.optional(),
       mllp: mllpSource.optional(),
@@ -1889,9 +2069,12 @@ const destination = restate(
             description: "The folder to write into, relative to this file. Created if missing.",
           }),
           sftp: sftpBlock.optional(),
+          s3: s3Block.optional(),
+          azblob: azblobBlock.optional(),
         })
         .meta({ description: "Write each output into dir as a file of its own." })
         .superRefine(sftpPaths(["dir"]))
+        .superRefine(objectRules("destination"))
         .optional(),
       http: httpDestination.optional(),
       mllp: mllpDestination.optional(),
@@ -2344,6 +2527,37 @@ export interface FileSource {
   readonly readTries: number;
   /** The SFTP server `dir` and `errorDir` are on, or `undefined` for a folder on this machine. */
   readonly sftp?: SftpConfig | undefined;
+  /** The S3 bucket `dir` is a key prefix in, or `undefined`. */
+  readonly s3?: S3Config | undefined;
+  /** The Azure Blob Storage container `dir` is a prefix in, or `undefined`. */
+  readonly azblob?: AzblobConfig | undefined;
+}
+
+/** How an object store block's source claims and its destination writes. */
+export interface ObjectStoreConfig {
+  /** A source runs on a store without conditional writes, claiming nothing. */
+  readonly singleNode: boolean;
+  /** How a destination writes: only where no object is, or over one. */
+  readonly mode: "create" | "overwrite";
+}
+
+/** An `s3:` block, resolved. Credentials come from the AWS SDK's default chain. */
+export interface S3Config extends ObjectStoreConfig {
+  readonly bucket: string;
+  readonly region: string | undefined;
+  readonly endpoint: string | undefined;
+  readonly pathStyle: boolean;
+  readonly timeoutMs: number | undefined;
+}
+
+/** An `azblob:` block, resolved, with its connection string as a reference. */
+export interface AzblobConfig extends ObjectStoreConfig {
+  readonly account: string;
+  readonly container: string;
+  readonly endpoint: string | undefined;
+  readonly connectionString: SecretSource | undefined;
+  /** Whether an http endpoint, in `endpoint` or the connection string, is allowed. */
+  readonly plaintext: boolean;
 }
 
 /**
@@ -2376,6 +2590,10 @@ export interface FileDestination {
   readonly dir: string;
   /** The SFTP server `dir` is on, or `undefined` for a folder on this machine. */
   readonly sftp?: SftpConfig | undefined;
+  /** The S3 bucket `dir` is a key prefix in, or `undefined`. */
+  readonly s3?: S3Config | undefined;
+  /** The Azure Blob Storage container `dir` is a prefix in, or `undefined`. */
+  readonly azblob?: AzblobConfig | undefined;
 }
 
 /**

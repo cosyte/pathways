@@ -1,0 +1,81 @@
+name: Object stores
+
+# The S3 and Azure Blob locations against local emulators: MinIO for S3 and Azurite for Azure Blob
+# Storage, each started on the loopback for the run with throwaway credentials and synthetic objects
+# only. test/object-store-server.test.ts checks that each honours If-None-Match, the claim, store and
+# delete of each object, two engines on one prefix, maxSize by a HEAD, a run stopped at each step of a
+# claim and then restarted, and the destination's create mode.
+#
+# Its own workflow, beside ci.yml rather than inside it, so it never changes the contexts the shared
+# `ci` job reports and never adds to its time. No ruleset requires it yet; its context is
+# `object-stores`.
+#
+# The images are pulled by tag, and the step prints the digest each tag resolved to.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  object-stores:
+    name: object-stores
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # The credentials are throwaway values for this run's MinIO, which listens only on the loopback.
+      - name: Start MinIO and Azurite
+        env:
+          MINIO_ROOT_USER: pathways-test
+          MINIO_ROOT_PASSWORD: pathways-test-only
+        run: |
+          docker run -d --name minio -p 127.0.0.1:9000:9000 \
+            -e MINIO_ROOT_USER -e MINIO_ROOT_PASSWORD \
+            minio/minio:latest server /data
+          docker run -d --name azurite -p 127.0.0.1:10000:10000 \
+            mcr.microsoft.com/azure-storage/azurite:latest \
+            azurite-blob --blobHost 0.0.0.0 --skipApiVersionCheck
+          for image in minio/minio:latest mcr.microsoft.com/azure-storage/azurite:latest; do
+            docker image inspect --format '{{index .RepoDigests 0}}' "$image"
+          done
+          for port in 9000 10000; do
+            for _ in $(seq 1 60); do
+              if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then break; fi
+              sleep 1
+            done
+          done
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:9000/minio/health/ready >/dev/null; then break; fi
+            sleep 1
+          done
+      - name: Run the object store suites against the emulators
+        env:
+          PATHWAYS_TEST_S3_ENDPOINT: http://127.0.0.1:9000
+          AWS_ACCESS_KEY_ID: pathways-test
+          AWS_SECRET_ACCESS_KEY: pathways-test-only
+          AWS_REGION: us-east-1
+          PATHWAYS_TEST_AZURITE: UseDevelopmentStorage=true
+        run: pnpm exec vitest run test/object-store-server.test.ts test/object-store.test.ts --reporter=verbose
+      - name: Emulator logs
+        if: failure()
+        run: |
+          docker logs minio 2>&1 | tail -50
+          docker logs azurite 2>&1 | tail -50

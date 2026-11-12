@@ -677,6 +677,10 @@ destinations:
       "channel.yaml.index.[].bits",
       "channel.yaml.source.file.sftp.weakAlgorithms.[]",
       "channel.yaml.destinations.[].file.sftp.weakAlgorithms.[]",
+      "channel.yaml.source.file.s3.plaintext",
+      "channel.yaml.source.file.azblob.plaintext",
+      "channel.yaml.destinations.[].file.s3.plaintext",
+      "channel.yaml.destinations.[].file.azblob.plaintext",
     ];
     type Node = Record<string, unknown>;
     const isNode = (value: unknown): value is Node =>
