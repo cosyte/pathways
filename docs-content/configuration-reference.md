@@ -488,7 +488,7 @@ Hex goes in quotes, two digits a byte, such as `"0d0a"`: unquoted, YAML reads `1
 
 ### Destinations
 
-Each entry is exactly one of `file`, `http`, `mllp`, `tcp` or `module`, and may add a [`retry`](#retry)
+Each entry is exactly one of `file`, `http`, `mllp`, `tcp`, `smtp` or `module`, and may add a [`retry`](#retry)
 block of its own and `dryRun`, beside that key:
 
 ```yaml title="channels/results-out/channel.yaml"
@@ -503,7 +503,7 @@ destinations:
 | -------- | ------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `dryRun` | boolean | `false` | transform and record each output, mark its delivery `dry-run`, and never send it: no connector is built, so no TLS file is read and no connection opened, and none of its secrets is read or resolved at start, a provider's (`secret:`) included, so a missing or expired one does not stop the start. Takes an environment reference. When `dryRun` is read from an environment variable, setting that variable to `false` makes the destination send for real, and the audit log does not record that change |
 
-A `file` or `module` destination may also set `timeout`, a duration (`30s` by default): how long one
+A `file`, `smtp` or `module` destination may also set `timeout`, a duration (`30s` by default): how long one
 delivery may take in all before it is cut off and retried. See
 [Every delivery has a deadline](#every-delivery-has-a-deadline).
 
@@ -524,6 +524,7 @@ the attempt as failed with the code `DELIVERY_TIMEOUT`: it is retried by the des
 | `mllp`      | twice its `ackTimeout` (one to connect, one for the ACK) and one second             |
 | `tcp`       | twice its `timeout` (one to connect, one for the send and its reply) and one second |
 | `file`      | its `timeout`, `30s` by default                                                     |
+| `smtp`      | its `timeout`, `30s` by default                                                     |
 | `module`    | its `timeout`, `30s` by default                                                     |
 
 The second of grace lets an HTTP, MLLP or tcp destination's own timeout, with its own code, come first.
@@ -657,6 +658,33 @@ it is written; with it, the destination reads one framed reply, at most `maxMess
 `timeout`. `replyCheck` is a module whose default export, a
 [`TcpReplyCheck`](./api/README.md#tcpreplycheck), answers `delivered`, `retry` or `rejected`. An
 output the framing cannot carry fails for good.
+
+#### SMTP destination
+
+| Key                | Type                                                                                      | Default                                         |
+| ------------------ | ----------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| `host`             | host name or address                                                                      | required                                        |
+| `port`             | 1 to 65535                                                                                | `465`; `587` with `starttls`; `25` plaintext    |
+| `tls`              | `{ mode, ca }`: `mode` is `implicit` or `starttls`                                        | required unless `plaintext`; `{}` is `implicit` |
+| `plaintext`        | boolean; cannot go with `user` and `password`                                             | `false`                                         |
+| `user`             | a [secret](#secrets), with `password`                                                     | none                                            |
+| `password`         | a [secret](#secrets), with `user`                                                         | none                                            |
+| `from`             | an address                                                                                | required                                        |
+| `to`               | a list of addresses, at least one                                                         | required                                        |
+| `cc`               | a list of addresses                                                                       | none                                            |
+| `subject`          | a template                                                                                | `Pathways message {{ messageId }}-{{ seq }}`    |
+| `body`             | a template                                                                                | a line naming the channel, message and seq      |
+| `attach`           | boolean: attach the output as a file                                                      | `false`                                         |
+| `onPartialRefusal` | `rejected` or `delivered`: some recipients refused                                        | `rejected`                                      |
+| `maxSize`          | a size such as `10MB`, or a number of bytes                                               | `10MB`                                          |
+| `connectTimeout`   | duration, at most the destination's `timeout`; covers the greeting and a STARTTLS upgrade | `10s`                                           |
+| `greetingTimeout`  | duration, at most the destination's `timeout`                                             | `10s`                                           |
+| `socketTimeout`    | duration, at most the destination's `timeout`                                             | `20s`                                           |
+
+An address is plain, such as `lab@example.test`, with no display name. A template's placeholders
+are `{{ messageId }}`, `{{ seq }}`, `{{ channel }}` and `{{ meta.<key> }}`. The server's certificate is
+always verified, with TLS 1.2 or later. [Send email over SMTP](./send-email-over-smtp.md) says what
+each answer means.
 
 #### Module destination
 

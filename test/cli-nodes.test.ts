@@ -147,7 +147,7 @@ describe("pathways start's node, on SQLite", () => {
         host: hostname(),
         pid: process.pid,
         version: VERSION,
-        schemaGeneration: 11,
+        schemaGeneration: 12,
         role: "active",
         draining: false,
         staleAfterMs: 3_000,
@@ -341,15 +341,15 @@ describe("pathways nodes forget", () => {
     expect((await cli(["migrate", "-C", root])).code).toBe(EXIT.ok);
     const older = new SqliteDatabase(db(root));
     older.exec(
-      "drop table nodes; delete from kysely_migration where name = '0011-nodes'; delete from schema_info where step = '0011-nodes'",
+      "drop table nodes; delete from kysely_migration where name = '0012-nodes'; delete from schema_info where step = '0012-nodes'",
     );
     older.close();
     expect(await bad()).toMatchObject({ code: EXIT.usage, out: "", err: rule });
     const after = new SqliteDatabase(db(root), { readonly: true });
     try {
       const steps = after.prepare("select name from kysely_migration").pluck().all();
-      expect(steps).not.toContain("0011-nodes");
-      expect(steps).toHaveLength(10);
+      expect(steps).not.toContain("0012-nodes");
+      expect(steps).toHaveLength(11);
       const tables = after
         .prepare("select name from sqlite_master where type = 'table' and name = 'nodes'")
         .all();

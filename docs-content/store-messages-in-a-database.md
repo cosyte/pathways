@@ -240,9 +240,16 @@ stopped, sets every channel running again. A custom store may implement `channel
 `setChannelState`; one without them keeps a channel's state in the engine only, and a restart
 forgets it.
 
-The `nodes` table, migration `0011-nodes`, holds one row per running engine: its node id, host,
+Migration `0011-delivery-failed-at` adds a `failed_at` column to `deliveries`: when a delivery failed
+for good, so a resumed bulk replay leaves out a message that failed after its count. It only adds a
+column that may be null, which an older Pathways never reads, and has no rollback step: to remove it,
+stop every engine and drop the column. A delivery an older Pathways failed has none, and a custom
+store may set `failedAt` on what `deliveries` returns; without it, a resume takes such a message by
+its own `updatedAt` alone.
+
+The `nodes` table, migration `0012-nodes`, holds one row per running engine: its node id, host,
 process id, version, role and last heartbeat, by the database's clock (see
-[nodes and heartbeats](./check-status-and-health.md#nodes-and-heartbeats)). It too only adds a
+[nodes and heartbeats](./check-status-and-health.md#nodes-and-heartbeats)). It only adds a
 table, and has no rollback step: dropping it, with every engine stopped, loses only who was running.
 
 If the database becomes unreachable while the engine runs, the engine stops with exit code 1 and the

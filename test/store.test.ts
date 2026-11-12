@@ -389,7 +389,7 @@ const CURRENT_SCHEMA = [
   `CREATE INDEX "meta_index_by_tag" on "meta_index" ("channel", "index_name", "tag", "message_id")`,
   `CREATE TABLE "audit_log" ("id" integer primary key autoincrement, "at" text not null, "actor" text not null, "action" text not null, "outcome" text not null, "channel" text, "message_id" integer, "detail" text)`,
   `CREATE TABLE "channel_states" ("channel" text primary key, "state" text not null, "changed_at" integer not null)`,
-  `CREATE TABLE "deliveries" ("id" integer primary key autoincrement, "message_id" integer not null references "messages" ("id"), "channel" text not null, "destination" integer not null, "seq" integer not null, "body" blob not null, "status" text not null, "attempts" integer not null, "next_attempt_at" integer not null, "last_error" text, "delivered_at" text, "generation" integer default 0 not null, "sending_at" integer, "sending_attempt" integer, "interrupted_attempt" integer)`,
+  `CREATE TABLE "deliveries" ("id" integer primary key autoincrement, "message_id" integer not null references "messages" ("id"), "channel" text not null, "destination" integer not null, "seq" integer not null, "body" blob not null, "status" text not null, "attempts" integer not null, "next_attempt_at" integer not null, "last_error" text, "delivered_at" text, "generation" integer default 0 not null, "sending_at" integer, "sending_attempt" integer, "interrupted_attempt" integer, "failed_at" text)`,
   `CREATE TABLE "kysely_migration" ("name" varchar(255) not null primary key, "timestamp" varchar(255) not null)`,
   `CREATE TABLE "kysely_migration_lock" ("id" varchar(255) not null primary key, "is_locked" integer default 0 not null)`,
   `CREATE TABLE "leases" ("name" text primary key, "owner" text not null, "host" text not null, "epoch" integer not null, "since" integer not null, "expires_at" integer not null)`,
@@ -470,7 +470,8 @@ describe("Store on SQLite files the first slice made", () => {
       "0008-content-drop",
       "0009-channel-states",
       "0010-message-meta",
-      "0011-nodes",
+      "0011-delivery-failed-at",
+      "0012-nodes",
     ]);
     db.close();
   });
