@@ -100,6 +100,16 @@ function requestError(op: string, error: unknown): Error {
   return failure(code, `the SFTP ${op} failed (${code})`);
 }
 
+/**
+ * Whether the SFTP channel can still send. The server can close the channel and keep SSH up (its
+ * `sftp-server` ended), and the SSH package then keeps each new request and never sends it, so a
+ * request made there would wait its whole deadline. The package keeps the channel's state on it
+ * (`open`, then `eof`, `closing` and `closed`), and its types do not say so.
+ */
+function channelOpen(sftp: SFTPWrapper): boolean {
+  return (sftp as unknown as { outgoing: { state: string } }).outgoing.state === "open";
+}
+
 /** The error for a connection that dropped, or closed, while it was in use. */
 function lost(): Error {
   return failure("ERR_PATHWAYS_SFTP_CONNECTION_LOST", "the SFTP connection was lost", true);
@@ -130,8 +140,9 @@ function kindOf(mode: number): FileEntry["kind"] {
 }
 
 /**
- * A file's stat. SFTP gives no inode, so a file's id is its mode, owner, group, size and change
- * time together: the same for one file under any name, and changed by a write. Two files can share
+ * A file's stat. SFTP gives no inode, and version 3 gives no change time either, so a file's id is
+ * its mode, owner, group, size and modification time together: the same for one file under any
+ * name, and changed by a write that changes its size or modification time. Two files can share
  * one, so a file refused by a check keeps one that looks the same from being taken while it is
  * there; and a link's own entry never shares one with a regular file, which the open's check uses.
  */
@@ -498,15 +509,19 @@ export class SftpLocation implements Location {
         this.drop(session, timedOut(op));
       }, timeoutMs);
       session.pending.add(fail);
+      const failed = (error: unknown): void => {
+        const reason = requestError(op, error);
+        settle(reason);
+        // A failure with no status is the channel gone under the request: the next one connects.
+        if ((reason as { down?: boolean }).down === true) this.drop(session, reason);
+      };
       try {
         run(session.sftp, (error, value) => {
-          settle(
-            error === undefined || error === null ? undefined : requestError(op, error),
-            value,
-          );
+          if (error === undefined || error === null) settle(undefined, value);
+          else failed(error);
         });
       } catch (error) {
-        settle(requestError(op, error));
+        failed(error);
       }
     });
   }
@@ -522,8 +537,13 @@ export class SftpLocation implements Location {
     session.client.destroy();
   }
 
-  /** The connection, made when there is none or the last one dropped. */
+  /**
+   * The connection, made when there is none, the last one dropped, or its SFTP channel was closed
+   * and has not said so yet.
+   */
   private session(): Promise<Session> {
+    const { live } = this;
+    if (live !== undefined && !channelOpen(live.sftp)) this.drop(live, lost());
     const made = (this.current ??= this.connect());
     // A failed connection is not kept: the next request tries again.
     made.catch(() => {
@@ -580,14 +600,25 @@ export class SftpLocation implements Location {
           return;
         }
         clearTimeout(timer);
-        up = {
+        const session: Session = {
           client,
           sftp,
           extensions: extensionsOf(sftp),
           pending: new Set(),
           closed: false,
         };
-        connected.resolve(up);
+        // The channel can close, or fail, while SSH stays up: the connection is dropped at once,
+        // failing each request in flight, so the next request opens a new one rather than wait
+        // its deadline on a channel that sends nothing. An error with no listener would stop the
+        // process.
+        const gone = (): void => {
+          this.drop(session, lost());
+        };
+        sftp.on("end", gone);
+        sftp.on("close", gone);
+        sftp.on("error", gone);
+        up = session;
+        connected.resolve(session);
       });
     });
     const config: ConnectConfig = {

@@ -20,8 +20,9 @@ The storage, engine and operator tests run on SQLite, and on PostgreSQL, MySQL, 
 Server when an administrator's URL for each is set (`PATHWAYS_TEST_POSTGRES_URL` and the like). CI's
 `databases` workflow runs one job per server. The SFTP location runs against a stand-in for the
 `ssh2` package everywhere, and against OpenSSH's own server where `PATHWAYS_TEST_SSHD` names the
-`sshd` binary: CI's `sftp` workflow sets it. The crash tests in `test/fault-points.test.ts` kill a
-real `pathways` process at the named points in `src/fault-points.ts`, which do nothing unless
+`sshd` binary: CI's `sftp` workflow sets it. The crash tests in `test/fault-points.test.ts`, and in
+`test/sftp-crash.test.ts` against that server, kill a real `pathways` process at the named points in
+`src/fault-points.ts`, which do nothing unless
 `PATHWAYS_TEST_FAULT_POINT` is set; a test for a new crash window adds a point there.
 
 ## The gate

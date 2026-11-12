@@ -1,7 +1,6 @@
-import { type ChildProcess, spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
-import { connect, createServer } from "node:net";
 import { userInfo } from "node:os";
 import { join } from "node:path";
 
@@ -12,116 +11,25 @@ import { CLAIMED_DIR, FileDestination, FileSource } from "../src/connectors/file
 import { fingerprint, KnownHosts } from "../src/connectors/known-hosts.js";
 import { SftpLocation, type SftpOptions } from "../src/connectors/sftp.js";
 import type { MessageSink, ReceiveOptions } from "../src/connectors/types.js";
-import { cleanUp, makeProject } from "./helpers.js";
+import { cleanUp } from "./helpers.js";
+import {
+  listening,
+  runSshd,
+  SFTP_SERVER,
+  SSHD,
+  type Sshd,
+  startSshd,
+  stopAllSshd,
+  stopSshd,
+} from "./sshd.js";
 
 // The SFTP location against OpenSSH's own server, started here on the loopback as this user, with
-// throwaway keys made for the run and synthetic files only. It runs where PATHWAYS_TEST_SSHD names
-// the sshd binary (an absolute path): .github/workflows/sftp.yml sets it. Elsewhere it is skipped,
-// and test/sftp.test.ts runs the same location against a stand-in for the SSH package.
-const SSHD = process.env["PATHWAYS_TEST_SSHD"];
-
-/** A port free on the loopback just now. */
-async function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const server = createServer();
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const { port } = server.address() as { port: number };
-      server.close(() => {
-        resolve(port);
-      });
-    });
-  });
-}
-
-/** Resolves once something listens on `port`, trying for up to ten seconds. */
-async function listening(port: number): Promise<void> {
-  for (let tries = 0; tries < 100; tries += 1) {
-    const up = await new Promise<boolean>((resolve) => {
-      const socket = connect(port, "127.0.0.1");
-      socket.once("connect", () => {
-        socket.destroy();
-        resolve(true);
-      });
-      socket.once("error", () => {
-        resolve(false);
-      });
-    });
-    if (up) return;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error("sshd did not start listening");
-}
-
-/** One OpenSSH server for a test: its folder, port, host key, and the user's key. */
-interface Sshd {
-  readonly home: string;
-  readonly port: number;
-  readonly hostPublic: string;
-  readonly userKey: string;
-  process: ChildProcess;
-  readonly config: string;
-}
-
-const servers: Sshd[] = [];
+// throwaway keys made for the run and synthetic files only (test/sshd.ts). It runs where
+// PATHWAYS_TEST_SSHD names the sshd binary: .github/workflows/sftp.yml sets it. Elsewhere it is
+// skipped, and test/sftp.test.ts runs the same location against a stand-in for the SSH package.
 
 /** The key blob of an OpenSSH public key line. */
 const blobOf = (line: string): Buffer => Buffer.from(String(line.split(" ")[1]), "base64");
-
-/** Starts sshd on a free port, serving this user, with `extra` lines in its configuration. */
-async function startSshd(extra: readonly string[] = []): Promise<Sshd> {
-  const home = await makeProject({});
-  const port = await freePort();
-  const host = utils.generateKeyPairSync("ed25519");
-  const user = utils.generateKeyPairSync("ed25519");
-  await writeFile(join(home, "host_ed25519"), host.private, { mode: 0o600 });
-  await writeFile(join(home, "authorized_keys"), `${user.public}\n`, { mode: 0o600 });
-  const config = join(home, "sshd_config");
-  await writeFile(
-    config,
-    [
-      `Port ${String(port)}`,
-      "ListenAddress 127.0.0.1",
-      `HostKey ${join(home, "host_ed25519")}`,
-      `PidFile ${join(home, "sshd.pid")}`,
-      `AuthorizedKeysFile ${join(home, "authorized_keys")}`,
-      `AllowUsers ${userInfo().username}`,
-      "StrictModes no",
-      "UsePAM no",
-      "PasswordAuthentication no",
-      "KbdInteractiveAuthentication no",
-      "PubkeyAuthentication yes",
-      "Subsystem sftp internal-sftp",
-      ...extra,
-      "",
-    ].join("\n"),
-  );
-  await mkdir(join(home, "inbox"));
-  const sshd: Sshd = {
-    home,
-    port,
-    hostPublic: host.public,
-    userKey: user.private,
-    process: run(String(SSHD), config),
-    config,
-  };
-  servers.push(sshd);
-  await listening(port);
-  return sshd;
-}
-
-/** sshd in the foreground, logging to stderr, which the test keeps quiet. */
-function run(binary: string, config: string): ChildProcess {
-  return spawn(binary, ["-D", "-e", "-f", config], { stdio: "ignore" });
-}
-
-/** Stops `sshd` and waits for it to exit. */
-async function stopSshd(sshd: Sshd): Promise<void> {
-  if (sshd.process.exitCode !== null || sshd.process.signalCode !== null) return;
-  const exited = new Promise((resolve) => sshd.process.once("exit", resolve));
-  sshd.process.kill("SIGTERM");
-  await exited;
-}
 
 const locations: SftpLocation[] = [];
 
@@ -187,6 +95,16 @@ async function drop(sshd: Sshd, files: readonly string[]): Promise<string> {
   return dir;
 }
 
+/** Whether the process `pid` is still there. */
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Whether `binary` runs here. */
 const has = (binary: string): boolean => spawnSync(binary, ["-?"]).error === undefined;
 
@@ -202,7 +120,7 @@ describe.skipIf(SSHD === undefined)("SftpLocation on OpenSSH", { timeout: 60_000
   });
 
   afterAll(async () => {
-    for (const server of servers.splice(0)) await stopSshd(server);
+    await stopAllSshd();
     await cleanUp();
   });
 
@@ -339,16 +257,42 @@ describe.skipIf(SSHD === undefined)("SftpLocation on OpenSSH", { timeout: 60_000
     await source.poll(sink);
     expect(down).toHaveLength(1);
     expect(stored.size).toBe(0);
-    own.process = run(String(SSHD), own.config);
+    own.process = runSshd(own.config);
     await listening(own.port);
     await source.poll(sink);
     expect(up).toEqual([1]);
     expect(bodies(stored)).toEqual(names(2));
   });
 
+  // The server's sftp-server ends and SSH stays up: OpenSSH closes the SFTP channel only. The SSH
+  // package keeps each request made on a closed channel and never sends it, so without a check the
+  // next request waited its whole deadline, 30 seconds here, before the location connected again.
+  it.skipIf(SFTP_SERVER === undefined)(
+    "opens the SFTP channel again at once when the server's sftp-server ends and SSH stays up",
+    async () => {
+      const own = await startSshd({ ownSftpServer: true });
+      const inbox = join(own.home, "inbox");
+      const location = sftp(own, { timeoutMs: 30_000 });
+      expect(await location.list(inbox)).toEqual([]);
+      const pid = Number((await readFile(own.sftpPid, "utf8")).trim());
+      process.kill(pid, "SIGKILL");
+      // Gone, and a moment for the server to close the channel; the SSH connection stays up.
+      for (let tries = 0; tries < 100 && alive(pid); tries += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      await writeFile(join(inbox, "a.hl7"), "synthetic");
+      const started = Date.now();
+      expect(await location.list(inbox)).toEqual([{ name: "a.hl7", kind: "file" }]);
+      expect(Date.now() - started).toBeLessThan(5_000);
+      // A new sftp-server served the request.
+      expect(Number((await readFile(own.sftpPid, "utf8")).trim())).not.toBe(pid);
+    },
+  );
+
   it("offers no SHA-1 MAC unless the channel names one", async () => {
     // A cipher with its own MAC would leave the MAC unused, so the server offers CTR ciphers only.
-    const old = await startSshd(["Ciphers aes128-ctr,aes256-ctr", "MACs hmac-sha1"]);
+    const old = await startSshd({ extra: ["Ciphers aes128-ctr,aes256-ctr", "MACs hmac-sha1"] });
     await expect(sftp(old).list(join(old.home, "inbox"))).rejects.toMatchObject({ down: true });
     expect(
       await sftp(old, { weakAlgorithms: ["hmac-sha1"] }).list(join(old.home, "inbox")),

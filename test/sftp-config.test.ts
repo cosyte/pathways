@@ -54,7 +54,12 @@ async function project(source: string[], destination: string[] = ["  - file: { d
     "channels/adt/empty_known_hosts": "# nothing here\n",
     "channels/adt/id_synthetic": "synthetic-key-not-real\n",
   });
-  if (process.platform !== "win32") await chmod(join(root, "channels/adt/id_synthetic"), 0o600);
+  if (process.platform !== "win32") {
+    await chmod(join(root, "channels/adt/id_synthetic"), 0o600);
+    // Whatever the machine's umask: others may read a known hosts file, and only its owner write it.
+    await chmod(join(root, "channels/adt/known_hosts"), 0o644);
+    await chmod(join(root, "channels/adt/empty_known_hosts"), 0o644);
+  }
   return root;
 }
 
@@ -233,9 +238,27 @@ describe("start, building an SFTP location", () => {
     },
   );
 
+  it.skipIf(process.platform === "win32")(
+    "refuses a known hosts file its group or others can write, and takes one they can read",
+    async () => {
+      const root = await project(SOURCE);
+      for (const mode of [0o664, 0o646]) {
+        await chmod(join(root, "channels/adt/known_hosts"), mode);
+        await expect(build(root)).rejects.toThrow(
+          "channels/adt/channel.yaml: source.file.sftp.knownHosts: the file can be written by its group or others; chmod go-w it",
+        );
+      }
+      await chmod(join(root, "channels/adt/known_hosts"), 0o444);
+      await expect(build(root)).resolves.toBeDefined();
+    },
+  );
+
   it("leaves the mode check to Windows' own access control there", async () => {
     const root = await project(SOURCE);
-    if (process.platform !== "win32") await chmod(join(root, "channels/adt/id_synthetic"), 0o644);
+    if (process.platform !== "win32") {
+      await chmod(join(root, "channels/adt/id_synthetic"), 0o644);
+      await chmod(join(root, "channels/adt/known_hosts"), 0o666);
+    }
     const restore = usePlatform("win32");
     try {
       await expect(build(root)).resolves.toBeDefined();

@@ -1819,13 +1819,13 @@ const source = restate(
           sortBy: envable(
             z.enum(["name", "mtime"]).meta({
               description:
-                "The order files are taken in: name, by path from dir (the default), or mtime, oldest change first.",
+                "The order files are taken in: name, by path from dir (the default), or mtime, least recently modified first.",
             }),
           ).optional(),
           stable: envable(
             z.boolean().meta({
               description:
-                "Take a file only once two passes in a row find the same size and change time, as well as minAge. Default false.",
+                "Take a file only once two passes in a row find the same size and modification time, as well as minAge. Default false.",
             }),
           ).optional(),
           doneFile: envable(

@@ -31,6 +31,9 @@ import { existsSync, rmSync, writeSync } from "node:fs";
  *   audit entry and commit.
  * - `before-claim-move`: a file source opened a ready file and checked it, and has not moved it into
  *   its claim folder.
+ * - `after-claim-move`: a file source moved a file into its claim folder and checked it, and has not
+ *   made the pass's claims durable.
+ * - `after-claim-flush`: a file source made the pass's claims durable, and has stored none of them.
  * - `mid-move-back`: a file source moved a file that is not the one it checked to a held name in
  *   `.claimed/` and linked it from there back where it came from, and has not removed the held name.
  */
@@ -40,6 +43,8 @@ export const FAULT_POINTS = [
   "after-send-before-record",
   "mid-requeue",
   "before-claim-move",
+  "after-claim-move",
+  "after-claim-flush",
   "mid-move-back",
 ] as const;
 

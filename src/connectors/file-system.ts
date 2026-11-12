@@ -41,7 +41,7 @@ export interface FileEntry {
 }
 
 /**
- * A file's size, change time and id, read without following a link. The id names the file itself,
+ * A file's size, modification time and id, read without following a link. The id names the file itself,
  * not its path: it stays the same when the file is renamed within the location, and two files never
  * share one at the same time.
  */
@@ -196,7 +196,7 @@ function localId(stats: { readonly dev: bigint; readonly ino: bigint }): string 
   return `${String(stats.dev)}:${String(stats.ino)}`;
 }
 
-/** A local file's size, change time and id, from a `stat` read with `bigint`. */
+/** A local file's size, modification time and id, from a `stat` read with `bigint`. */
 function localStat(stats: {
   readonly dev: bigint;
   readonly ino: bigint;
@@ -267,7 +267,7 @@ export class LocalFolder implements Location {
     }));
   }
 
-  /** `path`'s size, change time, device and inode, by `lstat`, never through a link. */
+  /** `path`'s size, modification time, device and inode, by `lstat`, never through a link. */
   async stat(path: string): Promise<FileStat> {
     return localStat(await lstat(path, { bigint: true }));
   }
