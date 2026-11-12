@@ -31,8 +31,9 @@ const ENV_BINDINGS = [
 
 /**
  * processEnv() anywhere but bound to `env`, alone or as `io.env ?? processEnv()`, or handed straight
- * to engineVariable or configuredVariable: so the process's environment is never read where it is
- * called, kept under another name, or copied, and every `env` it reaches is held by the rules below.
+ * to engineVariable or configuredVariable: so the listed ways of reading the process's environment
+ * where it is called, keeping it under another name, or copying it are refused, and every `env` it
+ * reaches is held by the rules below.
  */
 const STRAY_PROCESS_ENV = `CallExpression[callee.name='processEnv']:not(${[
   ...ENV_BINDINGS.flatMap(([binding, field]) => [
