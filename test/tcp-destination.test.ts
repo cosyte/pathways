@@ -324,27 +324,32 @@ describe("TcpDestination", () => {
     });
   });
 
-  it("retries a send that is not taken in time without expectReply", async () => {
-    // The receiver reads nothing, so a body larger than the system's buffers never finishes.
-    const receiver = await peer(() => undefined);
-    const pausing = createNetServer((socket) => {
-      socket.pause();
-      socket.on("error", () => undefined);
-      receiver.taken.push({ socket, read: Buffer.alloc(0), ended: false, authorized: undefined });
-    });
-    await new Promise<void>((resolve) => pausing.listen(0, "127.0.0.1", resolve));
-    const port = (pausing.address() as AddressInfo).port;
-    try {
-      await expect(
-        destination(port, { expectReply: false, timeoutMs: 200 }).deliver(
-          message("x".repeat(64 * 1_048_576)),
-        ),
-      ).rejects.toMatchObject({ code: "WRITE_TIMEOUT" });
-    } finally {
-      for (const { socket } of receiver.taken) socket.destroy();
-      await new Promise<void>((resolve) => pausing.close(() => resolve()));
-    }
-  });
+  // Skipped on Windows: there a write is done once the system holds it, however large, so a send
+  // the receiver never reads still finishes, and only a POSIX system's full buffers hold it back.
+  it.skipIf(process.platform === "win32")(
+    `retries a send that is not taken in time without expectReply${process.platform === "win32" ? " (skipped on Windows: a write finishes once the system holds it)" : ""}`,
+    async () => {
+      // The receiver reads nothing, so a body larger than the system's buffers never finishes.
+      const receiver = await peer(() => undefined);
+      const pausing = createNetServer((socket) => {
+        socket.pause();
+        socket.on("error", () => undefined);
+        receiver.taken.push({ socket, read: Buffer.alloc(0), ended: false, authorized: undefined });
+      });
+      await new Promise<void>((resolve) => pausing.listen(0, "127.0.0.1", resolve));
+      const port = (pausing.address() as AddressInfo).port;
+      try {
+        await expect(
+          destination(port, { expectReply: false, timeoutMs: 200 }).deliver(
+            message("x".repeat(64 * 1_048_576)),
+          ),
+        ).rejects.toMatchObject({ code: "WRITE_TIMEOUT" });
+      } finally {
+        for (const { socket } of receiver.taken) socket.destroy();
+        await new Promise<void>((resolve) => pausing.close(() => resolve()));
+      }
+    },
+  );
 
   it("gives up when the halt signal aborts, before or while it waits", async () => {
     const receiver = await peer(() => undefined);

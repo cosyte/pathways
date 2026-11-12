@@ -964,11 +964,13 @@ const HEX_BYTES = /^(?:[0-9A-Fa-f]{2})+$/;
 
 /** Bytes written in hex in quotes, at most `most` of them, with the hover text for the key. */
 const hexBytes = (most: number, description: string) =>
-  z
-    .string({ error: 'hex bytes in quotes, such as "0d0a"' })
-    .regex(HEX_BYTES, 'hex bytes, two digits each, such as "0d0a"')
-    .refine((text) => text.length <= most * 2, `at most ${most} bytes`)
-    .meta({ description });
+  envable(
+    z
+      .string({ error: 'hex bytes in quotes, such as "0d0a"' })
+      .regex(HEX_BYTES, 'hex bytes, two digits each, such as "0d0a"')
+      .refine((text) => text.length <= most * 2, `at most ${most} bytes`)
+      .meta({ description }),
+  );
 
 /** The framings a tcp block names exactly one of. */
 const TCP_FRAMINGS = ["raw", "delimiter", "lengthPrefix", "startEnd"] as const;
@@ -977,31 +979,32 @@ const TCP_FRAMINGS = ["raw", "delimiter", "lengthPrefix", "startEnd"] as const;
 const tcpFraming = restate(
   z
     .strictObject({
-      raw: z
-        .literal(true)
-        .meta({
+      raw: envable(
+        z.literal(true).meta({
           description:
             "raw: true reads one message per connection, every byte until the sender closes its side. Needs maxMessageSize.",
-        })
-        .optional(),
+        }),
+      ).optional(),
       delimiter: hexBytes(
         16,
         'Each message ends with these bytes, in hex in quotes, such as "0a" or "0d0a": at most 16.',
       ).optional(),
       lengthPrefix: z
         .strictObject({
-          bytes: z.literal([1, 2, 4]).meta({ description: "How long the prefix is: 1, 2 or 4." }),
-          endian: z
-            .enum(["big", "little"])
-            .meta({ description: "The prefix's byte order: big or little. Default big." })
-            .optional(),
-          inclusive: z
-            .boolean()
-            .meta({
+          bytes: envable(
+            z.literal([1, 2, 4]).meta({ description: "How long the prefix is: 1, 2 or 4." }),
+          ),
+          endian: envable(
+            z
+              .enum(["big", "little"])
+              .meta({ description: "The prefix's byte order: big or little. Default big." }),
+          ).optional(),
+          inclusive: envable(
+            z.boolean().meta({
               description:
                 "true when the length counts the prefix's own bytes as well as the message's. Default false.",
-            })
-            .optional(),
+            }),
+          ).optional(),
         })
         .meta({
           description: "Each message comes after its length, in bytes, as an unsigned number.",

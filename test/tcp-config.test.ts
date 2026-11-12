@@ -166,6 +166,22 @@ destinations:
     });
   });
 
+  it("reads the framing from the environment, as every key that holds one value", async () => {
+    const root = await makeProject({
+      "channels/a/channel.yaml": channel(
+        "tcp: { port: 1, plaintext: true, framing: { lengthPrefix: { bytes: { env: TCP_PREFIX }, endian: { env: TCP_ENDIAN, default: big } } } }",
+        'tcp: { host: h, port: 2, plaintext: true, framing: { delimiter: { env: TCP_END, default: "0a" } } }',
+      ),
+    });
+    const [a] = (
+      await loadProject(root, { env: { TCP_PREFIX: "2", TCP_ENDIAN: "little", TCP_END: "1C0D" } })
+    ).channels;
+    expect(a?.source).toMatchObject({
+      framing: { kind: "lengthPrefix", size: 2, endian: "little", inclusive: false },
+    });
+    expect(a?.destinations[0]).toMatchObject({ framing: { kind: "delimiter", delimiter: "1c0d" } });
+  });
+
   it.each([
     ["tcp: { port: 1, plaintext: true }", "source.tcp.framing"],
     [
