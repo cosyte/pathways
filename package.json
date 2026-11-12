@@ -136,7 +136,7 @@
   },
   "dependencies": {
     "@cosyte/ccda": "^0.1.6",
-    "@cosyte/fhir": "^0.1.12",
+    "@cosyte/fhir": "^0.1.9",
     "@cosyte/hl7": "^0.1.13",
     "@cosyte/mllp": "^0.1.12",
     "@cosyte/x12": "^0.1.11",

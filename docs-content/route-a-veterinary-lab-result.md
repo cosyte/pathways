@@ -22,20 +22,29 @@ The example's channel, `vet-results-to-fhir`, does four things. Its files are on
 1. **Take the result over MLLP.** An [MLLP source](./send-and-receive-mllp.md) stores each message,
    then acknowledges it. The channel's `format: hl7v2` hands the transform the message parsed by
    `@cosyte/hl7`.
-2. **Read species and breed by name.** `msg.patient.species` and `msg.patient.breed` are PID-35 and
-   PID-36 as coded elements, each with its `identifier`, `text` and `nameOfCodingSystem`. Each is
-   absent when its field is empty: `@cosyte/hl7` infers neither from anything else. The transform
-   filters out every message that is not an `ORU^R01`, and fails one with no species, so a person's
-   result on the same feed is never sent on as an animal's. A failed message is kept, and
+2. **Accept one exact shape, then read species and breed by name.** The transform filters out
+   every message that is not an `ORU^R01`, and fails a result unless it has this shape:
+
+   - exactly one PID segment. A second patient group, a person's or another animal's, would have
+     its results sent on as the first patient's;
+   - a control id in MSH-10, from which the Bundle's entry ids are made;
+   - PID-35 holding exactly one species, as `CODE^Text^SYSTEM`: one repetition, the code and the
+     coding system each one plain value (no subcomponent, no escape sequence, no space, and not the
+     HL7 null `""`), and a text with no subcomponent. Nothing may follow the coding system;
+   - PID-36 empty, or holding exactly one breed of the same shape.
+
+   The transform reads the fields' wire text through `@cosyte/hl7`, under the message's own
+   delimiters, so a message with other encoding characters in MSH-2 is held to the same shape. A
+   result with no species fails, so a person's result is not sent on as an animal's. Anything else
+   fails too, never trimmed to its first part: `msg.patient` reads only the first repetition and
+   the first subcomponent, so a second species, a code in a subcomponent or an escaped delimiter
+   would otherwise be dropped or sent on as a code no lab sent. We chose to fail such a result
+   rather than guess: a failed message is kept, and
    [replay](./inspect-replay-and-clear-messages.md) sends it again once it is fixed.
 
-   It also fails a result unless PID-35 holds exactly one species with a code (component 1) and a
-   coding system (component 3), and unless PID-36 is empty or holds exactly one breed coded the same
-   way. Neither field repeats in HL7 v2, and `msg.patient` reads only the first repetition, so a
-   second species or breed would be dropped without a trace. A species or breed with no code, or
-   with no coding system, would reach FHIR as a coding a receiver cannot match to a terminology. We
-   chose to fail such a result rather than send it with the breed left out: the message is kept for
-   replay, and nothing the lab sent is lost on the way.
+   Once the shape holds, `msg.patient.species` and `msg.patient.breed` give PID-35 and PID-36 as
+   coded elements, each with its `identifier`, `text` and `nameOfCodingSystem`. `@cosyte/hl7`
+   infers neither from anything else.
 
 3. **Convert with `@cosyte/transform`.** `toFhir` turns the message into a FHIR R4 message Bundle.
    The species and breed go into the Patient's `patient-animal` extension
@@ -61,7 +70,8 @@ synthetic result they include:
   OBR-25 gets its `DiagnosticReport`.
 - `TRANSFORM_CODE_SYSTEM_UNRESOLVED` for the species and breed: their codes are from a local code
   system, `99COSYTE`, so each coding carries its code and display and no `system`. `toFhir` never
-  invents a system URI.
+  invents a system URI. The transform still requires the coding system in the message, so a step
+  you add that maps a lab's local codes to a standard terminology knows which list a code is from.
 - `TRANSFORM_UNIT_NOT_UCUM` for units it cannot read as UCUM, kept as written.
 
 Before a real feed, decide which issues fail a message for your receiver, and throw for those in the
@@ -79,9 +89,15 @@ CI runs these on every change to Pathways, on synthetic messages only:
   file, and its Patient's `patient-animal` extension holds the species and breed codes that PID-35
   and PID-36 of the message carried. Each entry of the Bundle passes `@cosyte/fhir`'s
   `validateResource` with no error.
-- The transform fails a lab result whose species is absent, empty, HL7 null (`""`), text with no
-  code, repeated, or a code with no coding system, and one whose breed is repeated or has no code or
-  no coding system. It sends one with a coded species and no breed.
+- The transform fails a lab result with a second PID (a person's patient group after the animal's,
+  a person's PID right after the animal's, a second animal's PID), and one whose MSH-10 is empty or
+  HL7 null. It fails one whose species is absent, empty, HL7 null (`""`), text with no code,
+  repeated, a code with no coding system, two codes or two coding systems in subcomponents, the HL7
+  null as its code or coding system, an escaped delimiter or a hex escape in its code, or an
+  alternate code after its coding system, and one whose breed is HL7 null, repeated, has no code or
+  no coding system, two codes in subcomponents, the HL7 null as its code or coding system, or an
+  escaped delimiter in its code. It reads PID-35 the same way under other delimiters (`#` as the
+  component separator). It sends one with a coded species and no breed.
 - The test messages are the ones `@cosyte/synth` generates for the seeds the example's README names,
   so they can be made again.
 - The page's channel file passes the channel schema check, and its transform compiles against

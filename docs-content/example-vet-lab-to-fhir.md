@@ -21,9 +21,10 @@ real veterinary feed, and what it does not.
 
 - An [MLLP source](./send-and-receive-mllp.md) that stores each message before it sends the ACK.
 - A transform that reads the species (PID-35) and breed (PID-36) by name, as `msg.patient.species`
-  and `msg.patient.breed` from `@cosyte/hl7`, and fails a result that has no species instead of
-  sending it on as a person's. It also fails a result whose species or breed is repeated or has no
-  code and coding system, instead of sending it on with part of it dropped.
+  and `msg.patient.breed` from `@cosyte/hl7`, and accepts one exact shape: one PID, a control id in
+  MSH-10, one species as a plain code and a plain coding system, and no breed or one breed of the
+  same shape. It fails every other result, one with no species or a second patient among them,
+  rather than send it on in part or as another patient's.
 - `toFhir` from `@cosyte/transform`, which turns the result into a message Bundle: a
   `MessageHeader`, the `Patient` with the `patient-animal` extension, the owner as a
   `RelatedPerson`, and an `Observation` for each result.
@@ -191,9 +192,9 @@ destinations:
 
 ```ts runnable title="channels/vet-results-to-fhir/transform.ts"
 // Turns each veterinary lab result (ORU^R01) into a FHIR R4 message Bundle with @cosyte/transform,
-// keeping the animal's species and breed, and filters every other message out. A result with no
-// species fails instead of going on as a person's result, and so does one whose species or breed is
-// repeated or has no code and coding system, instead of going on with a part of it dropped.
+// keeping the animal's species and breed, and filters every other message out. A result fails
+// unless it has one patient, a control id, one plain coded species and no breed or one plain coded
+// breed: one exact shape is accepted, and everything else fails rather than going on in part.
 import { createHash } from "node:crypto";
 
 import { serializeResource } from "@cosyte/fhir";
@@ -241,49 +242,88 @@ function animalPart(bundle: string, part: "species" | "breed"): string | undefin
 /** The message a transform is given: an HL7 v2 message parsed by @cosyte/hl7. */
 type Message = Parameters<Transform>[0];
 
-/**
- * How many repetitions PID-`n` holds. PID-35 and PID-36 do not repeat, so a second one is a sender
- * error, and reading only the first would drop the rest without a trace.
- */
-function repetitions(msg: Message, n: 35 | 36): number {
-  return msg.segments("PID")[0]?.field(n).repetitions.length ?? 0;
-}
+/** One field of a segment, as @cosyte/hl7 reads it. */
+type Field = ReturnType<NonNullable<ReturnType<Message["segments"]>[number]>["field"]>;
 
-/** Whether a coded value has both a code (component 1) and a coding system (component 3). */
-function coded(value: {
-  readonly identifier?: string;
-  readonly nameOfCodingSystem?: string;
-}): boolean {
-  return Boolean(value.identifier) && Boolean(value.nameOfCodingSystem);
+/**
+ * Whether `field` holds exactly one coded value of the one shape this channel accepts, read from its
+ * wire text under the message's own delimiters: one repetition of a code, a text and a coding
+ * system (`CODE^Text^SYSTEM`, the text may be empty). The code and the coding system must each be
+ * one plain value: no subcomponent, no escape sequence, no space, and not the HL7 null (`""`). The
+ * text must have no subcomponent. Anything else is refused, never trimmed to its first part, since
+ * the parts left out would be dropped without a trace.
+ */
+function oneCodedValue(field: Field, msg: Message): boolean {
+  const {
+    component,
+    escape,
+    field: separator,
+    repetition,
+    subcomponent,
+    truncation,
+  } = msg.encodingCharacters;
+  const delimiters = [separator, component, repetition, escape, subcomponent, truncation ?? ""];
+  const plain = (value: string): boolean =>
+    value !== "" &&
+    value !== '""' &&
+    !/\s/u.test(value) &&
+    delimiters.every((each) => each === "" || !value.includes(each));
+  if (field.isNull || field.repetitions.length !== 1) return false;
+  const parts = field.text.split(component);
+  if (parts.length !== 3) return false;
+  const [code = "", text = "", system = ""] = parts;
+  return plain(code) && plain(system) && !text.includes(subcomponent);
 }
 
 export default ((msg) => {
   if (!msg.is("ORU^R01")) return null;
 
-  // PID-35 species and PID-36 breed, read by name through @cosyte/hl7's typed patient. Each must be
-  // one value with a code and a coding system: a repeated value would lose all but its first, and a
-  // value with no code or no system would reach FHIR as a coding a receiver cannot read.
-  const { species, breed } = msg.patient ?? {};
-  if (species === undefined && repetitions(msg, 35) <= 1) {
-    throw new Error("no species in PID-35: not a veterinary result");
-  }
-  if (species === undefined || repetitions(msg, 35) !== 1 || !coded(species)) {
-    throw new Error("PID-35 must hold exactly one species, with a code and a coding system");
-  }
-  if (repetitions(msg, 36) > 1 || (breed !== undefined && !coded(breed))) {
-    throw new Error(
-      "PID-36 must be empty or hold exactly one breed, with a code and a coding system",
-    );
+  // One patient per message. A second PID, a person's or another animal's, would have its results
+  // sent as the first one's, so the message fails instead.
+  const pids = msg.segments("PID");
+  const [pid] = pids;
+  if (pid === undefined || pids.length !== 1) {
+    throw new Error("the message must hold exactly one PID segment");
   }
 
-  const { bundle } = toFhir(msg, { generateId: idsFor(msg.meta.controlId ?? "") });
+  // The Bundle's entry ids are made from MSH-10, so two messages without one would share them.
+  const controlId = msg.segments("MSH")[0]?.field(10);
+  if (controlId === undefined || controlId.isNull || controlId.text === "") {
+    throw new Error("MSH-10 must hold the message's control id");
+  }
+
+  // PID-35 species and PID-36 breed. Each must be exactly one plain coded value (see
+  // oneCodedValue); PID-36 may also be empty. Only then are they read by name through
+  // @cosyte/hl7's typed patient.
+  const speciesField = pid.field(35);
+  if (speciesField.isNull || speciesField.repetitions.length === 0) {
+    throw new Error("no species in PID-35: not a veterinary result");
+  }
+  if (!oneCodedValue(speciesField, msg)) {
+    throw new Error(
+      "PID-35 must hold exactly one species, as one plain code and one plain coding system",
+    );
+  }
+  const breedField = pid.field(36);
+  const breedEmpty = !breedField.isNull && breedField.repetitions.length === 0;
+  if (!breedEmpty && !oneCodedValue(breedField, msg)) {
+    throw new Error(
+      "PID-36 must be empty or hold exactly one breed, as one plain code and one plain coding system",
+    );
+  }
+  const { species, breed } = msg.patient ?? {};
+  if (species?.identifier === undefined || (!breedEmpty && breed?.identifier === undefined)) {
+    throw new Error("@cosyte/hl7 did not read the species and breed that PID-35 and PID-36 hold");
+  }
+
+  const { bundle } = toFhir(msg, { generateId: idsFor(controlId.text) });
   const json = serializeResource(bundle);
 
   // The Patient in the Bundle carries the same species and breed, or the message fails here.
   if (animalPart(json, "species") !== species.identifier) {
     throw new Error("the Bundle's Patient does not carry the species from PID-35");
   }
-  if (breed !== undefined && animalPart(json, "breed") !== breed.identifier) {
+  if (!breedEmpty && animalPart(json, "breed") !== breed?.identifier) {
     throw new Error("the Bundle's Patient does not carry the breed from PID-36");
   }
   return json;

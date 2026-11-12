@@ -17,7 +17,7 @@ importers:
         specifier: ^0.1.6
         version: 0.1.6
       '@cosyte/fhir':
-        specifier: ^0.1.12
+        specifier: ^0.1.9
         version: 0.1.16(fast-check@4.10.2)
       '@cosyte/hl7':
         specifier: ^0.1.13

@@ -691,9 +691,10 @@ describe("the veterinary example's messages and transform", () => {
   }
 
   const BREED = "CAT-DSH^Domestic Shorthair^99COSYTE";
-  const ONE_SPECIES = "PID-35 must hold exactly one species, with a code and a coding system";
+  const ONE_SPECIES =
+    "PID-35 must hold exactly one species, as one plain code and one plain coding system";
   const ONE_BREED =
-    "PID-36 must be empty or hold exactly one breed, with a code and a coding system";
+    "PID-36 must be empty or hold exactly one breed, as one plain code and one plain coding system";
 
   it.each([
     ["empty", "", "no species in PID-35"],
@@ -726,5 +727,116 @@ describe("the veterinary example's messages and transform", () => {
     expect(typeof out).toBe("string");
     expect(out as string).toContain('"url":"species"');
     expect(out as string).not.toContain('"url":"breed"');
+  });
+
+  it.each([
+    ["two codes in subcomponents", "CAT&DOG^Cat^99COSYTE", ONE_SPECIES],
+    ["the HL7 null as its code", '""^Cat^99COSYTE', ONE_SPECIES],
+    ["the HL7 null as its coding system", 'CAT^Cat^""', ONE_SPECIES],
+    ["an escaped repetition separator in its code", "CAT\\R\\DOG^Cat^99COSYTE", ONE_SPECIES],
+    ["an escaped component separator in its code", "CAT\\S\\X^Cat^99COSYTE", ONE_SPECIES],
+    ["a hex escape in its code", "C\\X41\\T^Cat^99COSYTE", ONE_SPECIES],
+    ["two coding systems in subcomponents", "CAT^Cat^99COSYTE&99OTHER", ONE_SPECIES],
+    ["two texts in subcomponents", "CAT^Cat&Dog^99COSYTE", ONE_SPECIES],
+    ["an alternate code after the coding system", "CAT^Cat^99COSYTE^FEL^Feline^99X", ONE_SPECIES],
+  ])("refuses a lab result whose species has %s", async (_case, species, reason) => {
+    const transform = await vetTransform();
+    const msg = await vetResult(species, BREED);
+    expect(() => transform(msg)).toThrow(reason);
+  });
+
+  it.each([
+    ["two codes in subcomponents", "CAT-DSH&CAT-MCO^Domestic Shorthair^99COSYTE"],
+    ["the HL7 null as the whole field", '""'],
+    ["the HL7 null as its code", '""^x^99COSYTE'],
+    ["the HL7 null as its coding system", 'CAT-DSH^Domestic Shorthair^""'],
+    ["an escaped component separator in its code", "CAT\\S\\DSH^Domestic Shorthair^99COSYTE"],
+  ])("refuses a lab result whose breed has %s", async (_case, breed) => {
+    const transform = await vetTransform();
+    const msg = await vetResult("CAT^Cat^99COSYTE", breed);
+    expect(() => transform(msg)).toThrow(ONE_BREED);
+  });
+
+  /** The example's synthetic lab result, as raw text with its segments split. */
+  async function vetSegments(): Promise<string[]> {
+    return (await readFile(join(tests, "oru.hl7"), "latin1")).split("\r").filter(Boolean);
+  }
+
+  /**
+   * A person's lab result from `@cosyte/synth` (the same seed with no animal subject): its PID has no
+   * species or breed, and its OBR and OBX segments are the person's results.
+   */
+  const personSegments = (): string[] =>
+    generateOru({ seed: 4821 }).toString().split("\r").filter(Boolean);
+  const ONE_PID = "the message must hold exactly one PID segment";
+
+  it("refuses a lab result with a person's patient group after the animal's", async () => {
+    const transform = await vetTransform();
+    const segments = await vetSegments();
+    const person = personSegments();
+    const group = person.slice(person.findIndex((segment) => segment.startsWith("PID|")));
+    expect(group.some((segment) => segment.startsWith("OBX|"))).toBe(true);
+    segments.push(...group);
+    expect(() => transform(parseHL7(segments.join("\r")))).toThrow(ONE_PID);
+  });
+
+  it("refuses a lab result with a person's PID right after the animal's", async () => {
+    const transform = await vetTransform();
+    const segments = await vetSegments();
+    const at = segments.findIndex((segment) => segment.startsWith("PID|"));
+    const personPid = personSegments().find((segment) => segment.startsWith("PID|")) ?? "";
+    expect(personPid).not.toBe("");
+    segments.splice(at + 1, 0, personPid);
+    expect(() => transform(parseHL7(segments.join("\r")))).toThrow(ONE_PID);
+  });
+
+  it("refuses a lab result with a dog's PID after the cat's", async () => {
+    const transform = await vetTransform();
+    const segments = await vetSegments();
+    const cat = segments.find((segment) => segment.startsWith("PID|")) ?? "";
+    const dog = cat
+      .replace("CAT^Cat^99COSYTE", "DOG^Dog^99COSYTE")
+      .replace("CAT-DSH^Domestic Shorthair", "DOG-LAB^Labrador Retriever");
+    expect(dog).toContain("DOG^Dog^99COSYTE");
+    segments.push(dog);
+    expect(() => transform(parseHL7(segments.join("\r")))).toThrow(ONE_PID);
+  });
+
+  it.each([
+    ["absent", ""],
+    ["the HL7 null", '""'],
+  ])("refuses a lab result whose control id (MSH-10) is %s", async (_case, controlId) => {
+    const transform = await vetTransform();
+    const segments = (await vetSegments()).map((segment) => {
+      if (!segment.startsWith("MSH|")) return segment;
+      const fields = segment.split("|");
+      fields[9] = controlId;
+      return fields.join("|");
+    });
+    expect(() => transform(parseHL7(segments.join("\r")))).toThrow(
+      "MSH-10 must hold the message's control id",
+    );
+  });
+
+  /** The example's synthetic lab result under the delimiters `|#~\&`: `#` separates components. */
+  async function underHash(species: string): Promise<Hl7Message> {
+    const segments = (await vetSegments()).map((segment) => {
+      if (!segment.startsWith("PID|")) return segment;
+      const fields = segment.split("|");
+      fields[35] = species;
+      return fields.join("|");
+    });
+    return parseHL7(segments.join("\r").replaceAll("^", "#"));
+  }
+
+  it("reads PID-35 under the message's own delimiters", async () => {
+    const transform = await vetTransform();
+    const plain = await underHash("CAT^Cat^99COSYTE");
+    expect(plain.patient?.species?.identifier).toBe("CAT");
+    expect(typeof transform(plain)).toBe("string");
+    const subcomponents = await underHash("CAT&DOG^Cat^99COSYTE");
+    expect(() => transform(subcomponents)).toThrow(ONE_SPECIES);
+    const escaped = await underHash("CAT\\S\\DOG^Cat^99COSYTE");
+    expect(() => transform(escaped)).toThrow(ONE_SPECIES);
   });
 });
