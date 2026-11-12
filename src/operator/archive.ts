@@ -106,6 +106,11 @@ export interface ArchivedMessage {
   readonly duplicateOf: number | null;
   readonly contentHash: string | null;
   readonly contentDroppedAt: string | null;
+  /**
+   * The generation whose settled event was recorded, when one was and the store recorded it; null
+   * otherwise, and in an archive written before Pathways recorded it. Read back, it is always set.
+   */
+  readonly settledGeneration?: number | null;
   /** The hash of who sent it and its control ID, for spotting a repeat. */
   readonly dedupKey: string | null;
   /** The hash that names it to its source, so it is stored once. */
@@ -411,6 +416,7 @@ function asMessage(value: unknown): ArchivedMessage {
   check(isWholeOrNull(fields["size"]) && isWhole(fields["generation"]));
   check(isWholeOrNull(fields["duplicateOf"]) && isTextOrNull(fields["contentHash"]));
   check(isTextOrNull(fields["contentDroppedAt"]) && isTextOrNull(fields["error"]));
+  check(fields["settledGeneration"] === undefined || isWholeOrNull(fields["settledGeneration"]));
   check(isTextOrNull(fields["dedupKey"]) && isTextOrNull(fields["idempotencyKey"]));
   check(isTextOrNull(fields["body"]) && isMetaOrNull(fields["meta"]));
   const outputs = fields["outputs"];
@@ -427,7 +433,7 @@ function asMessage(value: unknown): ArchivedMessage {
     check(isWholeOrNull(d["interruptedAttempt"]));
     check(d["failedAt"] === undefined || isTextOrNull(d["failedAt"]));
   }
-  return fields as unknown as ArchivedMessage;
+  return { settledGeneration: null, ...fields } as unknown as ArchivedMessage;
 }
 
 /**
@@ -467,6 +473,7 @@ export async function archivedMessage(
     duplicateOf: message.duplicateOf,
     contentHash: message.contentHash,
     contentDroppedAt: message.contentDroppedAt,
+    settledGeneration: message.settledGeneration ?? null,
     dedupKey: message.dedupKey,
     idempotencyKey: message.idempotencyKey,
     error: message.error,

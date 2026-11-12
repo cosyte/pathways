@@ -18,6 +18,7 @@ import type {
   Page,
   PendingDelivery,
   SendStart,
+  SettledMessage,
   PendingMessage,
   ReceivedMessage,
   RequeueRequest,
@@ -205,6 +206,9 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
   readonly setChannelState?: (channel: string, state: ChannelRunState) => Promise<void>;
   /** Straight through, present only when the store underneath has it. */
   readonly markDryRun?: (deliveryId: number, epoch?: number) => Promise<void>;
+  /** Ids and states only, so straight through, present only when the store underneath has both. */
+  readonly settle?: (messageId: number) => Promise<SettledMessage | undefined>;
+  readonly unsettled?: (channel: string, after: number, limit: number) => Promise<number[]>;
   /**
    * The retention steps: ids and counts, and rows changed whole or emptied, so straight through,
    * present only when the store underneath has all four; the rows an archive holds come back
@@ -237,6 +241,10 @@ abstract class CodecStore implements MessageStore, MetaSearchStore {
       this.setChannelState = states.setChannelState;
     }
     if (inner.markDryRun !== undefined) this.markDryRun = inner.markDryRun.bind(inner);
+    if (inner.settle !== undefined && inner.unsettled !== undefined) {
+      this.settle = inner.settle.bind(inner);
+      this.unsettled = inner.unsettled.bind(inner);
+    }
     const steps = retentionStore(inner);
     if (steps !== undefined) {
       this.countExpiring = (channel, query) => steps.countExpiring(channel, query);

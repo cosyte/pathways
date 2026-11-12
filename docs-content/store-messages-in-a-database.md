@@ -247,6 +247,13 @@ stop every engine and drop the column. A delivery an older Pathways failed has n
 store may set `failedAt` on what `deliveries` returns; without it, a resume takes such a message by
 its own `updatedAt` alone.
 
+Migration `0012-settled` adds a `settled_generation` column to `messages`: the generation whose
+[settled event](./add-lifecycle-hooks.md#the-settled-event) was recorded, so it is sent once. It marks
+every message that had ended already as settled, so no event is sent for a message that ended before
+it. It only adds a column that may be null, which an older Pathways never reads, and has no rollback
+step: to remove it, stop every engine and drop the column. A custom store may implement `settle` and
+`unsettled`; one without them sends no settled events.
+
 If the database becomes unreachable while the engine runs, the engine stops with exit code 1 and the
 driver's error code, for a supervisor (systemd, Docker, Kubernetes) to restart it. Nothing is lost: a
 message is acknowledged only once it is stored, and a delivery is recorded only once it is done.

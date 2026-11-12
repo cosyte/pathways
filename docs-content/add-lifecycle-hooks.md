@@ -25,6 +25,7 @@ codes and times, never a message's content, so a hook can send them anywhere.
 | `delivery-redirected` | an HTTP destination answered a redirect; it is held and retried after `retryInMs` |
 | `delivery-rejected`   | a destination rejected an output for good                                         |
 | `delivery-exhausted`  | a delivery ran out of retries at its `retry.limit` or `maxAge`, and is failed     |
+| `settled`             | a message's last delivery ended, or it was filtered, or its transform failed      |
 | `source-down`         | a source could not start listening, or said it lost its connection; `retryInMs`   |
 | `source-up`           | a source that was down is listening, or connected, again                          |
 | `audit`               | an audit log entry was stored (engine-wide hooks only)                            |
@@ -120,6 +121,59 @@ It runs over HTTPS unless it says `plaintext: true` with an `http://` URL, verif
 certificate (against `tls.ca` when set), and reads headers that carry a credential from the
 environment, like an [HTTP destination](./send-and-receive-http.md). A 2xx answer is done; anything
 else, or no answer within the hook's time limit, is logged and the event is not sent again.
+
+## The settled event
+
+`settled` comes once per message, when nothing more will happen to it: its last delivery was
+delivered or failed for good, it was filtered, or its transform failed. A replay or a resend settles
+again, once, when its own deliveries end. It carries the message's id and, for each destination in the
+channel's list, `{ index, name, state }`: `name` is the destination's kind (`mllp`, `http`, `module`
+and so on), and `state` is `delivered`, `failed`, `filtered`, `cleared` or `dry-run`. A message whose
+transform failed is `failed` for every destination.
+
+The engine records each settled message on its row in one conditional update before it sends the
+event, so a restart sends the event for a message the last run ended and did not get to record, and
+neither a restart nor a second engine sends one twice. A custom store without `settle` sends none.
+
+## Hooks are best effort
+
+A hook is a notification, not a delivery guarantee. Past 1,000 events waiting for one hook, new events
+for it are dropped and logged as `hook-dropped`; a hard stop loses those still waiting; a call that
+fails is not retried. The engine never waits for a hook: a hook's full queue holds up neither a
+message nor its settled record. Where you need every one, count from storage instead: the message
+states in `pathways messages` and `pathways status`, and the audit log (`pathways audit`), which is
+written before the matching event is sent.
+
+## Run a step when the engine starts
+
+`pathways start` writes an `engine-start` audit entry once its channels have started, with the
+version, the channel count and the node id, and an `engine-stop` as it begins a clean stop; see
+[the audit log](./read-the-audit-log.md). There is no project-wide deploy script: to run a step once a
+deployment is up (a smoke check, a notice), give `pathways.yaml` a hook that acts on the
+`engine-start` entry:
+
+```ts runnable title="hooks/deployed.ts"
+import type { HookFactory } from "@cosyte/pathways";
+
+export default ((options) => ({
+  async onEvent(event, signal) {
+    if (event.type !== "audit" || event.action !== "engine-start") return;
+    await fetch(options.url, {
+      method: "POST",
+      body: JSON.stringify({ version: event.detail["version"], at: event.at }),
+      signal,
+    });
+  },
+})) satisfies HookFactory<{ url: string }>;
+```
+
+```yaml title="pathways.yaml"
+hooks:
+  - module: ./hooks/deployed.ts
+    options:
+      url: https://deploys.example.com/pathways
+    events: [audit]
+```
 
 ## Related
 

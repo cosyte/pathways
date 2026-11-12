@@ -8,7 +8,7 @@ description: "Read who searched, viewed, replayed, resent or cleared which messa
 # Read and forward the audit log
 
 Pathways writes an entry to its audit log for every operator action on stored messages, and for the
-engine's own retention runs and the configuration changes it sees at start. The log is a table,
+engine's own starts and stops, its retention runs and the configuration changes it sees at start. The log is a table,
 `audit_log`, in the same database as the messages. The code has no path that updates or deletes an
 entry.
 
@@ -28,6 +28,9 @@ entry.
 | `migrate`                                                                           | `pathways migrate` applied schema steps, said which it would apply (a dry run), or refused; once the database has an audit log                                                  |
 | `verify`                                                                            | `pathways verify` reads a stored message to run it through the project's transform; written before its content is read                                                          |
 | `archive`                                                                           | retention wrote and checked a sealed archive, with its step and how many messages it holds; written before they change                                                          |
+| `engine-start`                                                                      | `pathways start` started its channels: `version`, `channels` (how many) and `node` (its node id)                                                                                |
+| `engine-stop`                                                                       | `pathways start` began a clean stop, before its sources close, with the same particulars                                                                                        |
+| `unclean-shutdown`                                                                  | found at a start: the run before it left an `engine-start` and no `engine-stop` (killed, or its host lost); `since` is that start's entry id, with its `version` and `node`     |
 | `channel-pause`, `channel-resume`, `channel-stop`, `channel-halt`, `channel-reload` | a `pathways channel` command, whether it was done or refused, with the user the command reports                                                                                 |
 
 Each entry holds the time, the operating system user who acted, the action, its outcome (`ok`,
