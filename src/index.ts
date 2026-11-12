@@ -9,8 +9,8 @@
  * wrap, and a fake secret provider for tests. The engine itself runs through the `pathways` command.
  *
  * Nothing here loads the engine, the transports or a database driver: apart from `DeliveryRejected`,
- * `EncryptionError`, `SecretError`, `defaultAckBuilder`, `fakeSecretProvider`, `LIFECYCLE_EVENTS` and
- * `VERSION`, every export is a type.
+ * `PassFailed`, `EncryptionError`, `SecretError`, `defaultAckBuilder`, `fakeSecretProvider`,
+ * `LIFECYCLE_EVENTS` and `VERSION`, every export is a type.
  */
 export { VERSION } from "./version.js";
 export type { Format } from "./config/schema.js";
@@ -47,6 +47,7 @@ export type {
 } from "./transform.js";
 export {
   DeliveryRejected,
+  PassFailed,
   type DestinationConnector,
   type MessageSink,
   type OutgoingMessage,

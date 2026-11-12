@@ -441,6 +441,18 @@ for (const database of TEST_DATABASES) {
       expect(status.out()).toMatch(/^b: .*\n {2}fed by: a\n/m);
     });
 
+    it("refuses to start a channel that stores nothing with a channel destination", async () => {
+      await expect(
+        setUp(database, {
+          "channels/a/channel.yaml": `${FEEDER.replace(
+            "minAge: 0 }",
+            "minAge: 0, errorDir: ../../data/held }",
+          )}storage: { content: none }\n`,
+          "channels/b/channel.yaml": target(),
+        }),
+      ).rejects.toThrow(ConfigError);
+    });
+
     it("hands over through the database, so another engine node on it takes the message", async () => {
       const { root, project, engine, store, storage } = await setUp(
         database,

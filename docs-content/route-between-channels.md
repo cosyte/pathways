@@ -77,6 +77,11 @@ transform fails, none of its routes are kept; when it succeeds, all of them are.
 channel with a `channel:` source fails the message with `ERR_PATHWAYS_UNKNOWN_ROUTE`, and nothing
 is handed over.
 
+A channel with `storage.content: none` stores nothing, so it can neither hand over nor be handed
+to: start refuses a channel destination or a `channel:` source on one, and a transform there that
+calls `ctx.route` fails its pass with `ROUTE_UNSTORED` (logged as `pass-transform-failed` with the
+code `ERR_PATHWAYS_UNKNOWN_ROUTE`), so its sender is told not to send it again.
+
 `pathways test` runs a transform that routes, and keeps nothing it routes. `pathways replay`
 refuses a message whose transform routes, and changes nothing; `pathways replay --resend` works,
 since it runs no transform.
