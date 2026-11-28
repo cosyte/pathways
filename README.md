@@ -27,7 +27,6 @@ version is 0.0.x, and a release may still change a key or an API, which its chan
 - [Quickstart](#quickstart)
 - [Why this exists](#why-this-exists)
 - [What the latest release ships](#what-the-latest-release-ships)
-- [In the next release](#in-the-next-release)
 - [Status](#status)
 - [Build from source](#build-from-source)
 - [Layout](#layout)
@@ -120,7 +119,7 @@ one), and not a sandbox: a transform is your own trusted code.
 
 ## What the latest release ships
 
-What follows is in 0.0.4, the version on npm:
+What follows is in 0.0.5, the version on npm:
 
 - **Channels in git.** A channel is a YAML file that wires a source to its destinations. Its
   transform is a TypeScript file that receives the parsed message and returns what to send.
@@ -204,40 +203,29 @@ What follows is in 0.0.4, the version on npm:
 - **Examples.** Seven example projects in `examples/`, each running on synthetic messages with its
   tests and a docs page, and CI runs each on every change. The package description on npm now says
   only what Pathways is, and the README that more than one engine can share a database.
-
----
-
-## In the next release
-
-These are on `main` and land in the next release, not in 0.0.4:
-
 - **Empty bodies on SQL Server.** A message one channel hands to another with an empty body, a
   transform output that is empty, and an empty body that `pathways rekey` replaces or writes are
   now stored on SQL Server, as on every other database. SQL Server refused them before, and the
   write failed.
-  <!-- changesets: sqlserver-empty-body -->
 - **A scrape does not hang on a hung database.** The store reads behind `/metrics` wait at most 5
   seconds, as the readiness check does, so a database that hangs reads as `pathways_store_up 0` and
   the store-down alert can fire, instead of the scrape hanging with it. From when reads start
   until every one has ended, neither a scrape nor the readiness check starts new ones.
-  <!-- changesets: metrics-store-timeout -->
 - **What is safe to log from a channel.** The logs page now says what a transform or a channel
   script may log (the ids the engine made, counts, sizes and codes) and what it must not (the
   message, a field that identifies a person, the source's facts, the configuration, an error's own
   text), and how `ctx.logger`, `console` and a thrown error each behave.
-  <!-- changesets: examples-print-nothing-identifying -->
 - **The oldest pending age per destination holds.** Each delivery keeps the time it was queued
   (schema step `0017-delivery-queued-at`, applied at start), and
   `pathways_oldest_pending_age_seconds` counts from it, so clearing a failed delivery no longer
   restarts the age of the same message's deliveries at other destinations. The health body waits
   at most 5 seconds on a database that hangs, and answers `storage: "unreachable"`.
-  <!-- changesets: destination-pending-age -->
 
 ---
 
 ## Status
 
-Early, and released: 0.0.4 is on npm. Each release is published with provenance from this
+Early, and released: 0.0.5 is on npm. Each release is published with provenance from this
 repository's release workflow, with its signed image. Watch or star the repository to follow along.
 
 Pathways is an open engine, MIT licensed and free to self-host. We plan to offer hosted, managed
