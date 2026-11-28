@@ -16,6 +16,6 @@
     "@cosyte/hl7": "^0.1.14"
   },
   "devDependencies": {
-    "@cosyte/pathways": "^0.0.4"
+    "@cosyte/pathways": "^0.0.5"
   }
 }
